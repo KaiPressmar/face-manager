@@ -1,0 +1,16 @@
+body {
+  margin: 0;
+  background: #0d0d0f;
+  color: #e5e5e5;
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.page-content {
+  padding: 24px;
+  overflow-y: auto;
+  height: calc(100vh - 64px);
+}

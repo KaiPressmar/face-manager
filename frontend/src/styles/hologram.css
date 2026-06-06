@@ -1,0 +1,32 @@
+@keyframes pulseGlow {
+  0% {
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(255, 0, 229, 0.6);
+  }
+  100% {
+    box-shadow: 0 0 6px rgba(0, 229, 255, 0.4);
+  }
+}
+
+.hologram-box {
+  position: absolute;
+  border: 2px solid var(--neon-cyan);
+  animation: pulseGlow 2.4s infinite ease-in-out;
+  pointer-events: auto;
+  z-index: 50;
+}
+
+.hologram-label {
+  position: absolute;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: linear-gradient(90deg, #00e5ff, #ff00e5);
+  color: #ffffff;
+  border-radius: 2px;
+  animation: pulseGlow 2.4s infinite ease-in-out;
+  white-space: nowrap;
+  z-index: 60;
+}
+

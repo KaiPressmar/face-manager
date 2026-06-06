@@ -1,0 +1,162 @@
+/* GLOBAL */
+body {
+  margin: 0;
+  background: #0f0f0f;
+  color: #e5e5e5;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+.layout-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.topbar {
+  padding: 16px 24px;
+  background: #181818;
+  border-bottom: 1px solid #222;
+}
+
+.layout-body {
+  display: flex;
+  flex: 1;
+}
+
+/* SIDEBAR */
+.sidebar {
+  width: 240px;
+  background: #141414;
+  border-right: 1px solid #222;
+  padding: 24px;
+}
+
+.sidebar-title {
+  font-size: 14px;
+  opacity: 0.6;
+  margin-bottom: 12px;
+}
+
+.sidebar-btn {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 8px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #ccc;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.sidebar-btn:hover {
+  background: #262626;
+}
+
+.sidebar-btn.active {
+  background: #4b8df8;
+  border-color: #4b8df8;
+  color: white;
+}
+
+/* CONTENT */
+.content {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+/* PERSON FILTER */
+.person-filter {
+  margin-bottom: 16px;
+}
+
+.person-chip {
+  display: inline-block;
+  padding: 6px 12px;
+  margin: 4px;
+  background: #222;
+  border-radius: 999px;
+  border: 1px solid #333;
+  cursor: pointer;
+  transition: 0.2s;
+}
+
+.person-chip.selected {
+  background: #4b8df8;
+  border-color: #4b8df8;
+  color: white;
+}
+
+/* CLUSTER LIST */
+.cluster-list {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.cluster-item {
+  background: #1a1a1a;
+  padding: 16px;
+  border-radius: 12px;
+  width: 200px;
+  cursor: pointer;
+  border: 1px solid #333;
+  transition: 0.2s;
+}
+
+.cluster-item:hover {
+  background: #222;
+}
+
+.cluster-item.selected {
+  border-color: #4b8df8;
+}
+
+/* IMAGE GRID */
+.image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.image-card {
+  background: #1a1a1a;
+  border-radius: 12px;
+  padding: 12px;
+  position: relative;
+  overflow: hidden;
+  transition: 0.2s;
+}
+
+.image-card:hover {
+  transform: scale(1.02);
+}
+
+.image-wrapper {
+  position: relative;
+}
+
+.image-wrapper img {
+  width: 100%;
+  border-radius: 8px;
+}
+
+.face-overlay {
+  position: absolute;
+  border: 2px solid #4b8df8;
+  box-shadow: 0 0 12px rgba(75, 141, 248, 0.7);
+  pointer-events: none;
+}
+
+.overlay-label {
+  position: absolute;
+  top: -22px;
+  left: 0;
+  background: #4b8df8;
+  padding: 2px 6px;
+  font-size: 11px;
+  border-radius: 4px;
+  color: white;
+}
