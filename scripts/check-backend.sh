@@ -6,10 +6,18 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON="${PYTHON_BIN:-${PROJECT_ROOT}/backend/.venv/bin/python}"
 
-[[ -x "${PYTHON}" ]] || {
-  printf 'Backend environment is missing. Run ./scripts/setup-dev.sh first.\n' >&2
-  exit 1
-}
+if [[ "${PYTHON}" == */* ]]; then
+  [[ -x "${PYTHON}" ]] || {
+    printf 'Backend environment is missing. Run ./scripts/setup-dev.sh first.\n' >&2
+    exit 1
+  }
+else
+  RESOLVED_PYTHON="$(command -v "${PYTHON}")" || {
+    printf 'Python interpreter %s is unavailable.\n' "${PYTHON}" >&2
+    exit 1
+  }
+  PYTHON="${RESOLVED_PYTHON}"
+fi
 
 "${PYTHON}" -m pip check
 "${PYTHON}" -m py_compile \
