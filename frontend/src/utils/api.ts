@@ -1,5 +1,9 @@
 const API_BASE = "http://localhost:8000/api";
 
+export function imageFileUrl(imageId: number) {
+  return `${API_BASE}/images/${imageId}/file`;
+}
+
 export interface FolderNode {
   path: string;
   name: string;
@@ -94,4 +98,24 @@ export async function fetchProcessStatus() {
   const res = await fetch(`${API_BASE}/process-status`);
   if (!res.ok) return null;
   return await res.json();
+}
+
+export async function openImageLocation(imageId: number, imagePath: string) {
+  const res = await fetch(`${API_BASE}/images/${imageId}/open-location`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image_path: imagePath }),
+  });
+  if (!res.ok) {
+    throw new Error("Der Dateispeicherort konnte nicht geöffnet werden.");
+  }
+}
+
+export async function deleteImage(imageId: number) {
+  const res = await fetch(`${API_BASE}/images/${imageId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    throw new Error("Das Bild konnte nicht aus der Datenbank entfernt werden.");
+  }
 }

@@ -15,6 +15,8 @@ copy the source images into the project.
 - Incremental cosine-similarity clustering with HNSW
 - Person assignment and manual cluster cleanup
 - Masonry image browser with face overlays
+- Full-screen image gallery with keyboard navigation, clipboard copy, and
+  system file-location actions
 - Searchable, multi-select folder browser with nested-folder filtering
 - SQLite persistence with automatic schema initialization and migration
 - CPU support by default and optional NVIDIA GPU acceleration
@@ -255,9 +257,11 @@ The importer scans subfolders recursively and currently supports:
 - `.jpeg`
 - `.png`
 
-Previously processed image paths are skipped. Imported source files must remain
-at their original paths because the database stores references to them rather
-than image copies.
+Images are identified by a SHA-256 hash of their file contents. Importing the
+same image repeatedly, including from different folders, creates one library
+image with multiple source locations. Face detection runs only once for that
+content. At least one imported source file must remain available because the
+database stores references rather than image copies.
 
 Use **Ordnerfilter** to select one or more discovered folders. Selecting a
 folder includes images from all of its descendants.
@@ -270,9 +274,10 @@ The SQLite database is created automatically at:
 backend/db/database.sqlite
 ```
 
-Application startup initializes new databases and upgrades the legacy
-face-path schema when necessary. The normalized schema keeps image paths in
-the `image` table and face embeddings in the `face` table.
+Application startup initializes new databases and upgrades legacy schemas when
+necessary. Existing images are hashed once during this upgrade and duplicates
+are consolidated. The normalized schema keeps content identity in `image`,
+source paths in `image_location`, and face embeddings in `face`.
 
 Database files are ignored by Git. To back up the local library:
 

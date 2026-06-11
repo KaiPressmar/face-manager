@@ -7,7 +7,7 @@ import numpy as np
 
 from ..models.face_model import FaceModel
 from ..models.clustering import FaceClustering
-from ..db.schema import get_conn
+from ..db.schema import calculate_file_hash, get_conn
 from .storage import load_all_embeddings
 
 face_model = None
@@ -84,28 +84,80 @@ def process_folder(folder_path: str):
             try:
                 normalized_path = os.path.normpath(str(img_path))
                 existing = cur.execute(
-                    "SELECT id, processed_at FROM image WHERE path = ?",
+                    """
+                    SELECT i.id, i.processed_at
+                    FROM image_location location
+                    JOIN image i ON i.id = location.image_id
+                    WHERE location.path = ?
+                    """,
                     (normalized_path,),
                 ).fetchone()
                 if existing and existing["processed_at"]:
                     PROCESS_STATE["processed_images"] = idx
                     continue
 
-                if existing:
-                    image_id = existing["id"]
-                else:
+                content_hash = calculate_file_hash(normalized_path)
+                matching_content = cur.execute(
+                    "SELECT id, processed_at FROM image WHERE content_hash = ?",
+                    (content_hash,),
+                ).fetchone()
+
+                if matching_content:
+                    image_id = matching_content["id"]
                     cur.execute(
                         """
-                        INSERT INTO image(path, directory, filename)
-                        VALUES (?, ?, ?)
+                        INSERT OR IGNORE INTO image_location(
+                            image_id, path, directory, filename
+                        )
+                        VALUES (?, ?, ?, ?)
                         """,
                         (
+                            image_id,
                             normalized_path,
                             os.path.dirname(normalized_path),
                             os.path.basename(normalized_path),
                         ),
                     )
+                    conn.commit()
+                    if matching_content["processed_at"]:
+                        PROCESS_STATE["processed_images"] = idx
+                        continue
+                elif existing:
+                    image_id = existing["id"]
+                    cur.execute(
+                        "UPDATE image SET content_hash = ? WHERE id = ?",
+                        (content_hash, image_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO image(
+                            path, directory, filename, content_hash
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            normalized_path,
+                            os.path.dirname(normalized_path),
+                            os.path.basename(normalized_path),
+                            content_hash,
+                        ),
+                    )
                     image_id = cur.lastrowid
+                    cur.execute(
+                        """
+                        INSERT INTO image_location(
+                            image_id, path, directory, filename
+                        )
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            image_id,
+                            normalized_path,
+                            os.path.dirname(normalized_path),
+                            os.path.basename(normalized_path),
+                        ),
+                    )
 
                 img = Image.open(img_path).convert("RGB")
                 img_np = np.array(img)

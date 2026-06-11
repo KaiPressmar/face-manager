@@ -1,8 +1,11 @@
+import hashlib
 import os
 import sqlite3
 from pathlib import Path
 
 from ..config import DB_PATH
+
+HASH_CHUNK_SIZE = 1024 * 1024
 
 
 def get_conn():
@@ -25,10 +28,100 @@ def _create_image_table(cur):
             path TEXT NOT NULL UNIQUE,
             directory TEXT NOT NULL,
             filename TEXT NOT NULL,
+            content_hash TEXT,
             processed_at TEXT
         )
         """
     )
+
+
+def _create_image_location_table(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_location (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_id INTEGER NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            directory TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
+        )
+        """
+    )
+
+
+def calculate_file_hash(path: str):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(HASH_CHUNK_SIZE):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ensure_content_hash_column(cur):
+    columns = {
+        row["name"] for row in cur.execute("PRAGMA table_info(image)").fetchall()
+    }
+    if "content_hash" not in columns:
+        cur.execute("ALTER TABLE image ADD COLUMN content_hash TEXT")
+
+
+def _migrate_image_locations(conn):
+    cur = conn.cursor()
+    _ensure_content_hash_column(cur)
+    _create_image_location_table(cur)
+    cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO image_location(image_id, path, directory, filename)
+        SELECT id, path, directory, filename FROM image
+        """
+    )
+
+    unhashed = cur.execute(
+        "SELECT id, path FROM image WHERE content_hash IS NULL"
+    ).fetchall()
+    for row in unhashed:
+        if not os.path.isfile(row["path"]):
+            continue
+        try:
+            content_hash = calculate_file_hash(row["path"])
+        except OSError:
+            continue
+        cur.execute(
+            "UPDATE image SET content_hash = ? WHERE id = ?",
+            (content_hash, row["id"]),
+        )
+
+    duplicate_hashes = cur.execute(
+        """
+        SELECT content_hash
+        FROM image
+        WHERE content_hash IS NOT NULL
+        GROUP BY content_hash
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    for row in duplicate_hashes:
+        image_ids = [
+            image_row["id"]
+            for image_row in cur.execute(
+                """
+                SELECT id
+                FROM image
+                WHERE content_hash = ?
+                ORDER BY processed_at IS NULL, id
+                """,
+                (row["content_hash"],),
+            ).fetchall()
+        ]
+        canonical_id, duplicate_ids = image_ids[0], image_ids[1:]
+        for duplicate_id in duplicate_ids:
+            cur.execute(
+                "UPDATE image_location SET image_id = ? WHERE image_id = ?",
+                (canonical_id, duplicate_id),
+            )
+            cur.execute("DELETE FROM image WHERE id = ?", (duplicate_id,))
 
 
 def _create_face_table(cur, table_name="face"):
@@ -119,7 +212,24 @@ def init_db():
     else:
         _create_face_table(cur)
 
+    _migrate_image_locations(conn)
+
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_image_content_hash
+        ON image(content_hash)
+        WHERE content_hash IS NOT NULL
+        """
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_image_directory ON image(directory)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_location_image_id "
+        "ON image_location(image_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_location_directory "
+        "ON image_location(directory)"
+    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
 

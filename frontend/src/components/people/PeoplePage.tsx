@@ -6,7 +6,7 @@ import FolderPickerModal from "../shared/FolderPickerModal";
 import FolderFilterModal from "../shared/FolderFilterModal";
 
 const PeoplePage = () => {
-  const [images, setImages] = useState([]);
+  const [images, setImages] = useState<any[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
   const [showPicker, setShowPicker] = useState(false);
   const [showFolderFilter, setShowFolderFilter] = useState(false);
@@ -94,6 +94,11 @@ const PeoplePage = () => {
         images={images}
         selectedPersons={selectedPersons}
         isLoading={isLoading} // Prop an das Grid weiterreichen
+        onImageDeleted={(imageId) =>
+          setImages((current) =>
+            current.filter((image) => image.id !== imageId)
+          )
+        }
       />
 
       {showPicker && (

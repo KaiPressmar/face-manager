@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
+import FullscreenImageGallery from "./FullscreenImageGallery";
+import { deleteImage, imageFileUrl } from "../../utils/api";
 
 interface Face {
   id: number;
@@ -15,6 +17,10 @@ interface Face {
 interface ImageData {
   id: number;
   image_path: string;
+  filename?: string;
+  directory?: string;
+  content_hash: string | null;
+  location_count: number;
   faces: Face[];
 }
 
@@ -22,15 +28,26 @@ interface ImageGridProps {
   images: ImageData[];
   selectedPersons: string[];
   isLoading: boolean; // Neues Interface-Property
+  onImageDeleted: (imageId: number) => void;
 }
 
-const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoading }) => {
+const ImageGrid: React.FC<ImageGridProps> = ({
+  images,
+  selectedPersons,
+  isLoading,
+  onImageDeleted,
+}) => {
   // 1. Bilder filtern
   const filtered = useMemo(() => {
     if (!Array.isArray(images)) return [];
-    if (selectedPersons.length === 0) return images;
+    const uniqueImages = Array.from(
+      new Map(
+        images.map((image) => [image.content_hash || `id:${image.id}`, image])
+      ).values()
+    );
+    if (selectedPersons.length === 0) return uniqueImages;
 
-    return images.filter((img) => {
+    return uniqueImages.filter((img) => {
       const personsInImage = img.faces.map((f) => f.person_name || "Unbekannt");
       return selectedPersons.every((p) => personsInImage.includes(p));
     });
@@ -38,6 +55,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
 
   // 2. Pagination
   const [visibleCount, setVisibleCount] = useState(40);
+  const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
   const visibleImages = filtered.slice(0, visibleCount);
 
   const [imageDimensions, setImageDimensions] = useState<Record<string, { w: number; h: number }>>({});
@@ -70,7 +88,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
     visibleImages.forEach((img) => {
       if (imageDimensions[img.image_path]) return;
 
-      const imgSrc = `http://localhost:8000/api/images/${img.id}/file`;
+      const imgSrc = imageFileUrl(img.id);
       const i = new Image();
       i.src = imgSrc;
       i.onload = () => {
@@ -84,13 +102,40 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
 
   useEffect(() => {
     setVisibleCount(40);
-  }, [selectedPersons, images]);
+    setGalleryIndex(null);
+  }, [selectedPersons]);
 
   const breakpointCols = {
     default: 4,
     1400: 3,
     900: 2,
     600: 1,
+  };
+
+  const removeImage = async (image: ImageData) => {
+    const filename = image.filename || image.image_path.split("/").pop() || "Bild";
+    const confirmed = window.confirm(
+      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`
+    );
+    if (!confirmed) return false;
+
+    try {
+      await deleteImage(image.id);
+      onImageDeleted(image.id);
+      setGalleryIndex((current) => {
+        if (current === null) return null;
+        if (filtered.length <= 1) return null;
+        return Math.min(current, filtered.length - 2);
+      });
+      return true;
+    } catch (error) {
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : "Das Bild konnte nicht entfernt werden."
+      );
+      return false;
+    }
   };
 
   // 🔥 SKELETON RENDERER: Wenn die API noch lädt, zeigen wir sofort animierte Dummys an
@@ -130,58 +175,113 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
 
   // Normaler Renderer für echte Bilder
   return (
-    <Masonry
-      breakpointCols={breakpointCols}
-      className="masonry-grid"
-      columnClassName="masonry-column"
-    >
-      {visibleImages.map((img) => {
-        const dims = imageDimensions[img.image_path];
-        const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
+    <>
+      <Masonry
+        breakpointCols={breakpointCols}
+        className="masonry-grid"
+        columnClassName="masonry-column"
+      >
+        {visibleImages.map((img) => {
+          const dims = imageDimensions[img.image_path];
+          const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
-        return (
-          <div
-            key={img.id}
-            className={!dims ? "shimmer-placeholder" : ""}
-            style={{
-              position: "relative",
-              width: "100%",
-              overflow: "hidden",
-              borderRadius: 6,
-              background: "#101014",
-              border: "1px solid #222",
-              aspectRatio: aspectRatio, 
-              marginBottom: "16px",
-              transition: "aspect-ratio 0.2s ease",
-            }}
-          >
-            <img
-              src={`http://localhost:8000/api/images/${img.id}/file`}
-              loading="lazy"
-              style={{
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
-                display: "block",
-                opacity: dims ? 1 : 0,
-                transition: "opacity 0.3s ease",
+          return (
+            <div
+              key={img.id}
+              className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
+              onClick={() =>
+                setGalleryIndex(filtered.findIndex((item) => item.id === img.id))
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setGalleryIndex(
+                    filtered.findIndex((item) => item.id === img.id)
+                  );
+                }
               }}
-              alt=""
-            />
+              style={{
+                position: "relative",
+                width: "100%",
+                overflow: "hidden",
+                borderRadius: 6,
+                background: "#101014",
+                border: "1px solid #222",
+                aspectRatio,
+                marginBottom: "16px",
+                transition: "aspect-ratio 0.2s ease",
+              }}
+            >
+              <img
+                src={imageFileUrl(img.id)}
+                loading="lazy"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                  opacity: dims ? 1 : 0,
+                  transition: "opacity 0.3s ease",
+                }}
+                alt=""
+              />
 
-            {dims &&
-              img.faces.map((face) => (
-                <FaceOverlay
-                  key={face.id}
-                  face={face}
-                  naturalWidth={dims.w}
-                  naturalHeight={dims.h}
-                />
-              ))}
-          </div>
-        );
-      })}
-    </Masonry>
+              <button
+                type="button"
+                className="image-delete-button"
+                title="Bild aus der Datenbank entfernen"
+                aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeImage(img);
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <span aria-hidden="true">×</span>
+                Entfernen
+              </button>
+
+              {img.location_count > 1 && (
+                <span
+                  className="image-location-count"
+                  title={`Dieses Bild wurde an ${img.location_count} Speicherorten gefunden`}
+                >
+                  {img.location_count} Speicherorte
+                </span>
+              )}
+
+              <span className="image-open-cue" aria-hidden="true">
+                <span className="image-open-cue__icon">↗</span>
+                <span>Vollbild öffnen</span>
+              </span>
+
+              {dims &&
+                img.faces.map((face) => (
+                  <FaceOverlay
+                    key={face.id}
+                    face={face}
+                    naturalWidth={dims.w}
+                    naturalHeight={dims.h}
+                  />
+                ))}
+            </div>
+          );
+        })}
+      </Masonry>
+
+      {galleryIndex !== null && filtered[galleryIndex] && (
+        <FullscreenImageGallery
+          images={filtered}
+          activeIndex={galleryIndex}
+          onChange={setGalleryIndex}
+          onClose={() => setGalleryIndex(null)}
+          onDelete={(image) => removeImage(image as ImageData)}
+        />
+      )}
+    </>
   );
 };
 

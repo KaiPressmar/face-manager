@@ -39,7 +39,9 @@ def _descendant_filter(folders):
     params = []
     for folder in dict.fromkeys(normalize_folder_path(path) for path in folders if path):
         escaped = folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        conditions.append("(i.directory = ? OR i.directory LIKE ? ESCAPE '\\')")
+        conditions.append(
+            "(location.directory = ? OR location.directory LIKE ? ESCAPE '\\')"
+        )
         params.extend((folder, f"{escaped}{os.sep}%"))
     return conditions, params
 
@@ -48,17 +50,33 @@ def list_images(folders=None):
     folders = folders or []
     conditions, params = _descendant_filter(folders)
     where = ["f.cluster_id IS NOT NULL"]
-    if conditions:
-        where.append(f"({' OR '.join(conditions)})")
+    location_where = f"WHERE {' OR '.join(conditions)}" if conditions else ""
 
     conn = get_conn()
     rows = conn.execute(
         f"""
+        WITH ranked_locations AS (
+            SELECT
+                location.image_id,
+                location.path,
+                location.directory,
+                location.filename,
+                ROW_NUMBER() OVER (
+                    PARTITION BY location.image_id ORDER BY location.path
+                ) AS location_rank
+            FROM image_location location
+            {location_where}
+        )
         SELECT
             i.id AS image_id,
-            i.path AS image_path,
-            i.directory,
-            i.filename,
+            location.path AS image_path,
+            location.directory,
+            location.filename,
+            i.content_hash,
+            (
+                SELECT COUNT(*) FROM image_location all_locations
+                WHERE all_locations.image_id = i.id
+            ) AS location_count,
             f.id AS face_id,
             f.bbox_x,
             f.bbox_y,
@@ -67,11 +85,13 @@ def list_images(folders=None):
             f.cluster_id,
             p.name AS person_name
         FROM image i
+        JOIN ranked_locations location
+            ON location.image_id = i.id AND location.location_rank = 1
         JOIN face f ON f.image_id = i.id
         LEFT JOIN cluster c ON f.cluster_id = c.id
         LEFT JOIN person p ON c.person_id = p.id
         WHERE {' AND '.join(where)}
-        ORDER BY i.path, f.id
+        ORDER BY location.path, f.id
         """,
         params,
     ).fetchall()
@@ -83,16 +103,21 @@ def build_folder_tree():
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT directory, COUNT(*) AS image_count
-        FROM image
-        WHERE processed_at IS NOT NULL
-        GROUP BY directory
-        ORDER BY directory
+        SELECT location.image_id, location.directory
+        FROM image_location location
+        JOIN image i ON i.id = location.image_id
+        WHERE i.processed_at IS NOT NULL
+        ORDER BY location.directory
         """
     ).fetchall()
     conn.close()
 
-    direct_counts = {row["directory"]: row["image_count"] for row in rows}
+    direct_images = defaultdict(set)
+    all_image_ids = set()
+    for row in rows:
+        direct_images[row["directory"]].add(row["image_id"])
+        all_image_ids.add(row["image_id"])
+
     nodes = {}
 
     def ensure_node(path):
@@ -102,7 +127,7 @@ def build_folder_tree():
         node = {
             "path": path,
             "name": os.path.basename(path) or path,
-            "direct_image_count": direct_counts.get(path, 0),
+            "direct_image_count": len(direct_images.get(path, set())),
             "image_count": 0,
             "children": [],
             "_parent": parent,
@@ -112,14 +137,14 @@ def build_folder_tree():
             ensure_node(parent)
         return node
 
-    for directory in direct_counts:
+    for directory in direct_images:
         ensure_node(directory)
 
-    totals = defaultdict(int)
-    for directory, count in direct_counts.items():
+    totals = defaultdict(set)
+    for directory, image_ids in direct_images.items():
         current = directory
         while True:
-            totals[current] += count
+            totals[current].update(image_ids)
             parent = os.path.dirname(current)
             if parent == current:
                 break
@@ -127,7 +152,7 @@ def build_folder_tree():
 
     roots = []
     for path, node in nodes.items():
-        node["image_count"] = totals[path]
+        node["image_count"] = len(totals[path])
         parent = node.pop("_parent")
         if parent is None or parent not in nodes:
             roots.append(node)
@@ -142,9 +167,43 @@ def build_folder_tree():
     sort_nodes(roots)
     return {
         "roots": roots,
-        "image_count": sum(direct_counts.values()),
+        "image_count": len(all_image_ids),
         "folder_count": len(nodes),
     }
+
+
+def get_available_image_path(image_id: int, preferred_path=None):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT path
+        FROM image_location
+        WHERE image_id = ?
+        ORDER BY CASE WHEN path = ? THEN 0 ELSE 1 END, path
+        """,
+        (image_id, preferred_path),
+    ).fetchall()
+    conn.close()
+    return next((row["path"] for row in rows if os.path.isfile(row["path"])), None)
+
+
+def delete_image(image_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
+    deleted = cur.rowcount > 0
+    if deleted:
+        cur.execute(
+            """
+            DELETE FROM cluster
+            WHERE NOT EXISTS (
+                SELECT 1 FROM face WHERE face.cluster_id = cluster.id
+            )
+            """
+        )
+        conn.commit()
+    conn.close()
+    return deleted
 
 
 def list_faces_by_folder(folder_path: str):
