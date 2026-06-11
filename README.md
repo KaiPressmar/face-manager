@@ -52,8 +52,9 @@ Recommended development environment:
 
 On Ubuntu 22.04 or newer, the setup script installs the system packages,
 Node.js 20 when necessary, the Python environment, backend dependencies, and
-frontend dependencies. It finishes by compiling the backend and building the
-frontend:
+frontend dependencies. It also installs the current official GitHub CLI
+release into `~/.local/bin` and verifies its SHA-256 checksum. The setup
+finishes by compiling the backend and building the frontend:
 
 ```bash
 ./scripts/setup-dev.sh
@@ -96,6 +97,7 @@ The script is safe to rerun. Before making changes it checks:
 
 - Which Ubuntu packages are missing
 - Whether the installed Node.js version is supported
+- Whether GitHub CLI is installed
 - Whether the Python virtual environment already exists
 - Whether installed Python packages satisfy `requirements.txt`
 - Whether the selected ONNX Runtime provider is already usable
@@ -106,6 +108,12 @@ force-reinstall packages, remove an existing GPU runtime during an automatic
 or CPU run, replace a valid virtual environment, or recreate a matching
 `node_modules` directory. Existing source images and the SQLite database are
 never modified.
+
+If GitHub CLI is not authenticated yet, the setup prints the login command:
+
+```bash
+gh auth login --hostname github.com --git-protocol ssh --web
+```
 
 NVIDIA acceleration is optional. CPU processing works without CUDA, but large
 photo libraries will process considerably more slowly.
@@ -185,6 +193,30 @@ cd ..
 Run the backend and frontend in separate terminals. Commands below assume both
 terminals start in the repository root.
 
+### VS Code
+
+Open the repository root in VS Code and install the workspace recommendations
+when prompted. The workspace includes:
+
+- Python, Pylance, debugpy, and Ruff integration
+- Prettier and YAML formatting
+- GitHub Actions and GitHub Pull Requests support
+- Backend and frontend development tasks
+- Backend and browser debugging
+- A compound **Full Stack: Debug** configuration
+
+Useful commands from **Terminal > Run Task**:
+
+- **Setup: Development environment**
+- **Full Stack: Dev servers**
+- **Check: All**
+- **GitHub: Authenticate CLI**
+- **GitHub: Configure repository**
+- **Release: Bump patch/minor/major**
+
+Press `F5` and choose **Full Stack: Debug** to start FastAPI under the Python
+debugger, start Vite, and attach the browser debugger.
+
 ### Terminal 1: FastAPI Backend
 
 ```bash
@@ -254,22 +286,10 @@ assignments, clusters, and embeddings.
 
 ## Validation Commands
 
-Run these checks before committing changes:
+Run the same checks used by GitHub Actions:
 
 ```bash
-source backend/.venv/bin/activate
-python -m py_compile \
-  backend/app.py \
-  backend/config.py \
-  backend/db/schema.py \
-  backend/models/clustering.py \
-  backend/models/face_model.py \
-  backend/services/pipeline.py \
-  backend/services/storage.py
-
-cd frontend
-npm run typecheck
-npm run build
+./scripts/check-all.sh
 ```
 
 The production frontend can be previewed after building:
@@ -278,6 +298,27 @@ The production frontend can be previewed after building:
 cd frontend
 npm run preview
 ```
+
+## Git Workflow
+
+Development follows a two-branch model:
+
+- `develop` is the integration branch for ongoing work.
+- `main` contains released code only.
+- Feature branches start from and merge into `develop`.
+- Releases merge from `develop` into `main` through a pull request.
+
+Start a change:
+
+```bash
+git switch develop
+git pull --ff-only origin develop
+git switch -c feature/my-change
+```
+
+After validation, push the feature branch and open a pull request targeting
+`develop`. See [CONTRIBUTING.md](CONTRIBUTING.md) for naming, validation,
+release steps, and recommended branch-protection settings.
 
 ## Release Versioning
 
@@ -302,14 +343,17 @@ Use the release helper to prepare a version:
 ```
 
 The helper only updates version files. It deliberately does not commit or tag
-the release. After running validation, create the release commit and annotated
-tag:
+the release. Commit the version bump on `develop`, then open the release pull
+request from `develop` to `main`:
 
 ```bash
 git add VERSION frontend/package.json frontend/package-lock.json
 git commit -m "Release v1.2.0"
-git tag -a v1.2.0 -m "Face Manager v1.2.0"
+git push origin develop
 ```
+
+After that PR merges and CI succeeds on `main`, GitHub Actions creates the
+annotated `v1.2.0` tag and publishes a GitHub Release with generated notes.
 
 ## Troubleshooting
 

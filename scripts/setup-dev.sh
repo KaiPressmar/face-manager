@@ -21,6 +21,7 @@ readonly SYSTEM_PACKAGES=(
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BACKEND_VENV="${PROJECT_ROOT}/backend/.venv"
+export PATH="${HOME}/.local/bin:${PATH}"
 
 ACCELERATOR="auto"
 SKIP_SYSTEM_PACKAGES=0
@@ -193,6 +194,79 @@ install_nodejs() {
 
   ((DRY_RUN)) || node_is_supported ||
     die "Node.js installation completed, but Node.js ${MIN_NODE_MAJOR}+ is not available."
+}
+
+install_github_cli() {
+  if command -v gh >/dev/null 2>&1; then
+    log "Using GitHub CLI $(gh --version | sed -n '1p')."
+    return
+  fi
+
+  log "Installing the official GitHub CLI release for the current user."
+  local architecture
+  case "$(uname -m)" in
+    x86_64)
+      architecture="amd64"
+      ;;
+    aarch64 | arm64)
+      architecture="arm64"
+      ;;
+    *)
+      die "GitHub CLI user installation does not support $(uname -m)."
+      ;;
+  esac
+
+  if ((DRY_RUN)); then
+    printf '+ install latest GitHub CLI linux_%s to %q\n' \
+      "${architecture}" \
+      "${HOME}/.local/bin/gh"
+    return
+  fi
+
+  local version
+  version="$(
+    curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
+      sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' |
+      sed -n '1p'
+  )"
+  [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "Could not resolve the latest GitHub CLI version."
+
+  local archive="gh_${version}_linux_${architecture}.tar.gz"
+  local temp_dir
+  temp_dir="$(mktemp -d)"
+
+  curl -fsSL \
+    "https://github.com/cli/cli/releases/download/v${version}/${archive}" \
+    -o "${temp_dir}/${archive}"
+  curl -fsSL \
+    "https://github.com/cli/cli/releases/download/v${version}/gh_${version}_checksums.txt" \
+    -o "${temp_dir}/checksums.txt"
+
+  (
+    cd "${temp_dir}"
+    grep " ${archive}\$" checksums.txt | sha256sum --check --status
+  ) || die "GitHub CLI checksum verification failed."
+
+  tar -xzf "${temp_dir}/${archive}" -C "${temp_dir}"
+  install -D -m 755 \
+    "${temp_dir}/gh_${version}_linux_${architecture}/bin/gh" \
+    "${HOME}/.local/bin/gh"
+  rm -rf "${temp_dir}"
+
+  ((DRY_RUN)) || command -v gh >/dev/null 2>&1 ||
+    die "GitHub CLI installation completed, but gh is unavailable."
+}
+
+report_github_auth() {
+  ((DRY_RUN)) && return
+
+  if gh auth status --hostname github.com >/dev/null 2>&1; then
+    log "GitHub CLI is authenticated."
+  else
+    log "GitHub CLI is installed but not authenticated."
+    printf '  Run: gh auth login --hostname github.com --git-protocol ssh --web\n'
+  fi
 }
 
 nvidia_gpu_is_supported() {
@@ -462,6 +536,8 @@ main() {
   check_platform
   install_system_packages
   install_nodejs
+  install_github_cli
+  report_github_auth
   select_accelerator
   setup_backend
   setup_frontend

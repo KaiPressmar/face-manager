@@ -1,6 +1,6 @@
 {
   "name": "face-manager-ui",
-  "version": "1.1.0",
+  "version": "0.0.1",
   "private": true,
   "engines": {
     "node": ">=20"
@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check": "npm run typecheck && npm run build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },

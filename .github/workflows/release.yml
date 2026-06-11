@@ -1,0 +1,84 @@
+name: Publish Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+    types:
+      - completed
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag and publish
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - name: Validate release version
+        run: ./scripts/check-version.sh
+
+      - name: Resolve release version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          if git rev-parse "refs/tags/v${version}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "tag_exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+          if gh release view "v${version}" >/dev/null 2>&1; then
+            echo "release_exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "release_exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Create annotated tag
+        if: steps.version.outputs.tag_exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Face Manager v${VERSION}" "${RELEASE_SHA}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub Release
+        if: steps.version.outputs.release_exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" \
+            --title "Face Manager v${VERSION}" \
+            --generate-notes \
+            --target "${RELEASE_SHA}"
+
+      - name: Report existing release
+        if: steps.version.outputs.release_exists == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: echo "v${VERSION} already exists; no release was created."
