@@ -13,6 +13,7 @@ interface Face {
 }
 
 interface ImageData {
+  id: number;
   image_path: string;
   faces: Face[];
 }
@@ -69,7 +70,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
     visibleImages.forEach((img) => {
       if (imageDimensions[img.image_path]) return;
 
-      const imgSrc = `http://localhost:8000/api/image?path=${encodeURIComponent(img.image_path)}`;
+      const imgSrc = `http://localhost:8000/api/images/${img.id}/file`;
       const i = new Image();
       i.src = imgSrc;
       i.onload = () => {
@@ -83,7 +84,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
 
   useEffect(() => {
     setVisibleCount(40);
-  }, [selectedPersons]);
+  }, [selectedPersons, images]);
 
   const breakpointCols = {
     default: 4,
@@ -117,6 +118,16 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
     );
   }
 
+  if (filtered.length === 0) {
+    return (
+      <div className="empty-image-state">
+        <span className="folder-icon" aria-hidden="true" />
+        <h3>Keine Bilder in dieser Auswahl</h3>
+        <p>Wähle andere Ordner oder passe den Personenfilter an.</p>
+      </div>
+    );
+  }
+
   // Normaler Renderer für echte Bilder
   return (
     <Masonry
@@ -130,7 +141,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
 
         return (
           <div
-            key={img.image_path}
+            key={img.id}
             className={!dims ? "shimmer-placeholder" : ""}
             style={{
               position: "relative",
@@ -145,7 +156,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({ images, selectedPersons, isLoadin
             }}
           >
             <img
-              src={`http://localhost:8000/api/image?path=${encodeURIComponent(img.image_path)}`}
+              src={`http://localhost:8000/api/images/${img.id}/file`}
               loading="lazy"
               style={{
                 width: "100%",

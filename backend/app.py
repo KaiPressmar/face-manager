@@ -1,6 +1,8 @@
 import logging
 import os
+from functools import lru_cache
 from io import BytesIO
+from typing import List
 
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,12 +14,14 @@ from .services.pipeline import get_process_state, process_folder
 from .services.storage import (
     _safe_float,
     assign_cluster_to_person,
+    build_folder_tree,
     get_person_faces,
+    list_images,
     list_persons,
 )
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 init_db()
@@ -67,7 +71,8 @@ def api_clusters():
         """
         SELECT
             f.id          AS face_id,
-            f.image_path  AS image_path,
+            f.image_id    AS image_id,
+            i.path        AS image_path,
             f.bbox_x      AS bbox_x,
             f.bbox_y      AS bbox_y,
             f.bbox_w      AS bbox_w,
@@ -75,6 +80,7 @@ def api_clusters():
             f.cluster_id  AS cluster_id,
             p.name        AS person_name
         FROM face f
+        JOIN image i ON f.image_id = i.id
         LEFT JOIN cluster c ON f.cluster_id = c.id
         LEFT JOIN person  p ON c.person_id = p.id
         WHERE f.cluster_id IS NOT NULL
@@ -99,6 +105,7 @@ def api_clusters():
         clusters[cid]["faces"].append(
             {
                 "id": r["face_id"],
+                "image_id": r["image_id"],
                 "image_path": r["image_path"],
                 "bbox_x": int(r["bbox_x"]),
                 "bbox_y": int(r["bbox_y"]),
@@ -167,27 +174,29 @@ def api_person_faces(person_id: int):
 # -----------------------------
 
 
-@app.get("/api/image")
-def get_image(path: str):
-    return FileResponse(path)
+@app.get("/api/images/{image_id}/file")
+def get_image(image_id: int):
+    conn = get_conn()
+    row = conn.execute("SELECT path FROM image WHERE id = ?", (image_id,)).fetchone()
+    conn.close()
+    if not row or not os.path.isfile(row["path"]):
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(row["path"])
+
+
+@lru_cache(maxsize=2048)
+def get_image_orientation(path):
+    try:
+        with Image.open(path) as img:
+            exif = img.getexif()
+            orientation = exif.get(274, 1)
+            return orientation, img.width, img.height
+    except (OSError, ValueError):
+        return 1, 0, 0
 
 
 def correct_bbox_for_orientation(path, x, y, w, h):
-    img = Image.open(path)
-
-    try:
-        exif = img._getexif()
-        if not exif:
-            return x, y, w, h
-
-        orientation_key = next(
-            k for k, v in ExifTags.TAGS.items() if v == "Orientation"
-        )
-        orientation = exif.get(orientation_key, 1)
-    except:
-        orientation = 1
-
-    width, height = img.size
+    orientation, width, height = get_image_orientation(path)
 
     # Orientation corrections
     if orientation == 3:  # 180°
@@ -197,14 +206,14 @@ def correct_bbox_for_orientation(path, x, y, w, h):
             w,
             h,
         )
-    elif orientation == 6:  # 90° CW
+    if orientation == 6:  # 90° CW
         return (
             height - y - h,
             x,
             h,
             w,
         )
-    elif orientation == 8:  # 270° CW
+    if orientation == 8:  # 270° CW
         return (
             y,
             width - x - w,
@@ -215,41 +224,26 @@ def correct_bbox_for_orientation(path, x, y, w, h):
     return x, y, w, h
 
 
+@app.get("/api/folders")
+def get_folders():
+    return build_folder_tree()
+
+
 @app.get("/api/images")
-def get_images():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT 
-            f.id        AS face_id,
-            f.image_path AS image_path,
-            f.bbox_x    AS bbox_x,
-            f.bbox_y    AS bbox_y,
-            f.bbox_w    AS bbox_w,
-            f.bbox_h    AS bbox_h,
-            f.cluster_id AS cluster_id,
-            p.name      AS person_name
-        FROM face f
-        LEFT JOIN cluster c ON f.cluster_id = c.id
-        LEFT JOIN person  p ON c.person_id = p.id
-        WHERE f.cluster_id IS NOT NULL
-        ORDER BY f.image_path, f.id
-        """
-    )
-
-    rows = cur.fetchall()
-    conn.close()
-
+def get_images(folders: List[str] = Query(default=[])):
+    rows = list_images(folders)
     images = {}
 
     for r in rows:
+        image_id = r["image_id"]
         path = r["image_path"]
 
-        if path not in images:
-            images[path] = {
+        if image_id not in images:
+            images[image_id] = {
+                "id": image_id,
                 "image_path": path,
+                "directory": r["directory"],
+                "filename": r["filename"],
                 "faces": [],
             }
 
@@ -261,7 +255,7 @@ def get_images():
             _safe_float(r["bbox_h"]),
         )
 
-        images[path]["faces"].append(
+        images[image_id]["faces"].append(
             {
                 "id": r["face_id"],
                 "bbox_x": bbox_x,
@@ -281,17 +275,27 @@ def get_images():
 # -----------------------------
 
 
-@app.get("/api/face-crop")
-def api_face_crop(
-    path: str = Query(...),
-    x: int = Query(...),
-    y: int = Query(...),
-    w: int = Query(...),
-    h: int = Query(...),
-):
-    if not os.path.exists(path):
+@app.get("/api/faces/{face_id}/crop")
+def api_face_crop(face_id: int):
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT i.path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+        FROM face f
+        JOIN image i ON i.id = f.image_id
+        WHERE f.id = ?
+        """,
+        (face_id,),
+    ).fetchone()
+    conn.close()
+    if not row or not os.path.isfile(row["path"]):
         raise HTTPException(status_code=404, detail="Image not found")
 
+    path = row["path"]
+    x = int(_safe_float(row["bbox_x"]))
+    y = int(_safe_float(row["bbox_y"]))
+    w = int(_safe_float(row["bbox_w"]))
+    h = int(_safe_float(row["bbox_h"]))
     img = Image.open(path)
 
     # --- EXIF ORIENTATION FIX ---

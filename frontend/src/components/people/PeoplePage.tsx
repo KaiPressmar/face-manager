@@ -3,54 +3,92 @@ import { fetchImages } from "../../utils/api";
 import PersonFilter from "./PersonFilter";
 import ImageGrid from "./ImageGrid";
 import FolderPickerModal from "../shared/FolderPickerModal";
+import FolderFilterModal from "../shared/FolderFilterModal";
 
 const PeoplePage = () => {
   const [images, setImages] = useState([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
   const [showPicker, setShowPicker] = useState(false);
-  // Neuer Zustand, um den initialen Ladevorgang abzufangen
+  const [showFolderFilter, setShowFolderFilter] = useState(false);
+  const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Initialer Ladevorgang
-    fetchImages()
+    let isMounted = true;
+    setIsLoading(true);
+
+    const loadImages = () =>
+      fetchImages(selectedFolders)
       .then((data) => {
-        setImages(data);
+        if (isMounted) setImages(data);
       })
       .finally(() => {
-        setIsLoading(false); // Ladezustand beenden, sobald Daten (oder Fehler) da sind
+        if (isMounted) setIsLoading(false);
       });
 
-    // Aktualisierung alle 15 Sekunden statt jede Sekunde (Performance-Rettung!)
-    const interval = setInterval(() => {
-      fetchImages().then(setImages);
-    }, 15000);
+    loadImages();
+    const interval = setInterval(loadImages, 15000);
 
-    return () => clearInterval(interval);
-  }, []);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedFolders]);
 
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "space-between" }}>
+      <div className="people-toolbar">
         <PersonFilter
           images={images}
           selected={selectedPersons}
           onChange={setSelectedPersons}
         />
 
-        <button
-          className="neon-card"
-          style={{
-            padding: "10px 16px",
-            cursor: "pointer",
-            borderColor: "var(--neon-cyan)",
-            fontWeight: "bold",
-          }}
-          onClick={() => setShowPicker(true)}
-        >
-          📁 Ordner hinzufügen
-        </button>
+        <div className="people-toolbar-actions">
+          <button
+            className={`folder-filter-trigger${selectedFolders.length ? " folder-filter-trigger--active" : ""}`}
+            onClick={() => setShowFolderFilter(true)}
+          >
+            <span className="folder-icon" aria-hidden="true" />
+            <span>
+              <strong>Ordnerfilter</strong>
+              <small>
+                {selectedFolders.length
+                  ? `${selectedFolders.length} ausgewählt`
+                  : "Alle Ordner"}
+              </small>
+            </span>
+            {selectedFolders.length > 0 && <b>{selectedFolders.length}</b>}
+          </button>
+
+          <button className="neon-card import-folder-button" onClick={() => setShowPicker(true)}>
+            Ordner hinzufügen
+          </button>
+        </div>
       </div>
+
+      {selectedFolders.length > 0 && (
+        <div className="active-folder-filters">
+          <span>Aktive Ordner</span>
+          {selectedFolders.map((folder) => (
+            <button
+              key={folder}
+              title={folder}
+              onClick={() =>
+                setSelectedFolders((current) =>
+                  current.filter((path) => path !== folder)
+                )
+              }
+            >
+              {folder.split("/").filter(Boolean).pop() || folder}
+              <b>×</b>
+            </button>
+          ))}
+          <button className="clear-folder-filters" onClick={() => setSelectedFolders([])}>
+            Alle löschen
+          </button>
+        </div>
+      )}
 
       <ImageGrid
         images={images}
@@ -60,6 +98,16 @@ const PeoplePage = () => {
 
       {showPicker && (
         <FolderPickerModal onClose={() => setShowPicker(false)} />
+      )}
+      {showFolderFilter && (
+        <FolderFilterModal
+          selected={selectedFolders}
+          onClose={() => setShowFolderFilter(false)}
+          onApply={(folders) => {
+            setSelectedFolders(folders);
+            setShowFolderFilter(false);
+          }}
+        />
       )}
     </>
   );

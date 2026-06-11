@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Dict, Any
 
@@ -10,7 +11,7 @@ from ..db.schema import get_conn
 from ..config import DEVICE
 from .storage import load_all_embeddings
 
-face_model = FaceModel(DEVICE)
+face_model = None
 clusterer = FaceClustering()
 
 PROCESS_STATE: Dict[str, Any] = {
@@ -27,6 +28,13 @@ _loaded_existing = False
 
 def get_process_state():
     return dict(PROCESS_STATE)
+
+
+def _ensure_face_model_loaded():
+    global face_model
+    if face_model is None:
+        face_model = FaceModel(DEVICE)
+    return face_model
 
 
 def _ensure_clusterer_loaded():
@@ -47,6 +55,7 @@ def _ensure_clusterer_loaded():
 def process_folder(folder_path: str):
     try:
         _ensure_clusterer_loaded()
+        model = _ensure_face_model_loaded()
 
         PROCESS_STATE.update(
             {
@@ -74,11 +83,36 @@ def process_folder(folder_path: str):
 
         for idx, img_path in enumerate(image_paths, start=1):
             try:
+                normalized_path = os.path.normpath(str(img_path))
+                existing = cur.execute(
+                    "SELECT id, processed_at FROM image WHERE path = ?",
+                    (normalized_path,),
+                ).fetchone()
+                if existing and existing["processed_at"]:
+                    PROCESS_STATE["processed_images"] = idx
+                    continue
+
+                if existing:
+                    image_id = existing["id"]
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO image(path, directory, filename)
+                        VALUES (?, ?, ?)
+                        """,
+                        (
+                            normalized_path,
+                            os.path.dirname(normalized_path),
+                            os.path.basename(normalized_path),
+                        ),
+                    )
+                    image_id = cur.lastrowid
+
                 img = Image.open(img_path).convert("RGB")
                 img_np = np.array(img)
 
                 # DETECTION + EMBEDDING in einem Schritt
-                faces = face_model.detect_and_embed(img_np)
+                faces = model.detect_and_embed(img_np)
 
                 PROCESS_STATE["total_faces"] += len(faces)
 
@@ -100,11 +134,11 @@ def process_folder(folder_path: str):
                     # Face sofort speichern
                     cur.execute(
                         """
-                        INSERT INTO face(image_path, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding)
+                        INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
-                            str(img_path),
+                            image_id,
                             float(x1),
                             float(y1),
                             float(w),
@@ -116,6 +150,10 @@ def process_folder(folder_path: str):
 
                     PROCESS_STATE["processed_faces"] += 1
 
+                cur.execute(
+                    "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (image_id,),
+                )
                 conn.commit()
 
             except Exception as e:

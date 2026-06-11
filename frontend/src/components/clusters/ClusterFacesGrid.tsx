@@ -9,9 +9,7 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({ faces, onRemoveFace
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, 120px)", gap: 16 }}>
       {faces.map((f) => {
-        const cropUrl = `http://localhost:8000/api/face-crop?path=${encodeURIComponent(
-          f.image_path
-        )}&x=${f.bbox_x}&y=${f.bbox_y}&w=${f.bbox_w}&h=${f.bbox_h}`;
+        const cropUrl = `http://localhost:8000/api/faces/${f.id}/crop`;
 
         return (
           <div
