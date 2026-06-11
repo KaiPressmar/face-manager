@@ -29,7 +29,7 @@
         "backend.app:app",
         "--reload",
         "--reload-exclude",
-        "**/*.sqlite-journal",
+        "**/*.sqlite*",
         "--reload-exclude",
         "**/*.sqlite",
         "--reload-exclude",
