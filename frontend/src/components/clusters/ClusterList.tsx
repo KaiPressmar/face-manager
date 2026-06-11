@@ -1,5 +1,7 @@
 import React from "react";
 
+const UNKNOWN_PERSON_LABEL = "Unbekannt";
+
 interface ClusterListProps {
   clusters: any[];
   selected: number | null;
@@ -31,34 +33,109 @@ const ClusterList: React.FC<ClusterListProps> = ({ clusters, selected, onSelect,
     return <div style={{ opacity: 0.5, fontSize: 13 }}>Keine aktiven Cluster gefunden.</div>;
   }
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {clusters.map((c) => {
-        const isSelected = selected === c.cluster_id;
+  const groupedClusters = clusters.reduce((groups, cluster) => {
+    const groupName = cluster.person_name?.trim() || UNKNOWN_PERSON_LABEL;
+    if (!groups[groupName]) {
+      groups[groupName] = [];
+    }
+    groups[groupName].push(cluster);
+    return groups;
+  }, {} as Record<string, any[]>);
 
+  const groupOrder = Object.keys(groupedClusters).sort((a, b) => {
+    if (a === UNKNOWN_PERSON_LABEL) return 1;
+    if (b === UNKNOWN_PERSON_LABEL) return -1;
+    return a.localeCompare(b, "de", { sensitivity: "base" });
+  });
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {groupOrder.map((groupName) => {
+        const entries = groupedClusters[groupName];
         return (
-          <div
-            key={c.cluster_id}
-            className={`neon-card ${isSelected ? "neon-card--active" : ""}`}
+          <section
+            key={groupName}
             style={{
-              width: "100%",
-              cursor: "pointer",
-              padding: "12px",
-              borderColor: isSelected ? "var(--neon-magenta)" : "#1f1f22",
-              boxShadow: isSelected ? "0 0 12px rgba(255, 0, 229, 0.25)" : "none",
+              border: "1px solid #1f1f27",
+              borderRadius: 10,
+              background: "linear-gradient(180deg, rgba(21, 21, 28, 0.95), rgba(13, 13, 18, 0.95))",
+              overflow: "hidden",
             }}
-            onClick={() => onSelect(c.cluster_id)}
           >
-            <div style={{ fontSize: 14, fontWeight: "bold", marginBottom: 4 }}>
-              Cluster {c.cluster_id}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "8px 10px",
+                borderBottom: "1px solid #23232b",
+                background: "rgba(0, 229, 255, 0.04)",
+              }}
+            >
+              <strong style={{ fontSize: 12, color: "#d5d5dc", letterSpacing: "0.02em" }}>
+                {groupName}
+              </strong>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "#081013",
+                  background: "var(--neon-cyan)",
+                  borderRadius: 999,
+                  padding: "2px 8px",
+                }}
+              >
+                {entries.length}
+              </span>
             </div>
-            <div style={{ opacity: 0.6, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {c.person_name || "Unbekannt"}
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8 }}>
+              {entries.map((c) => {
+                const isSelected = selected === c.cluster_id;
+
+                return (
+                  <div
+                    key={c.cluster_id}
+                    className={`neon-card ${isSelected ? "neon-card--active" : ""}`}
+                    style={{
+                      width: "100%",
+                      cursor: "pointer",
+                      padding: "10px",
+                      borderColor: isSelected ? "var(--neon-magenta)" : "#2a2a33",
+                      boxShadow: isSelected ? "0 0 14px rgba(255, 0, 229, 0.22)" : "none",
+                    }}
+                    onClick={() => onSelect(c.cluster_id)}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>Cluster {c.cluster_id}</div>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          color: "var(--neon-cyan)",
+                          border: "1px solid rgba(0, 229, 255, 0.35)",
+                          borderRadius: 999,
+                          padding: "2px 6px",
+                        }}
+                      >
+                        {c.faces?.length || 0} Gesichter
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        opacity: 0.7,
+                        fontSize: 11,
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {groupName === UNKNOWN_PERSON_LABEL ? "Nicht zugewiesen" : "Zugewiesen"}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ fontSize: 11, color: "var(--neon-cyan)", marginTop: 4, opacity: 0.8 }}>
-              {c.faces?.length || 0} Gesichter
-            </div>
-          </div>
+          </section>
         );
       })}
     </div>
