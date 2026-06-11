@@ -1,0 +1,23 @@
+name: Main Branch Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  require-develop:
+    name: Require develop as source
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate source branch
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [[ "${HEAD_BRANCH}" != "develop" ]]; then
+            echo "Pull requests to main must come from develop."
+            exit 1
+          fi
