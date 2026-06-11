@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 from functools import lru_cache
 from io import BytesIO
 from typing import List
@@ -12,10 +13,13 @@ from PIL import ExifTags, Image
 from .config import APP_VERSION
 from .db.schema import get_conn, init_db
 from .services.pipeline import get_process_state, process_folder
+from .services.desktop import open_file_location
 from .services.storage import (
     _safe_float,
     assign_cluster_to_person,
     build_folder_tree,
+    delete_image,
+    get_available_image_path,
     get_person_faces,
     list_images,
     list_persons,
@@ -182,12 +186,33 @@ def api_person_faces(person_id: int):
 
 @app.get("/api/images/{image_id}/file")
 def get_image(image_id: int):
-    conn = get_conn()
-    row = conn.execute("SELECT path FROM image WHERE id = ?", (image_id,)).fetchone()
-    conn.close()
-    if not row or not os.path.isfile(row["path"]):
+    path = get_available_image_path(image_id)
+    if not path:
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(row["path"])
+    return FileResponse(path)
+
+
+@app.delete("/api/images/{image_id}")
+def remove_image(image_id: int):
+    if not delete_image(image_id):
+        raise HTTPException(status_code=404, detail="Image not found")
+    return {"status": "deleted"}
+
+
+@app.post("/api/images/{image_id}/open-location")
+def open_image_location(image_id: int, data: dict = Body(default=None)):
+    preferred_path = data.get("image_path") if data else None
+    path = get_available_image_path(image_id, preferred_path)
+    if not path:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        open_file_location(path)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.exception("Could not open image location for %s", path)
+        raise HTTPException(
+            status_code=500, detail="Could not open the system file manager"
+        ) from exc
+    return {"status": "opened"}
 
 
 @lru_cache(maxsize=2048)
@@ -250,6 +275,8 @@ def get_images(folders: List[str] = Query(default=[])):
                 "image_path": path,
                 "directory": r["directory"],
                 "filename": r["filename"],
+                "content_hash": r["content_hash"],
+                "location_count": r["location_count"],
                 "faces": [],
             }
 
@@ -286,18 +313,17 @@ def api_face_crop(face_id: int):
     conn = get_conn()
     row = conn.execute(
         """
-        SELECT i.path, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+        SELECT f.image_id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
         FROM face f
-        JOIN image i ON i.id = f.image_id
         WHERE f.id = ?
         """,
         (face_id,),
     ).fetchone()
     conn.close()
-    if not row or not os.path.isfile(row["path"]):
+    path = get_available_image_path(row["image_id"]) if row else None
+    if not path:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    path = row["path"]
     x = int(_safe_float(row["bbox_x"]))
     y = int(_safe_float(row["bbox_y"]))
     w = int(_safe_float(row["bbox_w"]))

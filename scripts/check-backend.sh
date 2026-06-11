@@ -26,7 +26,12 @@ fi
   "${PROJECT_ROOT}/backend/db/schema.py" \
   "${PROJECT_ROOT}/backend/models/clustering.py" \
   "${PROJECT_ROOT}/backend/models/face_model.py" \
+  "${PROJECT_ROOT}/backend/services/desktop.py" \
   "${PROJECT_ROOT}/backend/services/pipeline.py" \
   "${PROJECT_ROOT}/backend/services/storage.py"
+
+"${PYTHON}" -m unittest discover \
+  -s "${PROJECT_ROOT}/backend/tests" \
+  -t "${PROJECT_ROOT}"
 
 printf 'Backend checks passed.\n'
