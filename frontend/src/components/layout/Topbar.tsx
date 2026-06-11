@@ -9,11 +9,12 @@ const Topbar = () => {
         borderBottom: "1px solid #1f1f22",
         display: "flex",
         alignItems: "center",
-        paddingLeft: 24,
-        fontSize: 20,
+        gap: 10,
+        padding: "0 24px",
       }}
     >
-      Face Manager
+      <span style={{ fontSize: 20 }}>Face Manager</span>
+      <span className="app-version">v{__APP_VERSION__}</span>
     </header>
   );
 };

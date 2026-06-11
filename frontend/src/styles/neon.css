@@ -5,6 +5,18 @@
   --neon-grey: #9e9e9e;
 }
 
+.app-version {
+  padding: 3px 7px;
+  border: 1px solid rgba(0, 229, 255, 0.3);
+  border-radius: 999px;
+  background: rgba(0, 229, 255, 0.06);
+  color: var(--neon-cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 body {
   background: #050509;
   color: #e5e5e5;

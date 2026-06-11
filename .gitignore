@@ -3,4 +3,5 @@ frontend/dist
 backend/.venv
 __pycache__
 *.sqlite
+*.sqlite-*
 *.db

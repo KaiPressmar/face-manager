@@ -8,7 +8,6 @@ import numpy as np
 from ..models.face_model import FaceModel
 from ..models.clustering import FaceClustering
 from ..db.schema import get_conn
-from ..config import DEVICE
 from .storage import load_all_embeddings
 
 face_model = None
@@ -33,7 +32,7 @@ def get_process_state():
 def _ensure_face_model_loaded():
     global face_model
     if face_model is None:
-        face_model = FaceModel(DEVICE)
+        face_model = FaceModel()
     return face_model
 
 

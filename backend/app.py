@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from PIL import ExifTags, Image
 
+from .config import APP_VERSION
 from .db.schema import get_conn, init_db
 from .services.pipeline import get_process_state, process_folder
 from .services.storage import (
@@ -23,7 +24,7 @@ from .services.storage import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
+app = FastAPI(title="Face Manager API", version=APP_VERSION)
 init_db()
 
 app.add_middleware(
@@ -36,6 +37,11 @@ app.add_middleware(
 # -----------------------------
 # PROCESSING
 # -----------------------------
+
+
+@app.get("/api/version")
+def api_version():
+    return {"version": APP_VERSION}
 
 
 @app.post("/api/process-folder")
