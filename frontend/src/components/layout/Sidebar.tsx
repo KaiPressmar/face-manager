@@ -1,4 +1,5 @@
 import React from "react";
+import ImportProgress from "../import/ImportProgress";
 
 const Sidebar: React.FC<{
   page: "people" | "clusters";
@@ -11,6 +12,8 @@ const Sidebar: React.FC<{
         background: "#0b0b10",
         borderRight: "1px solid #1f1f22",
         padding: 16,
+        display: "flex",
+        flexDirection: "column",
       }}
     >
       <div style={{ marginBottom: 16, color: "#9e9e9e", fontSize: 12 }}>
@@ -45,6 +48,10 @@ const Sidebar: React.FC<{
       >
         Cluster verwalten
       </button>
+
+      <div style={{ marginTop: "auto", paddingTop: 16 }}>
+        <ImportProgress />
+      </div>
     </aside>
   );
 };

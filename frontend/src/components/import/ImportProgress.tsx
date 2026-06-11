@@ -1,16 +1,45 @@
 import React, { useEffect, useState } from "react";
 import { fetchProcessStatus } from "../../utils/api";
 
+const IDLE_POLL_INTERVAL_MS = 5000;
+const ACTIVE_POLL_INTERVAL_MS = 1000;
+
 const ImportProgress = () => {
   const [state, setState] = useState<any>(null);
 
   useEffect(() => {
-    const interval = setInterval(async () => {
-      const s = await fetchProcessStatus();
-      setState(s);
-    }, 5000);
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
-    return () => clearInterval(interval);
+    const scheduleNext = (status?: string) => {
+      const pollDelay =
+        status === "running" ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
+      timeoutId = setTimeout(poll, pollDelay);
+    };
+
+    const poll = async () => {
+      try {
+        const s = await fetchProcessStatus();
+        if (cancelled) {
+          return;
+        }
+        setState(s);
+        scheduleNext(s?.status);
+      } catch {
+        if (!cancelled) {
+          scheduleNext();
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, []);
 
   if (!state || state.status === "idle" || state.status === "done") {
@@ -30,15 +59,11 @@ const ImportProgress = () => {
   return (
     <div
       style={{
-        position: "fixed",
-        top: 20,
-        right: 20,
-        width: 300,
+        width: "100%",
         padding: 16,
         background: "#1a1a1f",
         borderRadius: 8,
         boxShadow: "0 0 12px rgba(0,0,0,0.4)",
-        zIndex: 9999,
         color: "white",
       }}
     >
