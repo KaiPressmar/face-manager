@@ -28,6 +28,12 @@
         "uvicorn",
         "backend.app:app",
         "--reload",
+        "--reload-exclude",
+        "**/*.sqlite-journal",
+        "--reload-exclude",
+        "**/*.sqlite",
+        "--reload-exclude",
+        "**/*.db",
         "--host",
         "0.0.0.0",
         "--port",
@@ -70,10 +76,7 @@
     {
       "label": "Full Stack: Dev servers",
       "dependsOrder": "parallel",
-      "dependsOn": [
-        "Backend: Dev server",
-        "Frontend: Dev server"
-      ],
+      "dependsOn": ["Backend: Dev server", "Frontend: Dev server"],
       "problemMatcher": []
     },
     {
