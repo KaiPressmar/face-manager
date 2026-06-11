@@ -75,6 +75,10 @@ an annotated `vX.Y.Z` tag and a GitHub Release with generated notes.
 
 Configure branch protection in the GitHub repository settings:
 
+### Repository default
+
+- Set `develop` as the default branch so new pull requests target it.
+
 ### `develop`
 
 - Require a pull request before merging
