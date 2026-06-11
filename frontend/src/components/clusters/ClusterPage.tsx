@@ -13,6 +13,12 @@ const UNKNOWN_PERSON_LABEL = "Unbekannt";
 
 const sortClustersByAssignedPerson = (items: any[]) => {
   return [...items].sort((a, b) => {
+    const aFaceCount = Array.isArray(a.faces) ? a.faces.length : 0;
+    const bFaceCount = Array.isArray(b.faces) ? b.faces.length : 0;
+    if (aFaceCount !== bFaceCount) {
+      return bFaceCount - aFaceCount;
+    }
+
     const aName = (a.person_name || "").trim();
     const bName = (b.person_name || "").trim();
     const aAssigned = aName.length > 0;
