@@ -1,13 +1,13 @@
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
-from PIL import Image
 import numpy as np
+from PIL import Image
 
-from ..models.face_model import FaceModel
-from ..models.clustering import FaceClustering
 from ..db.schema import calculate_file_hash, get_conn
+from ..models.clustering import FaceClustering
+from ..models.face_model import FaceModel
 from .storage import load_all_embeddings
 
 face_model = None
@@ -158,6 +158,9 @@ def process_folder(folder_path: str):
                             os.path.basename(normalized_path),
                         ),
                     )
+
+                # Release DB write locks before heavy CPU work (face detection/embedding).
+                conn.commit()
 
                 img = Image.open(img_path).convert("RGB")
                 img_np = np.array(img)
