@@ -52,8 +52,9 @@ Recommended development environment:
 
 On Ubuntu 22.04 or newer, the setup script installs the system packages,
 Node.js 20 when necessary, the Python environment, backend dependencies, and
-frontend dependencies. It finishes by compiling the backend and building the
-frontend:
+frontend dependencies. It also installs the current official GitHub CLI
+release into `~/.local/bin` and verifies its SHA-256 checksum. The setup
+finishes by compiling the backend and building the frontend:
 
 ```bash
 ./scripts/setup-dev.sh
@@ -96,6 +97,7 @@ The script is safe to rerun. Before making changes it checks:
 
 - Which Ubuntu packages are missing
 - Whether the installed Node.js version is supported
+- Whether GitHub CLI is installed
 - Whether the Python virtual environment already exists
 - Whether installed Python packages satisfy `requirements.txt`
 - Whether the selected ONNX Runtime provider is already usable
@@ -106,6 +108,12 @@ force-reinstall packages, remove an existing GPU runtime during an automatic
 or CPU run, replace a valid virtual environment, or recreate a matching
 `node_modules` directory. Existing source images and the SQLite database are
 never modified.
+
+If GitHub CLI is not authenticated yet, the setup prints the login command:
+
+```bash
+gh auth login --hostname github.com --git-protocol ssh --web
+```
 
 NVIDIA acceleration is optional. CPU processing works without CUDA, but large
 photo libraries will process considerably more slowly.
@@ -202,6 +210,8 @@ Useful commands from **Terminal > Run Task**:
 - **Setup: Development environment**
 - **Full Stack: Dev servers**
 - **Check: All**
+- **GitHub: Authenticate CLI**
+- **GitHub: Configure repository**
 - **Release: Bump patch/minor/major**
 
 Press `F5` and choose **Full Stack: Debug** to start FastAPI under the Python

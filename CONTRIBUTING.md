@@ -79,6 +79,12 @@ Configure branch protection in the GitHub repository settings:
 
 - Set `develop` as the default branch so new pull requests target it.
 
+After authenticating GitHub CLI, this repository setting can be applied with:
+
+```bash
+./scripts/configure-github-repo.sh
+```
+
 ### `develop`
 
 - Require a pull request before merging

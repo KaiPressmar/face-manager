@@ -107,6 +107,24 @@
       "problemMatcher": "$tsc"
     },
     {
+      "label": "GitHub: Authenticate CLI",
+      "type": "shell",
+      "command": "export PATH=\"$HOME/.local/bin:$PATH\"; gh auth login --hostname github.com --git-protocol ssh --web --skip-ssh-key",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "GitHub: Configure repository",
+      "type": "shell",
+      "command": "./scripts/configure-github-repo.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
       "label": "Release: Bump patch",
       "type": "shell",
       "command": "./scripts/release-version.sh patch",
