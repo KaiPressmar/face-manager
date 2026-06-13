@@ -1,20 +1,24 @@
 """Reusable face import pipeline components."""
 
+from __future__ import annotations
+
 import os
 import threading
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
 from PIL import Image
 
 from ..db.schema import calculate_file_hash, get_conn
-from ..models.clustering import FaceClustering
 from ..models.face_model import FaceModel, get_compute_mode
 from .storage import load_all_embeddings
+
+if TYPE_CHECKING:
+    from ..models.clustering import FaceClustering
 
 ProgressCallback = Callable[[dict], None]
 
@@ -133,7 +137,7 @@ class ImportResources:
     def __init__(self):
         """Create an unloaded resource container."""
         self._model: Optional[FaceModel] = None
-        self._clusterer: Optional[FaceClustering] = None
+        self._clusterer: Optional["FaceClustering"] = None
         self._clusterer_loaded = False
         self._lock = threading.Lock()
 
@@ -148,7 +152,7 @@ class ImportResources:
                 self._model = FaceModel()
             return self._model
 
-    def get_clusterer(self) -> FaceClustering:
+    def get_clusterer(self) -> "FaceClustering":
         """Return the clustering index, loading stored embeddings once.
 
         Returns:
@@ -156,6 +160,8 @@ class ImportResources:
         """
         with self._lock:
             if self._clusterer is None:
+                from ..models.clustering import FaceClustering
+
                 self._clusterer = FaceClustering()
             if not self._clusterer_loaded:
                 embeddings, cluster_ids = load_all_embeddings()
