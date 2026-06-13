@@ -131,9 +131,10 @@ jobs:
         run: ./packaging/windows/build-release.ps1 -Variant ${{ matrix.variant }}
 
       - name: Upload installer to GitHub Release
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release upload "v${VERSION}"
-          "dist/FaceManager-Setup${INSTALLER_SUFFIX}-${VERSION}.exe"
-          --clobber
+        run: |
+          gh release upload "v$env:VERSION" `
+            "dist/FaceManager-Setup$env:INSTALLER_SUFFIX-$env:VERSION.exe" `
+            --clobber
