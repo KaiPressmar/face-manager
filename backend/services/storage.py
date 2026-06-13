@@ -6,6 +6,8 @@ import numpy as np
 
 from ..db.schema import get_conn
 
+DEFAULT_CLUSTER_DISTANCE_THRESHOLD = 0.5
+
 
 def _safe_float(v):
     """Convert SQLite numeric representations to a float.
@@ -26,6 +28,39 @@ def _safe_float(v):
 
         return struct.unpack("<d", v)[0]
     raise TypeError(f"Unexpected bbox type: {type(v)}")
+
+
+def get_cluster_distance_threshold() -> float:
+    """Return the persisted clustering distance threshold."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        ("cluster_distance_threshold",),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return DEFAULT_CLUSTER_DISTANCE_THRESHOLD
+    try:
+        return float(row["value"])
+    except (TypeError, ValueError):
+        return DEFAULT_CLUSTER_DISTANCE_THRESHOLD
+
+
+def set_cluster_distance_threshold(value: float) -> float:
+    """Persist the clustering distance threshold."""
+    threshold = float(value)
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ("cluster_distance_threshold", str(threshold)),
+    )
+    conn.commit()
+    conn.close()
+    return threshold
 
 
 def _face_row_to_dict(r):

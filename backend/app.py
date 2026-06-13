@@ -1,9 +1,13 @@
 import logging
 import os
+import shutil
+import sqlite3
 import subprocess
+import tempfile
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from io import BytesIO
+from pathlib import Path
 from typing import List
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -12,7 +16,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import ExifTags, Image
 
-from .config import APP_VERSION, get_frontend_dist_dir
+from .config import APP_VERSION, DB_PATH, get_frontend_dist_dir
 from .db.schema import get_conn, init_db
 from .models.face_model import get_compute_mode, get_execution_provider
 from .services.desktop import (
@@ -25,15 +29,18 @@ from .services.desktop import (
 )
 from .services.import_queue import ImportQueue
 from .services.storage import (
+    DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
     _safe_float,
     assign_cluster_to_person,
     build_folder_tree,
     delete_image,
     get_available_image_path,
+    get_cluster_distance_threshold,
     list_image_locations,
     get_person_faces,
     list_images,
     list_persons,
+    set_cluster_distance_threshold,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -169,6 +176,61 @@ def serialize_import_snapshot(snapshot, display_platform: str):
     return snapshot
 
 
+def ensure_database_is_idle() -> None:
+    """Reject database mutation while imports are queued or running."""
+    snapshot = import_queue.snapshot()
+    if snapshot["running_count"] or snapshot["queued_count"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Database import/export is unavailable while imports are queued or running.",
+        )
+
+
+def reset_import_resources() -> None:
+    """Refresh cached import resources that depend on database contents."""
+    processor = getattr(import_queue, "_processor", None)
+    resources = getattr(processor, "resources", None)
+    if resources is not None and hasattr(resources, "reset_clusterer"):
+        resources.reset_clusterer()
+
+
+def validate_cluster_distance_threshold(value: float) -> float:
+    """Validate and normalize a clustering threshold supplied by the client."""
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Threshold must be a number.") from exc
+    if not 0 <= threshold <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Threshold must be between 0.0 and 1.0.",
+        )
+    return threshold
+
+
+def validate_database_file(path: Path) -> None:
+    """Verify that a file is a readable SQLite database with core tables."""
+    conn = None
+    try:
+        conn = sqlite3.connect(path)
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid SQLite database.") from exc
+    finally:
+        if conn is not None:
+            conn.close()
+
+    table_names = {row[0] for row in rows}
+    required = {"image", "face", "cluster", "person"}
+    if not required.issubset(table_names):
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded database is missing required Face Manager tables.",
+        )
+
+
 @app.post("/api/system/select-folder")
 def api_select_folder(request: Request):
     """Open a native folder picker on the backend host."""
@@ -189,6 +251,94 @@ def api_select_folder(request: Request):
             else normalize_import_folder_path(folder_path)
         )
     }
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    """Return persisted application settings used by the frontend."""
+    return {
+        "cluster_distance_threshold": get_cluster_distance_threshold(),
+        "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+        "database_path": DB_PATH,
+    }
+
+
+@app.put("/api/settings")
+def api_update_settings(data: dict = Body(...)):
+    """Persist mutable application settings."""
+    if "cluster_distance_threshold" not in data:
+        raise HTTPException(status_code=400, detail="Missing cluster_distance_threshold")
+    threshold = validate_cluster_distance_threshold(data["cluster_distance_threshold"])
+    return {
+        "cluster_distance_threshold": set_cluster_distance_threshold(threshold),
+        "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+        "database_path": DB_PATH,
+    }
+
+
+@app.get("/api/database/export")
+def api_export_database():
+    """Export a consistent SQLite snapshot of the current database."""
+    ensure_database_is_idle()
+    fd, temp_path = tempfile.mkstemp(suffix=".sqlite", prefix="face-manager-export-")
+    os.close(fd)
+
+    source = get_conn()
+    target = sqlite3.connect(temp_path)
+    try:
+        source.backup(target)
+        target.commit()
+    finally:
+        target.close()
+        source.close()
+
+    with open(temp_path, "rb") as exported:
+        payload = exported.read()
+    os.unlink(temp_path)
+
+    return Response(
+        payload,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'attachment; filename="face-manager-database.sqlite"'
+        },
+    )
+
+
+@app.post("/api/database/import")
+def api_import_database(payload: bytes = Body(..., media_type="application/octet-stream")):
+    """Replace the current database with an uploaded SQLite file."""
+    ensure_database_is_idle()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Missing database payload.")
+
+    current_db_path = Path(DB_PATH)
+    current_db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, temp_path_str = tempfile.mkstemp(
+        suffix=".sqlite",
+        prefix="face-manager-import-",
+        dir=current_db_path.parent,
+    )
+    os.close(fd)
+    temp_path = Path(temp_path_str)
+    temp_path.write_bytes(payload)
+
+    try:
+        validate_database_file(temp_path)
+        shutil.move(str(temp_path), DB_PATH)
+        wal_path = current_db_path.with_name(f"{current_db_path.name}-wal")
+        shm_path = current_db_path.with_name(f"{current_db_path.name}-shm")
+        for sidecar_path in (wal_path, shm_path):
+            if sidecar_path.exists():
+                sidecar_path.unlink()
+        init_db()
+        reset_import_resources()
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return {"status": "imported"}
 
 
 @app.post("/api/process-folder")

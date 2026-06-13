@@ -66,6 +66,12 @@ export interface RuntimeInfo {
   display_platform?: "windows" | "linux";
 }
 
+export interface AppSettings {
+  cluster_distance_threshold: number;
+  cluster_distance_threshold_default: number;
+  database_path: string;
+}
+
 export type ImportJobStatus =
   | "queued"
   | "running"
@@ -134,6 +140,49 @@ export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
     throw new Error("Runtime information is unavailable.");
   }
   return await res.json();
+}
+
+export async function fetchSettings(): Promise<AppSettings> {
+  const res = await apiFetch(`${API_BASE}/settings`);
+  if (!res.ok) {
+    throw new Error("Settings are unavailable.");
+  }
+  return await res.json();
+}
+
+export async function updateSettings(
+  clusterDistanceThreshold: number,
+): Promise<AppSettings> {
+  const res = await apiFetch(`${API_BASE}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      cluster_distance_threshold: clusterDistanceThreshold,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error("The settings could not be saved.");
+  }
+  return await res.json();
+}
+
+export async function exportDatabase(): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/database/export`);
+  if (!res.ok) {
+    throw new Error("The database could not be exported.");
+  }
+  return await res.blob();
+}
+
+export async function importDatabase(file: File): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/database/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: await file.arrayBuffer(),
+  });
+  if (!res.ok) {
+    throw new Error("The database could not be imported.");
+  }
 }
 
 export async function fetchImages(folders: string[] = []) {

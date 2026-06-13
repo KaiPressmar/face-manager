@@ -3,8 +3,8 @@ import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 
 const Layout: React.FC<{
-  page: "people" | "clusters";
-  onChangePage: (p: "people" | "clusters") => void;
+  page: "people" | "clusters" | "settings";
+  onChangePage: (p: "people" | "clusters" | "settings") => void;
   children: React.ReactNode;
 }> = ({ page, onChangePage, children }) => {
   return (
