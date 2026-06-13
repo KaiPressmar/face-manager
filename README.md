@@ -33,6 +33,9 @@ backend/
 frontend/
   src/                   React application
   package.json           Frontend scripts and dependencies
+packaging/windows/
+  build-release.ps1      Windows desktop bundle builder
+  FaceManager.iss        Inno Setup installer definition
 scripts/
   setup-dev.sh           Ubuntu development environment installer
   release-version.sh     Semantic release version helper
@@ -293,8 +296,13 @@ the backend on port `8000` during development.
 
 1. Open the People view.
 2. Select **Ordner hinzufügen**.
-3. Enter a Windows path such as `D:\Bilder\Sortiert` when running under WSL2.
+3. Choose a folder through the native filesystem dialog, or paste a path such as
+   `D:\Bilder\Sortiert` or `/home/kai/photos`.
 4. Start the import and follow the progress indicator.
+
+When the backend runs under WSL2, Windows-style paths entered in the UI are
+translated automatically for backend access, while the UI continues to display
+Windows-form paths so file locations stay familiar.
 
 The importer scans subfolders recursively and currently supports:
 
@@ -347,6 +355,52 @@ The production frontend can be previewed after building:
 ```bash
 cd frontend
 npm run preview
+```
+
+## Windows Desktop Release
+
+Each successful release on `main` now produces Windows installer bundles and
+uploads them to the matching GitHub Release as:
+
+```text
+FaceManager-Setup-X.Y.Z.exe
+FaceManager-Setup-GPU-X.Y.Z.exe
+```
+
+The installed app opens in its own native desktop window, starts the bundled
+backend automatically, and stores its SQLite database under the current user's
+local app-data directory on Windows:
+
+```text
+%LOCALAPPDATA%\FaceManager\database.sqlite
+```
+
+The first image import still downloads the InsightFace model if it is not
+cached yet, so the first run that processes faces requires internet access.
+
+The GPU installer is intended for Windows systems with a supported NVIDIA GPU.
+It bundles `onnxruntime-gpu` plus the CUDA 12 and cuDNN 9 Python runtime
+packages used by ONNX Runtime. Systems still need a compatible NVIDIA driver.
+When CUDA is unavailable at runtime, the app falls back to CPU execution.
+
+### Build the Windows Installer Manually
+
+On a Windows machine with Python 3.10+, Node.js 20+, and Inno Setup 6:
+
+```powershell
+py -m pip install -r backend/requirements.txt -r backend/requirements-desktop.txt "onnxruntime>=1.21,<2"
+./packaging/windows/build-release.ps1
+
+# GPU-capable installer variant
+./packaging/windows/build-release.ps1 -Variant gpu
+```
+
+That script rebuilds the frontend, creates the bundled desktop app with
+PyInstaller, and writes the installer into:
+
+```text
+dist/FaceManager-Setup-X.Y.Z.exe
+dist/FaceManager-Setup-GPU-X.Y.Z.exe
 ```
 
 ## Git Workflow
@@ -403,7 +457,8 @@ git push origin develop
 ```
 
 After that PR merges and CI succeeds on `main`, GitHub Actions creates the
-annotated `v1.2.0` tag and publishes a GitHub Release with generated notes.
+annotated `v1.2.0` tag, publishes a GitHub Release with generated notes, and
+attaches both Windows installer variants for that version.
 
 ## Troubleshooting
 

@@ -1,5 +1,7 @@
 frontend/node_modules
 frontend/dist
+build
+dist
 backend/.venv
 __pycache__
 *.sqlite

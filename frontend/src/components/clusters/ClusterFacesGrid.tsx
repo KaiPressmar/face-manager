@@ -1,5 +1,7 @@
 import React from "react";
 
+import { faceCropUrl } from "../../utils/api";
+
 interface ClusterFacesGridProps {
   faces: any[];
   onRemoveFace: (id: number) => void;
@@ -9,7 +11,7 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({ faces, onRemoveFace
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, 120px)", gap: 16 }}>
       {faces.map((f) => {
-        const cropUrl = `http://localhost:8000/api/faces/${f.id}/crop`;
+        const cropUrl = faceCropUrl(f.id);
 
         return (
           <div

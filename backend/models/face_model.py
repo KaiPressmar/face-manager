@@ -3,6 +3,12 @@ import onnxruntime as ort
 from insightface.app import FaceAnalysis
 
 
+def preload_gpu_runtime_dlls():
+    """Preload CUDA/cuDNN DLLs when ONNX Runtime exposes the helper."""
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls(directory="")
+
+
 def get_execution_provider(available_providers=None):
     """Choose the preferred ONNX Runtime execution provider.
 
@@ -13,6 +19,7 @@ def get_execution_provider(available_providers=None):
         CUDA when available, otherwise the CPU provider.
     """
     if available_providers is None:
+        preload_gpu_runtime_dlls()
         available_providers = ort.get_available_providers()
     if "CUDAExecutionProvider" in available_providers:
         return "CUDAExecutionProvider"
@@ -38,14 +45,10 @@ class FaceModel:
 
     def __init__(self):
         """Load only the detection and recognition InsightFace modules."""
+        preload_gpu_runtime_dlls()
         available_providers = ort.get_available_providers()
         execution_provider = get_execution_provider(available_providers)
         self.compute_mode = get_compute_mode(execution_provider)
-        if (
-            execution_provider == "CUDAExecutionProvider"
-            and hasattr(ort, "preload_dlls")
-        ):
-            ort.preload_dlls(directory="")
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
             if execution_provider == "CUDAExecutionProvider"

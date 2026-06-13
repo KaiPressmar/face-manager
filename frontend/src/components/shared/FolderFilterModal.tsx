@@ -4,6 +4,7 @@ import {
   FolderNode,
   FolderTree,
 } from "../../utils/api";
+import { pathBasename } from "../../utils/pathDisplay";
 
 interface FolderFilterModalProps {
   selected: string[];
@@ -207,7 +208,7 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
           <div className="selected-folder-strip">
             {Array.from(draft).map((path) => (
               <button key={path} title={path} onClick={() => toggleFolder(path)}>
-                <span>{path.split("/").filter(Boolean).pop() || path}</span>
+                <span>{pathBasename(path)}</span>
                 <b>×</b>
               </button>
             ))}

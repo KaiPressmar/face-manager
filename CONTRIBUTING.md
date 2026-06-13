@@ -69,7 +69,9 @@ git push origin develop
 ```
 
 After the release PR merges, the **Publish Release** GitHub workflow creates
-an annotated `vX.Y.Z` tag and a GitHub Release with generated notes.
+an annotated `vX.Y.Z` tag, publishes a GitHub Release with generated notes,
+and uploads both Windows installer bundles for that version, including the
+GPU-capable NVIDIA build.
 
 ## Recommended GitHub Protection
 

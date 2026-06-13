@@ -5,6 +5,7 @@ import React, {
   useState,
 } from "react";
 import { imageFileUrl, openImageLocation } from "../../utils/api";
+import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
 
 interface GalleryFace {
@@ -198,7 +199,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 
       <header className="gallery-header">
         <div className="gallery-title">
-          <strong>{image.filename || image.image_path.split("/").pop()}</strong>
+          <strong>{image.filename || pathBasename(image.image_path)}</strong>
           <span>
             {activeIndex + 1} / {images.length}
             {image.location_count > 1 && ` · ${image.location_count} Speicherorte`}
