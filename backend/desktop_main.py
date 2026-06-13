@@ -5,7 +5,7 @@ import time
 import uvicorn
 import webview
 
-from .config import APP_VERSION
+from backend.config import APP_VERSION
 
 
 def _reserve_local_port() -> int:
