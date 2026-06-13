@@ -23,6 +23,13 @@ def optional_collect(package_name):
     except Exception:
         return ([], [], [])
 
+
+def optional_copy_metadata(distribution_name):
+    try:
+        return copy_metadata(distribution_name)
+    except Exception:
+        return []
+
 datas = [
     (str(project_root / "VERSION"), "."),
     (str(frontend_dist), "frontend/dist"),
@@ -30,8 +37,9 @@ datas = [
 datas += collect_data_files("insightface")
 datas += collect_data_files("cv2")
 datas += copy_metadata("insightface")
-datas += copy_metadata("onnxruntime")
 datas += copy_metadata("pywebview")
+datas += optional_copy_metadata("onnxruntime")
+datas += optional_copy_metadata("onnxruntime-gpu")
 
 binaries = []
 binaries += collect_dynamic_libs("onnxruntime")
@@ -47,7 +55,12 @@ hiddenimports += [
     "uvicorn.lifespan.on",
 ]
 
-for package_name in ("nvidia_cuda_runtime_cu12", "nvidia_cudnn_cu12"):
+for package_name in (
+    "nvidia.cuda_runtime",
+    "nvidia.cudnn",
+    "nvidia.cublas",
+    "nvidia.cuda_nvrtc",
+):
     package_datas, package_binaries, package_metadata = optional_collect(package_name)
     datas += package_datas
     datas += package_metadata
