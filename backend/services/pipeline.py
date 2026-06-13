@@ -133,7 +133,7 @@ class ImportResources:
     def __init__(self):
         """Create an unloaded resource container."""
         self._model: Optional[FaceModel] = None
-        self._clusterer = FaceClustering()
+        self._clusterer: Optional[FaceClustering] = None
         self._clusterer_loaded = False
         self._lock = threading.Lock()
 
@@ -155,6 +155,8 @@ class ImportResources:
             Initialized incremental face clustering index.
         """
         with self._lock:
+            if self._clusterer is None:
+                self._clusterer = FaceClustering()
             if not self._clusterer_loaded:
                 embeddings, cluster_ids = load_all_embeddings()
                 if embeddings.size > 0:
