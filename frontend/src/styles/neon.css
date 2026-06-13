@@ -17,6 +17,42 @@
   letter-spacing: 0.04em;
 }
 
+.compute-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #3a3a42;
+  border-radius: 999px;
+  background: rgba(158, 158, 158, 0.06);
+  color: var(--neon-grey);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.compute-mode-badge__indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 7px currentColor;
+}
+
+.compute-mode-badge--gpu {
+  border-color: rgba(0, 229, 255, 0.35);
+  background: rgba(0, 229, 255, 0.07);
+  color: var(--neon-cyan);
+}
+
+.compute-mode-badge--cpu {
+  border-color: rgba(179, 136, 255, 0.35);
+  background: rgba(179, 136, 255, 0.07);
+  color: var(--neon-violet);
+}
+
 body {
   background: #050509;
   color: #e5e5e5;

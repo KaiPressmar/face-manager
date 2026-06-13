@@ -364,6 +364,36 @@ for package, specifier in requirements.items():
         raise SystemExit(1)
     if specifier and installed not in specifier:
         raise SystemExit(1)
+
+try:
+    metadata.version("onnxruntime")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit(1)
+PY
+}
+
+python_cpu_runtime_is_satisfied() {
+  local python="$1"
+  "${python}" <<'PY'
+from importlib import metadata
+
+from packaging.specifiers import SpecifierSet
+
+try:
+    installed = metadata.version("onnxruntime")
+except metadata.PackageNotFoundError:
+    raise SystemExit(1)
+if installed not in SpecifierSet(">=1.18,<2"):
+    raise SystemExit(1)
+
+try:
+    metadata.version("onnxruntime-gpu")
+except metadata.PackageNotFoundError:
+    pass
+else:
+    raise SystemExit(1)
 PY
 }
 
@@ -428,6 +458,8 @@ setup_backend() {
     run "${python}" -m pip install -r "${PROJECT_ROOT}/backend/requirements.txt"
     if [[ "${ACCELERATOR}" == "gpu" ]]; then
       run "${python}" -m pip install 'onnxruntime-gpu[cuda,cudnn]>=1.21,<2'
+    else
+      run "${python}" -m pip install 'onnxruntime>=1.18,<2'
     fi
     return
   fi
@@ -448,14 +480,17 @@ setup_backend() {
       python_gpu_runtime_is_satisfied "${python}"; then
       log "CUDAExecutionProvider and its runtime libraries are already available."
     else
-      log "Adding CUDA-enabled ONNX Runtime and missing CUDA/cuDNN libraries."
+      log "Installing an exclusive CUDA-enabled ONNX Runtime."
+      run "${python}" -m pip uninstall -y onnxruntime onnxruntime-gpu
       run "${python}" -m pip install 'onnxruntime-gpu[cuda,cudnn]>=1.21,<2'
     fi
   else
-    if python_has_provider "${python}" "CPUExecutionProvider"; then
-      log "CPUExecutionProvider is already available; preserving the current runtime."
+    if python_has_provider "${python}" "CPUExecutionProvider" &&
+      python_cpu_runtime_is_satisfied "${python}"; then
+      log "CPU-only ONNX Runtime is already available."
     else
-      log "Installing the CPU ONNX Runtime."
+      log "Installing an exclusive CPU-only ONNX Runtime."
+      run "${python}" -m pip uninstall -y onnxruntime onnxruntime-gpu
       run "${python}" -m pip install 'onnxruntime>=1.18,<2'
     fi
   fi
@@ -476,7 +511,7 @@ verify_setup() {
 
   local python="${BACKEND_VENV}/bin/python"
   log "Verifying Python dependencies."
-  "${python}" -m pip check
+  "${python}" "${PROJECT_ROOT}/scripts/check-python-dependencies.py"
 
   local providers
   providers="$(

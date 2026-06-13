@@ -19,7 +19,7 @@ else
   PYTHON="${RESOLVED_PYTHON}"
 fi
 
-"${PYTHON}" -m pip check
+"${PYTHON}" "${PROJECT_ROOT}/scripts/check-python-dependencies.py"
 "${PYTHON}" -m py_compile \
   "${PROJECT_ROOT}/backend/app.py" \
   "${PROJECT_ROOT}/backend/config.py" \

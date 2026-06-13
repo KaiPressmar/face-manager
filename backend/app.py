@@ -12,6 +12,7 @@ from PIL import ExifTags, Image
 
 from .config import APP_VERSION
 from .db.schema import get_conn, init_db
+from .models.face_model import get_compute_mode, get_execution_provider
 from .services.pipeline import get_process_state, process_folder
 from .services.desktop import open_file_location
 from .services.storage import (
@@ -46,6 +47,15 @@ app.add_middleware(
 @app.get("/api/version")
 def api_version():
     return {"version": APP_VERSION}
+
+
+@app.get("/api/runtime")
+def api_runtime():
+    execution_provider = get_execution_provider()
+    return {
+        "compute_mode": get_compute_mode(execution_provider),
+        "execution_provider": execution_provider,
+    }
 
 
 @app.post("/api/process-folder")

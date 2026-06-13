@@ -138,10 +138,11 @@ python3 -m venv backend/.venv
 source backend/.venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r backend/requirements.txt
+python -m pip install 'onnxruntime>=1.18,<2'
 ```
 
-The default requirements install CPU ONNX Runtime. The first image import
-downloads the InsightFace `buffalo_l` model into:
+The command above installs CPU ONNX Runtime. The first image import downloads
+the InsightFace `buffalo_l` model into:
 
 ```text
 ~/.insightface/models/buffalo_l
@@ -158,14 +159,13 @@ First verify that the NVIDIA driver is visible inside Linux or WSL:
 nvidia-smi
 ```
 
-After installing the normal backend requirements, install GPU ONNX Runtime
-and its CUDA/cuDNN dependencies last:
+After installing the normal backend requirements, remove any existing ONNX
+Runtime wheel and install only the GPU wheel with its CUDA/cuDNN dependencies:
 
 ```bash
 source backend/.venv/bin/activate
+python -m pip uninstall -y onnxruntime onnxruntime-gpu
 python -m pip install \
-  --upgrade \
-  --force-reinstall \
   'onnxruntime-gpu[cuda,cudnn]>=1.21,<2'
 ```
 
@@ -178,7 +178,10 @@ python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 The output must contain `CUDAExecutionProvider`. Face Manager chooses CUDA
 automatically when that provider is available and otherwise uses the CPU.
 The NVIDIA driver must support CUDA 12. The runtime CUDA and cuDNN libraries
-are installed inside the Python environment.
+are installed inside the Python environment. InsightFace declares the CPU
+package name as a dependency, so plain `pip check` may report that
+`onnxruntime` is missing in a correct GPU-only environment; the project check
+script verifies the GPU substitute and CUDA provider instead.
 
 ### Frontend
 
@@ -388,8 +391,9 @@ source backend/.venv/bin/activate
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
-If `CUDAExecutionProvider` is absent, verify `nvidia-smi`, the installed
-`onnxruntime-gpu` package, and CUDA/cuDNN compatibility.
+If `CUDAExecutionProvider` is absent, verify `nvidia-smi` and CUDA/cuDNN
+compatibility. Also run `python -m pip show onnxruntime onnxruntime-gpu`;
+only `onnxruntime-gpu` should be installed for GPU mode.
 
 ### The frontend cannot reach the API
 

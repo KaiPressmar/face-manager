@@ -18,6 +18,19 @@ export interface FolderTree {
   folder_count: number;
 }
 
+export interface RuntimeInfo {
+  compute_mode: "gpu" | "cpu";
+  execution_provider: string;
+}
+
+export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
+  const res = await fetch(`${API_BASE}/runtime`);
+  if (!res.ok) {
+    throw new Error("Runtime information is unavailable.");
+  }
+  return await res.json();
+}
+
 export async function fetchImages(folders: string[] = []) {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));

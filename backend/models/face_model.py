@@ -3,20 +3,35 @@ import onnxruntime as ort
 from insightface.app import FaceAnalysis
 
 
+def get_execution_provider(available_providers=None):
+    if available_providers is None:
+        available_providers = ort.get_available_providers()
+    if "CUDAExecutionProvider" in available_providers:
+        return "CUDAExecutionProvider"
+    return "CPUExecutionProvider"
+
+
+def get_compute_mode(execution_provider=None):
+    if execution_provider is None:
+        execution_provider = get_execution_provider()
+    return "gpu" if execution_provider == "CUDAExecutionProvider" else "cpu"
+
+
 class FaceModel:
     def __init__(self):
         available_providers = ort.get_available_providers()
+        execution_provider = get_execution_provider(available_providers)
         if (
-            "CUDAExecutionProvider" in available_providers
+            execution_provider == "CUDAExecutionProvider"
             and hasattr(ort, "preload_dlls")
         ):
             ort.preload_dlls(directory="")
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in available_providers
+            if execution_provider == "CUDAExecutionProvider"
             else ["CPUExecutionProvider"]
         )
-        ctx_id = 0 if providers[0] == "CUDAExecutionProvider" else -1
+        ctx_id = 0 if execution_provider == "CUDAExecutionProvider" else -1
         self.app = FaceAnalysis(name="buffalo_l", providers=providers)
         self.app.prepare(ctx_id=ctx_id, det_size=(1024, 1024))
 
