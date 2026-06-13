@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -720,6 +721,23 @@ def correct_bbox_for_orientation(path, x, y, w, h):
     return x, y, w, h
 
 
+def get_image_created_at(path: str) -> str | None:
+    """Return the best available filesystem creation timestamp for one image."""
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+
+    created_timestamp = getattr(stat_result, "st_birthtime", None)
+    if created_timestamp is None:
+        created_timestamp = stat_result.st_mtime
+
+    try:
+        return datetime.fromtimestamp(created_timestamp, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 @app.get("/api/folders")
 def get_folders(request: Request):
     """Return the imported folder hierarchy.
@@ -767,6 +785,7 @@ def get_images(request: Request, folders: List[str] = Query(default=[])):
                     else r["directory"]
                 ),
                 "filename": r["filename"],
+                "created_at": get_image_created_at(path),
                 "content_hash": r["content_hash"],
                 "location_count": r["location_count"],
                 "faces": [],

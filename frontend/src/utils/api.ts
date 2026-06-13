@@ -72,6 +72,30 @@ export interface AppSettings {
   database_path: string;
 }
 
+export interface FaceImage {
+  id: number;
+  image_path: string;
+  filename?: string;
+  directory?: string;
+  created_at: string | null;
+  content_hash: string | null;
+  location_count: number;
+  locations: {
+    path: string;
+    filename: string;
+    directory: string;
+  }[];
+  faces: {
+    id: number;
+    bbox_x: number;
+    bbox_y: number;
+    bbox_w: number;
+    bbox_h: number;
+    cluster_id: number | null;
+    person_name: string | null;
+  }[];
+}
+
 export type ImportJobStatus =
   | "queued"
   | "running"
@@ -185,7 +209,7 @@ export async function importDatabase(file: File): Promise<void> {
   }
 }
 
-export async function fetchImages(folders: string[] = []) {
+export async function fetchImages(folders: string[] = []): Promise<FaceImage[]> {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));
   const query = params.toString();

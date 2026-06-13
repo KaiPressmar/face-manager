@@ -1,76 +1,175 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import FullscreenImageGallery from "./FullscreenImageGallery";
-import { deleteImage, imageFileUrl } from "../../utils/api";
+import { deleteImage, FaceImage, imageFileUrl } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 
-interface Face {
-  id: number;
-  bbox_x: number;
-  bbox_y: number;
-  bbox_w: number;
-  bbox_h: number;
-  cluster_id: number | null;
-  person_name: string | null;
-}
-
-interface ImageLocation {
-  path: string;
-  filename: string;
-  directory: string;
-}
-
-interface ImageData {
-  id: number;
-  image_path: string;
-  filename?: string;
-  directory?: string;
-  content_hash: string | null;
-  location_count: number;
-  locations: ImageLocation[];
-  faces: Face[];
-}
+type ImageGroupingMode = "date" | "folder";
+type SortDirection = "desc" | "asc";
 
 interface ImageGridProps {
-  images: ImageData[];
+  images: FaceImage[];
   selectedPersons: string[];
-  isLoading: boolean; // Neues Interface-Property
+  groupingMode: ImageGroupingMode;
+  sortDirection: SortDirection;
+  isLoading: boolean;
   onImageDeleted: (imageId: number) => void;
+}
+
+interface ImageGroup {
+  key: string;
+  label: string;
+  images: FaceImage[];
+}
+
+const breakpointCols = {
+  default: 4,
+  1400: 3,
+  900: 2,
+  600: 1,
+};
+
+function compareValues(
+  left: string | number,
+  right: string | number,
+  direction: SortDirection,
+) {
+  const result =
+    typeof left === "number" && typeof right === "number"
+      ? left - right
+      : String(left).localeCompare(String(right), undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+  return direction === "asc" ? result : -result;
+}
+
+function imageTimestamp(image: FaceImage) {
+  return image.created_at ? new Date(image.created_at).getTime() : 0;
+}
+
+function formatDateLabel(createdAt: string | null) {
+  if (!createdAt) return "Unknown date";
+  const date = new Date(createdAt);
+  if (Number.isNaN(date.getTime())) return "Unknown date";
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(date);
+}
+
+function sortImages(
+  images: FaceImage[],
+  groupingMode: ImageGroupingMode,
+  sortDirection: SortDirection,
+) {
+  return [...images].sort((left, right) => {
+    if (groupingMode === "date") {
+      const byTimestamp = compareValues(
+        imageTimestamp(left),
+        imageTimestamp(right),
+        sortDirection,
+      );
+      if (byTimestamp !== 0) return byTimestamp;
+    } else {
+      const byDirectory = compareValues(
+        left.directory || "",
+        right.directory || "",
+        sortDirection,
+      );
+      if (byDirectory !== 0) return byDirectory;
+    }
+
+    return compareValues(
+      left.filename || left.image_path,
+      right.filename || right.image_path,
+      "asc",
+    );
+  });
+}
+
+function groupImages(
+  images: FaceImage[],
+  groupingMode: ImageGroupingMode,
+  sortDirection: SortDirection,
+) {
+  const grouped = new Map<string, ImageGroup>();
+  const sortedImages = sortImages(images, groupingMode, sortDirection);
+
+  sortedImages.forEach((image) => {
+    const groupKey =
+      groupingMode === "date"
+        ? image.created_at?.slice(0, 10) || "unknown-date"
+        : image.directory || "unknown-folder";
+    const groupLabel =
+      groupingMode === "date"
+        ? formatDateLabel(image.created_at)
+        : image.directory || "Unknown folder";
+
+    const existing = grouped.get(groupKey);
+    if (existing) {
+      existing.images.push(image);
+      return;
+    }
+
+    grouped.set(groupKey, {
+      key: groupKey,
+      label: groupLabel,
+      images: [image],
+    });
+  });
+
+  const groups = Array.from(grouped.values());
+  groups.sort((left, right) =>
+    compareValues(left.key, right.key, sortDirection),
+  );
+  return groups;
 }
 
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
   selectedPersons,
+  groupingMode,
+  sortDirection,
   isLoading,
   onImageDeleted,
 }) => {
-  // 1. Bilder filtern
   const filtered = useMemo(() => {
     if (!Array.isArray(images)) return [];
     const uniqueImages = Array.from(
       new Map(
-        images.map((image) => [image.content_hash || `id:${image.id}`, image])
-      ).values()
+        images.map((image) => [image.content_hash || `id:${image.id}`, image]),
+      ).values(),
     );
     if (selectedPersons.length === 0) return uniqueImages;
 
     return uniqueImages.filter((img) => {
       const personsInImage = img.faces.map((f) => f.person_name || "Unbekannt");
-      return selectedPersons.every((p) => personsInImage.includes(p));
+      return selectedPersons.every((person) => personsInImage.includes(person));
     });
   }, [images, selectedPersons]);
 
-  // 2. Pagination
   const [visibleCount, setVisibleCount] = useState(40);
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
-  const visibleImages = filtered.slice(0, visibleCount);
+  const orderedFilteredImages = useMemo(
+    () => sortImages(filtered, groupingMode, sortDirection),
+    [filtered, groupingMode, sortDirection],
+  );
+  const visibleImages = orderedFilteredImages.slice(0, visibleCount);
 
-  const [imageDimensions, setImageDimensions] = useState<Record<string, { w: number; h: number }>>({});
+  const [imageDimensions, setImageDimensions] = useState<
+    Record<string, { w: number; h: number }>
+  >({});
 
-  // 3. Infinite Scroll
+  const groupedVisibleImages = useMemo(
+    () => groupImages(visibleImages, groupingMode, sortDirection),
+    [groupingMode, sortDirection, visibleImages],
+  );
+
   useEffect(() => {
-    if (isLoading) return; // Kein Scroll-Listener während des Ladens nötig
+    if (isLoading) return;
 
     const scrollContainer = document.querySelector(".page-content");
     if (!scrollContainer) return;
@@ -89,7 +188,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     return () => scrollContainer.removeEventListener("scroll", handleScroll);
   }, [filtered.length, isLoading]);
 
-  // Bildabmessungen ermitteln
   useEffect(() => {
     if (isLoading) return;
 
@@ -97,12 +195,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       if (imageDimensions[img.image_path]) return;
 
       const imgSrc = imageFileUrl(img.id);
-      const i = new Image();
-      i.src = imgSrc;
-      i.onload = () => {
+      const image = new Image();
+      image.src = imgSrc;
+      image.onload = () => {
         setImageDimensions((prev) => ({
           ...prev,
-          [img.image_path]: { w: i.naturalWidth, h: i.naturalHeight },
+          [img.image_path]: { w: image.naturalWidth, h: image.naturalHeight },
         }));
       };
     });
@@ -111,19 +209,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   useEffect(() => {
     setVisibleCount(40);
     setGalleryIndex(null);
-  }, [selectedPersons]);
+  }, [selectedPersons, groupingMode, sortDirection]);
 
-  const breakpointCols = {
-    default: 4,
-    1400: 3,
-    900: 2,
-    600: 1,
-  };
-
-  const removeImage = async (image: ImageData) => {
+  const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
     const confirmed = window.confirm(
-      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`
+      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`,
     );
     if (!confirmed) return false;
 
@@ -140,17 +231,15 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       window.alert(
         error instanceof Error
           ? error.message
-          : "Das Bild konnte nicht entfernt werden."
+          : "Das Bild konnte nicht entfernt werden.",
       );
       return false;
     }
   };
 
-  // 🔥 SKELETON RENDERER: Wenn die API noch lädt, zeigen wir sofort animierte Dummys an
   if (isLoading) {
-    // Künstliche Höhen für den Masonry-Effekt (abwechselnd Hoch- und Querformat)
     const dummyHeights = ["350px", "200px", "400px", "250px", "300px", "220px"];
-    
+
     return (
       <Masonry
         breakpointCols={breakpointCols}
@@ -181,112 +270,124 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     );
   }
 
-  // Normaler Renderer für echte Bilder
   return (
     <>
-      <Masonry
-        breakpointCols={breakpointCols}
-        className="masonry-grid"
-        columnClassName="masonry-column"
-      >
-        {visibleImages.map((img) => {
-          const dims = imageDimensions[img.image_path];
-          const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
+      <div className="image-groups">
+        {groupedVisibleImages.map((group) => (
+          <section key={group.key} className="image-group-section">
+            <header className="image-group-section__header">
+              <h3>{group.label}</h3>
+              <span>{group.images.length} Bilder</span>
+            </header>
 
-          return (
-            <div
-              key={img.id}
-              className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
-              role="button"
-              tabIndex={0}
-              aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-              onClick={() =>
-                setGalleryIndex(filtered.findIndex((item) => item.id === img.id))
-              }
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setGalleryIndex(
-                    filtered.findIndex((item) => item.id === img.id)
-                  );
-                }
-              }}
-              style={{
-                position: "relative",
-                width: "100%",
-                overflow: "hidden",
-                borderRadius: 6,
-                background: "#101014",
-                border: "1px solid #222",
-                aspectRatio,
-                marginBottom: "16px",
-                transition: "aspect-ratio 0.2s ease",
-              }}
+            <Masonry
+              breakpointCols={breakpointCols}
+              className="masonry-grid"
+              columnClassName="masonry-column"
             >
-              <img
-                src={imageFileUrl(img.id)}
-                loading="lazy"
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
-                  opacity: dims ? 1 : 0,
-                  transition: "opacity 0.3s ease",
-                }}
-                alt=""
-              />
+              {group.images.map((img) => {
+                const dims = imageDimensions[img.image_path];
+                const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
-              <button
-                type="button"
-                className="image-delete-button"
-                title="Bild aus der Datenbank entfernen"
-                aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void removeImage(img);
-                }}
-                onKeyDown={(event) => event.stopPropagation()}
-              >
-                <span aria-hidden="true">×</span>
-                Entfernen
-              </button>
+                return (
+                  <div
+                    key={img.id}
+                    className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
+                    onClick={() =>
+                      setGalleryIndex(
+                        orderedFilteredImages.findIndex((item) => item.id === img.id),
+                      )
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setGalleryIndex(
+                          orderedFilteredImages.findIndex((item) => item.id === img.id),
+                        );
+                      }
+                    }}
+                    style={{
+                      position: "relative",
+                      width: "100%",
+                      overflow: "hidden",
+                      borderRadius: 6,
+                      background: "#101014",
+                      border: "1px solid #222",
+                      aspectRatio,
+                      marginBottom: "16px",
+                      transition: "aspect-ratio 0.2s ease",
+                    }}
+                  >
+                    <img
+                      src={imageFileUrl(img.id)}
+                      loading="lazy"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "cover",
+                        display: "block",
+                        opacity: dims ? 1 : 0,
+                        transition: "opacity 0.3s ease",
+                      }}
+                      alt=""
+                    />
 
-              {img.location_count > 1 && (
-                <span
-                  className="image-location-count"
-                  title={img.locations.map((location) => location.path).join("\n")}
-                >
-                  {img.location_count} Speicherorte
-                </span>
-              )}
+                    <button
+                      type="button"
+                      className="image-delete-button"
+                      title="Bild aus der Datenbank entfernen"
+                      aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void removeImage(img);
+                      }}
+                      onKeyDown={(event) => event.stopPropagation()}
+                    >
+                      <span aria-hidden="true">×</span>
+                      Entfernen
+                    </button>
 
-              <span className="image-open-cue" aria-hidden="true">
-                <span className="image-open-cue__icon">↗</span>
-                <span>Vollbild öffnen</span>
-              </span>
+                    {img.location_count > 1 && (
+                      <span
+                        className="image-location-count"
+                        title={img.locations.map((location) => location.path).join("\n")}
+                      >
+                        {img.location_count} Speicherorte
+                      </span>
+                    )}
 
-              {dims &&
-                img.faces.map((face) => (
-                  <FaceOverlay
-                    key={face.id}
-                    face={face}
-                    naturalWidth={dims.w}
-                    naturalHeight={dims.h}
-                  />
-                ))}
-            </div>
-          );
-        })}
-      </Masonry>
+                    <span className="image-open-cue" aria-hidden="true">
+                      <span className="image-open-cue__icon">↗</span>
+                      <span>Vollbild öffnen</span>
+                    </span>
 
-      {galleryIndex !== null && filtered[galleryIndex] && (
+                    {dims &&
+                      img.faces.map((face) => (
+                        <FaceOverlay
+                          key={face.id}
+                          face={face}
+                          naturalWidth={dims.w}
+                          naturalHeight={dims.h}
+                        />
+                      ))}
+                  </div>
+                );
+              })}
+            </Masonry>
+          </section>
+        ))}
+      </div>
+
+      {galleryIndex !== null && orderedFilteredImages[galleryIndex] && (
         <FullscreenImageGallery
-          images={filtered}
+          images={orderedFilteredImages}
           activeIndex={galleryIndex}
           onChange={setGalleryIndex}
           onClose={() => setGalleryIndex(null)}
-          onDelete={(image) => removeImage(image as ImageData)}
+          onDelete={(image) => removeImage(image as FaceImage)}
         />
       )}
     </>
