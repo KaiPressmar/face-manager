@@ -31,3 +31,49 @@ class OpenFileLocationTest(unittest.TestCase):
         desktop.open_file_location("/home/user/photos/image.jpg")
 
         popen.assert_called_once_with(["xdg-open", "/home/user/photos"])
+
+
+class ImportFolderPathTest(unittest.TestCase):
+    @patch("backend.services.desktop.sys.platform", "win32")
+    def test_windows_host_keeps_windows_path(self):
+        normalized = desktop.normalize_import_folder_path(
+            r"D:\Photos\Library\2025"
+        )
+
+        self.assertEqual(normalized, r"D:\Photos\Library\2025")
+
+    @patch("backend.services.desktop.sys.platform", "linux")
+    def test_linux_host_translates_windows_drive_path(self):
+        normalized = desktop.normalize_import_folder_path(
+            r"D:\Photos\Library\2025"
+        )
+
+        self.assertEqual(normalized, "/mnt/d/Photos/Library/2025")
+
+    @patch("backend.services.desktop.sys.platform", "linux")
+    def test_linux_host_leaves_linux_path_unchanged(self):
+        normalized = desktop.normalize_import_folder_path("/photos/library")
+
+        self.assertEqual(normalized, "/photos/library")
+
+    @patch("backend.services.desktop._is_wsl", return_value=True)
+    def test_wsl_display_path_is_converted_back_to_windows(self, _):
+        display_path = desktop.to_display_path("/mnt/d/Photos/Library/2025")
+
+        self.assertEqual(display_path, r"D:\Photos\Library\2025")
+
+    @patch("backend.services.desktop._is_wsl", return_value=False)
+    def test_non_wsl_display_path_is_left_unchanged(self, _):
+        display_path = desktop.to_display_path("/photos/library")
+
+        self.assertEqual(display_path, "/photos/library")
+
+    @patch("backend.services.desktop.subprocess.run")
+    @patch("backend.services.desktop._is_wsl", return_value=True)
+    def test_wsl_folder_picker_uses_windows_dialog(self, _, run):
+        run.return_value.stdout = "D:\\Photos\\Library\r\n"
+
+        selected = desktop.pick_folder(prefer_windows_dialog=True)
+
+        self.assertEqual(selected, r"D:\Photos\Library")
+        run.assert_called_once()

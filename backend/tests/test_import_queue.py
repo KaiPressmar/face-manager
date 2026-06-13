@@ -24,7 +24,16 @@ class RecordingProcessor:
         self.started.append(folder_path)
         self.active_count += 1
         self.max_active_count = max(self.max_active_count, self.active_count)
-        progress_callback({"total_images": 2, "processed_images": 1})
+        progress_callback(
+            {
+                "stage": "processing",
+                "stage_current": 1,
+                "stage_total": 2,
+                "current_file": f"{folder_path}/photo.jpg",
+                "total_images": 2,
+                "processed_images": 1,
+            }
+        )
         try:
             while not self.release.wait(0.01):
                 if cancel_event.is_set():
@@ -72,10 +81,36 @@ class ImportQueueTest(unittest.TestCase):
         queued = next(job for job in snapshot["jobs"] if job["id"] == second["id"])
         self.assertEqual(queued["queue_position"], 1)
         self.assertEqual(self.processor.max_active_count, 1)
+        running = next(job for job in snapshot["jobs"] if job["id"] == first["id"])
+        self.assertEqual(running["stage"], "processing")
+        self.assertEqual(running["stage_current"], 1)
+        self.assertEqual(running["current_file"], "/photos/first/photo.jpg")
+        self.assertIsNotNone(running["elapsed_seconds"])
+        self.assertTrue(
+            all(station["job_id"] == first["id"] for station in running["stations"])
+        )
 
         self.processor.release.set()
         self.wait_for(lambda: len(self.processor.started) == 2)
         self.assertEqual(first["status"], "queued")
+
+    def test_jobs_can_run_in_parallel_when_configured(self):
+        self.processor.release.clear()
+        self.queue.stop()
+        self.queue = ImportQueue(
+            self.processor,
+            repository=self.repository,
+            max_concurrent_jobs=2,
+        )
+
+        self.queue.enqueue("/photos/first")
+        self.queue.enqueue("/photos/second")
+        self.wait_for(lambda: len(self.processor.started) == 2)
+
+        snapshot = self.queue.snapshot()
+        self.assertEqual(snapshot["running_count"], 2)
+        self.assertEqual(snapshot["max_concurrent_jobs"], 2)
+        self.assertEqual(self.processor.max_active_count, 2)
 
     def test_queued_job_can_be_removed(self):
         self.queue.enqueue("/photos/running")
@@ -96,9 +131,7 @@ class ImportQueueTest(unittest.TestCase):
 
         result = self.queue.cancel_or_remove(job["id"])
         self.assertEqual(result["status"], "cancelling")
-        self.wait_for(
-            lambda: self.queue.snapshot()["jobs"][0]["status"] == "cancelled"
-        )
+        self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "cancelled")
 
     def test_terminal_history_is_bounded(self):
         self.processor.release.set()
@@ -113,13 +146,14 @@ class ImportQueueTest(unittest.TestCase):
             self.queue.enqueue(f"/photos/{index}")
 
         self.wait_for(
-            lambda: len(self.processor.started) >= 4
-            and self.queue.snapshot()["queued_count"] == 0
+            lambda: (
+                len(self.processor.started) >= 4
+                and self.queue.snapshot()["queued_count"] == 0
+            )
         )
         self.wait_for(
             lambda: all(
-                job["status"] == "completed"
-                for job in self.queue.snapshot()["jobs"]
+                job["status"] == "completed" for job in self.queue.snapshot()["jobs"]
             )
         )
 
@@ -174,4 +208,51 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(
             restarted_processor.started,
             ["/photos/interrupted", "/photos/queued"],
+        )
+
+    def test_repository_migrates_existing_import_job_table(self):
+        self.queue.stop()
+        legacy_path = Path(self.temp_dir.name) / "legacy.sqlite"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            """
+            CREATE TABLE import_job (
+                id TEXT PRIMARY KEY,
+                folder_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                total_images INTEGER NOT NULL DEFAULT 0,
+                processed_images INTEGER NOT NULL DEFAULT 0,
+                total_faces INTEGER NOT NULL DEFAULT 0,
+                processed_faces INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                queue_order INTEGER NOT NULL
+            );
+            """
+        )
+        connection.close()
+
+        def legacy_connection_factory():
+            legacy_connection = sqlite3.connect(legacy_path)
+            legacy_connection.row_factory = sqlite3.Row
+            return legacy_connection
+
+        ImportJobRepository(legacy_connection_factory)
+        connection = legacy_connection_factory()
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(import_job)").fetchall()
+        }
+        connection.close()
+
+        self.assertTrue(
+            {
+                "stage",
+                "stage_started_at",
+                "stage_current",
+                "stage_total",
+                "current_file",
+            }.issubset(columns)
         )

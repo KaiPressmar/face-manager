@@ -6,52 +6,36 @@ const Sidebar: React.FC<{
   onChangePage: (p: "people" | "clusters") => void;
 }> = ({ page, onChangePage }) => {
   return (
-    <aside
-      style={{
-        width: 280,
-        background: "#0b0b10",
-        borderRight: "1px solid #1f1f22",
-        padding: 16,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div style={{ marginBottom: 16, color: "#9e9e9e", fontSize: 12 }}>
-        Navigation
+    <aside className="sidebar">
+      <div className="sidebar__header">
+        <div className="sidebar__eyebrow">Navigation</div>
+        <div className="sidebar__title">Face Manager</div>
+        <div className="sidebar__subtitle">Importe, Personen und Cluster</div>
       </div>
 
-      <button
-        className={
-          page === "people" ? "neon-card neon-card--active" : "neon-card"
-        }
-        style={{
-          width: "100%",
-          marginBottom: 12,
-          cursor: "pointer",
-          background: "none",
-        }}
-        onClick={() => onChangePage("people")}
-      >
-        Bilder & Personen
-      </button>
+      <nav className="sidebar__nav" aria-label="Hauptnavigation">
+        <button
+          className={
+            page === "people" ? "neon-card neon-card--active" : "neon-card"
+          }
+          onClick={() => onChangePage("people")}
+        >
+          Bilder & Personen
+        </button>
 
-      <button
-        className={
-          page === "clusters" ? "neon-card neon-card--active" : "neon-card"
-        }
-        style={{
-          width: "100%",
-          cursor: "pointer",
-          background: "none",
-        }}
-        onClick={() => onChangePage("clusters")}
-      >
-        Cluster verwalten
-      </button>
+        <button
+          className={
+            page === "clusters" ? "neon-card neon-card--active" : "neon-card"
+          }
+          onClick={() => onChangePage("clusters")}
+        >
+          Cluster verwalten
+        </button>
+      </nav>
 
-      <div style={{ marginTop: "auto", paddingTop: 16 }}>
+      <section className="sidebar__imports" aria-label="Importstatus">
         <ImportProgress />
-      </div>
+      </section>
     </aside>
   );
 };

@@ -23,6 +23,7 @@ fi
 "${PYTHON}" -m py_compile \
   "${PROJECT_ROOT}/backend/app.py" \
   "${PROJECT_ROOT}/backend/config.py" \
+  "${PROJECT_ROOT}/backend/desktop_main.py" \
   "${PROJECT_ROOT}/backend/db/schema.py" \
   "${PROJECT_ROOT}/backend/models/clustering.py" \
   "${PROJECT_ROOT}/backend/models/face_model.py" \

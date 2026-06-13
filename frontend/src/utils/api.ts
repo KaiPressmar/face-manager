@@ -1,7 +1,48 @@
-const API_BASE = "http://localhost:8000/api";
+declare global {
+  interface Window {
+    FACE_MANAGER_API_BASE?: string;
+  }
+}
+
+function resolveApiBase() {
+  const configuredBase =
+    window.FACE_MANAGER_API_BASE || import.meta.env.VITE_API_BASE;
+  if (configuredBase) {
+    return configuredBase.replace(/\/$/, "");
+  }
+  if (import.meta.env.DEV) {
+    return "http://localhost:8000/api";
+  }
+  return `${window.location.origin}/api`;
+}
+
+const API_BASE = resolveApiBase();
+
+function resolveDisplayPlatform() {
+  const userAgentPlatform =
+    (navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    }).userAgentData?.platform || navigator.platform || "";
+  return /win/i.test(userAgentPlatform) ? "windows" : "linux";
+}
+
+const DISPLAY_PLATFORM = resolveDisplayPlatform();
+
+function apiFetch(input: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  headers.set("x-face-manager-display-platform", DISPLAY_PLATFORM);
+  return fetch(input, {
+    ...init,
+    headers,
+  });
+}
 
 export function imageFileUrl(imageId: number) {
   return `${API_BASE}/images/${imageId}/file`;
+}
+
+export function faceCropUrl(faceId: number) {
+  return `${API_BASE}/faces/${faceId}/crop`;
 }
 
 export interface FolderNode {
@@ -21,6 +62,8 @@ export interface FolderTree {
 export interface RuntimeInfo {
   compute_mode: "gpu" | "cpu";
   execution_provider: string;
+  host_platform: "windows" | "linux";
+  display_platform?: "windows" | "linux";
 }
 
 export type ImportJobStatus =
@@ -30,6 +73,15 @@ export type ImportJobStatus =
   | "completed"
   | "failed"
   | "cancelled";
+
+export type ImportJobStage =
+  | "scanning"
+  | "hashing"
+  | "loading_model"
+  | "loading_index"
+  | "processing"
+  | "finalizing"
+  | "completed";
 
 export interface ImportJob {
   id: string;
@@ -42,18 +94,42 @@ export interface ImportJob {
   processed_images: number;
   total_faces: number;
   processed_faces: number;
+  stage: ImportJobStage | null;
+  stage_started_at: string | null;
+  stage_current: number;
+  stage_total: number;
+  current_file: string | null;
   last_error: string | null;
   queue_position: number | null;
+  elapsed_seconds: number | null;
+  eta_seconds: number | null;
+  stations?: ImportStation[];
+}
+
+export interface ImportStation {
+  job_id: string;
+  key: string;
+  label: string;
+  state: "queued" | "active" | "done" | "failed" | "cancelled";
+  progress_current: number;
+  progress_total: number;
+  eta_seconds: number | null;
+  current_file: string | null;
+  detail: string | null;
 }
 
 export interface ImportQueueState {
   jobs: ImportJob[];
   active_job_id: string | null;
+  active_job_ids?: string[];
+  running_count?: number;
   queued_count: number;
+  max_concurrent_jobs?: number;
+  overall_eta_seconds: number | null;
 }
 
 export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
-  const res = await fetch(`${API_BASE}/runtime`);
+  const res = await apiFetch(`${API_BASE}/runtime`);
   if (!res.ok) {
     throw new Error("Runtime information is unavailable.");
   }
@@ -64,13 +140,13 @@ export async function fetchImages(folders: string[] = []) {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));
   const query = params.toString();
-  const res = await fetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
+  const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
   if (!res.ok) return [];
   return await res.json();
 }
 
 export async function fetchFolders(): Promise<FolderTree> {
-  const res = await fetch(`${API_BASE}/folders`);
+  const res = await apiFetch(`${API_BASE}/folders`);
   if (!res.ok) {
     return { roots: [], image_count: 0, folder_count: 0 };
   }
@@ -78,61 +154,52 @@ export async function fetchFolders(): Promise<FolderTree> {
 }
 
 export async function fetchClusters() {
-  const res = await fetch(`${API_BASE}/clusters`);
+  const res = await apiFetch(`${API_BASE}/clusters`);
   if (!res.ok) return [];
   return await res.json();
 }
 
 // legacy, no longer used by ClusterPage, but kept if needed elsewhere
 export async function fetchClusterFaces(id: number) {
-  const res = await fetch(`${API_BASE}/clusters/${id}/faces`);
+  const res = await apiFetch(`${API_BASE}/clusters/${id}/faces`);
   if (!res.ok) return [];
   return await res.json();
 }
 
-export async function removeFaceFromCluster(
-  clusterId: number,
-  faceId: number
-) {
-  await fetch(
-    `${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`,
-    {
-      method: "POST",
-    }
-  );
+export async function removeFaceFromCluster(clusterId: number, faceId: number) {
+  await apiFetch(`${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`, {
+    method: "POST",
+  });
 }
 
 export async function dissolveCluster(clusterId: number) {
-  await fetch(`${API_BASE}/clusters/${clusterId}/dissolve`, {
+  await apiFetch(`${API_BASE}/clusters/${clusterId}/dissolve`, {
     method: "POST",
   });
 }
 
 export async function assignClusterToPerson(
   clusterId: number,
-  personName: string
+  personName: string,
 ) {
-  await fetch(
-    `${API_BASE}/clusters/${clusterId}/assign-person`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ person_name: personName }),
-    }
-  );
+  await apiFetch(`${API_BASE}/clusters/${clusterId}/assign-person`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ person_name: personName }),
+  });
 }
 
 export async function listPersons() {
-  const res = await fetch(`${API_BASE}/persons`);
+  const res = await apiFetch(`${API_BASE}/persons`);
   if (!res.ok) return [];
   return await res.json();
 }
 
-export async function processFolder(wslPath: string): Promise<ImportJob> {
-  const res = await fetch(`${API_BASE}/imports`, {
+export async function processFolder(folderPath: string): Promise<ImportJob> {
+  const res = await apiFetch(`${API_BASE}/imports`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ folder_path: wslPath }),
+    body: JSON.stringify({ folder_path: folderPath }),
   });
   if (!res.ok) {
     throw new Error("Der Import konnte nicht eingereiht werden.");
@@ -142,8 +209,19 @@ export async function processFolder(wslPath: string): Promise<ImportJob> {
   return job;
 }
 
+export async function selectImportFolder(): Promise<string | null> {
+  const res = await apiFetch(`${API_BASE}/system/select-folder`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error("Der Ordnerdialog konnte nicht geöffnet werden.");
+  }
+  const payload = (await res.json()) as { folder_path: string | null };
+  return payload.folder_path;
+}
+
 export async function fetchImportQueue(): Promise<ImportQueueState> {
-  const res = await fetch(`${API_BASE}/imports`);
+  const res = await apiFetch(`${API_BASE}/imports`);
   if (!res.ok) {
     throw new Error("Die Import-Warteschlange ist nicht erreichbar.");
   }
@@ -151,7 +229,7 @@ export async function fetchImportQueue(): Promise<ImportQueueState> {
 }
 
 export async function removeImportJob(jobId: string) {
-  const res = await fetch(`${API_BASE}/imports/${jobId}`, {
+  const res = await apiFetch(`${API_BASE}/imports/${jobId}`, {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -161,7 +239,7 @@ export async function removeImportJob(jobId: string) {
 }
 
 export async function openImageLocation(imageId: number, imagePath: string) {
-  const res = await fetch(`${API_BASE}/images/${imageId}/open-location`, {
+  const res = await apiFetch(`${API_BASE}/images/${imageId}/open-location`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image_path: imagePath }),
@@ -172,7 +250,7 @@ export async function openImageLocation(imageId: number, imagePath: string) {
 }
 
 export async function deleteImage(imageId: number) {
-  const res = await fetch(`${API_BASE}/images/${imageId}`, {
+  const res = await apiFetch(`${API_BASE}/images/${imageId}`, {
     method: "DELETE",
   });
   if (!res.ok) {

@@ -21,6 +21,8 @@ jobs:
     name: Tag and publish
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     env:
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
@@ -82,3 +84,56 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: echo "v${VERSION} already exists; no release was created."
+
+  windows-installer:
+    name: Build Windows installer (${{ matrix.variant }})
+    if: github.event.workflow_run.conclusion == 'success'
+    needs:
+      - release
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - cpu
+          - gpu
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      VERSION: ${{ needs.release.outputs.version }}
+      INSTALLER_SUFFIX: ${{ matrix.variant == 'gpu' && '-GPU' || '' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-desktop.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows release bundle
+        shell: pwsh
+        run: ./packaging/windows/build-release.ps1 -Variant ${{ matrix.variant }}
+
+      - name: Upload installer to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release upload "v${VERSION}"
+          "dist/FaceManager-Setup${INSTALLER_SUFFIX}-${VERSION}.exe"
+          --clobber

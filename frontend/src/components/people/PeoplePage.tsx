@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { fetchImages } from "../../utils/api";
+import { pathBasename } from "../../utils/pathDisplay";
 import PersonFilter from "./PersonFilter";
 import ImageGrid from "./ImageGrid";
 import FolderPickerModal from "../shared/FolderPickerModal";
@@ -80,7 +81,7 @@ const PeoplePage = () => {
                 )
               }
             >
-              {folder.split("/").filter(Boolean).pop() || folder}
+              {pathBasename(folder)}
               <b>×</b>
             </button>
           ))}

@@ -3,6 +3,7 @@ import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import FullscreenImageGallery from "./FullscreenImageGallery";
 import { deleteImage, imageFileUrl } from "../../utils/api";
+import { pathBasename } from "../../utils/pathDisplay";
 
 interface Face {
   id: number;
@@ -120,7 +121,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   };
 
   const removeImage = async (image: ImageData) => {
-    const filename = image.filename || image.image_path.split("/").pop() || "Bild";
+    const filename = image.filename || pathBasename(image.image_path) || "Bild";
     const confirmed = window.confirm(
       `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`
     );

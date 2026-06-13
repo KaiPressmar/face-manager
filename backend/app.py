@@ -6,15 +6,23 @@ from functools import lru_cache
 from io import BytesIO
 from typing import List
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from PIL import ExifTags, Image
 
-from .config import APP_VERSION
+from .config import APP_VERSION, get_frontend_dist_dir
 from .db.schema import get_conn, init_db
 from .models.face_model import get_compute_mode, get_execution_provider
-from .services.desktop import open_file_location
+from .services.desktop import (
+    is_windows_host,
+    is_wsl_host,
+    normalize_import_folder_path,
+    open_file_location,
+    pick_folder,
+    to_display_path,
+)
 from .services.import_queue import ImportQueue
 from .services.storage import (
     _safe_float,
@@ -28,8 +36,7 @@ from .services.storage import (
     list_persons,
 )
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("uvicorn.error")
 
 init_db()
 import_queue = ImportQueue(auto_start=False)
@@ -87,11 +94,105 @@ def api_runtime():
     return {
         "compute_mode": get_compute_mode(execution_provider),
         "execution_provider": execution_provider,
+        "host_platform": "windows" if is_windows_host() else "linux",
+        "display_platform": "windows" if is_windows_host() else "linux",
+    }
+
+
+def get_display_platform(request: Request) -> str:
+    """Resolve the preferred UI path format for one request."""
+    preferred = request.headers.get("x-face-manager-display-platform", "").strip()
+    if preferred == "windows":
+        if is_windows_host() or is_wsl_host():
+            return "windows"
+    if is_windows_host():
+        return "windows"
+    return "linux"
+
+
+def serialize_folder_tree(node, display_platform: str):
+    """Convert folder tree paths into display paths for the UI."""
+    display_path = (
+        to_display_path(node["path"])
+        if display_platform == "windows"
+        else node["path"]
+    )
+    display_name = (
+        display_path.replace("\\", "/").rstrip("/").split("/").pop() or display_path
+    )
+    return {
+        **node,
+        "path": display_path,
+        "name": display_name,
+        "children": [
+            serialize_folder_tree(child, display_platform)
+            for child in node["children"]
+        ],
+    }
+
+
+def serialize_image_locations(locations, display_platform: str):
+    """Convert canonical image locations into UI display paths."""
+    payload = []
+    for location in locations:
+        display_path = (
+            to_display_path(location["path"])
+            if display_platform == "windows"
+            else location["path"]
+        )
+        payload.append(
+            {
+                **location,
+                "path": display_path,
+                "directory": (
+                    to_display_path(location["directory"])
+                    if display_platform == "windows"
+                    else location["directory"]
+                ),
+            }
+        )
+    return payload
+
+
+def serialize_import_snapshot(snapshot, display_platform: str):
+    """Convert queued job paths into UI display paths."""
+    for job in snapshot["jobs"]:
+        if display_platform == "windows":
+            job["folder_path"] = to_display_path(job["folder_path"])
+        if job.get("current_file"):
+            if display_platform == "windows":
+                job["current_file"] = to_display_path(job["current_file"])
+        for station in job.get("stations", []):
+            if station.get("current_file"):
+                if display_platform == "windows":
+                    station["current_file"] = to_display_path(station["current_file"])
+    return snapshot
+
+
+@app.post("/api/system/select-folder")
+def api_select_folder(request: Request):
+    """Open a native folder picker on the backend host."""
+    display_platform = get_display_platform(request)
+    try:
+        folder_path = pick_folder(prefer_windows_dialog=display_platform == "windows")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="A native folder picker is unavailable on this host.",
+        ) from exc
+    if not folder_path:
+        return {"folder_path": None}
+    return {
+        "folder_path": (
+            to_display_path(normalize_import_folder_path(folder_path))
+            if display_platform == "windows"
+            else normalize_import_folder_path(folder_path)
+        )
     }
 
 
 @app.post("/api/process-folder")
-def api_process_folder(data: dict = Body(...)):
+def api_process_folder(request: Request, data: dict = Body(...)):
     """Queue a folder import through the legacy endpoint.
 
     Args:
@@ -100,21 +201,24 @@ def api_process_folder(data: dict = Body(...)):
     Returns:
         Newly queued import job.
     """
-    return api_create_import(data)
+    return api_create_import(request, data)
 
 
 @app.get("/api/process-status")
-def api_process_status():
+def api_process_status(request: Request):
     """Return queue state through the legacy status endpoint.
 
     Returns:
         Current import queue snapshot.
     """
-    return import_queue.snapshot()
+    return serialize_import_snapshot(
+        import_queue.snapshot(),
+        get_display_platform(request),
+    )
 
 
 @app.post("/api/imports", status_code=202)
-def api_create_import(data: dict = Body(...)):
+def api_create_import(request: Request, data: dict = Body(...)):
     """Queue a folder for serialized background import.
 
     Args:
@@ -129,22 +233,28 @@ def api_create_import(data: dict = Body(...)):
     if "folder_path" not in data:
         raise HTTPException(status_code=400, detail="Missing folder_path")
 
-    wsl_path = data["folder_path"]
+    folder_path = normalize_import_folder_path(data["folder_path"])
 
-    if not os.path.isdir(wsl_path):
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {wsl_path}")
+    if not os.path.isdir(folder_path):
+        raise HTTPException(status_code=400, detail=f"Path does not exist: {folder_path}")
 
-    return import_queue.enqueue(os.path.normpath(wsl_path))
+    payload = import_queue.enqueue(folder_path)
+    if get_display_platform(request) == "windows":
+        payload["folder_path"] = to_display_path(payload["folder_path"])
+    return payload
 
 
 @app.get("/api/imports")
-def api_imports():
+def api_imports(request: Request):
     """Return all visible import jobs.
 
     Returns:
         Queue summary with active, queued, and recent terminal jobs.
     """
-    return import_queue.snapshot()
+    return serialize_import_snapshot(
+        import_queue.snapshot(),
+        get_display_platform(request),
+    )
 
 
 @app.delete("/api/imports/{job_id}")
@@ -385,6 +495,8 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
         HTTPException: If the image is missing or the file manager fails.
     """
     preferred_path = data.get("image_path") if data else None
+    if preferred_path:
+        preferred_path = normalize_import_folder_path(preferred_path)
     path = get_available_image_path(image_id, preferred_path)
     if not path:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -459,17 +571,22 @@ def correct_bbox_for_orientation(path, x, y, w, h):
 
 
 @app.get("/api/folders")
-def get_folders():
+def get_folders(request: Request):
     """Return the imported folder hierarchy.
 
     Returns:
         Folder tree and aggregate counts.
     """
-    return build_folder_tree()
+    display_platform = get_display_platform(request)
+    tree = build_folder_tree()
+    tree["roots"] = [
+        serialize_folder_tree(root, display_platform) for root in tree["roots"]
+    ]
+    return tree
 
 
 @app.get("/api/images")
-def get_images(folders: List[str] = Query(default=[])):
+def get_images(request: Request, folders: List[str] = Query(default=[])):
     """List images and oriented face boxes.
 
     Args:
@@ -478,7 +595,10 @@ def get_images(folders: List[str] = Query(default=[])):
     Returns:
         Image dictionaries containing nested face data.
     """
-    rows = list_images(folders)
+    display_platform = get_display_platform(request)
+    rows = list_images(
+        [normalize_import_folder_path(folder) for folder in folders]
+    )
     images = {}
 
     for r in rows:
@@ -488,8 +608,14 @@ def get_images(folders: List[str] = Query(default=[])):
         if image_id not in images:
             images[image_id] = {
                 "id": image_id,
-                "image_path": path,
-                "directory": r["directory"],
+                "image_path": (
+                    to_display_path(path) if display_platform == "windows" else path
+                ),
+                "directory": (
+                    to_display_path(r["directory"])
+                    if display_platform == "windows"
+                    else r["directory"]
+                ),
                 "filename": r["filename"],
                 "content_hash": r["content_hash"],
                 "location_count": r["location_count"],
@@ -519,7 +645,7 @@ def get_images(folders: List[str] = Query(default=[])):
     locations_by_image = list_image_locations(images.keys())
     for image_id, image in images.items():
         locations = locations_by_image.get(image_id, [])
-        image["locations"] = locations
+        image["locations"] = serialize_image_locations(locations, display_platform)
         image["location_count"] = len(locations)
 
     return list(images.values())
@@ -605,3 +731,8 @@ def api_face_crop(face_id: int):
     crop.save(buf, format="JPEG")
     buf.seek(0)
     return Response(buf.read(), media_type="image/jpeg")
+
+
+frontend_dist_dir = get_frontend_dist_dir()
+if frontend_dist_dir.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist_dir, html=True), name="frontend")

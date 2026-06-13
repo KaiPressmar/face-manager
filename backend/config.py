@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 WSL_DRIVE_MAP = {
@@ -21,5 +22,39 @@ def to_wsl_path(win_path: str) -> str:
     return base + rest
 
 EMBEDDING_DIM = 512
-DB_PATH = os.path.join(os.path.dirname(__file__), "db", "database.sqlite")
-APP_VERSION = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+
+
+def get_project_root() -> Path:
+    """Return the source tree root or the PyInstaller bundle root."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def get_data_root() -> Path:
+    """Return the writable application data directory."""
+    override = os.environ.get("FACE_MANAGER_DATA_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+
+    if getattr(sys, "frozen", False):
+        if sys.platform == "win32":
+            local_app_data = Path(
+                os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+            )
+            return local_app_data / "FaceManager"
+        return Path.home() / ".face-manager"
+
+    return get_project_root() / "backend" / "db"
+
+
+def get_frontend_dist_dir() -> Path:
+    """Return the built frontend directory when present."""
+    override = os.environ.get("FACE_MANAGER_FRONTEND_DIST")
+    if override:
+        return Path(override).expanduser().resolve()
+    return get_project_root() / "frontend" / "dist"
+
+
+DB_PATH = str(get_data_root() / "database.sqlite")
+APP_VERSION = (get_project_root() / "VERSION").read_text().strip()
