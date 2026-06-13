@@ -18,8 +18,9 @@ class ImportApiTest(unittest.TestCase):
     @patch("backend.app.os.path.isdir", return_value=True)
     @patch("backend.app.normalize_import_folder_path", return_value="/photos")
     @patch("backend.app.to_display_path", return_value=r"D:\Photos")
+    @patch("backend.app.is_wsl_host", return_value=True)
     def test_create_import_queues_normalized_folder(
-        self, to_display_path, normalize_import_folder_path, _, import_queue
+        self, _, to_display_path, normalize_import_folder_path, __, import_queue
     ):
         import_queue.enqueue.return_value = {
             "id": "job-1",
@@ -73,7 +74,10 @@ class ImportApiTest(unittest.TestCase):
 
     @patch("backend.app.pick_folder", return_value="/photos/library")
     @patch("backend.app.to_display_path", return_value=r"D:\Photos\Library")
-    def test_select_folder_returns_normalized_folder(self, to_display_path, pick_folder):
+    @patch("backend.app.is_wsl_host", return_value=True)
+    def test_select_folder_returns_normalized_folder(
+        self, _, to_display_path, pick_folder
+    ):
         with patch("backend.app.normalize_import_folder_path", return_value="/photos/library"):
             result = app.api_select_folder(self.make_request("windows"))
 
