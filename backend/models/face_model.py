@@ -21,6 +21,7 @@ class FaceModel:
     def __init__(self):
         available_providers = ort.get_available_providers()
         execution_provider = get_execution_provider(available_providers)
+        self.compute_mode = get_compute_mode(execution_provider)
         if (
             execution_provider == "CUDAExecutionProvider"
             and hasattr(ort, "preload_dlls")
@@ -32,7 +33,11 @@ class FaceModel:
             else ["CPUExecutionProvider"]
         )
         ctx_id = 0 if execution_provider == "CUDAExecutionProvider" else -1
-        self.app = FaceAnalysis(name="buffalo_l", providers=providers)
+        self.app = FaceAnalysis(
+            name="buffalo_l",
+            allowed_modules=["detection", "recognition"],
+            providers=providers,
+        )
         self.app.prepare(ctx_id=ctx_id, det_size=(1024, 1024))
 
     def detect_and_embed(self, image_np):

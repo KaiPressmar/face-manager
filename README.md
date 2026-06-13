@@ -183,6 +183,16 @@ package name as a dependency, so plain `pip check` may report that
 `onnxruntime` is missing in a correct GPU-only environment; the project check
 script verifies the GPU substitute and CUDA provider instead.
 
+Image hashing and decoding run in parallel with face inference. Face Manager
+automatically uses up to four preparation workers in GPU mode and up to two in
+CPU mode. To override this for unusually fast storage or limited memory, set
+`FACE_MANAGER_IMPORT_WORKERS` before starting the backend:
+
+```bash
+FACE_MANAGER_IMPORT_WORKERS=3 \
+  python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+```
+
 ### Frontend
 
 Install the locked frontend dependencies:
