@@ -138,10 +138,11 @@ python3 -m venv backend/.venv
 source backend/.venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r backend/requirements.txt
+python -m pip install 'onnxruntime>=1.18,<2'
 ```
 
-The default requirements install CPU ONNX Runtime. The first image import
-downloads the InsightFace `buffalo_l` model into:
+The command above installs CPU ONNX Runtime. The first image import downloads
+the InsightFace `buffalo_l` model into:
 
 ```text
 ~/.insightface/models/buffalo_l
@@ -158,14 +159,13 @@ First verify that the NVIDIA driver is visible inside Linux or WSL:
 nvidia-smi
 ```
 
-After installing the normal backend requirements, install GPU ONNX Runtime
-and its CUDA/cuDNN dependencies last:
+After installing the normal backend requirements, remove any existing ONNX
+Runtime wheel and install only the GPU wheel with its CUDA/cuDNN dependencies:
 
 ```bash
 source backend/.venv/bin/activate
+python -m pip uninstall -y onnxruntime onnxruntime-gpu
 python -m pip install \
-  --upgrade \
-  --force-reinstall \
   'onnxruntime-gpu[cuda,cudnn]>=1.21,<2'
 ```
 
@@ -178,7 +178,52 @@ python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 The output must contain `CUDAExecutionProvider`. Face Manager chooses CUDA
 automatically when that provider is available and otherwise uses the CPU.
 The NVIDIA driver must support CUDA 12. The runtime CUDA and cuDNN libraries
-are installed inside the Python environment.
+are installed inside the Python environment. InsightFace declares the CPU
+package name as a dependency, so plain `pip check` may report that
+`onnxruntime` is missing in a correct GPU-only environment; the project check
+script verifies the GPU substitute and CUDA provider instead.
+
+Image hashing and decoding run in parallel with face inference. Face Manager
+automatically uses up to four preparation workers in GPU mode and up to two in
+CPU mode. To override this for unusually fast storage or limited memory, set
+`FACE_MANAGER_IMPORT_WORKERS` before starting the backend:
+
+```bash
+FACE_MANAGER_IMPORT_WORKERS=3 \
+  python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Import Queue
+
+Folder imports are persisted in SQLite and processed by one background worker.
+This keeps the shared face model and clustering index serialized even when the
+import endpoint is called repeatedly.
+
+```text
+POST   /api/imports             Queue a folder import
+GET    /api/imports             List active, queued, and recent jobs
+DELETE /api/imports/{job_id}    Cancel a running job or remove another job
+```
+
+Queued jobs can be removed immediately. Running jobs stop cooperatively after
+the current image finishes, because interrupting an active GPU inference or
+database transaction could leave inconsistent state.
+
+If the backend exits or restarts, jobs that were queued, running, or cancelling
+are restored to the queue in their original FIFO order. Processing resumes by
+rescanning the folder and skipping images whose results were already committed,
+so the interrupted image is retried without reprocessing completed images.
+
+Every repeat import enumerates and hashes all selected files again. Hashes are
+matched against the indexed canonical image records, so unchanged or moved
+duplicates are registered without decoding the image or running face inference.
+If content at an existing path changed, that location is detached from the old
+content and the replacement is processed safely as a new image.
+
+When known content appears at a new location, Face Manager also validates its
+older registered locations. Missing paths and paths whose current hash no
+longer matches are removed. Valid copies remain assigned to the same canonical
+image, which is displayed once in the UI with all available locations listed.
 
 ### Frontend
 
@@ -388,8 +433,9 @@ source backend/.venv/bin/activate
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 ```
 
-If `CUDAExecutionProvider` is absent, verify `nvidia-smi`, the installed
-`onnxruntime-gpu` package, and CUDA/cuDNN compatibility.
+If `CUDAExecutionProvider` is absent, verify `nvidia-smi` and CUDA/cuDNN
+compatibility. Also run `python -m pip show onnxruntime onnxruntime-gpu`;
+only `onnxruntime-gpu` should be installed for GPU mode.
 
 ### The frontend cannot reach the API
 

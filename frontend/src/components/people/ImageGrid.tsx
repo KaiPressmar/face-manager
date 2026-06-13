@@ -14,6 +14,12 @@ interface Face {
   person_name: string | null;
 }
 
+interface ImageLocation {
+  path: string;
+  filename: string;
+  directory: string;
+}
+
 interface ImageData {
   id: number;
   image_path: string;
@@ -21,6 +27,7 @@ interface ImageData {
   directory?: string;
   content_hash: string | null;
   location_count: number;
+  locations: ImageLocation[];
   faces: Face[];
 }
 
@@ -247,7 +254,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
               {img.location_count > 1 && (
                 <span
                   className="image-location-count"
-                  title={`Dieses Bild wurde an ${img.location_count} Speicherorten gefunden`}
+                  title={img.locations.map((location) => location.path).join("\n")}
                 >
                   {img.location_count} Speicherorte
                 </span>

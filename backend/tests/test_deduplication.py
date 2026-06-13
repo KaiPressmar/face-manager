@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.db import schema
-from backend.services.storage import build_folder_tree
+from backend.services.storage import build_folder_tree, list_image_locations
 
 
 class DeduplicationMigrationTest(unittest.TestCase):
@@ -91,7 +91,14 @@ class DeduplicationMigrationTest(unittest.TestCase):
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM face").fetchone()[0], 1
                 )
+                image_id = conn.execute("SELECT id FROM image").fetchone()[0]
                 conn.close()
+
+                locations = list_image_locations([image_id])
+                self.assertEqual(
+                    [location["path"] for location in locations[image_id]],
+                    sorted((str(first_path), str(second_path))),
+                )
 
                 tree = build_folder_tree()
                 self.assertEqual(tree["image_count"], 1)

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   fetchClusters,
   removeFaceFromCluster,
@@ -8,6 +8,38 @@ import {
 } from "../../utils/api";
 import ClusterList from "./ClusterList";
 import ClusterFacesGrid from "./ClusterFacesGrid";
+
+const UNKNOWN_PERSON_LABEL = "Unbekannt";
+
+const sortClustersByAssignedPerson = (items: any[]) => {
+  return [...items].sort((a, b) => {
+    const aFaceCount = Array.isArray(a.faces) ? a.faces.length : 0;
+    const bFaceCount = Array.isArray(b.faces) ? b.faces.length : 0;
+    if (aFaceCount !== bFaceCount) {
+      return bFaceCount - aFaceCount;
+    }
+
+    const aName = (a.person_name || "").trim();
+    const bName = (b.person_name || "").trim();
+    const aAssigned = aName.length > 0;
+    const bAssigned = bName.length > 0;
+
+    if (aAssigned !== bAssigned) {
+      return aAssigned ? -1 : 1;
+    }
+
+    const byName = (aAssigned ? aName : UNKNOWN_PERSON_LABEL).localeCompare(
+      bAssigned ? bName : UNKNOWN_PERSON_LABEL,
+      "de",
+      { sensitivity: "base" }
+    );
+    if (byName !== 0) {
+      return byName;
+    }
+
+    return a.cluster_id - b.cluster_id;
+  });
+};
 
 const ClusterPage: React.FC = () => {
   const [clusters, setClusters] = useState<any[]>([]);
@@ -21,6 +53,11 @@ const ClusterPage: React.FC = () => {
   // 🔥 Neuer Zustand für die aufgeräumte Zuweisung: "existing" oder "new"
   const [assignmentMode, setAssignmentMode] = useState<"existing" | "new">("existing");
 
+  const sortedClusters = useMemo(
+    () => sortClustersByAssignedPerson(clusters),
+    [clusters]
+  );
+
   useEffect(() => {
     let isMounted = true;
 
@@ -31,7 +68,7 @@ const ClusterPage: React.FC = () => {
         setClusters(data);
 
         if (data.length > 0 && selectedClusterId === null) {
-          setSelectedClusterId(data[0].cluster_id);
+          setSelectedClusterId(sortClustersByAssignedPerson(data)[0].cluster_id);
         }
       } catch (err) {
         console.error("Fehler beim Laden der Cluster:", err);
@@ -46,15 +83,16 @@ const ClusterPage: React.FC = () => {
       const data = await fetchClusters();
       if (!isMounted) return;
       setClusters(data);
+      const sortedData = sortClustersByAssignedPerson(data);
 
       if (data.length > 0) {
         if (selectedClusterId !== null) {
           const stillExists = data.some((c) => c.cluster_id === selectedClusterId);
           if (!stillExists) {
-            setSelectedClusterId(data[0].cluster_id);
+            setSelectedClusterId(sortedData[0].cluster_id);
           }
         } else {
-          setSelectedClusterId(data[0].cluster_id);
+          setSelectedClusterId(sortedData[0].cluster_id);
         }
       } else {
         setSelectedClusterId(null);
@@ -74,12 +112,12 @@ const ClusterPage: React.FC = () => {
   const currentCluster = clusters.find((c) => c.cluster_id === selectedClusterId);
 
   const determineNextClusterIdOnSameSpot = (currentId: number): number | null => {
-    const currentIndex = clusters.findIndex((c) => c.cluster_id === currentId);
-    if (currentIndex === -1 || clusters.length <= 1) return null;
-    if (currentIndex === clusters.length - 1) {
-      return clusters[currentIndex - 1].cluster_id;
+    const currentIndex = sortedClusters.findIndex((c) => c.cluster_id === currentId);
+    if (currentIndex === -1 || sortedClusters.length <= 1) return null;
+    if (currentIndex === sortedClusters.length - 1) {
+      return sortedClusters[currentIndex - 1].cluster_id;
     }
-    return clusters[currentIndex + 1].cluster_id;
+    return sortedClusters[currentIndex + 1].cluster_id;
   };
 
   const handleRemoveFace = async (faceId: number) => {
@@ -138,7 +176,7 @@ const ClusterPage: React.FC = () => {
       <div style={{ width: 250, borderRight: "1px solid #222", paddingRight: 16, overflowY: "auto" }}>
         <h3 style={{ marginTop: 0, color: "var(--neon-magenta)" }}>Menschliche Cluster</h3>
         <ClusterList
-          clusters={clusters}
+          clusters={sortedClusters}
           selected={selectedClusterId}
           onSelect={setSelectedClusterId}
           isLoading={isLoading}
