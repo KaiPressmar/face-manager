@@ -61,7 +61,7 @@ excludes = [
 ]
 
 a = Analysis(
-    ["backend/desktop_main.py"],
+    [str(project_root / "backend" / "desktop_main.py")],
     pathex=[str(project_root)],
     binaries=binaries,
     datas=datas,
