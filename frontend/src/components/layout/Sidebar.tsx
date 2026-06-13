@@ -2,8 +2,8 @@ import React from "react";
 import ImportProgress from "../import/ImportProgress";
 
 const Sidebar: React.FC<{
-  page: "people" | "clusters";
-  onChangePage: (p: "people" | "clusters") => void;
+  page: "people" | "clusters" | "settings";
+  onChangePage: (p: "people" | "clusters" | "settings") => void;
 }> = ({ page, onChangePage }) => {
   return (
     <aside className="sidebar">
@@ -30,6 +30,15 @@ const Sidebar: React.FC<{
           onClick={() => onChangePage("clusters")}
         >
           Cluster verwalten
+        </button>
+
+        <button
+          className={
+            page === "settings" ? "neon-card neon-card--active" : "neon-card"
+          }
+          onClick={() => onChangePage("settings")}
+        >
+          Einstellungen
         </button>
       </nav>
 

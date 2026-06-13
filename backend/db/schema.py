@@ -245,6 +245,18 @@ def _create_import_job_table(cur):
     )
 
 
+def _create_app_settings_table(cur):
+    """Create the key-value application settings table when missing."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
 def _migrate_legacy_faces(conn):
     """Migrate face rows that referenced image paths directly.
 
@@ -320,6 +332,7 @@ def init_db():
 
     _migrate_image_locations(conn)
     _create_import_job_table(cur)
+    _create_app_settings_table(cur)
 
     cur.execute(
         """

@@ -15,7 +15,7 @@ from PIL import Image
 
 from ..db.schema import calculate_file_hash, get_conn
 from ..models.face_model import FaceModel, get_compute_mode
-from .storage import load_all_embeddings
+from .storage import get_cluster_distance_threshold, load_all_embeddings
 
 if TYPE_CHECKING:
     from ..models.clustering import FaceClustering
@@ -237,6 +237,12 @@ class ImportResources:
                     self._clusterer.load_existing(embeddings, cluster_ids)
                 self._clusterer_loaded = True
             return self._clusterer
+
+    def reset_clusterer(self) -> None:
+        """Drop the cached clustering index so it reloads from the database."""
+        with self._lock:
+            self._clusterer = None
+            self._clusterer_loaded = False
 
 
 class ImportProcessor:
@@ -543,10 +549,14 @@ class ImportProcessor:
         """
         cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
         faces = model.detect_and_embed(image_np)
+        distance_threshold = get_cluster_distance_threshold()
         for face in faces:
             x1, y1, width, height = face["bbox"]
             embedding = face["embedding"]
-            cluster_ids, _ = clusterer.add_and_assign(np.expand_dims(embedding, axis=0))
+            cluster_ids, _ = clusterer.add_and_assign(
+                np.expand_dims(embedding, axis=0),
+                distance_threshold=distance_threshold,
+            )
             cluster_id = int(cluster_ids[0])
             cursor.execute(
                 "INSERT OR IGNORE INTO cluster(id, label) VALUES (?, ?)",
