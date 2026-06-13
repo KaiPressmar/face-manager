@@ -193,6 +193,38 @@ FACE_MANAGER_IMPORT_WORKERS=3 \
   python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
+### Import Queue
+
+Folder imports are persisted in SQLite and processed by one background worker.
+This keeps the shared face model and clustering index serialized even when the
+import endpoint is called repeatedly.
+
+```text
+POST   /api/imports             Queue a folder import
+GET    /api/imports             List active, queued, and recent jobs
+DELETE /api/imports/{job_id}    Cancel a running job or remove another job
+```
+
+Queued jobs can be removed immediately. Running jobs stop cooperatively after
+the current image finishes, because interrupting an active GPU inference or
+database transaction could leave inconsistent state.
+
+If the backend exits or restarts, jobs that were queued, running, or cancelling
+are restored to the queue in their original FIFO order. Processing resumes by
+rescanning the folder and skipping images whose results were already committed,
+so the interrupted image is retried without reprocessing completed images.
+
+Every repeat import enumerates and hashes all selected files again. Hashes are
+matched against the indexed canonical image records, so unchanged or moved
+duplicates are registered without decoding the image or running face inference.
+If content at an existing path changed, that location is detached from the old
+content and the replacement is processed safely as a new image.
+
+When known content appears at a new location, Face Manager also validates its
+older registered locations. Missing paths and paths whose current hash no
+longer matches are removed. Valid copies remain assigned to the same canonical
+image, which is displayed once in the UI with all available locations listed.
+
 ### Frontend
 
 Install the locked frontend dependencies:

@@ -27,6 +27,7 @@ fi
   "${PROJECT_ROOT}/backend/models/clustering.py" \
   "${PROJECT_ROOT}/backend/models/face_model.py" \
   "${PROJECT_ROOT}/backend/services/desktop.py" \
+  "${PROJECT_ROOT}/backend/services/import_queue.py" \
   "${PROJECT_ROOT}/backend/services/pipeline.py" \
   "${PROJECT_ROOT}/backend/services/storage.py"
 

@@ -31,7 +31,11 @@ if result.returncode == 0:
         print(output)
     raise SystemExit(0)
 
-errors = [line for line in output.splitlines() if line.strip()]
+errors = [
+    line
+    for line in output.splitlines()
+    if line.strip() and not line.startswith("WARNING:")
+]
 gpu_substitutes_for_cpu_package = (
     errors
     and all(INSIGHTFACE_ONNXRUNTIME_ERROR.match(line) for line in errors)

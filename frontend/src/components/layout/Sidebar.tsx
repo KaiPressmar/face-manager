@@ -8,7 +8,7 @@ const Sidebar: React.FC<{
   return (
     <aside
       style={{
-        width: 240,
+        width: 280,
         background: "#0b0b10",
         borderRight: "1px solid #1f1f22",
         padding: 16,

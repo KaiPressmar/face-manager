@@ -4,22 +4,23 @@ import hnswlib
 
 
 class FaceClustering:
-    """
-    Incremental face clustering using HNSW.
+    """Incrementally cluster face embeddings with an HNSW cosine index.
 
-    - Uses cosine distance (space="cosine")
-    - Embeddings are expected to be L2-normalized (but wir normalisieren zur Sicherheit nochmal)
-    - distance_threshold ist ein Cosine-Distanz-Threshold:
-        0.0  → identisch
-        0.4  → cos-sim >= 0.6
-        0.6  → cos-sim >= 0.4
-        Wenn du willst, dass mehr Gesichter zusammengefasst werden:
-        --> threshold erhöhen (z. B. 0.5)
-        Wenn du willst, dass weniger Gesichter zusammengefasst werden:
-        --> threshold senken (z. B. 0.3)
+    Args:
+        dim: Embedding vector dimension.
+        space: HNSW distance metric.
+
+    Embeddings are normalized before insertion. Lower distance thresholds
+    produce stricter clusters; higher thresholds reuse clusters more readily.
     """
 
     def __init__(self, dim: int = 512, space: str = "cosine"):
+        """Initialize an empty HNSW clustering index.
+
+        Args:
+            dim: Embedding vector dimension.
+            space: HNSW distance metric.
+        """
         self.dim = dim
         self.space = space
         self.index = hnswlib.Index(space=space, dim=dim)
@@ -31,13 +32,27 @@ class FaceClustering:
         self._initialized = False
 
     def _normalize(self, embeddings: np.ndarray) -> np.ndarray:
+        """L2-normalize embedding rows.
+
+        Args:
+            embeddings: Two-dimensional embedding array.
+
+        Returns:
+            Float32 normalized embeddings.
+        """
         embeddings = embeddings.astype(np.float32)
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12
         return embeddings / norms
 
     def load_existing(self, embeddings: np.ndarray, cluster_ids: np.ndarray):
-        """
-        Load existing embeddings + cluster_ids from DB into the index.
+        """Load persisted embeddings into the index.
+
+        Args:
+            embeddings: Existing normalized or unnormalized face embeddings.
+            cluster_ids: Cluster identifier aligned with each embedding.
+
+        Raises:
+            ValueError: If the embedding dimension does not match the index.
         """
         if embeddings.size == 0:
             self._initialized = True
@@ -60,6 +75,7 @@ class FaceClustering:
         self._initialized = True
 
     def _ensure_initialized(self):
+        """Mark an empty index as ready for incremental additions."""
         if not self._initialized:
             self._initialized = True
 
@@ -68,12 +84,18 @@ class FaceClustering:
         embeddings: np.ndarray,
         distance_threshold: float = 0.5,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Add new embeddings and assign them to existing or new clusters.
+        """Assign embeddings to nearest clusters and add them to the index.
 
-        distance_threshold ist eine Cosine-Distanz:
-        - 0.4 ≈ cos-sim >= 0.6 (relativ streng)
-        - 0.5 ≈ cos-sim >= 0.5 (lockerer)
+        Args:
+            embeddings: Two-dimensional face embedding array.
+            distance_threshold: Maximum cosine distance for cluster reuse.
+
+        Returns:
+            Assigned cluster IDs and generated internal HNSW IDs.
+
+        Raises:
+            ValueError: If embeddings are not two-dimensional or use the
+                wrong vector dimension.
         """
         self._ensure_initialized()
 

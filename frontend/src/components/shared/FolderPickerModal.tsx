@@ -6,6 +6,7 @@ const FolderPickerModal = ({ onClose }) => {
   const [winPath, setWinPath] = useState("");
   const [wslPath, setWslPath] = useState("");
   const [isStarting, setIsStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setWslPath(windowsPathToWSL(winPath));
@@ -14,12 +15,19 @@ const FolderPickerModal = ({ onClose }) => {
   const submit = async () => {
     if (!wslPath) return;
 
-    setIsStarting(true); // UI Feedback
-
-    await processFolder(wslPath);
-
-    // Modal schließen → ProgressOverlay übernimmt
-    onClose(true);
+    setIsStarting(true);
+    setError(null);
+    try {
+      await processFolder(wslPath);
+      onClose(true);
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Der Import konnte nicht eingereiht werden."
+      );
+      setIsStarting(false);
+    }
   };
 
   return (
@@ -87,6 +95,10 @@ const FolderPickerModal = ({ onClose }) => {
           <div style={{ color: "#00e5ff", marginBottom: 12 }}>
             Import wird gestartet…
           </div>
+        )}
+
+        {error && (
+          <div style={{ color: "#ff6d89", marginBottom: 12 }}>{error}</div>
         )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>

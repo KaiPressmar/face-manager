@@ -4,6 +4,14 @@ from insightface.app import FaceAnalysis
 
 
 def get_execution_provider(available_providers=None):
+    """Choose the preferred ONNX Runtime execution provider.
+
+    Args:
+        available_providers: Optional provider names reported by ONNX Runtime.
+
+    Returns:
+        CUDA when available, otherwise the CPU provider.
+    """
     if available_providers is None:
         available_providers = ort.get_available_providers()
     if "CUDAExecutionProvider" in available_providers:
@@ -12,13 +20,24 @@ def get_execution_provider(available_providers=None):
 
 
 def get_compute_mode(execution_provider=None):
+    """Map an ONNX Runtime provider to a UI-facing compute mode.
+
+    Args:
+        execution_provider: Optional provider name to map.
+
+    Returns:
+        Either ``gpu`` or ``cpu``.
+    """
     if execution_provider is None:
         execution_provider = get_execution_provider()
     return "gpu" if execution_provider == "CUDAExecutionProvider" else "cpu"
 
 
 class FaceModel:
+    """Detect faces and create normalized recognition embeddings."""
+
     def __init__(self):
+        """Load only the detection and recognition InsightFace modules."""
         available_providers = ort.get_available_providers()
         execution_provider = get_execution_provider(available_providers)
         self.compute_mode = get_compute_mode(execution_provider)
@@ -41,6 +60,14 @@ class FaceModel:
         self.app.prepare(ctx_id=ctx_id, det_size=(1024, 1024))
 
     def detect_and_embed(self, image_np):
+        """Detect faces and calculate normalized embeddings.
+
+        Args:
+            image_np: RGB image represented as a NumPy array.
+
+        Returns:
+            Face dictionaries containing bounding boxes and embeddings.
+        """
         faces = self.app.get(image_np)
         results = []
         for f in faces:

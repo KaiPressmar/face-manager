@@ -536,6 +536,7 @@ print(",".join(ort.get_available_providers()))
     "${PROJECT_ROOT}/backend/db/schema.py" \
     "${PROJECT_ROOT}/backend/models/clustering.py" \
     "${PROJECT_ROOT}/backend/models/face_model.py" \
+    "${PROJECT_ROOT}/backend/services/import_queue.py" \
     "${PROJECT_ROOT}/backend/services/pipeline.py" \
     "${PROJECT_ROOT}/backend/services/storage.py"
 

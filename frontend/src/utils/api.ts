@@ -23,6 +23,35 @@ export interface RuntimeInfo {
   execution_provider: string;
 }
 
+export type ImportJobStatus =
+  | "queued"
+  | "running"
+  | "cancelling"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface ImportJob {
+  id: string;
+  folder_path: string;
+  status: ImportJobStatus;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  total_images: number;
+  processed_images: number;
+  total_faces: number;
+  processed_faces: number;
+  last_error: string | null;
+  queue_position: number | null;
+}
+
+export interface ImportQueueState {
+  jobs: ImportJob[];
+  active_job_id: string | null;
+  queued_count: number;
+}
+
 export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
   const res = await fetch(`${API_BASE}/runtime`);
   if (!res.ok) {
@@ -99,17 +128,35 @@ export async function listPersons() {
   return await res.json();
 }
 
-export async function processFolder(wslPath: string) {
-  await fetch(`${API_BASE}/process-folder`, {
+export async function processFolder(wslPath: string): Promise<ImportJob> {
+  const res = await fetch(`${API_BASE}/imports`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ folder_path: wslPath }),
   });
+  if (!res.ok) {
+    throw new Error("Der Import konnte nicht eingereiht werden.");
+  }
+  const job = await res.json();
+  window.dispatchEvent(new Event("face-manager:imports-changed"));
+  return job;
 }
 
-export async function fetchProcessStatus() {
-  const res = await fetch(`${API_BASE}/process-status`);
-  if (!res.ok) return null;
+export async function fetchImportQueue(): Promise<ImportQueueState> {
+  const res = await fetch(`${API_BASE}/imports`);
+  if (!res.ok) {
+    throw new Error("Die Import-Warteschlange ist nicht erreichbar.");
+  }
+  return await res.json();
+}
+
+export async function removeImportJob(jobId: string) {
+  const res = await fetch(`${API_BASE}/imports/${jobId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    throw new Error("Der Importauftrag konnte nicht entfernt werden.");
+  }
   return await res.json();
 }
 

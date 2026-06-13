@@ -9,6 +9,11 @@ HASH_CHUNK_SIZE = 1024 * 1024
 
 
 def get_conn():
+    """Open a configured SQLite connection.
+
+    Returns:
+        SQLite connection with row mapping, WAL, and foreign keys enabled.
+    """
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
@@ -18,11 +23,24 @@ def get_conn():
 
 
 def _split_image_path(image_path: str):
+    """Split an image path into stored path metadata.
+
+    Args:
+        image_path: Image path to normalize.
+
+    Returns:
+        Original path, normalized directory, and filename.
+    """
     normalized = os.path.normpath(image_path)
     return image_path, os.path.dirname(normalized), os.path.basename(normalized)
 
 
 def _create_image_table(cur):
+    """Create the canonical image table when missing.
+
+    Args:
+        cur: SQLite cursor executing schema statements.
+    """
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS image (
@@ -38,6 +56,11 @@ def _create_image_table(cur):
 
 
 def _create_image_location_table(cur):
+    """Create the table mapping images to filesystem locations.
+
+    Args:
+        cur: SQLite cursor executing schema statements.
+    """
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS image_location (
@@ -53,6 +76,14 @@ def _create_image_location_table(cur):
 
 
 def calculate_file_hash(path: str):
+    """Calculate a streaming SHA-256 digest.
+
+    Args:
+        path: File path to hash.
+
+    Returns:
+        Hexadecimal SHA-256 digest.
+    """
     digest = hashlib.sha256()
     with open(path, "rb") as source:
         while chunk := source.read(HASH_CHUNK_SIZE):
@@ -61,6 +92,11 @@ def calculate_file_hash(path: str):
 
 
 def _ensure_content_hash_column(cur):
+    """Add the image content hash column to legacy databases.
+
+    Args:
+        cur: SQLite cursor executing migration statements.
+    """
     columns = {
         row["name"] for row in cur.execute("PRAGMA table_info(image)").fetchall()
     }
@@ -69,6 +105,11 @@ def _ensure_content_hash_column(cur):
 
 
 def _migrate_image_locations(conn):
+    """Migrate legacy image paths and merge duplicate content.
+
+    Args:
+        conn: SQLite connection to migrate.
+    """
     cur = conn.cursor()
     _ensure_content_hash_column(cur)
     _create_image_location_table(cur)
@@ -127,6 +168,12 @@ def _migrate_image_locations(conn):
 
 
 def _create_face_table(cur, table_name="face"):
+    """Create a face table.
+
+    Args:
+        cur: SQLite cursor executing schema statements.
+        table_name: Table name used for normal creation or migration.
+    """
     cur.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
@@ -145,7 +192,44 @@ def _create_face_table(cur, table_name="face"):
     )
 
 
+def _create_import_job_table(cur):
+    """Create the durable import queue table when missing.
+
+    Args:
+        cur: SQLite cursor executing schema statements.
+    """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_job (
+            id TEXT PRIMARY KEY,
+            folder_path TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            total_images INTEGER NOT NULL DEFAULT 0,
+            processed_images INTEGER NOT NULL DEFAULT 0,
+            total_faces INTEGER NOT NULL DEFAULT 0,
+            processed_faces INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            queue_order INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_import_job_queue_order
+        ON import_job(queue_order)
+        """
+    )
+
+
 def _migrate_legacy_faces(conn):
+    """Migrate face rows that referenced image paths directly.
+
+    Args:
+        conn: SQLite connection to migrate.
+    """
     cur = conn.cursor()
     columns = {row["name"] for row in cur.execute("PRAGMA table_info(face)").fetchall()}
     if "image_path" not in columns or "image_id" in columns:
@@ -180,6 +264,7 @@ def _migrate_legacy_faces(conn):
 
 
 def init_db():
+    """Create and migrate the application database schema."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = get_conn()
     cur = conn.cursor()
@@ -213,6 +298,7 @@ def init_db():
         _create_face_table(cur)
 
     _migrate_image_locations(conn)
+    _create_import_job_table(cur)
 
     cur.execute(
         """

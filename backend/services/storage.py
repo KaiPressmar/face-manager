@@ -8,6 +8,17 @@ from ..db.schema import get_conn
 
 
 def _safe_float(v):
+    """Convert SQLite numeric representations to a float.
+
+    Args:
+        v: Numeric value or little-endian float bytes.
+
+    Returns:
+        Converted floating-point value.
+
+    Raises:
+        TypeError: If the value uses an unsupported representation.
+    """
     if isinstance(v, (float, int)):
         return float(v)
     if isinstance(v, bytes):
@@ -18,6 +29,14 @@ def _safe_float(v):
 
 
 def _face_row_to_dict(r):
+    """Convert a face database row to an API dictionary.
+
+    Args:
+        r: Mapping containing face and image columns.
+
+    Returns:
+        JSON-compatible face representation.
+    """
     return {
         "id": r["id"],
         "image_id": r["image_id"],
@@ -31,10 +50,26 @@ def _face_row_to_dict(r):
 
 
 def normalize_folder_path(folder_path: str):
+    """Trim and normalize a folder path.
+
+    Args:
+        folder_path: User-provided folder path.
+
+    Returns:
+        Platform-normalized folder path.
+    """
     return os.path.normpath(folder_path.strip())
 
 
 def _descendant_filter(folders):
+    """Build SQL conditions selecting folders and descendants.
+
+    Args:
+        folders: Folder paths to include.
+
+    Returns:
+        SQL condition fragments and bound parameters.
+    """
     conditions = []
     params = []
     for folder in dict.fromkeys(normalize_folder_path(path) for path in folders if path):
@@ -47,6 +82,14 @@ def _descendant_filter(folders):
 
 
 def list_images(folders=None):
+    """List images with clustered faces and preferred locations.
+
+    Args:
+        folders: Optional folder roots used to filter results.
+
+    Returns:
+        SQLite rows containing image, face, cluster, and person data.
+    """
     folders = folders or []
     conditions, params = _descendant_filter(folders)
     where = ["f.cluster_id IS NOT NULL"]
@@ -99,7 +142,50 @@ def list_images(folders=None):
     return rows
 
 
+def list_image_locations(image_ids):
+    """List every assigned location for canonical images.
+
+    Args:
+        image_ids: Canonical image identifiers to load.
+
+    Returns:
+        Mapping from image ID to ordered location dictionaries.
+    """
+    unique_ids = list(dict.fromkeys(image_ids))
+    if not unique_ids:
+        return {}
+
+    placeholders = ",".join("?" for _ in unique_ids)
+    conn = get_conn()
+    rows = conn.execute(
+        f"""
+        SELECT image_id, path, directory, filename
+        FROM image_location
+        WHERE image_id IN ({placeholders})
+        ORDER BY image_id, path
+        """,
+        unique_ids,
+    ).fetchall()
+    conn.close()
+
+    locations = defaultdict(list)
+    for row in rows:
+        locations[row["image_id"]].append(
+            {
+                "path": row["path"],
+                "directory": row["directory"],
+                "filename": row["filename"],
+            }
+        )
+    return dict(locations)
+
+
 def build_folder_tree():
+    """Build the imported folder hierarchy with unique image counts.
+
+    Returns:
+        Tree roots and aggregate image and folder counts.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
@@ -121,6 +207,14 @@ def build_folder_tree():
     nodes = {}
 
     def ensure_node(path):
+        """Create a folder node and any missing ancestors.
+
+        Args:
+            path: Folder path represented by the node.
+
+        Returns:
+            Mutable folder node dictionary.
+        """
         if path in nodes:
             return nodes[path]
         parent = os.path.dirname(path) if path != os.path.dirname(path) else None
@@ -160,6 +254,11 @@ def build_folder_tree():
             nodes[parent]["children"].append(node)
 
     def sort_nodes(items):
+        """Sort folder nodes recursively by display name.
+
+        Args:
+            items: Mutable list of folder node dictionaries.
+        """
         items.sort(key=lambda item: item["name"].casefold())
         for item in items:
             sort_nodes(item["children"])
@@ -173,6 +272,15 @@ def build_folder_tree():
 
 
 def get_available_image_path(image_id: int, preferred_path=None):
+    """Find an existing filesystem location for an image.
+
+    Args:
+        image_id: Canonical image identifier.
+        preferred_path: Optional location to try first.
+
+    Returns:
+        Existing path, or ``None`` when all locations are unavailable.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
@@ -188,6 +296,14 @@ def get_available_image_path(image_id: int, preferred_path=None):
 
 
 def delete_image(image_id: int):
+    """Delete an image and clean up empty clusters.
+
+    Args:
+        image_id: Canonical image identifier.
+
+    Returns:
+        Whether an image row was deleted.
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
@@ -207,6 +323,14 @@ def delete_image(image_id: int):
 
 
 def list_faces_by_folder(folder_path: str):
+    """List clustered faces below a folder.
+
+    Args:
+        folder_path: Folder root used to filter images.
+
+    Returns:
+        Face dictionaries for matching images.
+    """
     rows = list_images([folder_path])
     return [
         _face_row_to_dict(
@@ -226,6 +350,11 @@ def list_faces_by_folder(folder_path: str):
 
 
 def list_clusters():
+    """List all clusters with optional assigned person names.
+
+    Returns:
+        Cluster dictionaries ordered by identifier.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
@@ -243,6 +372,14 @@ def list_clusters():
 
 
 def get_cluster_faces(cluster_id: int):
+    """List faces assigned to a cluster.
+
+    Args:
+        cluster_id: Cluster identifier.
+
+    Returns:
+        Face dictionaries belonging to the cluster.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
@@ -260,6 +397,11 @@ def get_cluster_faces(cluster_id: int):
 
 
 def load_all_embeddings() -> Tuple[np.ndarray, np.ndarray]:
+    """Load persisted face embeddings and cluster identifiers.
+
+    Returns:
+        Embedding matrix and aligned cluster ID array.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
@@ -285,6 +427,12 @@ def load_all_embeddings() -> Tuple[np.ndarray, np.ndarray]:
 
 
 def assign_cluster_to_person(cluster_id: int, person_name: str):
+    """Assign a cluster to an existing or newly created person.
+
+    Args:
+        cluster_id: Cluster identifier to update.
+        person_name: Unique person display name.
+    """
     conn = get_conn()
     cur = conn.cursor()
     row = cur.execute("SELECT id FROM person WHERE name = ?", (person_name,)).fetchone()
@@ -299,6 +447,11 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
 
 
 def remove_face_from_cluster(face_id: int):
+    """Remove one face from its cluster.
+
+    Args:
+        face_id: Face identifier to update.
+    """
     conn = get_conn()
     conn.execute("UPDATE face SET cluster_id = NULL WHERE id = ?", (face_id,))
     conn.commit()
@@ -306,6 +459,11 @@ def remove_face_from_cluster(face_id: int):
 
 
 def list_persons():
+    """List known people alphabetically.
+
+    Returns:
+        Person identifier and name dictionaries.
+    """
     conn = get_conn()
     rows = conn.execute("SELECT id, name FROM person ORDER BY name").fetchall()
     conn.close()
@@ -313,6 +471,14 @@ def list_persons():
 
 
 def get_person_faces(person_id: int):
+    """List faces assigned to a person through clusters.
+
+    Args:
+        person_id: Person identifier.
+
+    Returns:
+        Face dictionaries assigned to the person.
+    """
     conn = get_conn()
     rows = conn.execute(
         """

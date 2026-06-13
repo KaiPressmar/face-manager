@@ -17,12 +17,19 @@ interface GalleryFace {
   person_name: string | null;
 }
 
+interface GalleryLocation {
+  path: string;
+  filename: string;
+  directory: string;
+}
+
 export interface GalleryImage {
   id: number;
   image_path: string;
   filename?: string;
   directory?: string;
   location_count: number;
+  locations: GalleryLocation[];
   faces: GalleryFace[];
 }
 
@@ -305,7 +312,28 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       </main>
 
       <footer className="gallery-footer">
-        <span title={image.image_path}>{image.image_path}</span>
+        <div className="gallery-locations">
+          {image.locations.map((location) => (
+            <button
+              key={location.path}
+              type="button"
+              title={location.path}
+              onClick={async () => {
+                try {
+                  await openImageLocation(image.id, location.path);
+                  setMessage("Dateispeicherort geöffnet");
+                } catch (error) {
+                  setMessage(
+                    error instanceof Error ? error.message : "Öffnen fehlgeschlagen"
+                  );
+                }
+              }}
+            >
+              <span>{location.path}</span>
+              <b>↗</b>
+            </button>
+          ))}
+        </div>
         <small>← → navigieren · Esc schließen</small>
       </footer>
 
