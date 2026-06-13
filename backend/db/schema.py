@@ -211,11 +211,32 @@ def _create_import_job_table(cur):
             processed_images INTEGER NOT NULL DEFAULT 0,
             total_faces INTEGER NOT NULL DEFAULT 0,
             processed_faces INTEGER NOT NULL DEFAULT 0,
+            stage TEXT,
+            stage_started_at TEXT,
+            stage_current INTEGER NOT NULL DEFAULT 0,
+            stage_total INTEGER NOT NULL DEFAULT 0,
+            current_file TEXT,
             last_error TEXT,
             queue_order INTEGER NOT NULL
         )
         """
     )
+    columns = {
+        row["name"]
+        for row in cur.execute("PRAGMA table_info(import_job)").fetchall()
+    }
+    additions = {
+        "stage": "TEXT",
+        "stage_started_at": "TEXT",
+        "stage_current": "INTEGER NOT NULL DEFAULT 0",
+        "stage_total": "INTEGER NOT NULL DEFAULT 0",
+        "current_file": "TEXT",
+    }
+    for column, definition in additions.items():
+        if column not in columns:
+            cur.execute(
+                f"ALTER TABLE import_job ADD COLUMN {column} {definition}"
+            )
     cur.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_import_job_queue_order

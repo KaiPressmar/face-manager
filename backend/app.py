@@ -28,8 +28,7 @@ from .services.storage import (
     list_persons,
 )
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("uvicorn.error")
 
 init_db()
 import_queue = ImportQueue(auto_start=False)

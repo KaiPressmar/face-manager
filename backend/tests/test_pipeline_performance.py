@@ -59,6 +59,46 @@ class HashedImageIteratorTest(unittest.TestCase):
             ],
         )
 
+    @patch.object(ImagePreparer, "hash_image")
+    def test_completed_iterator_yields_finished_hashes_first(self, prepare_image):
+        second_hash_ready = threading.Event()
+
+        def prepare(path):
+            if path.name == "first.jpg":
+                return path.name
+            second_hash_ready.wait(1)
+            return path.name
+
+        prepare_image.side_effect = prepare
+        paths = [
+            Path("first.jpg"),
+            Path("second.jpg"),
+        ]
+
+        results = []
+
+        def run_iterator():
+            for path, future in ImagePreparer(2).iter_hashed_completed(paths):
+                results.append((path.name, future.result()))
+
+        thread = threading.Thread(target=run_iterator)
+        thread.start()
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not results:
+            time.sleep(0.01)
+
+        self.assertEqual(results, [("first.jpg", "first.jpg")])
+        second_hash_ready.set()
+        thread.join(timeout=1)
+        self.assertEqual(
+            results,
+            [
+                ("first.jpg", "first.jpg"),
+                ("second.jpg", "second.jpg"),
+            ],
+        )
+
 
 class ParallelImportIntegrationTest(unittest.TestCase):
     def test_parallel_preparation_imports_images_and_reports_progress(self):
@@ -77,9 +117,12 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             resources.get_model.return_value = model
             resources.get_clusterer.return_value = Mock()
             progress = {}
+            stages = []
 
             def update(changes):
                 progress.update(changes)
+                if "stage" in changes:
+                    stages.append(changes["stage"])
 
             db_path = root / "database.sqlite"
             with (
@@ -105,6 +148,20 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(processed_count, 3)
             self.assertEqual(model.detect_and_embed.call_count, 3)
             self.assertEqual(progress["processed_images"], 3)
+            self.assertEqual(progress["stage"], "finalizing")
+            self.assertEqual(progress["stage_current"], 3)
+            self.assertEqual(
+                stages,
+                [
+                    "scanning",
+                    "hashing",
+                    "processing",
+                    "loading_model",
+                    "loading_index",
+                    "processing",
+                    "finalizing",
+                ],
+            )
 
     def test_cancellation_stops_before_the_next_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -153,6 +210,77 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(processed_count, 1)
             self.assertEqual(model.detect_and_embed.call_count, 1)
 
+    def test_processing_can_start_before_all_hashes_finish(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo_dir = root / "photos"
+            photo_dir.mkdir()
+            first = photo_dir / "first.jpg"
+            second = photo_dir / "second.jpg"
+            Image.new("RGB", (32, 32), color=(100, 0, 0)).save(first)
+            Image.new("RGB", (32, 32), color=(0, 100, 0)).save(second)
+
+            second_hash_blocked = threading.Event()
+            model_called = threading.Event()
+
+            real_hash_image = ImagePreparer.hash_image
+
+            def slow_hash(path):
+                if path == second:
+                    second_hash_blocked.wait(1)
+                return real_hash_image(path)
+
+            model = Mock(compute_mode="gpu")
+            model.detect_and_embed.return_value = []
+
+            def detect(_):
+                model_called.set()
+                return []
+
+            model.detect_and_embed.side_effect = detect
+            resources = Mock()
+            resources.get_model.return_value = model
+            resources.get_clusterer.return_value = Mock()
+            db_path = root / "database.sqlite"
+
+            with (
+                patch.object(schema, "DB_PATH", str(db_path)),
+                patch.object(ImagePreparer, "hash_image", side_effect=slow_hash),
+                patch(
+                    "backend.services.pipeline.get_import_worker_count",
+                    return_value=2,
+                ),
+            ):
+                schema.init_db()
+
+                def run_import():
+                    ImportProcessor(resources).process(
+                        str(photo_dir),
+                        lambda changes: None,
+                        threading.Event(),
+                    )
+
+                thread = threading.Thread(target=run_import)
+                thread.start()
+
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline and not model_called.is_set():
+                    time.sleep(0.01)
+
+                self.assertTrue(model_called.is_set())
+                self.assertFalse(second_hash_blocked.is_set())
+                second_hash_blocked.set()
+                thread.join(timeout=5)
+                self.assertFalse(thread.is_alive())
+
+                conn = schema.get_conn()
+                processed_count = conn.execute(
+                    "SELECT COUNT(*) FROM image WHERE processed_at IS NOT NULL"
+                ).fetchone()[0]
+                conn.close()
+
+                self.assertEqual(processed_count, 2)
+
             resumed_model = Mock(compute_mode="gpu")
             resumed_model.detect_and_embed.return_value = []
             resumed_resources = Mock()
@@ -177,8 +305,8 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 ).fetchone()[0]
                 conn.close()
 
-            self.assertEqual(resumed_count, 3)
-            self.assertEqual(resumed_model.detect_and_embed.call_count, 2)
+            self.assertEqual(resumed_count, 2)
+            self.assertEqual(resumed_model.detect_and_embed.call_count, 0)
 
     def test_repeat_import_hashes_every_file_without_repeating_inference(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -258,9 +386,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     threading.Event(),
                 )
                 conn = schema.get_conn()
-                image_count = conn.execute(
-                    "SELECT COUNT(*) FROM image"
-                ).fetchone()[0]
+                image_count = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
                 location_count = conn.execute(
                     "SELECT COUNT(*) FROM image_location"
                 ).fetchone()[0]
@@ -309,9 +435,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     threading.Event(),
                 )
                 conn = schema.get_conn()
-                image_count = conn.execute(
-                    "SELECT COUNT(*) FROM image"
-                ).fetchone()[0]
+                image_count = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
                 location_count = conn.execute(
                     "SELECT COUNT(*) FROM image_location"
                 ).fetchone()[0]
@@ -367,9 +491,9 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                         "SELECT path FROM image_location ORDER BY path"
                     ).fetchall()
                 ]
-                canonical_path = conn.execute(
-                    "SELECT path FROM image"
-                ).fetchone()["path"]
+                canonical_path = conn.execute("SELECT path FROM image").fetchone()[
+                    "path"
+                ]
                 conn.close()
 
             self.assertEqual(model.detect_and_embed.call_count, 1)
@@ -464,9 +588,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     threading.Event(),
                 )
                 conn = schema.get_conn()
-                image_count = conn.execute(
-                    "SELECT COUNT(*) FROM image"
-                ).fetchone()[0]
+                image_count = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
                 location_count = conn.execute(
                     "SELECT COUNT(*) FROM image_location"
                 ).fetchone()[0]
@@ -514,9 +636,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     threading.Event(),
                 )
                 conn = schema.get_conn()
-                image_count = conn.execute(
-                    "SELECT COUNT(*) FROM image"
-                ).fetchone()[0]
+                image_count = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
                 locations = conn.execute(
                     """
                     SELECT location.path, i.content_hash

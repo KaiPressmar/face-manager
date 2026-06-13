@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
-from collections import OrderedDict, deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
@@ -22,9 +22,28 @@ if TYPE_CHECKING:
 
 ProgressCallback = Callable[[dict], None]
 
+_PROCESSING_SLOT_LOCK = threading.Lock()
+_PROCESSING_SLOT_COUNT = 1
+_PROCESSING_SLOT_SEMAPHORE: threading.BoundedSemaphore = threading.BoundedSemaphore(1)
+
 
 class ImportCancelled(Exception):
     """Signal that an import job was cancelled by the user."""
+
+
+def configure_processing_slots(slot_count: int) -> None:
+    """Configure the shared concurrent processing slot budget.
+
+    Args:
+        slot_count: Maximum number of jobs allowed in processing stage.
+    """
+    global _PROCESSING_SLOT_COUNT, _PROCESSING_SLOT_SEMAPHORE
+    bounded = max(1, int(slot_count))
+    with _PROCESSING_SLOT_LOCK:
+        if bounded == _PROCESSING_SLOT_COUNT:
+            return
+        _PROCESSING_SLOT_COUNT = bounded
+        _PROCESSING_SLOT_SEMAPHORE = threading.BoundedSemaphore(bounded)
 
 
 @dataclass
@@ -130,6 +149,55 @@ class ImagePreparer:
                         )
                 yield path, future
 
+    def iter_hashed_completed(
+        self,
+        paths: Iterable[Path],
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Iterator[Tuple[Path, Future[HashedImage]]]:
+        """Yield hashing futures as they finish.
+
+        Args:
+            paths: Ordered image paths to prepare.
+            cancel_event: Optional event that stops scheduling additional work.
+
+        Yields:
+            Tuples containing the source path and its hashing future.
+        """
+        iterator = iter(paths)
+        pending: dict[Future[HashedImage], Path] = {}
+
+        with ThreadPoolExecutor(
+            max_workers=self.worker_count,
+            thread_name_prefix="image-prep",
+        ) as executor:
+            for _ in range(self.worker_count):
+                if cancel_event and cancel_event.is_set():
+                    break
+                try:
+                    path = next(iterator)
+                except StopIteration:
+                    break
+                future = executor.submit(self.hash_image, path)
+                pending[future] = path
+
+            while pending:
+                completed, _ = wait(
+                    tuple(pending),
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in completed:
+                    path = pending.pop(future)
+                    yield path, future
+
+                    if cancel_event and cancel_event.is_set():
+                        continue
+                    try:
+                        next_path = next(iterator)
+                    except StopIteration:
+                        continue
+                    next_future = executor.submit(self.hash_image, next_path)
+                    pending[next_future] = next_path
+
 
 class ImportResources:
     """Lazily own the model and clustering index shared by queued imports."""
@@ -207,13 +275,24 @@ class ImportProcessor:
         """
         folder = Path(folder_path)
         if not folder.is_dir():
-            raise FileNotFoundError(
-                f"Import folder no longer exists: {folder_path}"
-            )
+            raise FileNotFoundError(f"Import folder no longer exists: {folder_path}")
 
-        image_paths = self._find_images(folder)
         progress_callback(
             {
+                "stage": "scanning",
+                "stage_current": 0,
+                "stage_total": 0,
+                "current_file": str(folder),
+            }
+        )
+        image_paths = self._find_images(folder, progress_callback, cancel_event)
+        progress_callback(
+            {
+                "stage": "hashing",
+                "stage_current": 0,
+                "stage_total": len(image_paths),
+                "hashed_images": 0,
+                "current_file": None,
                 "total_images": len(image_paths),
                 "processed_images": 0,
                 "total_faces": 0,
@@ -222,63 +301,34 @@ class ImportProcessor:
         )
 
         conn = get_conn()
+        processing_slot_acquired = False
         try:
             cursor = conn.cursor()
             worker_count = get_import_worker_count(get_compute_mode())
             preparer = ImagePreparer(worker_count)
-            content_groups: OrderedDict[str, list[HashedImage]] = OrderedDict()
+            resources_loaded = False
+            content_groups: dict[str, list[HashedImage]] = {}
             completed_images = 0
+            hashed_images = 0
+            processing_started = False
 
-            for image_path, future in preparer.iter_hashed(
+            for image_path, future in preparer.iter_hashed_completed(
                 image_paths, cancel_event
             ):
                 self._raise_if_cancelled(cancel_event)
                 try:
                     hashed = future.result()
-                    content_groups.setdefault(hashed.content_hash, []).append(
-                        hashed
-                    )
-                except ImportCancelled:
-                    raise
-                except Exception as exc:
-                    progress_callback(
-                        {"last_error": f"{image_path}: {exc}"}
-                    )
-                    completed_images += 1
-                    progress_callback(
-                        {"processed_images": completed_images}
-                    )
+                    content_groups.setdefault(hashed.content_hash, []).append(hashed)
+                    matching_content = cursor.execute(
+                        """
+                        SELECT id, processed_at
+                        FROM image
+                        WHERE content_hash = ?
+                        """,
+                        (hashed.content_hash,),
+                    ).fetchone()
 
-            for content_hash, locations in content_groups.items():
-                self._raise_if_cancelled(cancel_event)
-                matching_content = cursor.execute(
-                    """
-                    SELECT id, processed_at
-                    FROM image
-                    WHERE content_hash = ?
-                    """,
-                    (content_hash,),
-                ).fetchone()
-
-                if matching_content and matching_content["processed_at"]:
-                    known_paths = {
-                        row["path"]
-                        for row in cursor.execute(
-                            """
-                            SELECT path
-                            FROM image_location
-                            WHERE image_id = ?
-                            """,
-                            (matching_content["id"],),
-                        ).fetchall()
-                    }
-                    discovered_paths = {
-                        hashed.normalized_path for hashed in locations
-                    }
-                    has_new_location = bool(
-                        discovered_paths - known_paths
-                    )
-                    for hashed in locations:
+                    if matching_content and matching_content["processed_at"]:
                         self._attach_location(
                             cursor,
                             conn,
@@ -287,64 +337,149 @@ class ImportProcessor:
                         )
                         completed_images += 1
                         progress_callback(
-                            {"processed_images": completed_images}
+                            {
+                                "processed_images": completed_images,
+                                "stage_current": completed_images,
+                                "current_file": str(hashed.path),
+                            }
                         )
-                    if has_new_location:
-                        self._prune_stale_locations(
-                            cursor,
-                            conn,
-                            matching_content["id"],
-                            content_hash,
-                            discovered_paths,
-                        )
-                    continue
+                    else:
+                        primary = hashed
+                        try:
+                            if not processing_started:
+                                self._acquire_processing_slot(cancel_event)
+                                processing_slot_acquired = True
+                                progress_callback(
+                                    {
+                                        "stage": "processing",
+                                        "stage_current": completed_images,
+                                        "stage_total": len(image_paths),
+                                        "current_file": None,
+                                    }
+                                )
+                                processing_started = True
 
-                primary = locations[0]
-                try:
-                    image_id = (
-                        matching_content["id"]
-                        if matching_content
-                        else self._create_image(cursor, conn, primary)
-                    )
-                    self._attach_location(
-                        cursor, conn, image_id, primary
-                    )
-                    self._raise_if_cancelled(cancel_event)
-                    model = self.resources.get_model()
-                    clusterer = self.resources.get_clusterer()
-                    image_np = preparer.decode(primary.path)
-                    self._process_image(
-                        cursor,
-                        conn,
-                        image_id,
-                        image_np,
-                        model,
-                        clusterer,
-                        progress_callback,
-                    )
-                    for duplicate in locations[1:]:
-                        self._attach_location(
-                            cursor, conn, image_id, duplicate
-                        )
+                            image_id = (
+                                matching_content["id"]
+                                if matching_content
+                                else self._create_image(cursor, conn, primary)
+                            )
+                            self._attach_location(cursor, conn, image_id, primary)
+                            self._raise_if_cancelled(cancel_event)
+                            if not resources_loaded:
+                                progress_callback(
+                                    {
+                                        "stage": "loading_model",
+                                        "current_file": None,
+                                    }
+                                )
+                                model = self.resources.get_model()
+                                progress_callback({"stage": "loading_index"})
+                                clusterer = self.resources.get_clusterer()
+                                resources_loaded = True
+                                progress_callback(
+                                    {
+                                        "stage": "processing",
+                                        "stage_current": completed_images,
+                                        "stage_total": len(image_paths),
+                                    }
+                                )
+                            image_np = preparer.decode(primary.path)
+                            progress_callback({"current_file": str(primary.path)})
+                            self._process_image(
+                                cursor,
+                                conn,
+                                image_id,
+                                image_np,
+                                model,
+                                clusterer,
+                                progress_callback,
+                            )
+                        except ImportCancelled:
+                            raise
+                        except Exception as exc:
+                            conn.rollback()
+                            progress_callback({"last_error": f"{primary.path}: {exc}"})
+                        finally:
+                            completed_images += 1
+                            progress_callback(
+                                {
+                                    "processed_images": completed_images,
+                                    "stage_current": completed_images,
+                                }
+                            )
                 except ImportCancelled:
                     raise
                 except Exception as exc:
-                    conn.rollback()
-                    progress_callback(
-                        {"last_error": f"{primary.path}: {exc}"}
-                    )
+                    progress_callback({"last_error": f"{image_path}: {exc}"})
+                    completed_images += 1
+                    progress_callback({"processed_images": completed_images})
                 finally:
-                    completed_images += len(locations)
-                    progress_callback(
-                        {"processed_images": completed_images}
-                    )
+                    hashed_images += 1
+                    progress_update: dict[str, object] = {
+                        "current_file": str(image_path),
+                        "hashed_images": hashed_images,
+                    }
+                    if not processing_started:
+                        progress_update["stage_current"] = hashed_images
+                    progress_callback(progress_update)
+
+            for content_hash, locations in content_groups.items():
+                matching_content = cursor.execute(
+                    """
+                    SELECT id, processed_at
+                    FROM image
+                    WHERE content_hash = ?
+                    """,
+                    (content_hash,),
+                ).fetchone()
+                if not matching_content or not matching_content["processed_at"]:
+                    continue
+                discovered_paths = {hashed.normalized_path for hashed in locations}
+                self._prune_stale_locations(
+                    cursor,
+                    conn,
+                    matching_content["id"],
+                    content_hash,
+                    discovered_paths,
+                )
 
             self._raise_if_cancelled(cancel_event)
+            progress_callback(
+                {
+                    "stage": "finalizing",
+                    "stage_current": len(image_paths),
+                    "stage_total": len(image_paths),
+                    "current_file": None,
+                }
+            )
         finally:
+            if processing_slot_acquired:
+                self._release_processing_slot()
             conn.close()
 
+    @staticmethod
+    def _acquire_processing_slot(cancel_event: threading.Event) -> None:
+        """Acquire the shared processing slot with cancellation checks."""
+        while True:
+            if cancel_event.is_set():
+                raise ImportCancelled()
+            acquired = _PROCESSING_SLOT_SEMAPHORE.acquire(timeout=0.2)
+            if acquired:
+                return
+
+    @staticmethod
+    def _release_processing_slot() -> None:
+        """Release one shared processing slot."""
+        _PROCESSING_SLOT_SEMAPHORE.release()
+
     @classmethod
-    def _find_images(cls, folder: Path) -> list[Path]:
+    def _find_images(
+        cls,
+        folder: Path,
+        progress_callback: Optional[ProgressCallback] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> list[Path]:
         """Find supported images below a folder.
 
         Args:
@@ -353,11 +488,24 @@ class ImportProcessor:
         Returns:
             Sorted image paths for deterministic queue processing.
         """
-        return sorted(
-            path
-            for path in folder.rglob("*")
-            if path.suffix.lower() in cls.IMAGE_SUFFIXES
-        )
+        image_paths = []
+        for root, directories, filenames in os.walk(folder):
+            directories.sort()
+            filenames.sort()
+            if cancel_event is not None:
+                cls._raise_if_cancelled(cancel_event)
+            for filename in filenames:
+                path = Path(root) / filename
+                if path.suffix.lower() in cls.IMAGE_SUFFIXES:
+                    image_paths.append(path)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage_current": len(image_paths),
+                        "current_file": root,
+                    }
+                )
+        return image_paths
 
     @staticmethod
     def _raise_if_cancelled(cancel_event: threading.Event) -> None:
@@ -398,9 +546,7 @@ class ImportProcessor:
         for face in faces:
             x1, y1, width, height = face["bbox"]
             embedding = face["embedding"]
-            cluster_ids, _ = clusterer.add_and_assign(
-                np.expand_dims(embedding, axis=0)
-            )
+            cluster_ids, _ = clusterer.add_and_assign(np.expand_dims(embedding, axis=0))
             cluster_id = int(cluster_ids[0])
             cursor.execute(
                 "INSERT OR IGNORE INTO cluster(id, label) VALUES (?, ?)",
@@ -616,8 +762,7 @@ class ImportProcessor:
                 continue
             try:
                 location_is_valid = (
-                    os.path.isfile(path)
-                    and calculate_file_hash(path) == expected_hash
+                    os.path.isfile(path) and calculate_file_hash(path) == expected_hash
                 )
             except OSError:
                 location_is_valid = False

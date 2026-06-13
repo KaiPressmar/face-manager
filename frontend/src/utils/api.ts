@@ -31,6 +31,15 @@ export type ImportJobStatus =
   | "failed"
   | "cancelled";
 
+export type ImportJobStage =
+  | "scanning"
+  | "hashing"
+  | "loading_model"
+  | "loading_index"
+  | "processing"
+  | "finalizing"
+  | "completed";
+
 export interface ImportJob {
   id: string;
   folder_path: string;
@@ -42,14 +51,38 @@ export interface ImportJob {
   processed_images: number;
   total_faces: number;
   processed_faces: number;
+  stage: ImportJobStage | null;
+  stage_started_at: string | null;
+  stage_current: number;
+  stage_total: number;
+  current_file: string | null;
   last_error: string | null;
   queue_position: number | null;
+  elapsed_seconds: number | null;
+  eta_seconds: number | null;
+  stations?: ImportStation[];
+}
+
+export interface ImportStation {
+  job_id: string;
+  key: string;
+  label: string;
+  state: "queued" | "active" | "done" | "failed" | "cancelled";
+  progress_current: number;
+  progress_total: number;
+  eta_seconds: number | null;
+  current_file: string | null;
+  detail: string | null;
 }
 
 export interface ImportQueueState {
   jobs: ImportJob[];
   active_job_id: string | null;
+  active_job_ids?: string[];
+  running_count?: number;
   queued_count: number;
+  max_concurrent_jobs?: number;
+  overall_eta_seconds: number | null;
 }
 
 export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
@@ -90,16 +123,10 @@ export async function fetchClusterFaces(id: number) {
   return await res.json();
 }
 
-export async function removeFaceFromCluster(
-  clusterId: number,
-  faceId: number
-) {
-  await fetch(
-    `${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`,
-    {
-      method: "POST",
-    }
-  );
+export async function removeFaceFromCluster(clusterId: number, faceId: number) {
+  await fetch(`${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`, {
+    method: "POST",
+  });
 }
 
 export async function dissolveCluster(clusterId: number) {
@@ -110,16 +137,13 @@ export async function dissolveCluster(clusterId: number) {
 
 export async function assignClusterToPerson(
   clusterId: number,
-  personName: string
+  personName: string,
 ) {
-  await fetch(
-    `${API_BASE}/clusters/${clusterId}/assign-person`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ person_name: personName }),
-    }
-  );
+  await fetch(`${API_BASE}/clusters/${clusterId}/assign-person`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ person_name: personName }),
+  });
 }
 
 export async function listPersons() {
