@@ -72,6 +72,48 @@ export interface AppSettings {
   database_path: string;
 }
 
+export interface FaceImage {
+  id: number;
+  image_path: string;
+  filename?: string;
+  directory?: string;
+  created_at: string | null;
+  content_hash: string | null;
+  location_count: number;
+  locations: {
+    path: string;
+    filename: string;
+    directory: string;
+  }[];
+  faces: {
+    id: number;
+    bbox_x: number;
+    bbox_y: number;
+    bbox_w: number;
+    bbox_h: number;
+    cluster_id: number | null;
+    person_name: string | null;
+  }[];
+}
+
+export interface ImagePage {
+  items: FaceImage[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  available_persons: string[];
+}
+
+export interface FetchImagesParams {
+  folders?: string[];
+  persons?: string[];
+  sortBy?: "date" | "folder";
+  sortDirection?: "desc" | "asc";
+  limit?: number;
+  offset?: number;
+}
+
 export type ImportJobStatus =
   | "queued"
   | "running"
@@ -185,12 +227,33 @@ export async function importDatabase(file: File): Promise<void> {
   }
 }
 
-export async function fetchImages(folders: string[] = []) {
+export async function fetchImages({
+  folders = [],
+  persons = [],
+  sortBy = "date",
+  sortDirection = "desc",
+  limit = 40,
+  offset = 0,
+}: FetchImagesParams = {}): Promise<ImagePage> {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));
+  persons.forEach((person) => params.append("persons", person));
+  params.set("sort_by", sortBy);
+  params.set("sort_direction", sortDirection);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
   const query = params.toString();
   const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
-  if (!res.ok) return [];
+  if (!res.ok) {
+    return {
+      items: [],
+      total: 0,
+      offset,
+      limit,
+      has_more: false,
+      available_persons: [],
+    };
+  }
   return await res.json();
 }
 

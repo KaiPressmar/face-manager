@@ -1,129 +1,92 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useEffect, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import FullscreenImageGallery from "./FullscreenImageGallery";
-import { deleteImage, imageFileUrl } from "../../utils/api";
+import { deleteImage, FaceImage, imageFileUrl } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 
-interface Face {
-  id: number;
-  bbox_x: number;
-  bbox_y: number;
-  bbox_w: number;
-  bbox_h: number;
-  cluster_id: number | null;
-  person_name: string | null;
-}
-
-interface ImageLocation {
-  path: string;
-  filename: string;
-  directory: string;
-}
-
-interface ImageData {
-  id: number;
-  image_path: string;
-  filename?: string;
-  directory?: string;
-  content_hash: string | null;
-  location_count: number;
-  locations: ImageLocation[];
-  faces: Face[];
-}
-
 interface ImageGridProps {
-  images: ImageData[];
-  selectedPersons: string[];
-  isLoading: boolean; // Neues Interface-Property
+  images: FaceImage[];
+  isLoading: boolean;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
   onImageDeleted: (imageId: number) => void;
 }
 
+const breakpointCols = {
+  default: 4,
+  1400: 3,
+  900: 2,
+  600: 1,
+};
+
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
-  selectedPersons,
   isLoading,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
   onImageDeleted,
 }) => {
-  // 1. Bilder filtern
-  const filtered = useMemo(() => {
-    if (!Array.isArray(images)) return [];
-    const uniqueImages = Array.from(
-      new Map(
-        images.map((image) => [image.content_hash || `id:${image.id}`, image])
-      ).values()
-    );
-    if (selectedPersons.length === 0) return uniqueImages;
-
-    return uniqueImages.filter((img) => {
-      const personsInImage = img.faces.map((f) => f.person_name || "Unbekannt");
-      return selectedPersons.every((p) => personsInImage.includes(p));
-    });
-  }, [images, selectedPersons]);
-
-  // 2. Pagination
-  const [visibleCount, setVisibleCount] = useState(40);
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
-  const visibleImages = filtered.slice(0, visibleCount);
+  const [imageDimensions, setImageDimensions] = useState<
+    Record<string, { w: number; h: number }>
+  >({});
+  const [loadMoreAnchor, setLoadMoreAnchor] = useState<HTMLDivElement | null>(null);
 
-  const [imageDimensions, setImageDimensions] = useState<Record<string, { w: number; h: number }>>({});
-
-  // 3. Infinite Scroll
   useEffect(() => {
-    if (isLoading) return; // Kein Scroll-Listener während des Ladens nötig
+    if (isLoading || !hasMore || isLoadingMore || !loadMoreAnchor) return;
 
     const scrollContainer = document.querySelector(".page-content");
     if (!scrollContainer) return;
 
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-      if (scrollHeight - scrollTop <= clientHeight + 1000) {
-        setVisibleCount((prev) => {
-          if (prev >= filtered.length) return prev;
-          return prev + 20;
-        });
-      }
-    };
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onLoadMore();
+        }
+      },
+      {
+        root: scrollContainer,
+        rootMargin: "1200px 0px 800px 0px",
+      },
+    );
 
-    scrollContainer.addEventListener("scroll", handleScroll);
-    return () => scrollContainer.removeEventListener("scroll", handleScroll);
-  }, [filtered.length, isLoading]);
+    observer.observe(loadMoreAnchor);
+    return () => observer.disconnect();
+  }, [hasMore, isLoading, isLoadingMore, loadMoreAnchor, onLoadMore]);
 
-  // Bildabmessungen ermitteln
   useEffect(() => {
     if (isLoading) return;
 
-    visibleImages.forEach((img) => {
+    images.forEach((img) => {
       if (imageDimensions[img.image_path]) return;
 
       const imgSrc = imageFileUrl(img.id);
-      const i = new Image();
-      i.src = imgSrc;
-      i.onload = () => {
+      const image = new Image();
+      image.src = imgSrc;
+      image.onload = () => {
         setImageDimensions((prev) => ({
           ...prev,
-          [img.image_path]: { w: i.naturalWidth, h: i.naturalHeight },
+          [img.image_path]: { w: image.naturalWidth, h: image.naturalHeight },
         }));
       };
     });
-  }, [visibleImages, imageDimensions, isLoading]);
+  }, [images, imageDimensions, isLoading]);
 
   useEffect(() => {
-    setVisibleCount(40);
-    setGalleryIndex(null);
-  }, [selectedPersons]);
+    setGalleryIndex((current) => {
+      if (current === null) return null;
+      if (current >= images.length) return null;
+      return current;
+    });
+  }, [images.length]);
 
-  const breakpointCols = {
-    default: 4,
-    1400: 3,
-    900: 2,
-    600: 1,
-  };
-
-  const removeImage = async (image: ImageData) => {
+  const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
     const confirmed = window.confirm(
-      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`
+      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`,
     );
     if (!confirmed) return false;
 
@@ -132,25 +95,23 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       onImageDeleted(image.id);
       setGalleryIndex((current) => {
         if (current === null) return null;
-        if (filtered.length <= 1) return null;
-        return Math.min(current, filtered.length - 2);
+        if (images.length <= 1) return null;
+        return Math.min(current, images.length - 2);
       });
       return true;
     } catch (error) {
       window.alert(
         error instanceof Error
           ? error.message
-          : "Das Bild konnte nicht entfernt werden."
+          : "Das Bild konnte nicht entfernt werden.",
       );
       return false;
     }
   };
 
-  // 🔥 SKELETON RENDERER: Wenn die API noch lädt, zeigen wir sofort animierte Dummys an
   if (isLoading) {
-    // Künstliche Höhen für den Masonry-Effekt (abwechselnd Hoch- und Querformat)
     const dummyHeights = ["350px", "200px", "400px", "250px", "300px", "220px"];
-    
+
     return (
       <Masonry
         breakpointCols={breakpointCols}
@@ -171,7 +132,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     );
   }
 
-  if (filtered.length === 0) {
+  if (images.length === 0) {
     return (
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
@@ -181,7 +142,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     );
   }
 
-  // Normaler Renderer für echte Bilder
   return (
     <>
       <Masonry
@@ -189,7 +149,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         className="masonry-grid"
         columnClassName="masonry-column"
       >
-        {visibleImages.map((img) => {
+        {images.map((img) => {
           const dims = imageDimensions[img.image_path];
           const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
@@ -200,15 +160,11 @@ const ImageGrid: React.FC<ImageGridProps> = ({
               role="button"
               tabIndex={0}
               aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-              onClick={() =>
-                setGalleryIndex(filtered.findIndex((item) => item.id === img.id))
-              }
+              onClick={() => setGalleryIndex(images.findIndex((item) => item.id === img.id))}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  setGalleryIndex(
-                    filtered.findIndex((item) => item.id === img.id)
-                  );
+                  setGalleryIndex(images.findIndex((item) => item.id === img.id));
                 }
               }}
               style={{
@@ -280,13 +236,16 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         })}
       </Masonry>
 
-      {galleryIndex !== null && filtered[galleryIndex] && (
+      {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
+      {hasMore && <div ref={setLoadMoreAnchor} className="image-grid-anchor" aria-hidden="true" />}
+
+      {galleryIndex !== null && images[galleryIndex] && (
         <FullscreenImageGallery
-          images={filtered}
+          images={images}
           activeIndex={galleryIndex}
           onChange={setGalleryIndex}
           onClose={() => setGalleryIndex(null)}
-          onDelete={(image) => removeImage(image as ImageData)}
+          onDelete={(image) => removeImage(image as FaceImage)}
         />
       )}
     </>

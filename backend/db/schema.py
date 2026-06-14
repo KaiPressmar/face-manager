@@ -1,6 +1,7 @@
 import hashlib
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import DB_PATH
@@ -33,6 +34,23 @@ def _split_image_path(image_path: str):
     """
     normalized = os.path.normpath(image_path)
     return image_path, os.path.dirname(normalized), os.path.basename(normalized)
+
+
+def get_file_created_at(path: str) -> str | None:
+    """Return the best available filesystem creation timestamp for one path."""
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+
+    created_timestamp = getattr(stat_result, "st_birthtime", None)
+    if created_timestamp is None:
+        created_timestamp = stat_result.st_mtime
+
+    try:
+        return datetime.fromtimestamp(created_timestamp, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _create_image_table(cur):
@@ -69,6 +87,7 @@ def _create_image_location_table(cur):
             path TEXT NOT NULL UNIQUE,
             directory TEXT NOT NULL,
             filename TEXT NOT NULL,
+            created_at TEXT,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
         )
         """
@@ -113,11 +132,18 @@ def _migrate_image_locations(conn):
     cur = conn.cursor()
     _ensure_content_hash_column(cur)
     _create_image_location_table(cur)
+    location_columns = {
+        row["name"] for row in cur.execute("PRAGMA table_info(image_location)").fetchall()
+    }
+    if "created_at" not in location_columns:
+        cur.execute("ALTER TABLE image_location ADD COLUMN created_at TEXT")
     cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     cur.execute(
         """
-        INSERT OR IGNORE INTO image_location(image_id, path, directory, filename)
-        SELECT id, path, directory, filename FROM image
+        INSERT OR IGNORE INTO image_location(
+            image_id, path, directory, filename, created_at
+        )
+        SELECT id, path, directory, filename, NULL FROM image
         """
     )
 
@@ -165,6 +191,15 @@ def _migrate_image_locations(conn):
                 (canonical_id, duplicate_id),
             )
             cur.execute("DELETE FROM image WHERE id = ?", (duplicate_id,))
+
+    missing_created_at = cur.execute(
+        "SELECT id, path FROM image_location WHERE created_at IS NULL"
+    ).fetchall()
+    for row in missing_created_at:
+        cur.execute(
+            "UPDATE image_location SET created_at = ? WHERE id = ?",
+            (get_file_created_at(row["path"]), row["id"]),
+        )
 
 
 def _create_face_table(cur, table_name="face"):
@@ -349,6 +384,14 @@ def init_db():
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_location_directory "
         "ON image_location(directory)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_location_image_path "
+        "ON image_location(image_id, path)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_location_created_at "
+        "ON image_location(created_at)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")

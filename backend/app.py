@@ -37,9 +37,11 @@ from .services.storage import (
     get_available_image_path,
     get_cluster_distance_threshold,
     list_image_locations,
+    list_available_image_persons,
     get_person_faces,
-    list_images,
+    list_images_page,
     list_persons,
+    invalidate_image_query_cache,
     set_cluster_distance_threshold,
 )
 
@@ -539,6 +541,7 @@ def api_remove_face_from_cluster(cluster_id: int, face_id: int):
         raise HTTPException(status_code=404, detail="Face not in this cluster")
     conn.commit()
     conn.close()
+    invalidate_image_query_cache()
     return {"status": "ok"}
 
 
@@ -557,6 +560,7 @@ def api_dissolve_cluster(cluster_id: int):
     cur.execute("UPDATE face SET cluster_id = NULL WHERE cluster_id = ?", (cluster_id,))
     conn.commit()
     conn.close()
+    invalidate_image_query_cache()
     return {"status": "ok"}
 
 
@@ -736,18 +740,37 @@ def get_folders(request: Request):
 
 
 @app.get("/api/images")
-def get_images(request: Request, folders: List[str] = Query(default=[])):
+def get_images(
+    request: Request,
+    folders: List[str] = Query(default=[]),
+    persons: List[str] = Query(default=[]),
+    sort_by: str = Query(default="date"),
+    sort_direction: str = Query(default="desc"),
+    limit: int = Query(default=40, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
     """List images and oriented face boxes.
 
     Args:
         folders: Optional folder roots used to filter images.
+        persons: Optional person names used to require matching faces.
+        sort_by: Primary gallery sort key.
+        sort_direction: Primary gallery sort direction.
+        limit: Maximum number of images returned in one page.
+        offset: Starting image offset for pagination.
 
     Returns:
-        Image dictionaries containing nested face data.
+        Paginated image dictionaries containing nested face data.
     """
     display_platform = get_display_platform(request)
-    rows = list_images(
-        [normalize_import_folder_path(folder) for folder in folders]
+    normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
+    rows, total = list_images_page(
+        folders=normalized_folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=limit,
+        offset=offset,
     )
     images = {}
 
@@ -767,6 +790,7 @@ def get_images(request: Request, folders: List[str] = Query(default=[])):
                     else r["directory"]
                 ),
                 "filename": r["filename"],
+                "created_at": r["created_at"],
                 "content_hash": r["content_hash"],
                 "location_count": r["location_count"],
                 "faces": [],
@@ -792,13 +816,21 @@ def get_images(request: Request, folders: List[str] = Query(default=[])):
             }
         )
 
-    locations_by_image = list_image_locations(images.keys())
+    locations_by_image = list_image_locations(list(images.keys()))
     for image_id, image in images.items():
         locations = locations_by_image.get(image_id, [])
         image["locations"] = serialize_image_locations(locations, display_platform)
         image["location_count"] = len(locations)
 
-    return list(images.values())
+    items = list(images.values())
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(items) < total,
+        "available_persons": list_available_image_persons(normalized_folders),
+    }
 
 
 # -----------------------------
