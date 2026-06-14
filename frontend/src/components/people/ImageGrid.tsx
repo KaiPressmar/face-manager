@@ -17,12 +17,6 @@ interface ImageGridProps {
   onImageDeleted: (imageId: number) => void;
 }
 
-interface ImageGroup {
-  key: string;
-  label: string;
-  images: FaceImage[];
-}
-
 const breakpointCols = {
   default: 4,
   1400: 3,
@@ -47,17 +41,6 @@ function compareValues(
 
 function imageTimestamp(image: FaceImage) {
   return image.created_at ? new Date(image.created_at).getTime() : 0;
-}
-
-function formatDateLabel(createdAt: string | null) {
-  if (!createdAt) return "Unknown date";
-  const date = new Date(createdAt);
-  if (Number.isNaN(date.getTime())) return "Unknown date";
-  return new Intl.DateTimeFormat(undefined, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  }).format(date);
 }
 
 function sortImages(
@@ -89,45 +72,6 @@ function sortImages(
     );
   });
 }
-
-function groupImages(
-  images: FaceImage[],
-  groupingMode: ImageGroupingMode,
-  sortDirection: SortDirection,
-) {
-  const grouped = new Map<string, ImageGroup>();
-  const sortedImages = sortImages(images, groupingMode, sortDirection);
-
-  sortedImages.forEach((image) => {
-    const groupKey =
-      groupingMode === "date"
-        ? image.created_at?.slice(0, 10) || "unknown-date"
-        : image.directory || "unknown-folder";
-    const groupLabel =
-      groupingMode === "date"
-        ? formatDateLabel(image.created_at)
-        : image.directory || "Unknown folder";
-
-    const existing = grouped.get(groupKey);
-    if (existing) {
-      existing.images.push(image);
-      return;
-    }
-
-    grouped.set(groupKey, {
-      key: groupKey,
-      label: groupLabel,
-      images: [image],
-    });
-  });
-
-  const groups = Array.from(grouped.values());
-  groups.sort((left, right) =>
-    compareValues(left.key, right.key, sortDirection),
-  );
-  return groups;
-}
-
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
   selectedPersons,
@@ -162,11 +106,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const [imageDimensions, setImageDimensions] = useState<
     Record<string, { w: number; h: number }>
   >({});
-
-  const groupedVisibleImages = useMemo(
-    () => groupImages(visibleImages, groupingMode, sortDirection),
-    [groupingMode, sortDirection, visibleImages],
-  );
 
   useEffect(() => {
     if (isLoading) return;
@@ -272,114 +211,103 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
   return (
     <>
-      <div className="image-groups">
-        {groupedVisibleImages.map((group) => (
-          <section key={group.key} className="image-group-section">
-            <header className="image-group-section__header">
-              <h3>{group.label}</h3>
-              <span>{group.images.length} Bilder</span>
-            </header>
+      <Masonry
+        breakpointCols={breakpointCols}
+        className="masonry-grid"
+        columnClassName="masonry-column"
+      >
+        {visibleImages.map((img) => {
+          const dims = imageDimensions[img.image_path];
+          const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
-            <Masonry
-              breakpointCols={breakpointCols}
-              className="masonry-grid"
-              columnClassName="masonry-column"
+          return (
+            <div
+              key={img.id}
+              className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
+              onClick={() =>
+                setGalleryIndex(
+                  orderedFilteredImages.findIndex((item) => item.id === img.id),
+                )
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setGalleryIndex(
+                    orderedFilteredImages.findIndex((item) => item.id === img.id),
+                  );
+                }
+              }}
+              style={{
+                position: "relative",
+                width: "100%",
+                overflow: "hidden",
+                borderRadius: 6,
+                background: "#101014",
+                border: "1px solid #222",
+                aspectRatio,
+                marginBottom: "16px",
+                transition: "aspect-ratio 0.2s ease",
+              }}
             >
-              {group.images.map((img) => {
-                const dims = imageDimensions[img.image_path];
-                const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
+              <img
+                src={imageFileUrl(img.id)}
+                loading="lazy"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                  opacity: dims ? 1 : 0,
+                  transition: "opacity 0.3s ease",
+                }}
+                alt=""
+              />
 
-                return (
-                  <div
-                    key={img.id}
-                    className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-                    onClick={() =>
-                      setGalleryIndex(
-                        orderedFilteredImages.findIndex((item) => item.id === img.id),
-                      )
-                    }
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setGalleryIndex(
-                          orderedFilteredImages.findIndex((item) => item.id === img.id),
-                        );
-                      }
-                    }}
-                    style={{
-                      position: "relative",
-                      width: "100%",
-                      overflow: "hidden",
-                      borderRadius: 6,
-                      background: "#101014",
-                      border: "1px solid #222",
-                      aspectRatio,
-                      marginBottom: "16px",
-                      transition: "aspect-ratio 0.2s ease",
-                    }}
-                  >
-                    <img
-                      src={imageFileUrl(img.id)}
-                      loading="lazy"
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "cover",
-                        display: "block",
-                        opacity: dims ? 1 : 0,
-                        transition: "opacity 0.3s ease",
-                      }}
-                      alt=""
-                    />
+              <button
+                type="button"
+                className="image-delete-button"
+                title="Bild aus der Datenbank entfernen"
+                aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeImage(img);
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <span aria-hidden="true">×</span>
+                Entfernen
+              </button>
 
-                    <button
-                      type="button"
-                      className="image-delete-button"
-                      title="Bild aus der Datenbank entfernen"
-                      aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void removeImage(img);
-                      }}
-                      onKeyDown={(event) => event.stopPropagation()}
-                    >
-                      <span aria-hidden="true">×</span>
-                      Entfernen
-                    </button>
+              {img.location_count > 1 && (
+                <span
+                  className="image-location-count"
+                  title={img.locations.map((location) => location.path).join("\n")}
+                >
+                  {img.location_count} Speicherorte
+                </span>
+              )}
 
-                    {img.location_count > 1 && (
-                      <span
-                        className="image-location-count"
-                        title={img.locations.map((location) => location.path).join("\n")}
-                      >
-                        {img.location_count} Speicherorte
-                      </span>
-                    )}
+              <span className="image-open-cue" aria-hidden="true">
+                <span className="image-open-cue__icon">↗</span>
+                <span>Vollbild öffnen</span>
+              </span>
 
-                    <span className="image-open-cue" aria-hidden="true">
-                      <span className="image-open-cue__icon">↗</span>
-                      <span>Vollbild öffnen</span>
-                    </span>
-
-                    {dims &&
-                      img.faces.map((face) => (
-                        <FaceOverlay
-                          key={face.id}
-                          face={face}
-                          naturalWidth={dims.w}
-                          naturalHeight={dims.h}
-                        />
-                      ))}
-                  </div>
-                );
-              })}
-            </Masonry>
-          </section>
-        ))}
-      </div>
+              {dims &&
+                img.faces.map((face) => (
+                  <FaceOverlay
+                    key={face.id}
+                    face={face}
+                    naturalWidth={dims.w}
+                    naturalHeight={dims.h}
+                  />
+                ))}
+            </div>
+          );
+        })}
+      </Masonry>
 
       {galleryIndex !== null && orderedFilteredImages[galleryIndex] && (
         <FullscreenImageGallery

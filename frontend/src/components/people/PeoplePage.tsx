@@ -53,7 +53,7 @@ const PeoplePage = () => {
         <div className="people-toolbar-actions">
           <div className="people-sort-panel">
             <label className="people-sort-panel__field">
-              <span>Gruppieren nach</span>
+              <span>Sortieren nach</span>
               <select
                 value={groupingMode}
                 onChange={(event) =>

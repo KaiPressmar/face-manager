@@ -818,41 +818,6 @@ img {
   color: #85858f;
 }
 
-.image-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-
-.image-group-section {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.image-group-section__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.image-group-section__header h3 {
-  margin: 0;
-  color: #f3f5f7;
-  font-size: 18px;
-}
-
-.image-group-section__header span {
-  color: #85858f;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
 .modal-backdrop {
   position: fixed;
   inset: 0;
