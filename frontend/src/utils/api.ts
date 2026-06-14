@@ -37,6 +37,23 @@ function apiFetch(input: string, init: RequestInit = {}) {
   });
 }
 
+async function readApiError(res: Response, fallback: string) {
+  try {
+    const payload = await res.json();
+    if (
+      payload &&
+      typeof payload === "object" &&
+      "detail" in payload &&
+      typeof payload.detail === "string"
+    ) {
+      return payload.detail;
+    }
+  } catch {
+    // Ignore non-JSON error bodies.
+  }
+  return fallback;
+}
+
 export function imageFileUrl(imageId: number) {
   return `${API_BASE}/images/${imageId}/file`;
 }
@@ -69,7 +86,20 @@ export interface RuntimeInfo {
 export interface AppSettings {
   cluster_distance_threshold: number;
   cluster_distance_threshold_default: number;
+  filename_person_suffix_format: string;
+  filename_person_suffix_format_default: string;
+  filename_person_block_separator: string;
+  filename_person_block_separator_default: string;
+  filename_person_joiner: string;
+  filename_person_joiner_default: string;
   database_path: string;
+}
+
+export interface UpdateSettingsPayload {
+  cluster_distance_threshold?: number;
+  filename_person_suffix_format?: string;
+  filename_person_block_separator?: string;
+  filename_person_joiner?: string;
 }
 
 export interface FaceImage {
@@ -193,17 +223,15 @@ export async function fetchSettings(): Promise<AppSettings> {
 }
 
 export async function updateSettings(
-  clusterDistanceThreshold: number,
+  payload: UpdateSettingsPayload,
 ): Promise<AppSettings> {
   const res = await apiFetch(`${API_BASE}/settings`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      cluster_distance_threshold: clusterDistanceThreshold,
-    }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error("The settings could not be saved.");
+    throw new Error(await readApiError(res, "The settings could not be saved."));
   }
   return await res.json();
 }
@@ -368,4 +396,94 @@ export async function deleteImage(imageId: number) {
   if (!res.ok) {
     throw new Error("Das Bild konnte nicht aus der Datenbank entfernt werden.");
   }
+}
+
+export interface ImageRenameCandidate {
+  location_id: number;
+  image_id: number;
+  path: string;
+  directory: string;
+  current_filename: string;
+  proposed_filename: string;
+  proposed_path: string;
+  detected_person_names: string[];
+  current_suffix_person_names: string[];
+}
+
+export interface ImageRenamePage {
+  items: ImageRenameCandidate[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+  available_persons: string[];
+}
+
+export interface ApplyImageRenamePayload {
+  selected_paths?: string[];
+  rename_all?: boolean;
+  excluded_paths?: string[];
+  folders?: string[];
+  persons?: string[];
+  sort_by?: "date" | "folder";
+  sort_direction?: "desc" | "asc";
+}
+
+export interface ApplyImageRenameResult {
+  renamed: {
+    from_path: string;
+    to_path: string;
+    image_id: number;
+  }[];
+  skipped: {
+    path: string;
+    reason: string;
+  }[];
+  errors: {
+    path: string;
+    reason: string;
+  }[];
+  renamed_count: number;
+  skipped_count: number;
+  error_count: number;
+}
+
+export async function fetchImageRenameCandidates(
+  {
+    folders = [],
+    persons = [],
+    sortBy = "date",
+    sortDirection = "desc",
+    limit = 100,
+    offset = 0,
+  }: FetchImagesParams = {},
+): Promise<ImageRenamePage> {
+  const params = new URLSearchParams();
+  folders.forEach((folder) => params.append("folders", folder));
+  persons.forEach((person) => params.append("persons", person));
+  params.set("sort_by", sortBy);
+  params.set("sort_direction", sortDirection);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const res = await apiFetch(`${API_BASE}/image-renames?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error("Die Umbenennungsvorschau konnte nicht geladen werden.");
+  }
+  return await res.json();
+}
+
+export async function applyImageRenames(
+  payload: ApplyImageRenamePayload,
+): Promise<ApplyImageRenameResult> {
+  const res = await apiFetch(`${API_BASE}/image-renames/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(
+      await readApiError(res, "Die Dateinamen konnten nicht aktualisiert werden."),
+    );
+  }
+  return await res.json();
 }

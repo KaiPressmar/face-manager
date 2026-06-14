@@ -2,21 +2,34 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from types import SimpleNamespace
 
 from backend import app
 
 
 class SettingsApiTest(unittest.TestCase):
+    @patch("backend.app.get_filename_person_block_separator", return_value=" - ")
+    @patch("backend.app.get_filename_person_joiner", return_value=", ")
     @patch("backend.app.get_cluster_distance_threshold", return_value=0.42)
-    def test_get_settings_returns_threshold_and_database_path(self, get_threshold):
+    def test_get_settings_returns_threshold_and_database_path(
+        self, get_threshold, get_joiner, get_block_separator
+    ):
         result = app.api_get_settings()
 
         get_threshold.assert_called_once_with()
+        get_joiner.assert_called_once_with()
+        get_block_separator.assert_called_once_with()
         self.assertEqual(result["cluster_distance_threshold"], 0.42)
         self.assertEqual(
             result["cluster_distance_threshold_default"],
             app.DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
         )
+        self.assertEqual(result["filename_person_suffix_format"], "DATEI - Name 1, Name 2.jpg")
+        self.assertEqual(
+            result["filename_person_joiner"],
+            ", ",
+        )
+        self.assertEqual(result["filename_person_block_separator"], " - ")
         self.assertEqual(result["database_path"], app.DB_PATH)
 
     @patch("backend.app.set_cluster_distance_threshold", return_value=0.61)
@@ -26,11 +39,96 @@ class SettingsApiTest(unittest.TestCase):
         set_threshold.assert_called_once_with(0.61)
         self.assertEqual(result["cluster_distance_threshold"], 0.61)
 
+    @patch("backend.app.set_filename_person_block_separator", return_value=" - ")
+    @patch("backend.app.set_filename_person_joiner", return_value=" / ")
+    @patch("backend.app.get_filename_person_block_separator", return_value=" ")
+    @patch("backend.app.get_filename_person_joiner", return_value=", ")
+    @patch("backend.app.get_cluster_distance_threshold", return_value=0.5)
+    def test_update_settings_persists_filename_person_rules(
+        self,
+        get_threshold,
+        get_joiner,
+        get_block_separator,
+        set_joiner,
+        set_block_separator,
+    ):
+        result = app.api_update_settings(
+            {
+                "filename_person_block_separator": " - ",
+                "filename_person_joiner": " / ",
+            }
+        )
+
+        get_threshold.assert_called_once_with()
+        get_joiner.assert_called_once_with()
+        get_block_separator.assert_called_once_with()
+        set_joiner.assert_called_once_with(" / ")
+        set_block_separator.assert_called_once_with(" - ")
+        self.assertEqual(result["filename_person_joiner"], " / ")
+        self.assertEqual(result["filename_person_block_separator"], " - ")
+
     def test_update_settings_rejects_invalid_threshold(self):
         with self.assertRaises(HTTPException) as raised:
             app.api_update_settings({"cluster_distance_threshold": 1.5})
 
         self.assertEqual(raised.exception.status_code, 400)
+
+    def test_update_settings_requires_mutable_payload(self):
+        with self.assertRaises(HTTPException) as raised:
+            app.api_update_settings({})
+
+        self.assertEqual(raised.exception.status_code, 400)
+
+    @patch("backend.app.list_available_image_persons", return_value=["Kai"])
+    @patch("backend.app.list_filename_rename_candidates")
+    @patch("backend.app.normalize_import_folder_path", return_value="/photos")
+    def test_get_image_rename_candidates_returns_payload(
+        self,
+        normalize_import_folder_path,
+        list_filename_rename_candidates,
+        list_available_image_persons,
+    ):
+        request = SimpleNamespace(headers={"x-face-manager-display-platform": "linux"})
+        list_filename_rename_candidates.return_value = (
+            [
+                {
+                    "location_id": 1,
+                    "image_id": 2,
+                    "path": "/photos/a.jpg",
+                    "directory": "/photos",
+                    "created_at": "2026-06-01T00:00:00+00:00",
+                    "current_filename": "a.jpg",
+                    "proposed_filename": "a Kai.jpg",
+                    "proposed_path": "/photos/a Kai.jpg",
+                    "detected_person_names": ["Kai"],
+                    "current_suffix_person_names": [],
+                }
+            ],
+            1,
+        )
+
+        result = app.api_get_image_rename_candidates(
+            request,
+            folders=["/photos"],
+            persons=["Kai"],
+            sort_by="date",
+            sort_direction="desc",
+            limit=100,
+            offset=0,
+        )
+
+        normalize_import_folder_path.assert_called_once_with("/photos")
+        list_filename_rename_candidates.assert_called_once_with(
+            folders=["/photos"],
+            persons=["Kai"],
+            sort_by="date",
+            sort_direction="desc",
+            limit=100,
+            offset=0,
+        )
+        list_available_image_persons.assert_called_once_with(["/photos"])
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["items"][0]["path"], "/photos/a.jpg")
 
     @patch("backend.app.import_queue")
     def test_export_database_requires_idle_queue(self, import_queue):
