@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 from collections import defaultdict
 from typing import List, Tuple
 
@@ -7,6 +9,11 @@ import numpy as np
 from ..db.schema import get_conn
 
 DEFAULT_CLUSTER_DISTANCE_THRESHOLD = 0.5
+UNKNOWN_PERSON_LABEL = "Unbekannt"
+MAX_IMAGE_PAGE_SIZE = 200
+IMAGE_QUERY_CACHE_TTL_SECONDS = 5.0
+_IMAGE_QUERY_CACHE_LOCK = threading.Lock()
+_IMAGE_QUERY_CACHE: dict[tuple, tuple[float, object]] = {}
 
 
 def _safe_float(v):
@@ -114,6 +121,228 @@ def _descendant_filter(folders):
         )
         params.extend((folder, f"{escaped}{os.sep}%"))
     return conditions, params
+
+
+def _cache_get(key):
+    """Return a cached value when it is still fresh."""
+    with _IMAGE_QUERY_CACHE_LOCK:
+        cached = _IMAGE_QUERY_CACHE.get(key)
+        if not cached:
+            return None
+        expires_at, value = cached
+        if expires_at < time.monotonic():
+            _IMAGE_QUERY_CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _cache_set(key, value):
+    """Store one cached query result."""
+    with _IMAGE_QUERY_CACHE_LOCK:
+        _IMAGE_QUERY_CACHE[key] = (time.monotonic() + IMAGE_QUERY_CACHE_TTL_SECONDS, value)
+
+
+def invalidate_image_query_cache():
+    """Clear cached image query results after image-related writes."""
+    with _IMAGE_QUERY_CACHE_LOCK:
+        _IMAGE_QUERY_CACHE.clear()
+
+
+def _normalize_person_filters(persons):
+    """Normalize person names for deterministic SQL filtering."""
+    return [person.strip() for person in dict.fromkeys(persons or []) if person.strip()]
+
+
+def _matching_images_cte(folders=None, persons=None):
+    """Build the common CTE used for image pagination queries."""
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    conditions, params = _descendant_filter(folders)
+    location_where = f"WHERE {' OR '.join(conditions)}" if conditions else ""
+
+    person_clause = ""
+    person_params = []
+    if persons:
+        placeholders = ",".join("?" for _ in persons)
+        person_clause = f"""
+        AND i.id IN (
+            SELECT f.image_id
+            FROM face f
+            LEFT JOIN cluster c ON f.cluster_id = c.id
+            LEFT JOIN person p ON c.person_id = p.id
+            WHERE f.cluster_id IS NOT NULL
+              AND COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') IN ({placeholders})
+            GROUP BY f.image_id
+            HAVING COUNT(DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')) = ?
+        )
+        """
+        person_params = [*persons, len(persons)]
+
+    sql = f"""
+    WITH ranked_locations AS (
+        SELECT
+            location.image_id,
+            location.path,
+            location.directory,
+            location.filename,
+            location.created_at,
+            ROW_NUMBER() OVER (
+                PARTITION BY location.image_id ORDER BY location.path
+            ) AS location_rank
+        FROM image_location location
+        {location_where}
+    ),
+    matching_images AS (
+        SELECT
+            i.id AS image_id,
+            location.path AS image_path,
+            location.directory,
+            location.filename,
+            location.created_at
+        FROM image i
+        JOIN ranked_locations location
+            ON location.image_id = i.id AND location.location_rank = 1
+        WHERE EXISTS (
+            SELECT 1
+            FROM face f
+            WHERE f.image_id = i.id AND f.cluster_id IS NOT NULL
+        )
+        {person_clause}
+    )
+    """
+    return sql, [*params, *person_params]
+
+
+def _image_order_by(prefix: str, sort_by: str, sort_direction: str):
+    """Return the ORDER BY clause for image pagination."""
+    direction = "ASC" if sort_direction == "asc" else "DESC"
+    if sort_by == "folder":
+        return (
+            f"{prefix}directory COLLATE NOCASE {direction}, "
+            f"{prefix}filename COLLATE NOCASE ASC, "
+            f"{prefix}image_path COLLATE NOCASE ASC"
+        )
+    return (
+        f"{prefix}created_at IS NULL ASC, "
+        f"{prefix}created_at {direction}, "
+        f"{prefix}filename COLLATE NOCASE ASC, "
+        f"{prefix}image_path COLLATE NOCASE ASC"
+    )
+
+
+def list_available_image_persons(folders=None):
+    """List person names available within the current folder selection."""
+    folders = folders or []
+    cache_key = ("available_persons", tuple(folders))
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    cte, params = _matching_images_cte(folders=folders, persons=[])
+    conn = get_conn()
+    rows = conn.execute(
+        f"""
+        {cte}
+        SELECT DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') AS person_name
+        FROM matching_images
+        JOIN face f ON f.image_id = matching_images.image_id
+        LEFT JOIN cluster c ON f.cluster_id = c.id
+        LEFT JOIN person p ON c.person_id = p.id
+        WHERE f.cluster_id IS NOT NULL
+        ORDER BY person_name COLLATE NOCASE
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    people = [row["person_name"] for row in rows]
+    _cache_set(cache_key, people)
+    return people
+
+
+def list_images_page(
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+    limit: int = 40,
+    offset: int = 0,
+):
+    """List one page of images with clustered faces and preferred locations."""
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    sort_by = "folder" if sort_by == "folder" else "date"
+    sort_direction = "asc" if sort_direction == "asc" else "desc"
+    limit = max(1, min(int(limit), MAX_IMAGE_PAGE_SIZE))
+    offset = max(0, int(offset))
+
+    cache_key = (
+        "image_page",
+        tuple(folders),
+        tuple(persons),
+        sort_by,
+        sort_direction,
+        limit,
+        offset,
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
+    paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
+
+    conn = get_conn()
+    total = conn.execute(
+        f"""
+        {cte}
+        SELECT COUNT(*) AS total
+        FROM matching_images
+        """,
+        params,
+    ).fetchone()["total"]
+    rows = conn.execute(
+        f"""
+        {cte}
+        , paged_images AS (
+            SELECT *
+            FROM matching_images
+            ORDER BY {matching_order}
+            LIMIT ? OFFSET ?
+        )
+        SELECT
+            paged_images.image_id,
+            paged_images.image_path,
+            paged_images.directory,
+            paged_images.filename,
+            paged_images.created_at,
+            i.content_hash,
+            (
+                SELECT COUNT(*)
+                FROM image_location all_locations
+                WHERE all_locations.image_id = paged_images.image_id
+            ) AS location_count,
+            f.id AS face_id,
+            f.bbox_x,
+            f.bbox_y,
+            f.bbox_w,
+            f.bbox_h,
+            f.cluster_id,
+            p.name AS person_name
+        FROM paged_images
+        JOIN image i ON i.id = paged_images.image_id
+        JOIN face f ON f.image_id = paged_images.image_id
+        LEFT JOIN cluster c ON f.cluster_id = c.id
+        LEFT JOIN person p ON c.person_id = p.id
+        WHERE f.cluster_id IS NOT NULL
+        ORDER BY {paged_order}, f.id
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+    conn.close()
+    result = (rows, total)
+    _cache_set(cache_key, result)
+    return result
 
 
 def list_images(folders=None):
@@ -354,6 +583,8 @@ def delete_image(image_id: int):
         )
         conn.commit()
     conn.close()
+    if deleted:
+        invalidate_image_query_cache()
     return deleted
 
 
@@ -479,6 +710,7 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
     cur.execute("UPDATE cluster SET person_id = ? WHERE id = ?", (person_id, cluster_id))
     conn.commit()
     conn.close()
+    invalidate_image_query_cache()
 
 
 def remove_face_from_cluster(face_id: int):
@@ -491,6 +723,7 @@ def remove_face_from_cluster(face_id: int):
     conn.execute("UPDATE face SET cluster_id = NULL WHERE id = ?", (face_id,))
     conn.commit()
     conn.close()
+    invalidate_image_query_cache()
 
 
 def list_persons():

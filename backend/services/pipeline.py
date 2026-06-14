@@ -13,9 +13,13 @@ from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, T
 import numpy as np
 from PIL import Image
 
-from ..db.schema import calculate_file_hash, get_conn
+from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
 from ..models.face_model import FaceModel, get_compute_mode
-from .storage import get_cluster_distance_threshold, load_all_embeddings
+from .storage import (
+    get_cluster_distance_threshold,
+    invalidate_image_query_cache,
+    load_all_embeddings,
+)
 
 if TYPE_CHECKING:
     from ..models.clustering import FaceClustering
@@ -54,11 +58,13 @@ class HashedImage:
         path: Original filesystem path.
         normalized_path: Platform-normalized path used for database lookups.
         content_hash: SHA-256 digest used for duplicate detection.
+        created_at: Best available filesystem creation timestamp.
     """
 
     path: Path
     normalized_path: str
     content_hash: str
+    created_at: str | None
 
 
 class ImagePreparer:
@@ -88,7 +94,8 @@ class ImagePreparer:
         """
         normalized_path = os.path.normpath(str(path))
         content_hash = calculate_file_hash(normalized_path)
-        return HashedImage(path, normalized_path, content_hash)
+        created_at = get_file_created_at(normalized_path)
+        return HashedImage(path, normalized_path, content_hash, created_at)
 
     @staticmethod
     def decode(path: Path) -> np.ndarray:
@@ -586,6 +593,7 @@ class ImportProcessor:
             (image_id,),
         )
         connection.commit()
+        invalidate_image_query_cache()
         progress_callback(
             {
                 "total_faces_increment": len(faces),
@@ -659,18 +667,20 @@ class ImportProcessor:
         cursor.execute(
             """
             INSERT INTO image_location(
-                image_id, path, directory, filename
+                image_id, path, directory, filename, created_at
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 image_id,
                 hashed.normalized_path,
                 os.path.dirname(hashed.normalized_path),
                 os.path.basename(hashed.normalized_path),
+                hashed.created_at,
             ),
         )
         connection.commit()
+        invalidate_image_query_cache()
 
     @staticmethod
     def _detach_path(cursor, normalized_path: str) -> None:

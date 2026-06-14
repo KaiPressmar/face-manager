@@ -10,7 +10,7 @@ const Sidebar: React.FC<{
       <div className="sidebar__header">
         <div className="sidebar__eyebrow">Navigation</div>
         <div className="sidebar__title">Face Manager</div>
-        <div className="sidebar__subtitle">Importe, Personen und Cluster</div>
+        <div className="sidebar__subtitle">Importe, Bilder und Cluster</div>
       </div>
 
       <nav className="sidebar__nav" aria-label="Hauptnavigation">
@@ -20,7 +20,7 @@ const Sidebar: React.FC<{
           }
           onClick={() => onChangePage("people")}
         >
-          Bilder & Personen
+          Bilder
         </button>
 
         <button
@@ -29,7 +29,7 @@ const Sidebar: React.FC<{
           }
           onClick={() => onChangePage("clusters")}
         >
-          Cluster verwalten
+          Cluster
         </button>
 
         <button

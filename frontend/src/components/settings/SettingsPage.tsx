@@ -29,7 +29,11 @@ const SettingsPage: React.FC = () => {
       })
       .catch((loadError) => {
         if (cancelled) return;
-        setError(loadError instanceof Error ? loadError.message : "Settings could not be loaded.");
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Die Einstellungen konnten nicht geladen werden.",
+        );
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -43,7 +47,9 @@ const SettingsPage: React.FC = () => {
   const handleSaveThreshold = async () => {
     const value = Number.parseFloat(thresholdInput);
     if (Number.isNaN(value) || value < 0 || value > 1) {
-      setError("The clustering threshold must be between 0.00 and 1.00.");
+      setError(
+        "Der Clustering-Schwellenwert muss zwischen 0,00 und 1,00 liegen.",
+      );
       return;
     }
 
@@ -56,7 +62,11 @@ const SettingsPage: React.FC = () => {
       setThresholdInput(next.cluster_distance_threshold.toFixed(2));
       setMessage("Clustering threshold saved.");
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "The settings could not be saved.");
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Die Einstellungen konnten nicht gespeichert werden.",
+      );
     } finally {
       setIsSaving(false);
     }
@@ -74,9 +84,13 @@ const SettingsPage: React.FC = () => {
       link.download = "face-manager-database.sqlite";
       link.click();
       URL.revokeObjectURL(url);
-      setMessage("Database export started.");
+      setMessage("Die Datenbank wurde erfolgreich exportiert.");
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : "The database could not be exported.");
+      setError(
+        exportError instanceof Error
+          ? exportError.message
+          : "Die Datenbank konnte nicht exportiert werden.",
+      );
     } finally {
       setIsExporting(false);
     }
@@ -101,9 +115,13 @@ const SettingsPage: React.FC = () => {
       const next = await fetchSettings();
       setSettings(next);
       setThresholdInput(next.cluster_distance_threshold.toFixed(2));
-      setMessage("Database imported successfully.");
+      setMessage("Die Datenbank wurde erfolgreich importiert.");
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "The database could not be imported.");
+      setError(
+        importError instanceof Error
+          ? importError.message
+          : "Die Datenbank konnte nicht importiert werden.",
+      );
     } finally {
       setIsImporting(false);
     }
@@ -113,27 +131,30 @@ const SettingsPage: React.FC = () => {
     <div className="settings-page">
       <div className="settings-page__header">
         <div>
-          <div className="settings-page__eyebrow">Settings</div>
-          <h1 className="settings-page__title">Database and clustering</h1>
+          <div className="settings-page__eyebrow">Einstellungen</div>
+          <h1 className="settings-page__title">Datenbank und Clustering</h1>
           <p className="settings-page__copy">
-            Manage the database file and tune how aggressively new faces are grouped into existing clusters.
+            Verwalten Sie die Datenbankdatei und passen Sie an, wie aggressiv
+            neue Gesichter in bestehende Cluster gruppiert werden.
           </p>
         </div>
       </div>
 
       {isLoading ? (
-        <div className="settings-card">Loading settings…</div>
+        <div className="settings-card">Lade Einstellungen…</div>
       ) : (
         <div className="settings-grid">
           <section className="settings-card">
             <div className="settings-card__kicker">Clustering</div>
-            <h2 className="settings-card__title">Distance threshold</h2>
+            <h2 className="settings-card__title">Abstandsschwelle</h2>
             <p className="settings-card__copy">
-              Lower values are stricter and create more separate clusters. Higher values merge faces more easily.
+              Niedrigere Werte sind strenger und erzeugen mehr separate Cluster.
+              Höhere Werte führen dazu, dass Gesichter leichter zusammengeführt
+              werden.
             </p>
 
             <label className="settings-field">
-              <span>Threshold</span>
+              <span>Schwellenwert</span>
               <div className="settings-threshold-row">
                 <input
                   type="range"
@@ -156,8 +177,12 @@ const SettingsPage: React.FC = () => {
             </label>
 
             <div className="settings-actions">
-              <button className="neon-card" onClick={handleSaveThreshold} disabled={isSaving}>
-                {isSaving ? "Saving…" : "Save threshold"}
+              <button
+                className="neon-card"
+                onClick={handleSaveThreshold}
+                disabled={isSaving}
+              >
+                {isSaving ? "Speichern…" : "Schwellenwert speichern"}
               </button>
               <button
                 className="neon-card"
@@ -168,29 +193,38 @@ const SettingsPage: React.FC = () => {
                   )
                 }
               >
-                Reset to default
+                Auf Standard zurücksetzen
               </button>
             </div>
           </section>
 
           <section className="settings-card">
-            <div className="settings-card__kicker">Database</div>
-            <h2 className="settings-card__title">Import and export</h2>
+            <div className="settings-card__kicker">Datenbank</div>
+            <h2 className="settings-card__title">Import und Export</h2>
             <p className="settings-card__copy">
-              Export a backup of the current SQLite database or replace it with an existing Face Manager database.
+              Exportieren Sie ein Backup der aktuellen SQLite-Datenbank oder
+              ersetzen Sie sie durch eine vorhandene Face Manager-Datenbank.
             </p>
 
             <div className="settings-meta">
-              <span>Database path</span>
+              <span>Datenbankpfad</span>
               <code>{settings?.database_path}</code>
             </div>
 
             <div className="settings-actions">
-              <button className="neon-card" onClick={handleExport} disabled={isExporting}>
-                {isExporting ? "Exporting…" : "Export database"}
+              <button
+                className="neon-card"
+                onClick={handleExport}
+                disabled={isExporting}
+              >
+                {isExporting ? "Exportieren…" : "Datenbank exportieren"}
               </button>
-              <button className="neon-card" onClick={handleImportClick} disabled={isImporting}>
-                {isImporting ? "Importing…" : "Import database"}
+              <button
+                className="neon-card"
+                onClick={handleImportClick}
+                disabled={isImporting}
+              >
+                {isImporting ? "Importieren…" : "Datenbank importieren"}
               </button>
             </div>
 
@@ -207,7 +241,11 @@ const SettingsPage: React.FC = () => {
 
       {(message || error) && (
         <div
-          className={error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
+          className={
+            error
+              ? "settings-feedback settings-feedback--error"
+              : "settings-feedback"
+          }
         >
           {error || message}
         </div>

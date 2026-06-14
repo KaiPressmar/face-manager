@@ -1,12 +1,18 @@
 import React from "react";
 import { neonColorFromName } from "../../utils/colors";
 
-const PersonFilter = ({ images, selected, onChange }) => {
-  const persons = new Set<string>();
+interface PersonFilterProps {
+  persons: string[];
+  selected: string[];
+  onChange: (persons: string[]) => void;
+}
 
-  images.forEach((img) =>
-    img.faces.forEach((f) => persons.add(f.person_name || "Unbekannt"))
-  );
+const PersonFilter: React.FC<PersonFilterProps> = ({
+  persons,
+  selected,
+  onChange,
+}) => {
+  const visiblePersons = Array.from(new Set([...persons, ...selected]));
 
   const toggle = (p: string) => {
     if (selected.includes(p)) {
@@ -18,7 +24,7 @@ const PersonFilter = ({ images, selected, onChange }) => {
 
   return (
     <div style={{ marginBottom: 16 }}>
-      {[...persons].map((p) => (
+      {visiblePersons.map((p) => (
         <span
           key={p}
           onClick={() => toggle(p)}

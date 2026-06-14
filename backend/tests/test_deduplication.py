@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.db import schema
-from backend.services.storage import build_folder_tree, list_image_locations
+from backend.services.storage import (
+    build_folder_tree,
+    list_available_image_persons,
+    list_image_locations,
+    list_images_page,
+)
 
 
 class DeduplicationMigrationTest(unittest.TestCase):
@@ -115,3 +120,131 @@ class DeduplicationMigrationTest(unittest.TestCase):
                 self.assertEqual(counts[str(first_dir)], 1)
                 self.assertEqual(counts[str(second_dir)], 1)
                 self.assertEqual(counts[str(root)], 1)
+
+    def test_list_images_page_supports_filters_and_pagination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photos = root / "photos"
+            archive = photos / "archive"
+            photos.mkdir()
+            archive.mkdir()
+            first_path = photos / "anna.jpg"
+            second_path = archive / "bert.jpg"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            db_path = root / "database.sqlite"
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE person (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                );
+                CREATE TABLE cluster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT,
+                    person_id INTEGER
+                );
+                CREATE TABLE image (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_hash TEXT,
+                    processed_at TEXT
+                );
+                CREATE TABLE image_location (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    created_at TEXT
+                );
+                CREATE TABLE face (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    cluster_id INTEGER,
+                    embedding BLOB
+                );
+                """
+            )
+            conn.execute("INSERT INTO person(name) VALUES ('Anna')")
+            conn.execute("INSERT INTO cluster(id, label, person_id) VALUES (1, 'Cluster 1', 1)")
+            conn.execute("INSERT INTO cluster(id, label, person_id) VALUES (2, 'Cluster 2', NULL)")
+            conn.execute(
+                """
+                INSERT INTO image(path, directory, filename, content_hash, processed_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (str(first_path), str(photos), first_path.name, "hash-1"),
+            )
+            conn.execute(
+                """
+                INSERT INTO image(path, directory, filename, content_hash, processed_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (str(second_path), str(archive), second_path.name, "hash-2"),
+            )
+            conn.execute(
+                """
+                INSERT INTO image_location(image_id, path, directory, filename, created_at)
+                VALUES (1, ?, ?, ?, ?)
+                """,
+                (
+                    str(first_path),
+                    str(photos),
+                    first_path.name,
+                    "2026-06-02T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO image_location(image_id, path, directory, filename, created_at)
+                VALUES (2, ?, ?, ?, ?)
+                """,
+                (
+                    str(second_path),
+                    str(archive),
+                    second_path.name,
+                    "2026-06-01T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id)
+                VALUES (1, 1, 2, 3, 4, 1)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id)
+                VALUES (2, 1, 2, 3, 4, 2)
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(schema, "DB_PATH", str(db_path)), patch(
+                "backend.services.storage.get_conn", schema.get_conn
+            ):
+                rows, total = list_images_page(
+                    folders=[str(photos)],
+                    persons=["Anna"],
+                    sort_by="date",
+                    sort_direction="desc",
+                    limit=1,
+                    offset=0,
+                )
+                self.assertEqual(total, 1)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["filename"], "anna.jpg")
+
+                persons = list_available_image_persons([str(photos)])
+                self.assertEqual(persons, ["Anna", "Unbekannt"])

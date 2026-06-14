@@ -1,19 +1,16 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import FullscreenImageGallery from "./FullscreenImageGallery";
 import { deleteImage, FaceImage, imageFileUrl } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 
-type ImageGroupingMode = "date" | "folder";
-type SortDirection = "desc" | "asc";
-
 interface ImageGridProps {
   images: FaceImage[];
-  selectedPersons: string[];
-  groupingMode: ImageGroupingMode;
-  sortDirection: SortDirection;
   isLoading: boolean;
+  hasMore: boolean;
+  isLoadingMore: boolean;
+  onLoadMore: () => void;
   onImageDeleted: (imageId: number) => void;
 }
 
@@ -24,113 +21,46 @@ const breakpointCols = {
   600: 1,
 };
 
-function compareValues(
-  left: string | number,
-  right: string | number,
-  direction: SortDirection,
-) {
-  const result =
-    typeof left === "number" && typeof right === "number"
-      ? left - right
-      : String(left).localeCompare(String(right), undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-  return direction === "asc" ? result : -result;
-}
-
-function imageTimestamp(image: FaceImage) {
-  return image.created_at ? new Date(image.created_at).getTime() : 0;
-}
-
-function sortImages(
-  images: FaceImage[],
-  groupingMode: ImageGroupingMode,
-  sortDirection: SortDirection,
-) {
-  return [...images].sort((left, right) => {
-    if (groupingMode === "date") {
-      const byTimestamp = compareValues(
-        imageTimestamp(left),
-        imageTimestamp(right),
-        sortDirection,
-      );
-      if (byTimestamp !== 0) return byTimestamp;
-    } else {
-      const byDirectory = compareValues(
-        left.directory || "",
-        right.directory || "",
-        sortDirection,
-      );
-      if (byDirectory !== 0) return byDirectory;
-    }
-
-    return compareValues(
-      left.filename || left.image_path,
-      right.filename || right.image_path,
-      "asc",
-    );
-  });
-}
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
-  selectedPersons,
-  groupingMode,
-  sortDirection,
   isLoading,
+  hasMore,
+  isLoadingMore,
+  onLoadMore,
   onImageDeleted,
 }) => {
-  const filtered = useMemo(() => {
-    if (!Array.isArray(images)) return [];
-    const uniqueImages = Array.from(
-      new Map(
-        images.map((image) => [image.content_hash || `id:${image.id}`, image]),
-      ).values(),
-    );
-    if (selectedPersons.length === 0) return uniqueImages;
-
-    return uniqueImages.filter((img) => {
-      const personsInImage = img.faces.map((f) => f.person_name || "Unbekannt");
-      return selectedPersons.every((person) => personsInImage.includes(person));
-    });
-  }, [images, selectedPersons]);
-
-  const [visibleCount, setVisibleCount] = useState(40);
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
-  const orderedFilteredImages = useMemo(
-    () => sortImages(filtered, groupingMode, sortDirection),
-    [filtered, groupingMode, sortDirection],
-  );
-  const visibleImages = orderedFilteredImages.slice(0, visibleCount);
-
   const [imageDimensions, setImageDimensions] = useState<
     Record<string, { w: number; h: number }>
   >({});
+  const [loadMoreAnchor, setLoadMoreAnchor] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !hasMore || isLoadingMore || !loadMoreAnchor) return;
 
     const scrollContainer = document.querySelector(".page-content");
     if (!scrollContainer) return;
 
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-      if (scrollHeight - scrollTop <= clientHeight + 1000) {
-        setVisibleCount((prev) => {
-          if (prev >= filtered.length) return prev;
-          return prev + 20;
-        });
-      }
-    };
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onLoadMore();
+        }
+      },
+      {
+        root: scrollContainer,
+        rootMargin: "1200px 0px 800px 0px",
+      },
+    );
 
-    scrollContainer.addEventListener("scroll", handleScroll);
-    return () => scrollContainer.removeEventListener("scroll", handleScroll);
-  }, [filtered.length, isLoading]);
+    observer.observe(loadMoreAnchor);
+    return () => observer.disconnect();
+  }, [hasMore, isLoading, isLoadingMore, loadMoreAnchor, onLoadMore]);
 
   useEffect(() => {
     if (isLoading) return;
 
-    visibleImages.forEach((img) => {
+    images.forEach((img) => {
       if (imageDimensions[img.image_path]) return;
 
       const imgSrc = imageFileUrl(img.id);
@@ -143,12 +73,15 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         }));
       };
     });
-  }, [visibleImages, imageDimensions, isLoading]);
+  }, [images, imageDimensions, isLoading]);
 
   useEffect(() => {
-    setVisibleCount(40);
-    setGalleryIndex(null);
-  }, [selectedPersons, groupingMode, sortDirection]);
+    setGalleryIndex((current) => {
+      if (current === null) return null;
+      if (current >= images.length) return null;
+      return current;
+    });
+  }, [images.length]);
 
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
@@ -162,8 +95,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       onImageDeleted(image.id);
       setGalleryIndex((current) => {
         if (current === null) return null;
-        if (filtered.length <= 1) return null;
-        return Math.min(current, filtered.length - 2);
+        if (images.length <= 1) return null;
+        return Math.min(current, images.length - 2);
       });
       return true;
     } catch (error) {
@@ -199,7 +132,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     );
   }
 
-  if (filtered.length === 0) {
+  if (images.length === 0) {
     return (
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
@@ -216,7 +149,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         className="masonry-grid"
         columnClassName="masonry-column"
       >
-        {visibleImages.map((img) => {
+        {images.map((img) => {
           const dims = imageDimensions[img.image_path];
           const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
@@ -227,17 +160,11 @@ const ImageGrid: React.FC<ImageGridProps> = ({
               role="button"
               tabIndex={0}
               aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-              onClick={() =>
-                setGalleryIndex(
-                  orderedFilteredImages.findIndex((item) => item.id === img.id),
-                )
-              }
+              onClick={() => setGalleryIndex(images.findIndex((item) => item.id === img.id))}
               onKeyDown={(event) => {
                 if (event.key === "Enter" || event.key === " ") {
                   event.preventDefault();
-                  setGalleryIndex(
-                    orderedFilteredImages.findIndex((item) => item.id === img.id),
-                  );
+                  setGalleryIndex(images.findIndex((item) => item.id === img.id));
                 }
               }}
               style={{
@@ -309,9 +236,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         })}
       </Masonry>
 
-      {galleryIndex !== null && orderedFilteredImages[galleryIndex] && (
+      {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
+      {hasMore && <div ref={setLoadMoreAnchor} className="image-grid-anchor" aria-hidden="true" />}
+
+      {galleryIndex !== null && images[galleryIndex] && (
         <FullscreenImageGallery
-          images={orderedFilteredImages}
+          images={images}
           activeIndex={galleryIndex}
           onChange={setGalleryIndex}
           onClose={() => setGalleryIndex(null)}

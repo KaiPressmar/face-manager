@@ -100,3 +100,62 @@ class ImportApiTest(unittest.TestCase):
             app.api_cancel_or_remove_import("missing")
 
         self.assertEqual(raised.exception.status_code, 404)
+
+    @patch("backend.app.list_available_image_persons", return_value=["Alice", "Unbekannt"])
+    @patch("backend.app.list_image_locations", return_value={1: []})
+    @patch("backend.app.list_images_page")
+    @patch("backend.app.normalize_import_folder_path", return_value="/photos")
+    def test_get_images_returns_paginated_payload(
+        self,
+        normalize_import_folder_path,
+        list_images_page,
+        list_image_locations,
+        list_available_image_persons,
+    ):
+        list_images_page.return_value = (
+            [
+                {
+                    "image_id": 1,
+                    "image_path": "/photos/a.jpg",
+                    "directory": "/photos",
+                    "filename": "a.jpg",
+                    "created_at": "2026-06-01T00:00:00+00:00",
+                    "content_hash": "hash-1",
+                    "location_count": 1,
+                    "face_id": 5,
+                    "bbox_x": 1,
+                    "bbox_y": 2,
+                    "bbox_w": 3,
+                    "bbox_h": 4,
+                    "cluster_id": 9,
+                    "person_name": "Alice",
+                }
+            ],
+            10,
+        )
+
+        result = app.get_images(
+            self.make_request(),
+            folders=["/photos"],
+            persons=["Alice"],
+            sort_by="date",
+            sort_direction="desc",
+            limit=40,
+            offset=0,
+        )
+
+        normalize_import_folder_path.assert_called_once_with("/photos")
+        list_images_page.assert_called_once_with(
+            folders=["/photos"],
+            persons=["Alice"],
+            sort_by="date",
+            sort_direction="desc",
+            limit=40,
+            offset=0,
+        )
+        list_image_locations.assert_called_once_with([1])
+        list_available_image_persons.assert_called_once_with(["/photos"])
+        self.assertEqual(result["total"], 10)
+        self.assertTrue(result["has_more"])
+        self.assertEqual(result["available_persons"], ["Alice", "Unbekannt"])
+        self.assertEqual(result["items"][0]["created_at"], "2026-06-01T00:00:00+00:00")
