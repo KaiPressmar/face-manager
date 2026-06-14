@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { FaceImage, fetchImages } from "../../utils/api";
+import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import PersonFilter from "./PersonFilter";
 import ImageGrid from "./ImageGrid";
@@ -10,6 +10,14 @@ export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
+const PREFETCH_IMAGE_COUNT = PAGE_SIZE;
+
+function preloadPageImages(page: ImagePage) {
+  page.items.slice(0, PREFETCH_IMAGE_COUNT).forEach((image) => {
+    const preload = new Image();
+    preload.src = imageFileUrl(image.id);
+  });
+}
 
 const PeoplePage = () => {
   const [images, setImages] = useState<FaceImage[]>([]);
@@ -26,15 +34,79 @@ const PeoplePage = () => {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const latestQueryRef = useRef(0);
   const loadedCountRef = useRef(PAGE_SIZE);
+  const prefetchedPageRef = useRef<ImagePage | null>(null);
+  const prefetchedOffsetRef = useRef<number | null>(null);
+  const prefetchPromiseRef = useRef<Promise<void> | null>(null);
+  const queryKeyRef = useRef("");
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
   }, [images.length]);
 
   useEffect(() => {
+    queryKeyRef.current = JSON.stringify({
+      folders: selectedFolders,
+      persons: selectedPersons,
+      sortBy: groupingMode,
+      sortDirection,
+    });
+  }, [groupingMode, selectedFolders, selectedPersons, sortDirection]);
+
+  const scheduleNextPagePrefetch = async (
+    requestId: number,
+    offset: number,
+    expectedQueryKey: string,
+  ) => {
+    if (prefetchPromiseRef.current || prefetchedOffsetRef.current === offset) return;
+
+    const prefetchPromise = (async () => {
+      const page = await fetchImages({
+        folders: selectedFolders,
+        persons: selectedPersons,
+        sortBy: groupingMode,
+        sortDirection,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      if (
+        latestQueryRef.current !== requestId ||
+        queryKeyRef.current !== expectedQueryKey ||
+        page.offset !== offset
+      ) {
+        return;
+      }
+
+      prefetchedPageRef.current = page;
+      prefetchedOffsetRef.current = offset;
+      if (page.items.length > 0) {
+        preloadPageImages(page);
+      }
+    })();
+
+    prefetchPromiseRef.current = prefetchPromise;
+    try {
+      await prefetchPromise;
+    } finally {
+      if (prefetchPromiseRef.current === prefetchPromise) {
+        prefetchPromiseRef.current = null;
+      }
+    }
+  };
+
+  useEffect(() => {
     let isMounted = true;
     const requestId = latestQueryRef.current + 1;
+    const queryKey = JSON.stringify({
+      folders: selectedFolders,
+      persons: selectedPersons,
+      sortBy: groupingMode,
+      sortDirection,
+    });
     latestQueryRef.current = requestId;
+    queryKeyRef.current = queryKey;
+    prefetchedPageRef.current = null;
+    prefetchedOffsetRef.current = null;
+    prefetchPromiseRef.current = null;
     setIsLoading(true);
     setHasMore(false);
 
@@ -61,6 +133,9 @@ const PeoplePage = () => {
           return next.length === current.length ? current : next;
         });
         loadedCountRef.current = Math.max(PAGE_SIZE, page.items.length || PAGE_SIZE);
+        if (page.has_more) {
+          void scheduleNextPagePrefetch(requestId, loadedCountRef.current, queryKey);
+        }
       } finally {
         if (isMounted && latestQueryRef.current === requestId) {
           setIsLoading(false);
@@ -92,6 +167,17 @@ const PeoplePage = () => {
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
+        prefetchedPageRef.current = null;
+        prefetchedOffsetRef.current = null;
+        prefetchPromiseRef.current = null;
+        loadedCountRef.current = Math.max(PAGE_SIZE, page.items.length || PAGE_SIZE);
+        if (page.has_more) {
+          void scheduleNextPagePrefetch(
+            requestId,
+            loadedCountRef.current,
+            queryKeyRef.current,
+          );
+        }
       });
     };
 
@@ -120,17 +206,11 @@ const PeoplePage = () => {
   const loadMoreImages = async () => {
     if (isLoading || isLoadingMore || !hasMore) return;
     const requestId = latestQueryRef.current;
-    setIsLoadingMore(true);
-    try {
-      const page = await fetchImages({
-        folders: selectedFolders,
-        persons: selectedPersons,
-        sortBy: groupingMode,
-        sortDirection,
-        limit: PAGE_SIZE,
-        offset: loadedCountRef.current,
-      });
-      if (latestQueryRef.current !== requestId) return;
+    const offset = loadedCountRef.current;
+    const cachedPage =
+      prefetchedOffsetRef.current === offset ? prefetchedPageRef.current : null;
+
+    const appendPage = (page: ImagePage) => {
       setImages((current) => {
         const merged = new Map(current.map((image) => [image.id, image]));
         page.items.forEach((image) => merged.set(image.id, image));
@@ -141,6 +221,34 @@ const PeoplePage = () => {
       setAvailablePersons(page.available_persons);
       setTotalImages(page.total);
       setHasMore(page.has_more);
+      if (page.has_more) {
+        void scheduleNextPagePrefetch(
+          requestId,
+          offset + page.items.length,
+          queryKeyRef.current,
+        );
+      }
+    };
+
+    if (cachedPage) {
+      prefetchedPageRef.current = null;
+      prefetchedOffsetRef.current = null;
+      appendPage(cachedPage);
+      return;
+    }
+
+    setIsLoadingMore(true);
+    try {
+      const page = await fetchImages({
+        folders: selectedFolders,
+        persons: selectedPersons,
+        sortBy: groupingMode,
+        sortDirection,
+        limit: PAGE_SIZE,
+        offset,
+      });
+      if (latestQueryRef.current !== requestId) return;
+      appendPage(page);
     } finally {
       setIsLoadingMore(false);
     }
