@@ -3,7 +3,6 @@ import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api
 import { pathBasename } from "../../utils/pathDisplay";
 import PersonFilter from "./PersonFilter";
 import ImageGrid from "./ImageGrid";
-import FolderPickerModal from "../shared/FolderPickerModal";
 import FolderFilterModal from "../shared/FolderFilterModal";
 
 export type ImageGroupingMode = "date" | "folder";
@@ -23,9 +22,9 @@ const PeoplePage = () => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
-  const [showPicker, setShowPicker] = useState(false);
   const [showFolderFilter, setShowFolderFilter] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
+  const [showFaceOverlays, setShowFaceOverlays] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -297,6 +296,20 @@ const PeoplePage = () => {
           </div>
 
           <button
+            className={`people-visual-toggle${showFaceOverlays ? " people-visual-toggle--active" : ""}`}
+            onClick={() => setShowFaceOverlays((current) => !current)}
+            type="button"
+          >
+            <span className="people-visual-toggle__indicator" aria-hidden="true" />
+            <span>
+              <strong>Gesichtserkennung</strong>
+              <small>
+                {showFaceOverlays ? "Markierungen sichtbar" : "Markierungen ausgeblendet"}
+              </small>
+            </span>
+          </button>
+
+          <button
             className={`folder-filter-trigger${selectedFolders.length ? " folder-filter-trigger--active" : ""}`}
             onClick={() => setShowFolderFilter(true)}
           >
@@ -312,9 +325,6 @@ const PeoplePage = () => {
             {selectedFolders.length > 0 && <b>{selectedFolders.length}</b>}
           </button>
 
-          <button className="neon-card import-folder-button" onClick={() => setShowPicker(true)}>
-            Ordner hinzufügen
-          </button>
         </div>
       </div>
 
@@ -346,6 +356,7 @@ const PeoplePage = () => {
         isLoading={isLoading}
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
+        showFaceOverlays={showFaceOverlays}
         onLoadMore={loadMoreImages}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
@@ -353,9 +364,6 @@ const PeoplePage = () => {
         }}
       />
 
-      {showPicker && (
-        <FolderPickerModal onClose={() => setShowPicker(false)} />
-      )}
       {showFolderFilter && (
         <FolderFilterModal
           selected={selectedFolders}

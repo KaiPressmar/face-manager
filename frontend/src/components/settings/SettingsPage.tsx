@@ -6,6 +6,7 @@ import {
   importDatabase,
   updateSettings,
 } from "../../utils/api";
+import FolderPickerModal from "../shared/FolderPickerModal";
 
 const SettingsPage: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -14,6 +15,7 @@ const SettingsPage: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -199,6 +201,29 @@ const SettingsPage: React.FC = () => {
           </section>
 
           <section className="settings-card">
+            <div className="settings-card__kicker">Importe</div>
+            <h2 className="settings-card__title">Bildordner einreihen</h2>
+            <p className="settings-card__copy">
+              Starte einen neuen Importjob, um einen weiteren Bilderordner in
+              die Verarbeitungswarteschlange aufzunehmen.
+            </p>
+
+            <div className="settings-actions">
+              <button
+                className="neon-card import-folder-button"
+                onClick={() => {
+                  setError(null);
+                  setMessage(null);
+                  setShowFolderPicker(true);
+                }}
+                type="button"
+              >
+                Neuen Ordner importieren
+              </button>
+            </div>
+          </section>
+
+          <section className="settings-card">
             <div className="settings-card__kicker">Datenbank</div>
             <h2 className="settings-card__title">Import und Export</h2>
             <p className="settings-card__copy">
@@ -249,6 +274,18 @@ const SettingsPage: React.FC = () => {
         >
           {error || message}
         </div>
+      )}
+
+      {showFolderPicker && (
+        <FolderPickerModal
+          onClose={(started) => {
+            setShowFolderPicker(false);
+            if (started) {
+              setError(null);
+              setMessage("Der Ordnerimport wurde zur Warteschlange hinzugefügt.");
+            }
+          }}
+        />
       )}
     </div>
   );

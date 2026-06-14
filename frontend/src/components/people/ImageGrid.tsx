@@ -10,6 +10,7 @@ interface ImageGridProps {
   isLoading: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
+  showFaceOverlays: boolean;
   onLoadMore: () => void;
   onImageDeleted: (imageId: number) => void;
 }
@@ -29,6 +30,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   isLoading,
   hasMore,
   isLoadingMore,
+  showFaceOverlays,
   onLoadMore,
   onImageDeleted,
 }) => {
@@ -273,7 +275,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   <span>Vollbild öffnen</span>
                 </span>
 
-                {dims &&
+                {showFaceOverlays &&
+                  dims &&
                   img.faces.map((face) => (
                     <FaceOverlay
                       key={face.id}
