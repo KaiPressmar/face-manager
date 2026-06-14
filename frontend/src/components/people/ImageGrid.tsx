@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import FullscreenImageGallery from "./FullscreenImageGallery";
@@ -10,6 +10,7 @@ interface ImageGridProps {
   isLoading: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
+  showFaceOverlays: boolean;
   onLoadMore: () => void;
   onImageDeleted: (imageId: number) => void;
 }
@@ -21,11 +22,15 @@ const breakpointCols = {
   600: 1,
 };
 
+const COLUMN_PRELOAD_VIEWPORTS = 1.5;
+const GRID_PRELOAD_VIEWPORTS = 2.5;
+
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
   isLoading,
   hasMore,
   isLoadingMore,
+  showFaceOverlays,
   onLoadMore,
   onImageDeleted,
 }) => {
@@ -33,29 +38,76 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const [imageDimensions, setImageDimensions] = useState<
     Record<string, { w: number; h: number }>
   >({});
-  const [loadMoreAnchor, setLoadMoreAnchor] = useState<HTMLDivElement | null>(null);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  const rafIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (isLoading || !hasMore || isLoadingMore || !loadMoreAnchor) return;
-
     const scrollContainer = document.querySelector(".page-content");
-    if (!scrollContainer) return;
+    if (!(scrollContainer instanceof HTMLElement)) return;
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
+    const scheduleCheck = () => {
+      if (rafIdRef.current !== null) return;
+      rafIdRef.current = window.requestAnimationFrame(() => {
+        rafIdRef.current = null;
+
+        if (isLoading || isLoadingMore || !hasMore || !gridRef.current) return;
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const viewportBottom = containerRect.bottom;
+        const viewportHeight = scrollContainer.clientHeight;
+        const gridRect = gridRef.current.getBoundingClientRect();
+        const gridRemaining = gridRect.bottom - viewportBottom;
+        const gridThreshold = viewportHeight * GRID_PRELOAD_VIEWPORTS;
+
+        const columnElements = Array.from(
+          gridRef.current.querySelectorAll(".masonry-column"),
+        ) as HTMLElement[];
+        const shortestColumnRemaining =
+          columnElements.length > 0
+            ? Math.min(
+                ...columnElements.map((column) => {
+                  const cards = Array.from(column.children) as HTMLElement[];
+                  const lastCard = cards.at(-1);
+                  if (!lastCard) return Number.POSITIVE_INFINITY;
+                  return lastCard.getBoundingClientRect().bottom - viewportBottom;
+                }),
+              )
+            : Number.POSITIVE_INFINITY;
+        const columnThreshold = viewportHeight * COLUMN_PRELOAD_VIEWPORTS;
+
+        if (
+          shortestColumnRemaining <= columnThreshold ||
+          gridRemaining <= gridThreshold
+        ) {
           onLoadMore();
         }
-      },
-      {
-        root: scrollContainer,
-        rootMargin: "1200px 0px 800px 0px",
-      },
-    );
+      });
+    };
 
-    observer.observe(loadMoreAnchor);
-    return () => observer.disconnect();
-  }, [hasMore, isLoading, isLoadingMore, loadMoreAnchor, onLoadMore]);
+    scheduleCheck();
+    scrollContainer.addEventListener("scroll", scheduleCheck, { passive: true });
+    window.addEventListener("resize", scheduleCheck);
+
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined" && gridRef.current) {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleCheck();
+      });
+      resizeObserver.observe(gridRef.current);
+      const columnElements = gridRef.current.querySelectorAll(".masonry-column");
+      columnElements.forEach((column) => resizeObserver?.observe(column));
+    }
+
+    return () => {
+      scrollContainer.removeEventListener("scroll", scheduleCheck);
+      window.removeEventListener("resize", scheduleCheck);
+      resizeObserver?.disconnect();
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+    };
+  }, [hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -144,100 +196,102 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
   return (
     <>
-      <Masonry
-        breakpointCols={breakpointCols}
-        className="masonry-grid"
-        columnClassName="masonry-column"
-      >
-        {images.map((img) => {
-          const dims = imageDimensions[img.image_path];
-          const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
+      <div ref={gridRef}>
+        <Masonry
+          breakpointCols={breakpointCols}
+          className="masonry-grid"
+          columnClassName="masonry-column"
+        >
+          {images.map((img) => {
+            const dims = imageDimensions[img.image_path];
+            const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
 
-          return (
-            <div
-              key={img.id}
-              className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
-              role="button"
-              tabIndex={0}
-              aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-              onClick={() => setGalleryIndex(images.findIndex((item) => item.id === img.id))}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  setGalleryIndex(images.findIndex((item) => item.id === img.id));
-                }
-              }}
-              style={{
-                position: "relative",
-                width: "100%",
-                overflow: "hidden",
-                borderRadius: 6,
-                background: "#101014",
-                border: "1px solid #222",
-                aspectRatio,
-                marginBottom: "16px",
-                transition: "aspect-ratio 0.2s ease",
-              }}
-            >
-              <img
-                src={imageFileUrl(img.id)}
-                loading="lazy"
+            return (
+              <div
+                key={img.id}
+                className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
+                onClick={() => setGalleryIndex(images.findIndex((item) => item.id === img.id))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setGalleryIndex(images.findIndex((item) => item.id === img.id));
+                  }
+                }}
                 style={{
+                  position: "relative",
                   width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
-                  opacity: dims ? 1 : 0,
-                  transition: "opacity 0.3s ease",
+                  overflow: "hidden",
+                  borderRadius: 6,
+                  background: "#101014",
+                  border: "1px solid #222",
+                  aspectRatio,
+                  marginBottom: "16px",
+                  transition: "aspect-ratio 0.2s ease",
                 }}
-                alt=""
-              />
-
-              <button
-                type="button"
-                className="image-delete-button"
-                title="Bild aus der Datenbank entfernen"
-                aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void removeImage(img);
-                }}
-                onKeyDown={(event) => event.stopPropagation()}
               >
-                <span aria-hidden="true">×</span>
-                Entfernen
-              </button>
+                <img
+                  src={imageFileUrl(img.id)}
+                  loading="lazy"
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    display: "block",
+                    opacity: dims ? 1 : 0,
+                    transition: "opacity 0.3s ease",
+                  }}
+                  alt=""
+                />
 
-              {img.location_count > 1 && (
-                <span
-                  className="image-location-count"
-                  title={img.locations.map((location) => location.path).join("\n")}
+                <button
+                  type="button"
+                  className="image-delete-button"
+                  title="Bild aus der Datenbank entfernen"
+                  aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void removeImage(img);
+                  }}
+                  onKeyDown={(event) => event.stopPropagation()}
                 >
-                  {img.location_count} Speicherorte
+                  <span aria-hidden="true">×</span>
+                  Entfernen
+                </button>
+
+                {img.location_count > 1 && (
+                  <span
+                    className="image-location-count"
+                    title={img.locations.map((location) => location.path).join("\n")}
+                  >
+                    {img.location_count} Speicherorte
+                  </span>
+                )}
+
+                <span className="image-open-cue" aria-hidden="true">
+                  <span className="image-open-cue__icon">↗</span>
+                  <span>Vollbild öffnen</span>
                 </span>
-              )}
 
-              <span className="image-open-cue" aria-hidden="true">
-                <span className="image-open-cue__icon">↗</span>
-                <span>Vollbild öffnen</span>
-              </span>
-
-              {dims &&
-                img.faces.map((face) => (
-                  <FaceOverlay
-                    key={face.id}
-                    face={face}
-                    naturalWidth={dims.w}
-                    naturalHeight={dims.h}
-                  />
-                ))}
-            </div>
-          );
-        })}
-      </Masonry>
+                {showFaceOverlays &&
+                  dims &&
+                  img.faces.map((face) => (
+                    <FaceOverlay
+                      key={face.id}
+                      face={face}
+                      naturalWidth={dims.w}
+                      naturalHeight={dims.h}
+                    />
+                  ))}
+              </div>
+            );
+          })}
+        </Masonry>
+      </div>
 
       {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
-      {hasMore && <div ref={setLoadMoreAnchor} className="image-grid-anchor" aria-hidden="true" />}
 
       {galleryIndex !== null && images[galleryIndex] && (
         <FullscreenImageGallery

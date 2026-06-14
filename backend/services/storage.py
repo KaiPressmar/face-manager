@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 from collections import defaultdict
@@ -9,6 +10,9 @@ import numpy as np
 from ..db.schema import get_conn
 
 DEFAULT_CLUSTER_DISTANCE_THRESHOLD = 0.5
+DEFAULT_FILENAME_PERSON_SUFFIX_FORMAT = " {names}"
+DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR = " "
+DEFAULT_FILENAME_PERSON_JOINER = ", "
 UNKNOWN_PERSON_LABEL = "Unbekannt"
 MAX_IMAGE_PAGE_SIZE = 200
 IMAGE_QUERY_CACHE_TTL_SECONDS = 5.0
@@ -53,6 +57,52 @@ def get_cluster_distance_threshold() -> float:
         return DEFAULT_CLUSTER_DISTANCE_THRESHOLD
 
 
+def get_filename_person_suffix_format() -> str:
+    """Return the persisted filename suffix format used for person names."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        ("filename_person_suffix_format",),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return DEFAULT_FILENAME_PERSON_SUFFIX_FORMAT
+    value = (row["value"] or "").strip()
+    if not value or "{names}" not in value:
+        return DEFAULT_FILENAME_PERSON_SUFFIX_FORMAT
+    return value
+
+
+def get_filename_person_joiner() -> str:
+    """Return the separator used between multiple person names."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        ("filename_person_joiner",),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return DEFAULT_FILENAME_PERSON_JOINER
+    return row["value"] if row["value"] is not None else DEFAULT_FILENAME_PERSON_JOINER
+
+
+def get_filename_person_block_separator() -> str:
+    """Return the separator between filename and appended person names."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        ("filename_person_block_separator",),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+    return (
+        row["value"]
+        if row["value"] is not None
+        else DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+    )
+
+
 def set_cluster_distance_threshold(value: float) -> float:
     """Persist the clustering distance threshold."""
     threshold = float(value)
@@ -68,6 +118,156 @@ def set_cluster_distance_threshold(value: float) -> float:
     conn.commit()
     conn.close()
     return threshold
+
+
+def set_filename_person_suffix_format(value: str) -> str:
+    """Persist the filename suffix format used for detected person names."""
+    suffix_format = (value or "").strip()
+    if not suffix_format or "{names}" not in suffix_format:
+        raise ValueError("Filename suffix format must contain the {names} placeholder.")
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ("filename_person_suffix_format", suffix_format),
+    )
+    conn.commit()
+    conn.close()
+    return suffix_format
+
+
+def set_filename_person_joiner(value: str) -> str:
+    """Persist the separator used between person names."""
+    joiner = value if value is not None else DEFAULT_FILENAME_PERSON_JOINER
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ("filename_person_joiner", joiner),
+    )
+    conn.commit()
+    conn.close()
+    return joiner
+
+
+def set_filename_person_block_separator(value: str) -> str:
+    """Persist the separator between filename and appended person names."""
+    separator = (
+        value if value is not None else DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+    )
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ("filename_person_block_separator", separator),
+    )
+    conn.commit()
+    conn.close()
+    return separator
+
+
+def build_filename_person_format_summary(
+    joiner: str | None = None,
+    block_separator: str | None = None,
+) -> str:
+    """Return a human-readable format string for UI display and compatibility."""
+    joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
+    block_separator = (
+        DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+        if block_separator is None
+        else block_separator
+    )
+    names_placeholder = f"Name 1{joiner}Name 2"
+    return f"DATEI{block_separator}{names_placeholder}.jpg"
+
+
+def _dedupe_names_in_order(names):
+    """Keep the first occurrence of each non-empty name."""
+    seen = set()
+    ordered = []
+    for name in names:
+        normalized = (name or "").strip()
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(normalized)
+    return ordered
+
+
+def _extract_trailing_person_names(stem: str, detected_names: list[str]):
+    """Split a filename stem into root text and a trailing person appendix."""
+    remaining = stem.rstrip()
+    if not remaining or not detected_names:
+        return stem.rstrip(), []
+
+    suffix_names_reversed = []
+    name_patterns = sorted(detected_names, key=lambda item: len(item), reverse=True)
+    separator_pattern = re.compile(r"[\s,;:+&()\[\]{}-]+$")
+
+    while remaining:
+        match_name = None
+        for candidate in name_patterns:
+            pattern = re.compile(rf"(?i)(^|[\s,;:+&()\[\]{{}}-])({re.escape(candidate)})$")
+            match = pattern.search(remaining)
+            if match:
+                match_name = candidate
+                remaining = remaining[: match.start(2)].rstrip()
+                remaining = separator_pattern.sub("", remaining).rstrip()
+                suffix_names_reversed.append(candidate)
+                break
+        if match_name is None:
+            break
+
+    return remaining, list(reversed(suffix_names_reversed))
+
+
+def build_person_filename_preview(
+    filename: str,
+    detected_names: list[str],
+    block_separator: str | None = None,
+    joiner: str | None = None,
+):
+    """Build a rename preview for one filename based on detected people."""
+    ordered_names = _dedupe_names_in_order(detected_names)
+    if not ordered_names:
+        return None
+    block_separator = (
+        DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+        if block_separator is None
+        else block_separator
+    )
+    joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
+
+    stem, extension = os.path.splitext(filename)
+    root_stem, current_suffix_names = _extract_trailing_person_names(stem, ordered_names)
+    if not root_stem:
+        root_stem = stem
+
+    names_text = joiner.join(ordered_names)
+    next_stem = f"{root_stem}{block_separator}{names_text}".strip()
+    next_filename = f"{next_stem}{extension}"
+
+    if next_filename == filename and current_suffix_names == ordered_names:
+        return None
+
+    return {
+        "current_filename": filename,
+        "proposed_filename": next_filename,
+        "detected_person_names": ordered_names,
+        "current_suffix_person_names": current_suffix_names,
+    }
 
 
 def _face_row_to_dict(r):
@@ -736,6 +936,264 @@ def list_persons():
     rows = conn.execute("SELECT id, name FROM person ORDER BY name").fetchall()
     conn.close()
     return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+
+def list_filename_rename_candidates(
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+    limit: int | None = 100,
+    offset: int = 0,
+):
+    """List image locations whose filenames should be updated with person names."""
+    suffix_format = suffix_format or get_filename_person_suffix_format()
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    sort_by = "folder" if sort_by == "folder" else "date"
+    sort_direction = "asc" if sort_direction == "asc" else "desc"
+    if limit is not None:
+        limit = max(1, min(int(limit), MAX_IMAGE_PAGE_SIZE))
+    offset = max(0, int(offset))
+
+    conn = get_conn()
+    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    direction = "ASC" if sort_direction == "asc" else "DESC"
+    if sort_by == "folder":
+        location_order = (
+            "location.directory COLLATE NOCASE "
+            f"{direction}, location.filename COLLATE NOCASE ASC, "
+            "location.path COLLATE NOCASE ASC"
+        )
+    else:
+        location_order = (
+            "location.created_at IS NULL ASC, "
+            f"location.created_at {direction}, "
+            "location.filename COLLATE NOCASE ASC, "
+            "location.path COLLATE NOCASE ASC"
+        )
+    rows = conn.execute(
+        f"""
+        {cte}
+        SELECT
+            location.id AS location_id,
+            location.image_id,
+            location.path,
+            location.directory,
+            location.filename,
+            location.created_at,
+            f.id AS face_id,
+            f.bbox_x,
+            p.name AS person_name
+        FROM image_location location
+        JOIN matching_images
+            ON matching_images.image_id = location.image_id
+        JOIN face f ON f.image_id = location.image_id
+        JOIN cluster c ON f.cluster_id = c.id
+        JOIN person p ON c.person_id = p.id
+        ORDER BY {location_order}, f.bbox_x ASC, f.id ASC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+
+    grouped_rows = defaultdict(list)
+    for row in rows:
+        grouped_rows[row["location_id"]].append(row)
+
+    candidates = []
+    for location_id, location_rows in grouped_rows.items():
+        first_row = location_rows[0]
+        if not os.path.isfile(first_row["path"]):
+            continue
+        preview = build_person_filename_preview(
+            first_row["filename"],
+            [row["person_name"] for row in location_rows],
+            block_separator=block_separator,
+            joiner=joiner,
+        )
+        if not preview:
+            continue
+        candidates.append(
+            {
+                "location_id": location_id,
+                "image_id": first_row["image_id"],
+                "path": first_row["path"],
+                "directory": first_row["directory"],
+                "created_at": first_row["created_at"],
+                "current_filename": preview["current_filename"],
+                "proposed_filename": preview["proposed_filename"],
+                "proposed_path": os.path.join(
+                    first_row["directory"], preview["proposed_filename"]
+                ),
+                "detected_person_names": preview["detected_person_names"],
+                "current_suffix_person_names": preview["current_suffix_person_names"],
+            }
+        )
+
+    candidates.sort(key=lambda item: item["path"].casefold())
+    total = len(candidates)
+    if limit is None:
+        return candidates[offset:], total
+    return candidates[offset : offset + limit], total
+
+
+def list_all_filename_rename_candidates(
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+):
+    """Return the complete rename candidate list without pagination."""
+    candidates, total = list_filename_rename_candidates(
+        suffix_format=suffix_format,
+        folders=folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=MAX_IMAGE_PAGE_SIZE,
+        offset=0,
+    )
+    if total <= MAX_IMAGE_PAGE_SIZE:
+        return candidates
+    candidates, _ = list_filename_rename_candidates(
+        suffix_format=suffix_format,
+        folders=folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=None,
+        offset=0,
+    )
+    return candidates
+
+
+def _refresh_canonical_image_location(cur, image_id: int):
+    """Keep the legacy canonical image columns aligned with image locations."""
+    row = cur.execute(
+        """
+        SELECT path, directory, filename
+        FROM image_location
+        WHERE image_id = ?
+        ORDER BY path COLLATE NOCASE ASC
+        LIMIT 1
+        """,
+        (image_id,),
+    ).fetchone()
+    if row:
+        cur.execute(
+            """
+            UPDATE image
+            SET path = ?, directory = ?, filename = ?
+            WHERE id = ?
+            """,
+            (row["path"], row["directory"], row["filename"], image_id),
+        )
+
+
+def rename_image_locations_to_match_people(
+    selected_paths: list[str] | None = None,
+    rename_all: bool = False,
+    excluded_paths: list[str] | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+):
+    """Rename selected candidate image locations and sync database metadata."""
+    selected_paths = list(dict.fromkeys(selected_paths or []))
+    excluded = {path for path in (excluded_paths or []) if path}
+    candidates = list_all_filename_rename_candidates(
+        suffix_format=None,
+        folders=folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
+    candidate_by_path = {candidate["path"]: candidate for candidate in candidates}
+
+    if rename_all:
+        target_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate["path"] not in excluded
+        ]
+    else:
+        target_candidates = [
+            candidate
+            for path in selected_paths
+            if (candidate := candidate_by_path.get(path)) is not None
+        ]
+
+    renamed = []
+    skipped = []
+    errors = []
+
+    for candidate in target_candidates:
+        source_path = candidate["path"]
+        target_path = candidate["proposed_path"]
+        if source_path == target_path:
+            skipped.append({"path": source_path, "reason": "already_matches"})
+            continue
+        if not os.path.isfile(source_path):
+            skipped.append({"path": source_path, "reason": "missing_source"})
+            continue
+        if os.path.exists(target_path):
+            skipped.append({"path": source_path, "reason": "target_exists"})
+            continue
+
+        try:
+            os.rename(source_path, target_path)
+        except OSError as exc:
+            errors.append({"path": source_path, "reason": str(exc)})
+            continue
+
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE image_location
+                SET path = ?, filename = ?
+                WHERE id = ?
+                """,
+                (target_path, candidate["proposed_filename"], candidate["location_id"]),
+            )
+            _refresh_canonical_image_location(cur, candidate["image_id"])
+            conn.commit()
+        except sqlite3.DatabaseError as exc:
+            conn.rollback()
+            try:
+                os.rename(target_path, source_path)
+            except OSError:
+                pass
+            errors.append({"path": source_path, "reason": str(exc)})
+            conn.close()
+            continue
+        conn.close()
+        renamed.append(
+            {
+                "from_path": source_path,
+                "to_path": target_path,
+                "image_id": candidate["image_id"],
+            }
+        )
+
+    if renamed:
+        invalidate_image_query_cache()
+
+    return {
+        "renamed": renamed,
+        "skipped": skipped,
+        "errors": errors,
+        "renamed_count": len(renamed),
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+    }
 
 
 def get_person_faces(person_id: int):

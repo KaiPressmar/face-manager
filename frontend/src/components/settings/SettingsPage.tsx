@@ -6,17 +6,59 @@ import {
   importDatabase,
   updateSettings,
 } from "../../utils/api";
+import FolderPickerModal from "../shared/FolderPickerModal";
+
+const PERSON_NAME_JOINER_PRESETS = [
+  { label: "Komma", value: ", " },
+  { label: "Slash", value: " / " },
+  { label: "Und", value: " und " },
+  { label: "Plus", value: " + " },
+];
+const FILENAME_TO_NAMES_SEPARATOR_PRESETS = [
+  { label: "Leerzeichen", value: " " },
+  { label: "Bindestrich", value: " - " },
+  { label: "Unterstrich", value: "_" },
+  { label: "Klammer auf", value: " (" },
+];
+
+const SAMPLE_BASENAME = "img_abc_heute hier morgen da.jpg";
+const SAMPLE_PERSON_NAMES = ["Kai", "Regina"];
+
+function buildSuffixFormatPreview(
+  blockSeparator: string,
+  joiner: string,
+) {
+  const extensionIndex = SAMPLE_BASENAME.lastIndexOf(".");
+  const stem =
+    extensionIndex >= 0
+      ? SAMPLE_BASENAME.slice(0, extensionIndex)
+      : SAMPLE_BASENAME;
+  const extension = extensionIndex >= 0 ? SAMPLE_BASENAME.slice(extensionIndex) : "";
+  const joinedNames = SAMPLE_PERSON_NAMES.join(joiner);
+  const suffix = `${blockSeparator}${joinedNames}`;
+  const closing = blockSeparator === " (" ? ")" : "";
+  return `${stem}${suffix}${closing}${extension}`;
+}
 
 const SettingsPage: React.FC = () => {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [thresholdInput, setThresholdInput] = useState("0.50");
+  const [filenameBlockSeparatorInput, setFilenameBlockSeparatorInput] =
+    useState(" ");
+  const [personJoinerInput, setPersonJoinerInput] = useState(", ");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const suffixPreview = buildSuffixFormatPreview(
+    filenameBlockSeparatorInput,
+    personJoinerInput,
+  );
+  const joinerPreviewText = SAMPLE_PERSON_NAMES.join(personJoinerInput);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +68,8 @@ const SettingsPage: React.FC = () => {
         if (cancelled) return;
         setSettings(data);
         setThresholdInput(data.cluster_distance_threshold.toFixed(2));
+        setFilenameBlockSeparatorInput(data.filename_person_block_separator);
+        setPersonJoinerInput(data.filename_person_joiner);
       })
       .catch((loadError) => {
         if (cancelled) return;
@@ -57,7 +101,9 @@ const SettingsPage: React.FC = () => {
     setError(null);
     setMessage(null);
     try {
-      const next = await updateSettings(value);
+      const next = await updateSettings({
+        cluster_distance_threshold: value,
+      });
       setSettings(next);
       setThresholdInput(next.cluster_distance_threshold.toFixed(2));
       setMessage("Clustering threshold saved.");
@@ -66,6 +112,30 @@ const SettingsPage: React.FC = () => {
         saveError instanceof Error
           ? saveError.message
           : "Die Einstellungen konnten nicht gespeichert werden.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveSuffixFormat = async () => {
+    setIsSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await updateSettings({
+        filename_person_block_separator: filenameBlockSeparatorInput,
+        filename_person_joiner: personJoinerInput,
+      });
+      setSettings(next);
+      setFilenameBlockSeparatorInput(next.filename_person_block_separator);
+      setPersonJoinerInput(next.filename_person_joiner);
+      setMessage("Einstellungen fuer Personennamen im Dateinamen gespeichert.");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Die Dateinamen-Einstellungen konnten nicht gespeichert werden.",
       );
     } finally {
       setIsSaving(false);
@@ -115,6 +185,8 @@ const SettingsPage: React.FC = () => {
       const next = await fetchSettings();
       setSettings(next);
       setThresholdInput(next.cluster_distance_threshold.toFixed(2));
+      setFilenameBlockSeparatorInput(next.filename_person_block_separator);
+      setPersonJoinerInput(next.filename_person_joiner);
       setMessage("Die Datenbank wurde erfolgreich importiert.");
     } catch (importError) {
       setError(
@@ -199,6 +271,134 @@ const SettingsPage: React.FC = () => {
           </section>
 
           <section className="settings-card">
+            <div className="settings-card__kicker">Importe</div>
+            <h2 className="settings-card__title">Bildordner einreihen</h2>
+            <p className="settings-card__copy">
+              Starte einen neuen Importjob, um einen weiteren Bilderordner in
+              die Verarbeitungswarteschlange aufzunehmen.
+            </p>
+
+            <div className="settings-actions">
+              <button
+                className="neon-card import-folder-button"
+                onClick={() => {
+                  setError(null);
+                  setMessage(null);
+                  setShowFolderPicker(true);
+                }}
+                type="button"
+              >
+                Neuen Ordner importieren
+              </button>
+            </div>
+          </section>
+
+          <section className="settings-card">
+            <div className="settings-card__kicker">Dateinamen</div>
+            <h2 className="settings-card__title">Personen-Anhang</h2>
+            <p className="settings-card__copy">
+              Legen Sie fest, welche Zeichen zwischen dem eigentlichen
+              Dateinamen und dem angehängten Namensblock stehen sollen und wie
+              mehrere Personennamen voneinander getrennt werden.
+            </p>
+
+            <div className="settings-format-presets" aria-label="Trennung zwischen Dateiname und Namen">
+              {FILENAME_TO_NAMES_SEPARATOR_PRESETS.map((preset) => (
+                <button
+                  key={`${preset.label}-${preset.value}`}
+                  className={
+                    filenameBlockSeparatorInput === preset.value
+                      ? "settings-format-preset settings-format-preset--active"
+                      : "settings-format-preset"
+                  }
+                  type="button"
+                  onClick={() => setFilenameBlockSeparatorInput(preset.value)}
+                >
+                  <strong>{preset.label}</strong>
+                  <code>{`Datei${preset.value}Kai${preset.value === " (" ? ")" : ""}.jpg`}</code>
+                </button>
+              ))}
+            </div>
+
+            <label className="settings-field">
+              <span>Zeichen zwischen Dateiname und Namensblock</span>
+              <input
+                className="settings-number-input settings-text-input"
+                type="text"
+                value={filenameBlockSeparatorInput}
+                onChange={(event) =>
+                  setFilenameBlockSeparatorInput(event.target.value)
+                }
+                placeholder="z. B.  - "
+              />
+            </label>
+
+            <div className="settings-format-presets" aria-label="Trennzeichen-Vorlagen">
+              {PERSON_NAME_JOINER_PRESETS.map((preset) => (
+                <button
+                  key={`${preset.label}-${preset.value}`}
+                  className={
+                    personJoinerInput === preset.value
+                      ? "settings-format-preset settings-format-preset--active"
+                      : "settings-format-preset"
+                  }
+                  type="button"
+                  onClick={() => setPersonJoinerInput(preset.value)}
+                >
+                  <strong>{preset.label}</strong>
+                  <code>{SAMPLE_PERSON_NAMES.join(preset.value)}</code>
+                </button>
+              ))}
+            </div>
+
+            <label className="settings-field">
+              <span>Trennzeichen zwischen Personennamen</span>
+              <input
+                className="settings-number-input settings-text-input"
+                type="text"
+                value={personJoinerInput}
+                onChange={(event) => setPersonJoinerInput(event.target.value)}
+                placeholder="z. B. ,  oder  / "
+              />
+              <div className="settings-format-help">
+                <span>
+                  Vorschau für die Namen: <code>{joinerPreviewText}</code>
+                </span>
+              </div>
+            </label>
+
+            <div className="settings-format-preview">
+              <span className="settings-format-preview__label">Vorschau</span>
+              <code>{suffixPreview}</code>
+              <small>
+                Beispielpersonen: <code>Kai</code> und <code>Regina</code>
+              </small>
+            </div>
+
+            <div className="settings-actions">
+              <button
+                className="neon-card"
+                onClick={handleSaveSuffixFormat}
+                disabled={isSaving}
+              >
+                {isSaving ? "Speichern…" : "Dateinamen-Regeln speichern"}
+              </button>
+              <button
+                className="neon-card"
+                onClick={() => {
+                  if (!settings) return;
+                  setFilenameBlockSeparatorInput(
+                    settings.filename_person_block_separator_default,
+                  );
+                  setPersonJoinerInput(settings.filename_person_joiner_default);
+                }}
+              >
+                Auf Standard zurücksetzen
+              </button>
+            </div>
+          </section>
+
+          <section className="settings-card">
             <div className="settings-card__kicker">Datenbank</div>
             <h2 className="settings-card__title">Import und Export</h2>
             <p className="settings-card__copy">
@@ -249,6 +449,18 @@ const SettingsPage: React.FC = () => {
         >
           {error || message}
         </div>
+      )}
+
+      {showFolderPicker && (
+        <FolderPickerModal
+          onClose={(started) => {
+            setShowFolderPicker(false);
+            if (started) {
+              setError(null);
+              setMessage("Der Ordnerimport wurde zur Warteschlange hinzugefügt.");
+            }
+          }}
+        />
       )}
     </div>
   );
