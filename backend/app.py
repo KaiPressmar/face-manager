@@ -30,19 +30,30 @@ from .services.desktop import (
 from .services.import_queue import ImportQueue
 from .services.storage import (
     DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+    DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+    DEFAULT_FILENAME_PERSON_JOINER,
     _safe_float,
     assign_cluster_to_person,
+    build_filename_person_format_summary,
     build_folder_tree,
     delete_image,
     get_available_image_path,
     get_cluster_distance_threshold,
+    get_filename_person_block_separator,
+    get_filename_person_joiner,
+    get_filename_person_suffix_format,
     list_image_locations,
     list_available_image_persons,
+    list_filename_rename_candidates,
     get_person_faces,
     list_images_page,
     list_persons,
     invalidate_image_query_cache,
+    rename_image_locations_to_match_people,
     set_cluster_distance_threshold,
+    set_filename_person_block_separator,
+    set_filename_person_joiner,
+    set_filename_person_suffix_format,
 )
 
 logger = logging.getLogger("uvicorn.error")
@@ -258,9 +269,23 @@ def api_select_folder(request: Request):
 @app.get("/api/settings")
 def api_get_settings():
     """Return persisted application settings used by the frontend."""
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
     return {
         "cluster_distance_threshold": get_cluster_distance_threshold(),
         "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+        "filename_person_suffix_format": build_filename_person_format_summary(
+            block_separator=block_separator,
+            joiner=joiner,
+        ),
+        "filename_person_suffix_format_default": build_filename_person_format_summary(
+            block_separator=DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+            joiner=DEFAULT_FILENAME_PERSON_JOINER,
+        ),
+        "filename_person_block_separator": block_separator,
+        "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+        "filename_person_joiner": joiner,
+        "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
         "database_path": DB_PATH,
     }
 
@@ -268,12 +293,53 @@ def api_get_settings():
 @app.put("/api/settings")
 def api_update_settings(data: dict = Body(...)):
     """Persist mutable application settings."""
-    if "cluster_distance_threshold" not in data:
-        raise HTTPException(status_code=400, detail="Missing cluster_distance_threshold")
-    threshold = validate_cluster_distance_threshold(data["cluster_distance_threshold"])
+    threshold = get_cluster_distance_threshold()
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
+
+    if "cluster_distance_threshold" in data:
+        threshold = validate_cluster_distance_threshold(data["cluster_distance_threshold"])
+        threshold = set_cluster_distance_threshold(threshold)
+    if "filename_person_block_separator" in data:
+        block_separator = set_filename_person_block_separator(
+            str(data["filename_person_block_separator"])
+        )
+    if "filename_person_joiner" in data:
+        joiner = set_filename_person_joiner(str(data["filename_person_joiner"]))
+    if "filename_person_suffix_format" in data:
+        try:
+            set_filename_person_suffix_format(
+                str(data["filename_person_suffix_format"])
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if (
+        "cluster_distance_threshold" not in data
+        and "filename_person_block_separator" not in data
+        and "filename_person_joiner" not in data
+        and "filename_person_suffix_format" not in data
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Missing mutable settings payload.",
+        )
+
     return {
-        "cluster_distance_threshold": set_cluster_distance_threshold(threshold),
+        "cluster_distance_threshold": threshold,
         "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+        "filename_person_suffix_format": build_filename_person_format_summary(
+            block_separator=block_separator,
+            joiner=joiner,
+        ),
+        "filename_person_suffix_format_default": build_filename_person_format_summary(
+            block_separator=DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+            joiner=DEFAULT_FILENAME_PERSON_JOINER,
+        ),
+        "filename_person_block_separator": block_separator,
+        "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+        "filename_person_joiner": joiner,
+        "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
         "database_path": DB_PATH,
     }
 
@@ -831,6 +897,96 @@ def get_images(
         "has_more": offset + len(items) < total,
         "available_persons": list_available_image_persons(normalized_folders),
     }
+
+
+@app.get("/api/image-renames")
+def api_get_image_rename_candidates(
+    request: Request,
+    folders: List[str] = Query(default=[]),
+    persons: List[str] = Query(default=[]),
+    sort_by: str = Query(default="date"),
+    sort_direction: str = Query(default="desc"),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """List image paths whose filenames should be updated with person names."""
+    display_platform = get_display_platform(request)
+    normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
+    candidates, total = list_filename_rename_candidates(
+        folders=normalized_folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=limit,
+        offset=offset,
+    )
+
+    items = []
+    for candidate in candidates:
+        display_directory = (
+            to_display_path(candidate["directory"])
+            if display_platform == "windows"
+            else candidate["directory"]
+        )
+        display_path = (
+            to_display_path(candidate["path"])
+            if display_platform == "windows"
+            else candidate["path"]
+        )
+        items.append(
+            {
+                **candidate,
+                "directory": display_directory,
+                "path": display_path,
+                "proposed_path": os.path.join(
+                    display_directory, candidate["proposed_filename"]
+                ),
+            }
+        )
+
+    return {
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(items) < total,
+        "available_persons": list_available_image_persons(normalized_folders),
+    }
+
+
+@app.post("/api/image-renames/apply")
+def api_apply_image_rename_candidates(data: dict = Body(...)):
+    """Rename selected image paths and update the database."""
+    folders = [
+        normalize_import_folder_path(path)
+        for path in data.get("folders", [])
+        if isinstance(path, str) and path.strip()
+    ]
+    persons = [
+        person.strip()
+        for person in data.get("persons", [])
+        if isinstance(person, str) and person.strip()
+    ]
+    selected_paths = [
+        normalize_import_folder_path(path)
+        for path in data.get("selected_paths", [])
+        if isinstance(path, str) and path.strip()
+    ]
+    excluded_paths = [
+        normalize_import_folder_path(path)
+        for path in data.get("excluded_paths", [])
+        if isinstance(path, str) and path.strip()
+    ]
+    result = rename_image_locations_to_match_people(
+        selected_paths=selected_paths,
+        rename_all=bool(data.get("rename_all")),
+        excluded_paths=excluded_paths,
+        folders=folders,
+        persons=persons,
+        sort_by=data.get("sort_by", "date"),
+        sort_direction=data.get("sort_direction", "desc"),
+    )
+    return result
 
 
 # -----------------------------

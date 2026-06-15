@@ -715,6 +715,60 @@ img {
   transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 
+.people-visual-toggle {
+  min-width: 210px;
+  padding: 9px 12px;
+  border: 1px solid #30303a;
+  border-radius: 8px;
+  background: linear-gradient(145deg, #17171d, #101014);
+  color: #eee;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.people-visual-toggle:hover,
+.people-visual-toggle--active {
+  border-color: rgba(0, 229, 255, 0.7);
+  box-shadow: 0 0 18px rgba(0, 229, 255, 0.12);
+}
+
+.people-visual-toggle:hover {
+  transform: translateY(-1px);
+}
+
+.people-visual-toggle > span:nth-child(2) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.people-visual-toggle strong {
+  font-size: 13px;
+}
+
+.people-visual-toggle small {
+  color: #85858f;
+  font-size: 11px;
+}
+
+.people-visual-toggle__indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: #4f5562;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.people-visual-toggle--active .people-visual-toggle__indicator {
+  background: var(--neon-cyan);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.55);
+}
+
 .folder-filter-trigger:hover,
 .folder-filter-trigger--active {
   border-color: rgba(0, 229, 255, 0.7);
@@ -1589,6 +1643,10 @@ img {
   }
 
   .folder-filter-trigger {
+    flex: 1;
+  }
+
+  .people-visual-toggle {
     flex: 1;
   }
 
