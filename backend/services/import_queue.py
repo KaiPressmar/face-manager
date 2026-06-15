@@ -1,5 +1,6 @@
 """Adaptive import queue with request-level cancellation and staged ETA."""
 
+import logging
 import os
 import threading
 import time
@@ -12,7 +13,11 @@ from typing import Callable, Optional, Protocol
 
 from ..models.face_model import get_compute_mode
 from ..db.schema import get_conn
+from ..error_logging import configure_error_logging
 from .pipeline import ImportCancelled, ImportProcessor, configure_processing_slots
+
+configure_error_logging()
+logger = logging.getLogger("face_manager.import_queue")
 
 
 def _utc_now() -> str:
@@ -1075,6 +1080,7 @@ class ImportQueue:
         except ImportCancelled:
             return "cancelled", None
         except Exception as exc:  # pragma: no cover - safety net
+            logger.exception("Import job %s failed for %s", job_id, job.folder_path)
             return "failed", str(exc)
         return ("cancelled", None) if cancel_event.is_set() else ("completed", None)
 
@@ -1083,6 +1089,7 @@ class ImportQueue:
         try:
             final_status, error_message = future.result()
         except Exception as exc:  # pragma: no cover - callback safety
+            logger.exception("Import job callback failed for %s", job_id)
             final_status, error_message = "failed", str(exc)
         with self._condition:
             job = self._jobs.get(job_id)

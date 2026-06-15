@@ -1,12 +1,91 @@
 import hashlib
+import logging
 import os
+import shutil
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import DB_PATH
+from ..error_logging import configure_error_logging
+
+configure_error_logging()
+logger = logging.getLogger("face_manager.db")
 
 HASH_CHUNK_SIZE = 1024 * 1024
+DATABASE_RECOVERY_LOCK = threading.Lock()
+RECOVERABLE_DATABASE_ERROR_MARKERS = (
+    "database disk image is malformed",
+    "malformed",
+    "not a database",
+    "file is not a database",
+)
+
+
+def _open_connection():
+    """Open a configured SQLite connection without recovery side effects."""
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def _is_recoverable_database_error(exc: sqlite3.DatabaseError) -> bool:
+    """Return whether a SQLite error suggests on-disk corruption."""
+    message = str(exc).lower()
+    return any(marker in message for marker in RECOVERABLE_DATABASE_ERROR_MARKERS)
+
+
+def _quarantine_database_file() -> Path | None:
+    """Move a broken database and its sidecars out of the active location."""
+    database_path = Path(DB_PATH)
+    if not database_path.exists():
+        return None
+
+    recovery_dir = database_path.parent / "recovery"
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target_path = recovery_dir / f"{database_path.stem}.corrupt-{timestamp}{database_path.suffix}"
+    suffix_counter = 1
+    while target_path.exists():
+        suffix_counter += 1
+        target_path = recovery_dir / (
+            f"{database_path.stem}.corrupt-{timestamp}-{suffix_counter}{database_path.suffix}"
+        )
+
+    shutil.move(str(database_path), str(target_path))
+    for sidecar_suffix in ("-wal", "-shm"):
+        sidecar_path = database_path.with_name(f"{database_path.name}{sidecar_suffix}")
+        if sidecar_path.exists():
+            shutil.move(
+                str(sidecar_path),
+                str(target_path.with_name(f"{target_path.name}{sidecar_suffix}")),
+            )
+    return target_path
+
+
+def recover_database(exc: sqlite3.DatabaseError, context: str) -> Path | None:
+    """Archive a corrupted database so the app can recreate a healthy one."""
+    with DATABASE_RECOVERY_LOCK:
+        archived_path = _quarantine_database_file()
+    if archived_path is not None:
+        logger.exception(
+            "Recovered corrupted database during %s; archived previous file to %s",
+            context,
+            archived_path,
+            exc_info=exc,
+        )
+    else:
+        logger.exception(
+            "Detected recoverable database issue during %s, but no active database file was present",
+            context,
+            exc_info=exc,
+        )
+    return archived_path
 
 
 def get_conn():
@@ -15,12 +94,13 @@ def get_conn():
     Returns:
         SQLite connection with row mapping, WAL, and foreign keys enabled.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        return _open_connection()
+    except sqlite3.DatabaseError as exc:
+        if not _is_recoverable_database_error(exc):
+            raise
+        recover_database(exc, "connection open")
+        return _open_connection()
 
 
 def _split_image_path(image_path: str):
@@ -331,10 +411,8 @@ def _migrate_legacy_faces(conn):
     cur.execute("ALTER TABLE face_migrated RENAME TO face")
 
 
-def init_db():
-    """Create and migrate the application database schema."""
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = get_conn()
+def _initialize_schema(conn):
+    """Create and migrate the application database schema on one connection."""
     cur = conn.cursor()
 
     cur.execute(
@@ -397,4 +475,23 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
 
     conn.commit()
-    conn.close()
+
+
+def init_db():
+    """Create and migrate the application database schema."""
+    conn = None
+    try:
+        conn = _open_connection()
+        _initialize_schema(conn)
+    except sqlite3.DatabaseError as exc:
+        if conn is not None:
+            conn.close()
+            conn = None
+        if not _is_recoverable_database_error(exc):
+            raise
+        recover_database(exc, "database initialization")
+        conn = _open_connection()
+        _initialize_schema(conn)
+    finally:
+        if conn is not None:
+            conn.close()

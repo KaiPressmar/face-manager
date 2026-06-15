@@ -244,9 +244,10 @@ const ClusterPage: React.FC = () => {
                 <div style={{ flex: 1 }}>
                   {assignmentMode === "existing" ? (
                     <select
+                      className="app-select"
                       value={selectedPerson}
                       onChange={(e) => setSelectedPerson(e.target.value)}
-                      style={{ width: "100%", background: "#141418", color: "#fff", border: "1px solid #333", padding: "10px 12px", borderRadius: 4, outline: "none", fontSize: 14 }}
+                      style={{ width: "100%", border: "1px solid #333", fontSize: 14 }}
                     >
                       <option value="">-- Person aus Liste wählen --</option>
                       {persons.map((p) => (

@@ -12,12 +12,18 @@ from typing import List
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import ExifTags, Image
 
-from .config import APP_VERSION, DB_PATH, get_frontend_dist_dir
+from .config import APP_VERSION, DB_PATH, get_error_log_path, get_frontend_dist_dir
 from .db.schema import get_conn, init_db
+from .error_logging import (
+    DEFAULT_FILE_LOG_LEVEL,
+    apply_persisted_file_log_level,
+    configure_error_logging,
+    install_global_exception_hooks,
+)
 from .models.face_model import get_compute_mode, get_execution_provider
 from .services.desktop import (
     is_windows_host,
@@ -39,6 +45,7 @@ from .services.storage import (
     delete_image,
     get_available_image_path,
     get_cluster_distance_threshold,
+    get_file_log_level,
     get_filename_person_block_separator,
     get_filename_person_joiner,
     get_filename_person_suffix_format,
@@ -51,12 +58,15 @@ from .services.storage import (
     invalidate_image_query_cache,
     rename_image_locations_to_match_people,
     set_cluster_distance_threshold,
+    set_file_log_level,
     set_filename_person_block_separator,
     set_filename_person_joiner,
     set_filename_person_suffix_format,
 )
 
-logger = logging.getLogger("uvicorn.error")
+configure_error_logging()
+install_global_exception_hooks()
+logger = logging.getLogger("face_manager.api")
 
 init_db()
 import_queue = ImportQueue(auto_start=False)
@@ -72,11 +82,18 @@ async def lifespan(_app: FastAPI):
     Yields:
         Control while the application is accepting requests.
     """
-    import_queue.start()
+    try:
+        import_queue.start()
+    except Exception:
+        logger.exception("Could not start import queue during application startup")
+        raise
     try:
         yield
     finally:
-        import_queue.stop()
+        try:
+            import_queue.stop()
+        except Exception:
+            logger.exception("Could not stop import queue cleanly during shutdown")
 
 
 app = FastAPI(title="Face Manager API", version=APP_VERSION, lifespan=lifespan)
@@ -87,6 +104,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_unhandled_request_errors(request: Request, call_next):
+    """Log unexpected request failures and return a stable JSON response."""
+    try:
+        return await call_next(request)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "Unhandled API error for %s %s",
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            {
+                "detail": (
+                    "Internal server error. Face Manager attempted to recover "
+                    "automatically. See the error log for details."
+                )
+            },
+            status_code=500,
+        )
 
 # -----------------------------
 # PROCESSING
@@ -286,7 +327,10 @@ def api_get_settings():
         "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
         "filename_person_joiner": joiner,
         "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
+        "file_log_level": get_file_log_level(),
+        "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
         "database_path": DB_PATH,
+        "error_log_path": str(get_error_log_path()),
     }
 
 
@@ -296,6 +340,7 @@ def api_update_settings(data: dict = Body(...)):
     threshold = get_cluster_distance_threshold()
     block_separator = get_filename_person_block_separator()
     joiner = get_filename_person_joiner()
+    file_log_level = get_file_log_level()
 
     if "cluster_distance_threshold" in data:
         threshold = validate_cluster_distance_threshold(data["cluster_distance_threshold"])
@@ -313,12 +358,19 @@ def api_update_settings(data: dict = Body(...)):
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "file_log_level" in data:
+        try:
+            file_log_level = set_file_log_level(str(data["file_log_level"]))
+            apply_persisted_file_log_level()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if (
         "cluster_distance_threshold" not in data
         and "filename_person_block_separator" not in data
         and "filename_person_joiner" not in data
         and "filename_person_suffix_format" not in data
+        and "file_log_level" not in data
     ):
         raise HTTPException(
             status_code=400,
@@ -340,7 +392,10 @@ def api_update_settings(data: dict = Body(...)):
         "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
         "filename_person_joiner": joiner,
         "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
+        "file_log_level": file_log_level,
+        "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
         "database_path": DB_PATH,
+        "error_log_path": str(get_error_log_path()),
     }
 
 
@@ -356,13 +411,16 @@ def api_export_database():
     try:
         source.backup(target)
         target.commit()
+        with open(temp_path, "rb") as exported:
+            payload = exported.read()
+    except Exception:
+        logger.exception("Database export failed")
+        raise
     finally:
         target.close()
         source.close()
-
-    with open(temp_path, "rb") as exported:
-        payload = exported.read()
-    os.unlink(temp_path)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
 
     return Response(
         payload,
@@ -391,8 +449,11 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
     os.close(fd)
     temp_path = Path(temp_path_str)
     temp_path.write_bytes(payload)
+    backup_path = current_db_path.with_name(f"{current_db_path.stem}.pre-import-backup.sqlite")
 
     try:
+        if current_db_path.exists():
+            shutil.copy2(DB_PATH, backup_path)
         validate_database_file(temp_path)
         shutil.move(str(temp_path), DB_PATH)
         wal_path = current_db_path.with_name(f"{current_db_path.name}-wal")
@@ -402,7 +463,28 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 sidecar_path.unlink()
         init_db()
         reset_import_resources()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Database import failed; attempting recovery")
+        try:
+            if backup_path.exists():
+                shutil.move(str(backup_path), DB_PATH)
+                init_db()
+                reset_import_resources()
+            elif current_db_path.exists():
+                current_db_path.unlink()
+                init_db()
+                reset_import_resources()
+        except Exception:
+            logger.exception("Automatic recovery after failed database import also failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Database import failed. Face Manager restored the previous database when possible.",
+        ) from exc
     finally:
+        if backup_path.exists():
+            backup_path.unlink()
         if temp_path.exists():
             temp_path.unlink()
 

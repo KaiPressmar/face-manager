@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from collections import deque
@@ -14,12 +15,16 @@ import numpy as np
 from PIL import Image
 
 from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
+from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
 from .storage import (
     get_cluster_distance_threshold,
     invalidate_image_query_cache,
     load_all_embeddings,
 )
+
+configure_error_logging()
+logger = logging.getLogger("face_manager.pipeline")
 
 if TYPE_CHECKING:
     from ..models.clustering import FaceClustering
@@ -412,6 +417,10 @@ class ImportProcessor:
                             raise
                         except Exception as exc:
                             conn.rollback()
+                            logger.exception(
+                                "Import processing failed for %s",
+                                primary.path,
+                            )
                             progress_callback({"last_error": f"{primary.path}: {exc}"})
                         finally:
                             completed_images += 1
@@ -424,6 +433,7 @@ class ImportProcessor:
                 except ImportCancelled:
                     raise
                 except Exception as exc:
+                    logger.exception("Import hashing/planning failed for %s", image_path)
                     progress_callback({"last_error": f"{image_path}: {exc}"})
                     completed_images += 1
                     progress_callback({"processed_images": completed_images})

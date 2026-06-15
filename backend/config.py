@@ -56,5 +56,15 @@ def get_frontend_dist_dir() -> Path:
     return get_project_root() / "frontend" / "dist"
 
 
+def get_log_dir() -> Path:
+    """Return the directory used for persistent application logs."""
+    return get_data_root() / "logs"
+
+
+def get_error_log_path() -> Path:
+    """Return the primary persistent error log path."""
+    return get_log_dir() / "error.log"
+
+
 DB_PATH = str(get_data_root() / "database.sqlite")
 APP_VERSION = (get_project_root() / "VERSION").read_text().strip()
