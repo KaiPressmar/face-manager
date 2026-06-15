@@ -3,6 +3,7 @@ frontend/dist
 build
 dist
 backend/.venv
+backend/db/logs/
 __pycache__
 *.sqlite
 *.sqlite-*
