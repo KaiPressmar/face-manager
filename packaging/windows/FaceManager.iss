@@ -51,6 +51,8 @@ var
   ExistingInstallDir: string;
   ExistingUninstallString: string;
   ExistingInstallHandled: Boolean;
+  ExistingUninstallExe: string;
+  ExistingUninstallParams: string;
 
 function AppDataDir(): string;
 begin
@@ -79,6 +81,61 @@ begin
     Result := Copy(Result, 2, Length(Result) - 2);
 end;
 
+function TrimLeftWhitespace(const Value: string): string;
+var
+  Index: Integer;
+begin
+  Index := 1;
+  while (Index <= Length(Value)) and (Value[Index] <= ' ') do
+    Index := Index + 1;
+  Result := Copy(Value, Index, MaxInt);
+end;
+
+procedure SplitCommandLine(const CommandLine: string; var FileName: string; var Params: string);
+var
+  Text: string;
+  Index: Integer;
+begin
+  Text := TrimLeftWhitespace(CommandLine);
+  FileName := '';
+  Params := '';
+
+  if Text = '' then
+    exit;
+
+  if Text[1] = '"' then
+  begin
+    Index := 2;
+    while (Index <= Length(Text)) and (Text[Index] <> '"') do
+      Index := Index + 1;
+    FileName := Copy(Text, 2, Index - 2);
+    Params := TrimLeftWhitespace(Copy(Text, Index + 1, MaxInt));
+  end
+  else
+  begin
+    Index := 1;
+    while (Index <= Length(Text)) and (Text[Index] > ' ') do
+      Index := Index + 1;
+    FileName := Copy(Text, 1, Index - 1);
+    Params := TrimLeftWhitespace(Copy(Text, Index + 1, MaxInt));
+  end;
+end;
+
+function ContainsSilentFlag(const Params: string): Boolean;
+var
+  UpperParams: string;
+begin
+  UpperParams := Uppercase(' ' + Params + ' ');
+  Result :=
+    (Pos(' /SILENT ', UpperParams) > 0) or
+    (Pos(' /VERYSILENT ', UpperParams) > 0);
+end;
+
+procedure ResolveExistingUninstallCommand();
+begin
+  SplitCommandLine(ExistingUninstallString, ExistingUninstallExe, ExistingUninstallParams);
+end;
+
 function ExistingInstallSummary(): string;
 begin
   Result :=
@@ -102,6 +159,7 @@ begin
   if not TryGetExistingInstallValue('InstallLocation', ExistingInstallDir) then
     ExistingInstallDir := ExpandConstant('{app}');
   TryGetExistingInstallValue('QuietUninstallString', ExistingUninstallString);
+  ResolveExistingUninstallCommand();
   if ExistingInstallDir <> '' then
     WizardForm.DirEdit.Text := ExistingInstallDir;
 
@@ -143,19 +201,43 @@ end;
 procedure HandleExistingInstall();
 var
   ResultCode: Integer;
-  SilentUninstall: string;
+  SilentParams: string;
 begin
   if ExistingInstallHandled or not ExistingInstallDetected then
     exit;
 
   ExistingInstallHandled := True;
-  SilentUninstall :=
-    '"' + RemoveQuotes(ExistingUninstallString) + '"' +
-    ' /VERYSILENT /SUPPRESSMSGBOXES /NORESTART';
+
+  if ExistingUninstallExe = '' then
+  begin
+    MsgBox(
+      'The existing Face Manager uninstaller could not be resolved.' + #13#10 +
+      'Please uninstall the current version manually and run the installer again.',
+      mbCriticalError,
+      MB_OK
+    );
+    Abort();
+  end;
+
+  SilentParams := ExistingUninstallParams;
+  if not ContainsSilentFlag(SilentParams) then
+  begin
+    if SilentParams <> '' then
+      SilentParams := SilentParams + ' ';
+    SilentParams := SilentParams + '/VERYSILENT';
+  end;
+  SilentParams := Trim(SilentParams + ' /SUPPRESSMSGBOXES /NORESTART');
+
+  Log(
+    Format(
+      'Running existing uninstaller: %s %s',
+      [ExistingUninstallExe, SilentParams]
+    )
+  );
 
   if not Exec(
-    ExpandConstant('{cmd}'),
-    '/C "' + SilentUninstall + '"',
+    ExistingUninstallExe,
+    SilentParams,
     '',
     SW_HIDE,
     ewWaitUntilTerminated,
@@ -175,6 +257,7 @@ begin
   begin
     MsgBox(
       'The existing Face Manager installation returned an error during the update step.' + #13#10 +
+      'Exit code: ' + IntToStr(ResultCode) + #13#10 +
       'Please close the application and try again.',
       mbCriticalError,
       MB_OK
