@@ -5,9 +5,13 @@ from fastapi import HTTPException
 from types import SimpleNamespace
 
 from backend import app
+from backend.services.cache import app_cache
 
 
 class SettingsApiTest(unittest.TestCase):
+    def setUp(self):
+        app_cache.clear()
+
     @patch("backend.app.get_error_log_path", return_value="/tmp/face-manager/logs/error.log")
     @patch("backend.app.get_file_log_level", return_value="WARNING")
     @patch("backend.app.get_filename_person_block_separator", return_value=" - ")

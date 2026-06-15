@@ -1,16 +1,18 @@
 import React from "react";
 
-import { faceCropUrl } from "../../utils/api";
+import { ClusterFace, faceCropUrl } from "../../utils/api";
 
 interface ClusterFacesGridProps {
-  faces: any[];
+  faces: ClusterFace[];
   onRemoveFace: (id: number) => void;
 }
 
 const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({ faces, onRemoveFace }) => {
+  const safeFaces = Array.isArray(faces) ? faces : [];
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, 120px)", gap: 16 }}>
-      {faces.map((f) => {
+      {safeFaces.map((f) => {
         const cropUrl = faceCropUrl(f.id);
 
         return (
@@ -73,4 +75,4 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({ faces, onRemoveFace
   );
 };
 
-export default ClusterFacesGrid;
+export default React.memo(ClusterFacesGrid);

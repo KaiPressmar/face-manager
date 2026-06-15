@@ -33,6 +33,7 @@ from .services.desktop import (
     pick_folder,
     to_display_path,
 )
+from .services.cache import app_cache
 from .services.import_queue import ImportQueue
 from .services.storage import (
     DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
@@ -45,6 +46,8 @@ from .services.storage import (
     count_filename_rename_candidates,
     delete_image,
     get_available_image_path,
+    get_cluster_faces,
+    get_cluster_summary,
     get_cluster_distance_threshold,
     get_file_log_level,
     get_filename_person_block_separator,
@@ -55,6 +58,7 @@ from .services.storage import (
     list_filename_rename_candidates,
     get_person_faces,
     list_images_page,
+    list_cluster_summaries,
     list_persons,
     invalidate_image_query_cache,
     rename_image_locations_to_match_people,
@@ -311,28 +315,36 @@ def api_select_folder(request: Request):
 @app.get("/api/settings")
 def api_get_settings():
     """Return persisted application settings used by the frontend."""
-    block_separator = get_filename_person_block_separator()
-    joiner = get_filename_person_joiner()
-    return {
-        "cluster_distance_threshold": get_cluster_distance_threshold(),
-        "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
-        "filename_person_suffix_format": build_filename_person_format_summary(
-            block_separator=block_separator,
-            joiner=joiner,
-        ),
-        "filename_person_suffix_format_default": build_filename_person_format_summary(
-            block_separator=DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
-            joiner=DEFAULT_FILENAME_PERSON_JOINER,
-        ),
-        "filename_person_block_separator": block_separator,
-        "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
-        "filename_person_joiner": joiner,
-        "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
-        "file_log_level": get_file_log_level(),
-        "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
-        "database_path": DB_PATH,
-        "error_log_path": str(get_error_log_path()),
-    }
+    def load_settings():
+        block_separator = get_filename_person_block_separator()
+        joiner = get_filename_person_joiner()
+        return {
+            "cluster_distance_threshold": get_cluster_distance_threshold(),
+            "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+            "filename_person_suffix_format": build_filename_person_format_summary(
+                block_separator=block_separator,
+                joiner=joiner,
+            ),
+            "filename_person_suffix_format_default": build_filename_person_format_summary(
+                block_separator=DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+                joiner=DEFAULT_FILENAME_PERSON_JOINER,
+            ),
+            "filename_person_block_separator": block_separator,
+            "filename_person_block_separator_default": DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+            "filename_person_joiner": joiner,
+            "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
+            "file_log_level": get_file_log_level(),
+            "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
+            "database_path": DB_PATH,
+            "error_log_path": str(get_error_log_path()),
+        }
+
+    return app_cache.get_or_set(
+        ("api_settings",),
+        load_settings,
+        ttl_seconds=5.0,
+        tags={"settings"},
+    )
 
 
 @app.put("/api/settings")
@@ -464,6 +476,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 sidecar_path.unlink()
         init_db()
         reset_import_resources()
+        app_cache.clear()
     except HTTPException:
         raise
     except Exception as exc:
@@ -473,10 +486,12 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 shutil.move(str(backup_path), DB_PATH)
                 init_db()
                 reset_import_resources()
+                app_cache.clear()
             elif current_db_path.exists():
                 current_db_path.unlink()
                 init_db()
                 reset_import_resources()
+                app_cache.clear()
         except Exception:
             logger.exception("Automatic recovery after failed database import also failed")
         raise HTTPException(
@@ -584,63 +599,29 @@ def api_cancel_or_remove_import(job_id: str):
 
 @app.get("/api/clusters")
 def api_clusters():
-    """List clusters and their faces.
+    """List compact cluster summaries for the sidebar."""
+    return list_cluster_summaries()
 
-    Returns:
-        Cluster dictionaries grouped from persisted face rows.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT
-            f.id          AS face_id,
-            f.image_id    AS image_id,
-            i.path        AS image_path,
-            f.bbox_x      AS bbox_x,
-            f.bbox_y      AS bbox_y,
-            f.bbox_w      AS bbox_w,
-            f.bbox_h      AS bbox_h,
-            f.cluster_id  AS cluster_id,
-            p.name        AS person_name
-        FROM face f
-        JOIN image i ON f.image_id = i.id
-        LEFT JOIN cluster c ON f.cluster_id = c.id
-        LEFT JOIN person  p ON c.person_id = p.id
-        WHERE f.cluster_id IS NOT NULL
-        ORDER BY f.cluster_id, f.id
-        """
-    )
+@app.get("/api/clusters/{cluster_id}")
+def api_cluster_detail(cluster_id: int):
+    """Return compact metadata for one cluster."""
+    cluster = get_cluster_summary(cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return cluster
 
-    rows = cur.fetchall()
-    conn.close()
 
-    clusters = {}
-
-    for r in rows:
-        cid = r["cluster_id"]
-        if cid not in clusters:
-            clusters[cid] = {
-                "cluster_id": cid,
-                "person_name": r["person_name"],
-                "faces": [],
-            }
-
-        clusters[cid]["faces"].append(
-            {
-                "id": r["face_id"],
-                "image_id": r["image_id"],
-                "image_path": r["image_path"],
-                "bbox_x": int(r["bbox_x"]),
-                "bbox_y": int(r["bbox_y"]),
-                "bbox_w": int(r["bbox_w"]),
-                "bbox_h": int(r["bbox_h"]),
-                "person_name": r["person_name"],
-            }
-        )
-
-    return list(clusters.values())
+@app.get("/api/clusters/{cluster_id}/faces")
+def api_cluster_faces(cluster_id: int):
+    """Return faces for one cluster only."""
+    cluster = get_cluster_summary(cluster_id)
+    if cluster is None:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+    return {
+        **cluster,
+        "faces": get_cluster_faces(cluster_id),
+    }
 
 
 @app.post("/api/clusters/{cluster_id}/assign-person")

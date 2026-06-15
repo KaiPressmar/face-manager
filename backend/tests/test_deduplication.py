@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.db import schema
+from backend.services.cache import app_cache
 from backend.services.storage import (
     build_folder_tree,
     list_available_image_persons,
@@ -14,6 +15,9 @@ from backend.services.storage import (
 
 
 class DeduplicationMigrationTest(unittest.TestCase):
+    def setUp(self):
+        app_cache.clear()
+
     def test_legacy_duplicate_images_are_merged_and_keep_all_locations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

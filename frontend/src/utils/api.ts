@@ -139,6 +139,27 @@ export interface ImagePage {
   available_persons: string[];
 }
 
+export interface ClusterSummary {
+  cluster_id: number;
+  person_name: string | null;
+  face_count: number;
+}
+
+export interface ClusterFace {
+  id: number;
+  image_id: number;
+  image_path: string;
+  bbox_x: number;
+  bbox_y: number;
+  bbox_w: number;
+  bbox_h: number;
+  cluster_id: number | null;
+}
+
+export interface ClusterDetails extends ClusterSummary {
+  faces: ClusterFace[];
+}
+
 export interface FetchImagesParams {
   folders?: string[];
   persons?: string[];
@@ -298,46 +319,123 @@ export async function fetchFolders(): Promise<FolderTree> {
   return await res.json();
 }
 
-export async function fetchClusters() {
-  const res = await apiFetch(`${API_BASE}/clusters`);
-  if (!res.ok) return [];
-  return await res.json();
+let personsCache:
+  | {
+      expiresAt: number;
+      data: Array<{ id: number; name: string }>;
+    }
+  | null = null;
+let personsRequest: Promise<Array<{ id: number; name: string }>> | null = null;
+const PERSONS_CACHE_TTL_MS = 30_000;
+
+export function invalidatePersonsCache() {
+  personsCache = null;
+  personsRequest = null;
 }
 
-// legacy, no longer used by ClusterPage, but kept if needed elsewhere
-export async function fetchClusterFaces(id: number) {
-  const res = await apiFetch(`${API_BASE}/clusters/${id}/faces`);
+export async function fetchClusters(): Promise<ClusterSummary[]> {
+  const res = await apiFetch(`${API_BASE}/clusters`);
   if (!res.ok) return [];
-  return await res.json();
+  const payload = await res.json();
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+  return payload.map((item) => ({
+    cluster_id: Number(item?.cluster_id ?? item?.id ?? 0),
+    person_name:
+      typeof item?.person_name === "string" || item?.person_name === null
+        ? item.person_name
+        : null,
+    face_count: Number(
+      item?.face_count ??
+        (Array.isArray(item?.faces) ? item.faces.length : 0),
+    ),
+  })).filter((item) => item.cluster_id > 0);
+}
+
+export async function fetchClusterFaces(id: number): Promise<ClusterDetails | null> {
+  const res = await apiFetch(`${API_BASE}/clusters/${id}/faces`);
+  if (res.status === 404) return null;
+  if (!res.ok) return null;
+  const payload = await res.json();
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  return {
+    cluster_id: Number((payload as { cluster_id?: number }).cluster_id ?? id),
+    person_name:
+      typeof (payload as { person_name?: unknown }).person_name === "string" ||
+      (payload as { person_name?: unknown }).person_name === null
+        ? ((payload as { person_name: string | null }).person_name ?? null)
+        : null,
+    face_count: Number(
+      (payload as { face_count?: number }).face_count ??
+        (Array.isArray((payload as { faces?: unknown[] }).faces)
+          ? (payload as { faces: unknown[] }).faces.length
+          : 0),
+    ),
+    faces: Array.isArray((payload as { faces?: unknown[] }).faces)
+      ? (payload as { faces: ClusterFace[] }).faces
+      : [],
+  };
 }
 
 export async function removeFaceFromCluster(clusterId: number, faceId: number) {
-  await apiFetch(`${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`, {
+  const res = await apiFetch(`${API_BASE}/clusters/${clusterId}/remove-face/${faceId}`, {
     method: "POST",
   });
+  if (!res.ok) {
+    throw new Error("Das Gesicht konnte nicht aus dem Cluster entfernt werden.");
+  }
 }
 
 export async function dissolveCluster(clusterId: number) {
-  await apiFetch(`${API_BASE}/clusters/${clusterId}/dissolve`, {
+  const res = await apiFetch(`${API_BASE}/clusters/${clusterId}/dissolve`, {
     method: "POST",
   });
+  if (!res.ok) {
+    throw new Error("Das Cluster konnte nicht aufgelöst werden.");
+  }
 }
 
 export async function assignClusterToPerson(
   clusterId: number,
   personName: string,
 ) {
-  await apiFetch(`${API_BASE}/clusters/${clusterId}/assign-person`, {
+  const res = await apiFetch(`${API_BASE}/clusters/${clusterId}/assign-person`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ person_name: personName }),
   });
+  if (!res.ok) {
+    throw new Error("Die Person konnte dem Cluster nicht zugewiesen werden.");
+  }
+  invalidatePersonsCache();
 }
 
 export async function listPersons() {
+  const now = Date.now();
+  if (personsCache && personsCache.expiresAt > now) {
+    return personsCache.data;
+  }
+  if (personsRequest) {
+    return personsRequest;
+  }
   const res = await apiFetch(`${API_BASE}/persons`);
   if (!res.ok) return [];
-  return await res.json();
+  personsRequest = res.json().then((data) => {
+    const normalized = Array.isArray(data) ? data : [];
+    personsCache = {
+      data: normalized,
+      expiresAt: Date.now() + PERSONS_CACHE_TTL_MS,
+    };
+    personsRequest = null;
+    return normalized;
+  }).catch((error) => {
+    personsRequest = null;
+    throw error;
+  });
+  return personsRequest;
 }
 
 export async function processFolder(folderPath: string): Promise<ImportJob> {
