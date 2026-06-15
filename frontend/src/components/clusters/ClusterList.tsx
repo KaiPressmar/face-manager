@@ -1,17 +1,23 @@
 import React from "react";
+import { ClusterSummary } from "../../utils/api";
 
 const UNKNOWN_PERSON_LABEL = "Unbekannt";
 
 interface ClusterListProps {
-  clusters: any[];
+  clusters: ClusterSummary[];
   selected: number | null;
   onSelect: (id: number) => void;
-  isLoading: boolean; // 🔥 Neues Property
+  isLoading: boolean;
 }
 
-const ClusterList: React.FC<ClusterListProps> = ({ clusters, selected, onSelect, isLoading }) => {
-  
-  // 🔥 Während des Ladens pulsierende Sidebar-Einträge anzeigen
+const ClusterList: React.FC<ClusterListProps> = ({
+  clusters,
+  selected,
+  onSelect,
+  isLoading,
+}) => {
+  const safeClusters = Array.isArray(clusters) ? clusters : [];
+
   if (isLoading) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -29,18 +35,18 @@ const ClusterList: React.FC<ClusterListProps> = ({ clusters, selected, onSelect,
     );
   }
 
-  if (clusters.length === 0) {
+  if (safeClusters.length === 0) {
     return <div style={{ opacity: 0.5, fontSize: 13 }}>Keine aktiven Cluster gefunden.</div>;
   }
 
-  const groupedClusters = clusters.reduce((groups, cluster) => {
+  const groupedClusters = safeClusters.reduce((groups, cluster) => {
     const groupName = cluster.person_name?.trim() || UNKNOWN_PERSON_LABEL;
     if (!groups[groupName]) {
       groups[groupName] = [];
     }
     groups[groupName].push(cluster);
     return groups;
-  }, {} as Record<string, any[]>);
+  }, {} as Record<string, ClusterSummary[]>);
 
   const groupOrder = Object.keys(groupedClusters).sort((a, b) => {
     if (a === UNKNOWN_PERSON_LABEL) return 1;
@@ -117,7 +123,7 @@ const ClusterList: React.FC<ClusterListProps> = ({ clusters, selected, onSelect,
                           padding: "2px 6px",
                         }}
                       >
-                        {c.faces?.length || 0} Gesichter
+                        {c.face_count} Gesichter
                       </span>
                     </div>
                     <div

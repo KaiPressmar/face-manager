@@ -2,8 +2,6 @@ import logging
 import os
 import re
 import sqlite3
-import threading
-import time
 from collections import defaultdict
 from typing import List, Tuple
 
@@ -15,6 +13,7 @@ from ..error_logging import (
     configure_error_logging,
     normalize_file_log_level,
 )
+from .cache import app_cache
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.storage")
@@ -26,9 +25,15 @@ DEFAULT_FILENAME_PERSON_JOINER = ", "
 DEFAULT_PERSISTED_FILE_LOG_LEVEL = DEFAULT_FILE_LOG_LEVEL
 UNKNOWN_PERSON_LABEL = "Unbekannt"
 MAX_IMAGE_PAGE_SIZE = 200
-IMAGE_QUERY_CACHE_TTL_SECONDS = 5.0
-_IMAGE_QUERY_CACHE_LOCK = threading.Lock()
-_IMAGE_QUERY_CACHE: dict[tuple, tuple[float, object]] = {}
+QUERY_CACHE_TTL_SECONDS = 5.0
+QUERY_CACHE_TAG_IMAGES = "images"
+QUERY_CACHE_TAG_FOLDERS = "folders"
+QUERY_CACHE_TAG_PERSONS = "persons"
+QUERY_CACHE_TAG_RENAMES = "renames"
+QUERY_CACHE_TAG_CLUSTERS = "clusters"
+QUERY_CACHE_TAG_SETTINGS = "settings"
+QUERY_CACHE_TAG_PERSON_FACES = "person_faces"
+QUERY_CACHE_TAG_CLUSTER_FACES = "cluster_faces"
 
 
 def _safe_float(v):
@@ -144,6 +149,7 @@ def set_cluster_distance_threshold(value: float) -> float:
     )
     conn.commit()
     conn.close()
+    invalidate_query_cache_tags(QUERY_CACHE_TAG_SETTINGS)
     return threshold
 
 
@@ -163,6 +169,7 @@ def set_filename_person_suffix_format(value: str) -> str:
     )
     conn.commit()
     conn.close()
+    invalidate_query_cache_tags(QUERY_CACHE_TAG_SETTINGS, QUERY_CACHE_TAG_RENAMES)
     return suffix_format
 
 
@@ -180,6 +187,7 @@ def set_filename_person_joiner(value: str) -> str:
     )
     conn.commit()
     conn.close()
+    invalidate_query_cache_tags(QUERY_CACHE_TAG_SETTINGS, QUERY_CACHE_TAG_RENAMES)
     return joiner
 
 
@@ -199,6 +207,7 @@ def set_filename_person_block_separator(value: str) -> str:
     )
     conn.commit()
     conn.close()
+    invalidate_query_cache_tags(QUERY_CACHE_TAG_SETTINGS, QUERY_CACHE_TAG_RENAMES)
     return separator
 
 
@@ -216,6 +225,7 @@ def set_file_log_level(value: str) -> str:
     )
     conn.commit()
     conn.close()
+    invalidate_query_cache_tags(QUERY_CACHE_TAG_SETTINGS)
     return normalized
 
 
@@ -367,29 +377,22 @@ def _descendant_filter(folders):
     return conditions, params
 
 
-def _cache_get(key):
-    """Return a cached value when it is still fresh."""
-    with _IMAGE_QUERY_CACHE_LOCK:
-        cached = _IMAGE_QUERY_CACHE.get(key)
-        if not cached:
-            return None
-        expires_at, value = cached
-        if expires_at < time.monotonic():
-            _IMAGE_QUERY_CACHE.pop(key, None)
-            return None
-        return value
-
-
-def _cache_set(key, value):
-    """Store one cached query result."""
-    with _IMAGE_QUERY_CACHE_LOCK:
-        _IMAGE_QUERY_CACHE[key] = (time.monotonic() + IMAGE_QUERY_CACHE_TTL_SECONDS, value)
+def invalidate_query_cache_tags(*tags: str) -> None:
+    """Clear cached query groups by their logical data tags."""
+    app_cache.invalidate_tags(*tags)
 
 
 def invalidate_image_query_cache():
     """Clear cached image query results after image-related writes."""
-    with _IMAGE_QUERY_CACHE_LOCK:
-        _IMAGE_QUERY_CACHE.clear()
+    invalidate_query_cache_tags(
+        QUERY_CACHE_TAG_IMAGES,
+        QUERY_CACHE_TAG_FOLDERS,
+        QUERY_CACHE_TAG_PERSONS,
+        QUERY_CACHE_TAG_RENAMES,
+        QUERY_CACHE_TAG_CLUSTERS,
+        QUERY_CACHE_TAG_PERSON_FACES,
+        QUERY_CACHE_TAG_CLUSTER_FACES,
+    )
 
 
 def _normalize_person_filters(persons):
@@ -478,29 +481,35 @@ def list_available_image_persons(folders=None):
     """List person names available within the current folder selection."""
     folders = folders or []
     cache_key = ("available_persons", tuple(folders))
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
 
-    cte, params = _matching_images_cte(folders=folders, persons=[])
-    conn = get_conn()
-    rows = conn.execute(
-        f"""
-        {cte}
-        SELECT DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') AS person_name
-        FROM matching_images
-        JOIN face f ON f.image_id = matching_images.image_id
-        LEFT JOIN cluster c ON f.cluster_id = c.id
-        LEFT JOIN person p ON c.person_id = p.id
-        WHERE f.cluster_id IS NOT NULL
-        ORDER BY person_name COLLATE NOCASE
-        """,
-        params,
-    ).fetchall()
-    conn.close()
-    people = [row["person_name"] for row in rows]
-    _cache_set(cache_key, people)
-    return people
+    def load_people():
+        cte, params = _matching_images_cte(folders=folders, persons=[])
+        conn = get_conn()
+        rows = conn.execute(
+            f"""
+            {cte}
+            SELECT DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') AS person_name
+            FROM matching_images
+            JOIN face f ON f.image_id = matching_images.image_id
+            LEFT JOIN cluster c ON f.cluster_id = c.id
+            LEFT JOIN person p ON c.person_id = p.id
+            WHERE f.cluster_id IS NOT NULL
+            ORDER BY person_name COLLATE NOCASE
+            """,
+            params,
+        ).fetchall()
+        conn.close()
+        return [row["person_name"] for row in rows]
+
+    return app_cache.get_or_set(
+        cache_key,
+        load_people,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_IMAGES,
+            QUERY_CACHE_TAG_PERSONS,
+        },
+    )
 
 
 def list_images_page(
@@ -528,65 +537,71 @@ def list_images_page(
         limit,
         offset,
     )
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
 
-    cte, params = _matching_images_cte(folders=folders, persons=persons)
-    matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
-    paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
+    def load_page():
+        cte, params = _matching_images_cte(folders=folders, persons=persons)
+        matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
+        paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
 
-    conn = get_conn()
-    total = conn.execute(
-        f"""
-        {cte}
-        SELECT COUNT(*) AS total
-        FROM matching_images
-        """,
-        params,
-    ).fetchone()["total"]
-    rows = conn.execute(
-        f"""
-        {cte}
-        , paged_images AS (
-            SELECT *
+        conn = get_conn()
+        total = conn.execute(
+            f"""
+            {cte}
+            SELECT COUNT(*) AS total
             FROM matching_images
-            ORDER BY {matching_order}
-            LIMIT ? OFFSET ?
-        )
-        SELECT
-            paged_images.image_id,
-            paged_images.image_path,
-            paged_images.directory,
-            paged_images.filename,
-            paged_images.created_at,
-            i.content_hash,
-            (
-                SELECT COUNT(*)
-                FROM image_location all_locations
-                WHERE all_locations.image_id = paged_images.image_id
-            ) AS location_count,
-            f.id AS face_id,
-            f.bbox_x,
-            f.bbox_y,
-            f.bbox_w,
-            f.bbox_h,
-            f.cluster_id,
-            p.name AS person_name
-        FROM paged_images
-        JOIN image i ON i.id = paged_images.image_id
-        JOIN face f ON f.image_id = paged_images.image_id
-        LEFT JOIN cluster c ON f.cluster_id = c.id
-        LEFT JOIN person p ON c.person_id = p.id
-        WHERE f.cluster_id IS NOT NULL
-        ORDER BY {paged_order}, f.id
-        """,
-        [*params, limit, offset],
-    ).fetchall()
-    conn.close()
-    result = (rows, total)
-    _cache_set(cache_key, result)
-    return result
+            """,
+            params,
+        ).fetchone()["total"]
+        rows = conn.execute(
+            f"""
+            {cte}
+            , paged_images AS (
+                SELECT *
+                FROM matching_images
+                ORDER BY {matching_order}
+                LIMIT ? OFFSET ?
+            )
+            SELECT
+                paged_images.image_id,
+                paged_images.image_path,
+                paged_images.directory,
+                paged_images.filename,
+                paged_images.created_at,
+                i.content_hash,
+                (
+                    SELECT COUNT(*)
+                    FROM image_location all_locations
+                    WHERE all_locations.image_id = paged_images.image_id
+                ) AS location_count,
+                f.id AS face_id,
+                f.bbox_x,
+                f.bbox_y,
+                f.bbox_w,
+                f.bbox_h,
+                f.cluster_id,
+                p.name AS person_name
+            FROM paged_images
+            JOIN image i ON i.id = paged_images.image_id
+            JOIN face f ON f.image_id = paged_images.image_id
+            LEFT JOIN cluster c ON f.cluster_id = c.id
+            LEFT JOIN person p ON c.person_id = p.id
+            WHERE f.cluster_id IS NOT NULL
+            ORDER BY {paged_order}, f.id
+            """,
+            [*params, limit, offset],
+        ).fetchall()
+        conn.close()
+        return rows, total
+
+    return app_cache.get_or_set(
+        cache_key,
+        load_page,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_IMAGES,
+            QUERY_CACHE_TAG_PERSONS,
+        },
+    )
 
 
 def list_images(folders=None):
@@ -694,89 +709,89 @@ def build_folder_tree():
     Returns:
         Tree roots and aggregate image and folder counts.
     """
-    conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT location.image_id, location.directory
-        FROM image_location location
-        JOIN image i ON i.id = location.image_id
-        WHERE i.processed_at IS NOT NULL
-        ORDER BY location.directory
-        """
-    ).fetchall()
-    conn.close()
+    def load_tree():
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT location.image_id, location.directory
+            FROM image_location location
+            JOIN image i ON i.id = location.image_id
+            WHERE i.processed_at IS NOT NULL
+            ORDER BY location.directory
+            """
+        ).fetchall()
+        conn.close()
 
-    direct_images = defaultdict(set)
-    all_image_ids = set()
-    for row in rows:
-        direct_images[row["directory"]].add(row["image_id"])
-        all_image_ids.add(row["image_id"])
+        direct_images = defaultdict(set)
+        all_image_ids = set()
+        for row in rows:
+            direct_images[row["directory"]].add(row["image_id"])
+            all_image_ids.add(row["image_id"])
 
-    nodes = {}
+        nodes = {}
 
-    def ensure_node(path):
-        """Create a folder node and any missing ancestors.
+        def ensure_node(path):
+            """Create a folder node and any missing ancestors."""
+            if path in nodes:
+                return nodes[path]
+            parent = os.path.dirname(path) if path != os.path.dirname(path) else None
+            node = {
+                "path": path,
+                "name": os.path.basename(path) or path,
+                "direct_image_count": len(direct_images.get(path, set())),
+                "image_count": 0,
+                "children": [],
+                "_parent": parent,
+            }
+            nodes[path] = node
+            if parent is not None:
+                ensure_node(parent)
+            return node
 
-        Args:
-            path: Folder path represented by the node.
+        for directory in direct_images:
+            ensure_node(directory)
 
-        Returns:
-            Mutable folder node dictionary.
-        """
-        if path in nodes:
-            return nodes[path]
-        parent = os.path.dirname(path) if path != os.path.dirname(path) else None
-        node = {
-            "path": path,
-            "name": os.path.basename(path) or path,
-            "direct_image_count": len(direct_images.get(path, set())),
-            "image_count": 0,
-            "children": [],
-            "_parent": parent,
+        totals = defaultdict(set)
+        for directory, image_ids in direct_images.items():
+            current = directory
+            while True:
+                totals[current].update(image_ids)
+                parent = os.path.dirname(current)
+                if parent == current:
+                    break
+                current = parent
+
+        roots = []
+        for path, node in nodes.items():
+            node["image_count"] = len(totals[path])
+            parent = node.pop("_parent")
+            if parent is None or parent not in nodes:
+                roots.append(node)
+            else:
+                nodes[parent]["children"].append(node)
+
+        def sort_nodes(items):
+            """Sort folder nodes recursively by display name."""
+            items.sort(key=lambda item: item["name"].casefold())
+            for item in items:
+                sort_nodes(item["children"])
+
+        sort_nodes(roots)
+        return {
+            "roots": roots,
+            "image_count": len(all_image_ids),
+            "folder_count": len(nodes),
         }
-        nodes[path] = node
-        if parent is not None:
-            ensure_node(parent)
-        return node
 
-    for directory in direct_images:
-        ensure_node(directory)
-
-    totals = defaultdict(set)
-    for directory, image_ids in direct_images.items():
-        current = directory
-        while True:
-            totals[current].update(image_ids)
-            parent = os.path.dirname(current)
-            if parent == current:
-                break
-            current = parent
-
-    roots = []
-    for path, node in nodes.items():
-        node["image_count"] = len(totals[path])
-        parent = node.pop("_parent")
-        if parent is None or parent not in nodes:
-            roots.append(node)
-        else:
-            nodes[parent]["children"].append(node)
-
-    def sort_nodes(items):
-        """Sort folder nodes recursively by display name.
-
-        Args:
-            items: Mutable list of folder node dictionaries.
-        """
-        items.sort(key=lambda item: item["name"].casefold())
-        for item in items:
-            sort_nodes(item["children"])
-
-    sort_nodes(roots)
-    return {
-        "roots": roots,
-        "image_count": len(all_image_ids),
-        "folder_count": len(nodes),
-    }
+    return app_cache.get_or_set(
+        ("folder_tree",),
+        load_tree,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_FOLDERS,
+            QUERY_CACHE_TAG_IMAGES,
+        },
+    )
 
 
 def get_available_image_path(image_id: int, preferred_path=None):
@@ -859,26 +874,89 @@ def list_faces_by_folder(folder_path: str):
     ]
 
 
-def list_clusters():
-    """List all clusters with optional assigned person names.
+def list_cluster_summaries():
+    """List compact cluster summaries for the cluster sidebar."""
+    def load_clusters():
+        conn = get_conn()
+        rows = conn.execute(
+            """
+            SELECT
+                c.id AS cluster_id,
+                p.name AS person_name,
+                COUNT(f.id) AS face_count
+            FROM cluster c
+            JOIN face f ON f.cluster_id = c.id
+            LEFT JOIN person p ON c.person_id = p.id
+            GROUP BY c.id, p.name
+            ORDER BY
+                face_count DESC,
+                CASE WHEN COALESCE(TRIM(p.name), '') = '' THEN 1 ELSE 0 END ASC,
+                COALESCE(p.name, ?) COLLATE NOCASE ASC,
+                c.id ASC
+            """,
+            (UNKNOWN_PERSON_LABEL,),
+        ).fetchall()
+        conn.close()
+        return [
+            {
+                "cluster_id": r["cluster_id"],
+                "person_name": r["person_name"],
+                "face_count": int(r["face_count"]),
+            }
+            for r in rows
+        ]
 
-    Returns:
-        Cluster dictionaries ordered by identifier.
-    """
+    return app_cache.get_or_set(
+        ("cluster_summaries",),
+        load_clusters,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_CLUSTERS,
+            QUERY_CACHE_TAG_PERSONS,
+            QUERY_CACHE_TAG_IMAGES,
+        },
+    )
+
+
+def get_cluster_summary(cluster_id: int):
+    """Load compact metadata for one cluster."""
+    return app_cache.get_or_set(
+        ("cluster_summary", int(cluster_id)),
+        lambda: _load_cluster_summary(cluster_id),
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_CLUSTERS,
+            QUERY_CACHE_TAG_PERSONS,
+            QUERY_CACHE_TAG_IMAGES,
+        },
+    )
+
+
+def _load_cluster_summary(cluster_id: int):
+    """Query compact metadata for one cluster from the database."""
     conn = get_conn()
-    rows = conn.execute(
+    row = conn.execute(
         """
-        SELECT c.id, c.label, p.name AS person_name
+        SELECT
+            c.id AS cluster_id,
+            p.name AS person_name,
+            COUNT(f.id) AS face_count
         FROM cluster c
+        JOIN face f ON f.cluster_id = c.id
         LEFT JOIN person p ON c.person_id = p.id
-        ORDER BY c.id
-        """
-    ).fetchall()
+        WHERE c.id = ?
+        GROUP BY c.id, p.name
+        """,
+        (cluster_id,),
+    ).fetchone()
     conn.close()
-    return [
-        {"id": r["id"], "label": r["label"], "person_name": r["person_name"]}
-        for r in rows
-    ]
+    if row is None:
+        return None
+    return {
+        "cluster_id": row["cluster_id"],
+        "person_name": row["person_name"],
+        "face_count": int(row["face_count"]),
+    }
 
 
 def get_cluster_faces(cluster_id: int):
@@ -890,6 +968,20 @@ def get_cluster_faces(cluster_id: int):
     Returns:
         Face dictionaries belonging to the cluster.
     """
+    return app_cache.get_or_set(
+        ("cluster_faces", int(cluster_id)),
+        lambda: _load_cluster_faces(cluster_id),
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_CLUSTER_FACES,
+            QUERY_CACHE_TAG_CLUSTERS,
+            QUERY_CACHE_TAG_IMAGES,
+        },
+    )
+
+
+def _load_cluster_faces(cluster_id: int):
+    """Load faces for one cluster from the database."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -976,6 +1068,16 @@ def list_persons():
     Returns:
         Person identifier and name dictionaries.
     """
+    return app_cache.get_or_set(
+        ("person_list",),
+        _load_persons,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={QUERY_CACHE_TAG_PERSONS},
+    )
+
+
+def _load_persons():
+    """Load known people from the database."""
     conn = get_conn()
     rows = conn.execute("SELECT id, name FROM person ORDER BY name").fetchall()
     conn.close()
@@ -1003,53 +1105,191 @@ def list_filename_rename_candidates(
         limit = max(1, min(int(limit), MAX_IMAGE_PAGE_SIZE))
     offset = max(0, int(offset))
 
-    conn = get_conn()
-    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    cache_key = (
+        "filename_rename_candidates",
+        suffix_format,
+        block_separator,
+        joiner,
+        tuple(folders),
+        tuple(persons),
+        sort_by,
+        sort_direction,
+        limit,
+        offset,
+    )
+
+    def load_candidates():
+        conn = get_conn()
+        try:
+            if limit is None:
+                rows = _fetch_filename_rename_candidate_rows(
+                    conn,
+                    folders=folders,
+                    persons=persons,
+                    sort_by=sort_by,
+                    sort_direction=sort_direction,
+                    limit=None,
+                    offset=0,
+                )
+                candidates = _build_filename_rename_candidates_from_rows(
+                    rows,
+                    block_separator=block_separator,
+                    joiner=joiner,
+                )
+                return candidates, len(candidates)
+
+            scan_size = max(MAX_IMAGE_PAGE_SIZE, limit * 4)
+            raw_offset = 0
+            collected_candidates = []
+            target_size = offset + limit
+
+            while len(collected_candidates) < target_size:
+                rows = _fetch_filename_rename_candidate_rows(
+                    conn,
+                    folders=folders,
+                    persons=persons,
+                    sort_by=sort_by,
+                    sort_direction=sort_direction,
+                    limit=scan_size,
+                    offset=raw_offset,
+                )
+                if not rows:
+                    break
+                collected_candidates.extend(
+                    _build_filename_rename_candidates_from_rows(
+                        rows,
+                        block_separator=block_separator,
+                        joiner=joiner,
+                    )
+                )
+                raw_offset += scan_size
+
+            total = len(collected_candidates)
+            return collected_candidates[offset : offset + limit], total
+        finally:
+            conn.close()
+
+    return app_cache.get_or_set(
+        cache_key,
+        load_candidates,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_RENAMES,
+            QUERY_CACHE_TAG_IMAGES,
+            QUERY_CACHE_TAG_PERSONS,
+            QUERY_CACHE_TAG_SETTINGS,
+        },
+    )
+
+
+def _filename_rename_location_order(prefix: str, sort_by: str, sort_direction: str):
+    """Return the ORDER BY clause for filename rename candidate locations."""
     direction = "ASC" if sort_direction == "asc" else "DESC"
     if sort_by == "folder":
-        location_order = (
-            "location.directory COLLATE NOCASE "
-            f"{direction}, location.filename COLLATE NOCASE ASC, "
-            "location.path COLLATE NOCASE ASC"
+        return (
+            f"{prefix}directory COLLATE NOCASE {direction}, "
+            f"{prefix}filename COLLATE NOCASE ASC, "
+            f"{prefix}path COLLATE NOCASE ASC"
         )
+    return (
+        f"{prefix}created_at IS NULL ASC, "
+        f"{prefix}created_at {direction}, "
+        f"{prefix}filename COLLATE NOCASE ASC, "
+        f"{prefix}path COLLATE NOCASE ASC"
+    )
+
+
+def _fetch_filename_rename_candidate_rows(
+    conn,
+    *,
+    folders,
+    persons,
+    sort_by: str,
+    sort_direction: str,
+    limit: int | None,
+    offset: int,
+):
+    """Fetch ordered face rows for a slice of image locations."""
+    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    location_order = _filename_rename_location_order(
+        "matching_locations.", sort_by, sort_direction
+    )
+    if limit is None:
+        paging_cte = ""
+        from_table = "matching_locations"
+        query_params = params
     else:
-        location_order = (
-            "location.created_at IS NULL ASC, "
-            f"location.created_at {direction}, "
-            "location.filename COLLATE NOCASE ASC, "
-            "location.path COLLATE NOCASE ASC"
+        paging_cte = f"""
+        , paged_locations AS (
+            SELECT *
+            FROM matching_locations
+            ORDER BY {location_order}
+            LIMIT ? OFFSET ?
         )
-    rows = conn.execute(
+        """
+        from_table = "paged_locations"
+        query_params = [*params, limit, offset]
+
+    return conn.execute(
         f"""
         {cte}
+        , matching_locations AS (
+            SELECT
+                location.id AS location_id,
+                location.image_id,
+                location.path,
+                location.directory,
+                location.filename,
+                location.created_at
+            FROM image_location location
+            JOIN matching_images
+                ON matching_images.image_id = location.image_id
+        )
+        {paging_cte}
         SELECT
-            location.id AS location_id,
-            location.image_id,
-            location.path,
-            location.directory,
-            location.filename,
-            location.created_at,
+            {from_table}.location_id,
+            {from_table}.image_id,
+            {from_table}.path,
+            {from_table}.directory,
+            {from_table}.filename,
+            {from_table}.created_at,
             f.id AS face_id,
             f.bbox_x,
             p.name AS person_name
-        FROM image_location location
-        JOIN matching_images
-            ON matching_images.image_id = location.image_id
-        JOIN face f ON f.image_id = location.image_id
+        FROM {from_table}
+        JOIN face f ON f.image_id = {from_table}.image_id
         JOIN cluster c ON f.cluster_id = c.id
         JOIN person p ON c.person_id = p.id
-        ORDER BY {location_order}, f.bbox_x ASC, f.id ASC
+        ORDER BY {_filename_rename_location_order(f'{from_table}.', sort_by, sort_direction)}, f.bbox_x ASC, f.id ASC
         """,
-        params,
+        query_params,
     ).fetchall()
-    conn.close()
 
-    grouped_rows = defaultdict(list)
-    for row in rows:
-        grouped_rows[row["location_id"]].append(row)
 
+def _build_filename_rename_candidates_from_rows(
+    rows,
+    *,
+    block_separator: str,
+    joiner: str,
+):
+    """Build rename candidates from ordered face rows."""
     candidates = []
-    for location_id, location_rows in grouped_rows.items():
+    grouped_rows = []
+    current_location_rows = []
+    current_location_id = None
+    for row in rows:
+        location_id = row["location_id"]
+        if current_location_id is None or current_location_id == location_id:
+            current_location_rows.append(row)
+            current_location_id = location_id
+            continue
+        grouped_rows.append(current_location_rows)
+        current_location_rows = [row]
+        current_location_id = location_id
+    if current_location_rows:
+        grouped_rows.append(current_location_rows)
+
+    for location_rows in grouped_rows:
         first_row = location_rows[0]
         if not os.path.isfile(first_row["path"]):
             continue
@@ -1063,7 +1303,7 @@ def list_filename_rename_candidates(
             continue
         candidates.append(
             {
-                "location_id": location_id,
+                "location_id": first_row["location_id"],
                 "image_id": first_row["image_id"],
                 "path": first_row["path"],
                 "directory": first_row["directory"],
@@ -1077,12 +1317,114 @@ def list_filename_rename_candidates(
                 "current_suffix_person_names": preview["current_suffix_person_names"],
             }
         )
+    return candidates
 
-    candidates.sort(key=lambda item: item["path"].casefold())
-    total = len(candidates)
-    if limit is None:
-        return candidates[offset:], total
-    return candidates[offset : offset + limit], total
+
+def count_filename_rename_candidates(
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+):
+    """Count rename candidates after preview filtering."""
+    suffix_format = suffix_format or get_filename_person_suffix_format()
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    sort_by = "folder" if sort_by == "folder" else "date"
+    sort_direction = "asc" if sort_direction == "asc" else "desc"
+    cache_key = (
+        "filename_rename_candidates_count",
+        suffix_format,
+        block_separator,
+        joiner,
+        tuple(folders),
+        tuple(persons),
+        sort_by,
+        sort_direction,
+    )
+    return app_cache.get_or_set(
+        cache_key,
+        lambda: list_filename_rename_candidates(
+            suffix_format=suffix_format,
+            folders=folders,
+            persons=persons,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+            limit=None,
+            offset=0,
+        )[1],
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_RENAMES,
+            QUERY_CACHE_TAG_IMAGES,
+            QUERY_CACHE_TAG_PERSONS,
+            QUERY_CACHE_TAG_SETTINGS,
+        },
+    )
+
+
+def list_filename_rename_candidates_for_paths(
+    paths: list[str] | None,
+    *,
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+):
+    """Build rename candidates for specific image paths only."""
+    requested_paths = list(dict.fromkeys(path for path in (paths or []) if path))
+    if not requested_paths:
+        return []
+
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    placeholders = ",".join("?" for _ in requested_paths)
+
+    conn = get_conn()
+    try:
+        cte, params = _matching_images_cte(folders=folders, persons=persons)
+        rows = conn.execute(
+            f"""
+            {cte}
+            SELECT
+                location.id AS location_id,
+                location.image_id,
+                location.path,
+                location.directory,
+                location.filename,
+                location.created_at,
+                f.id AS face_id,
+                f.bbox_x,
+                p.name AS person_name
+            FROM image_location location
+            JOIN matching_images
+                ON matching_images.image_id = location.image_id
+            JOIN face f ON f.image_id = location.image_id
+            JOIN cluster c ON f.cluster_id = c.id
+            JOIN person p ON c.person_id = p.id
+            WHERE location.path IN ({placeholders})
+            ORDER BY location.path COLLATE NOCASE ASC, f.bbox_x ASC, f.id ASC
+            """,
+            [*params, *requested_paths],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    candidates = _build_filename_rename_candidates_from_rows(
+        rows,
+        block_separator=block_separator,
+        joiner=joiner,
+    )
+    candidate_by_path = {candidate["path"]: candidate for candidate in candidates}
+    return [
+        candidate_by_path[path]
+        for path in requested_paths
+        if path in candidate_by_path
+    ]
 
 
 def list_all_filename_rename_candidates(
@@ -1093,17 +1435,6 @@ def list_all_filename_rename_candidates(
     sort_direction: str = "desc",
 ):
     """Return the complete rename candidate list without pagination."""
-    candidates, total = list_filename_rename_candidates(
-        suffix_format=suffix_format,
-        folders=folders,
-        persons=persons,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        limit=MAX_IMAGE_PAGE_SIZE,
-        offset=0,
-    )
-    if total <= MAX_IMAGE_PAGE_SIZE:
-        return candidates
     candidates, _ = list_filename_rename_candidates(
         suffix_format=suffix_format,
         folders=folders,
@@ -1151,27 +1482,27 @@ def rename_image_locations_to_match_people(
     """Rename selected candidate image locations and sync database metadata."""
     selected_paths = list(dict.fromkeys(selected_paths or []))
     excluded = {path for path in (excluded_paths or []) if path}
-    candidates = list_all_filename_rename_candidates(
-        suffix_format=None,
-        folders=folders,
-        persons=persons,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-    )
-    candidate_by_path = {candidate["path"]: candidate for candidate in candidates}
 
     if rename_all:
+        candidates = list_all_filename_rename_candidates(
+            suffix_format=None,
+            folders=folders,
+            persons=persons,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
         target_candidates = [
             candidate
             for candidate in candidates
             if candidate["path"] not in excluded
         ]
     else:
-        target_candidates = [
-            candidate
-            for path in selected_paths
-            if (candidate := candidate_by_path.get(path)) is not None
-        ]
+        target_candidates = list_filename_rename_candidates_for_paths(
+            selected_paths,
+            suffix_format=None,
+            folders=folders,
+            persons=persons,
+        )
 
     renamed = []
     skipped = []
@@ -1264,6 +1595,21 @@ def get_person_faces(person_id: int):
     Returns:
         Face dictionaries assigned to the person.
     """
+    return app_cache.get_or_set(
+        ("person_faces", int(person_id)),
+        lambda: _load_person_faces(person_id),
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={
+            QUERY_CACHE_TAG_PERSON_FACES,
+            QUERY_CACHE_TAG_PERSONS,
+            QUERY_CACHE_TAG_CLUSTERS,
+            QUERY_CACHE_TAG_IMAGES,
+        },
+    )
+
+
+def _load_person_faces(person_id: int):
+    """Load faces assigned to a person through clusters."""
     conn = get_conn()
     rows = conn.execute(
         """

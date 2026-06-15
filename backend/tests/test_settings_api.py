@@ -5,9 +5,13 @@ from fastapi import HTTPException
 from types import SimpleNamespace
 
 from backend import app
+from backend.services.cache import app_cache
 
 
 class SettingsApiTest(unittest.TestCase):
+    def setUp(self):
+        app_cache.clear()
+
     @patch("backend.app.get_error_log_path", return_value="/tmp/face-manager/logs/error.log")
     @patch("backend.app.get_file_log_level", return_value="WARNING")
     @patch("backend.app.get_filename_person_block_separator", return_value=" - ")
@@ -105,12 +109,14 @@ class SettingsApiTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
 
     @patch("backend.app.list_available_image_persons", return_value=["Kai"])
+    @patch("backend.app.count_filename_rename_candidates", return_value=1)
     @patch("backend.app.list_filename_rename_candidates")
     @patch("backend.app.normalize_import_folder_path", return_value="/photos")
     def test_get_image_rename_candidates_returns_payload(
         self,
         normalize_import_folder_path,
         list_filename_rename_candidates,
+        count_filename_rename_candidates,
         list_available_image_persons,
     ):
         request = SimpleNamespace(headers={"x-face-manager-display-platform": "linux"})
@@ -151,9 +157,53 @@ class SettingsApiTest(unittest.TestCase):
             limit=100,
             offset=0,
         )
+        count_filename_rename_candidates.assert_called_once_with(
+            folders=["/photos"],
+            persons=["Kai"],
+            sort_by="date",
+            sort_direction="desc",
+        )
         list_available_image_persons.assert_called_once_with(["/photos"])
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["items"][0]["path"], "/photos/a.jpg")
+
+    @patch("backend.app.list_available_image_persons", return_value=["Kai"])
+    @patch("backend.app.count_filename_rename_candidates")
+    @patch("backend.app.list_filename_rename_candidates")
+    @patch("backend.app.normalize_import_folder_path", return_value="/photos")
+    def test_get_image_rename_candidates_can_skip_total_count(
+        self,
+        normalize_import_folder_path,
+        list_filename_rename_candidates,
+        count_filename_rename_candidates,
+        list_available_image_persons,
+    ):
+        request = SimpleNamespace(headers={"x-face-manager-display-platform": "linux"})
+        list_filename_rename_candidates.return_value = ([], 0)
+
+        result = app.api_get_image_rename_candidates(
+            request,
+            folders=["/photos"],
+            persons=[],
+            sort_by="date",
+            sort_direction="desc",
+            limit=25,
+            offset=0,
+            include_total=False,
+        )
+
+        normalize_import_folder_path.assert_called_once_with("/photos")
+        list_filename_rename_candidates.assert_called_once_with(
+            folders=["/photos"],
+            persons=[],
+            sort_by="date",
+            sort_direction="desc",
+            limit=25,
+            offset=0,
+        )
+        count_filename_rename_candidates.assert_not_called()
+        list_available_image_persons.assert_called_once_with(["/photos"])
+        self.assertIsNone(result["total"])
 
     @patch("backend.app.import_queue")
     def test_export_database_requires_idle_queue(self, import_queue):

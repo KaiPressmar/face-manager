@@ -5,9 +5,13 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from backend import app
+from backend.services.cache import app_cache
 
 
 class ImportApiTest(unittest.TestCase):
+    def setUp(self):
+        app_cache.clear()
+
     @staticmethod
     def make_request(display_platform: str = "linux"):
         return SimpleNamespace(
