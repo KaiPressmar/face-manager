@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AppSettings,
   ImageRenameCandidate,
   applyImageRenames,
+  fetchImageRenameCandidateCount,
   fetchImageRenameCandidates,
   fetchSettings,
 } from "../../utils/api";
@@ -26,9 +27,11 @@ const ImageRenamePage: React.FC = () => {
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isTotalLoading, setIsTotalLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectionMode, setSelectionMode] = useState<"manual" | "all">("manual");
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
@@ -37,6 +40,9 @@ const ImageRenamePage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [pageJumpInput, setPageJumpInput] = useState("1");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const activeRequestRef = useRef(0);
+  const activeAbortRef = useRef<AbortController | null>(null);
+  const totalAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -54,7 +60,41 @@ const ImageRenamePage: React.FC = () => {
     };
   }, []);
 
+  const loadTotalCount = async () => {
+    const controller = new AbortController();
+    totalAbortRef.current?.abort();
+    totalAbortRef.current = controller;
+    setIsTotalLoading(true);
+    setTotal(null);
+    try {
+      const nextTotal = await fetchImageRenameCandidateCount({
+        folders: selectedFolders,
+        persons: selectedPersons,
+        sortBy: groupingMode,
+        sortDirection,
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted) {
+        setTotal(nextTotal);
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        setTotal(null);
+      }
+    } finally {
+      if (!controller.signal.aborted) {
+        setIsTotalLoading(false);
+      }
+    }
+  };
+
   const loadData = async (nextOffset = 0) => {
+    const requestId = activeRequestRef.current + 1;
+    activeRequestRef.current = requestId;
+    activeAbortRef.current?.abort();
+    const controller = new AbortController();
+    activeAbortRef.current = controller;
+
     setIsLoading(true);
     setError(null);
     try {
@@ -65,7 +105,11 @@ const ImageRenamePage: React.FC = () => {
         sortDirection,
         limit: pageSize,
         offset: nextOffset,
+        signal: controller.signal,
       });
+      if (activeRequestRef.current !== requestId) {
+        return;
+      }
       setItems(renameData.items);
       setAvailablePersons(renameData.available_persons);
       setSelectedPersons((current) => {
@@ -74,17 +118,25 @@ const ImageRenamePage: React.FC = () => {
         );
         return next.length === current.length ? current : next;
       });
-      setTotal(renameData.total);
+      if (renameData.total !== null) {
+        setTotal(renameData.total);
+      }
       setOffset(renameData.offset);
+      setHasMore(renameData.has_more);
       setHasLoadedOnce(true);
     } catch (loadError) {
+      if (controller.signal.aborted) {
+        return;
+      }
       setError(
         loadError instanceof Error
           ? loadError.message
           : "Die Umbenennungsvorschlaege konnten nicht geladen werden.",
       );
     } finally {
-      setIsLoading(false);
+      if (activeRequestRef.current === requestId) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -93,12 +145,23 @@ const ImageRenamePage: React.FC = () => {
   }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons]);
 
   useEffect(() => {
+    return () => {
+      activeAbortRef.current?.abort();
+      totalAbortRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    void loadTotalCount();
+  }, [groupingMode, sortDirection, selectedFolders, selectedPersons]);
+
+  useEffect(() => {
     handleClearSelection();
   }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons]);
 
   const selectedCount = useMemo(() => {
     if (selectionMode === "all") {
-      return Math.max(total - excludedPaths.size, 0);
+      return total === null ? 0 : Math.max(total - excludedPaths.size, 0);
     }
     return selectedPaths.size;
   }, [excludedPaths.size, selectedPaths.size, selectionMode, total]);
@@ -186,6 +249,7 @@ const ImageRenamePage: React.FC = () => {
       );
       handleClearSelection();
       await loadData(offset);
+      await loadTotalCount();
     } catch (submitError) {
       setError(
         submitError instanceof Error
@@ -201,10 +265,11 @@ const ImageRenamePage: React.FC = () => {
     void loadData(nextOffset);
   };
 
-  const pageStart = total === 0 ? 0 : offset + 1;
-  const pageEnd = Math.min(offset + items.length, total);
-  const currentPage = total === 0 ? 1 : Math.floor(offset / pageSize) + 1;
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const pageStart = items.length === 0 ? 0 : offset + 1;
+  const pageEnd =
+    total === null ? offset + items.length : Math.min(offset + items.length, total);
+  const currentPage = offset === 0 ? 1 : Math.floor(offset / pageSize) + 1;
+  const pageCount = total === null ? null : Math.max(1, Math.ceil(total / pageSize));
   const showSkeletonRows = isLoading && !hasLoadedOnce;
   const showLoadingOverlay = isLoading && hasLoadedOnce;
 
@@ -213,6 +278,9 @@ const ImageRenamePage: React.FC = () => {
   }, [currentPage]);
 
   const handleJumpToPage = () => {
+    if (pageCount === null) {
+      return;
+    }
     const parsed = Number.parseInt(pageJumpInput, 10);
     if (Number.isNaN(parsed)) {
       setPageJumpInput(String(currentPage));
@@ -229,10 +297,12 @@ const ImageRenamePage: React.FC = () => {
     >
       <div className="rename-pagination__summary">
         <span>
-          Zeige {pageStart}-{pageEnd} von {total}
+          Zeige {pageStart}-{pageEnd}
+          {total === null ? " von …" : ` von ${total}`}
         </span>
         <span>
-          Seite {currentPage} von {pageCount}
+          Seite {currentPage}
+          {pageCount === null ? "" : ` von ${pageCount}`}
         </span>
       </div>
 
@@ -270,14 +340,14 @@ const ImageRenamePage: React.FC = () => {
           <button
             className="neon-card"
             onClick={() => handlePageChange(offset + pageSize)}
-            disabled={isLoading || currentPage >= pageCount}
+            disabled={isLoading || (pageCount === null ? !hasMore : currentPage >= pageCount)}
           >
             Weiter
           </button>
           <button
             className="neon-card"
-            onClick={() => handlePageChange((pageCount - 1) * pageSize)}
-            disabled={isLoading || currentPage >= pageCount}
+            onClick={() => handlePageChange(((pageCount || 1) - 1) * pageSize)}
+            disabled={isLoading || pageCount === null || currentPage >= pageCount}
           >
             Letzte
           </button>
@@ -289,7 +359,7 @@ const ImageRenamePage: React.FC = () => {
             <input
               type="number"
               min="1"
-              max={pageCount}
+              max={pageCount ?? undefined}
               value={pageJumpInput}
               onChange={(event) => setPageJumpInput(event.target.value)}
               onKeyDown={(event) => {
@@ -297,9 +367,13 @@ const ImageRenamePage: React.FC = () => {
                   handleJumpToPage();
                 }
               }}
-              disabled={isLoading}
+              disabled={isLoading || pageCount === null}
             />
-            <button className="neon-card" onClick={handleJumpToPage} disabled={isLoading}>
+            <button
+              className="neon-card"
+              onClick={handleJumpToPage}
+              disabled={isLoading || pageCount === null}
+            >
               Springen
             </button>
           </div>
@@ -377,7 +451,7 @@ const ImageRenamePage: React.FC = () => {
           </div>
 
           <div className="people-toolbar-count">
-            {total.toLocaleString()} Dateipfade
+            {total === null ? "…" : total.toLocaleString()} Dateipfade
           </div>
 
           <button
@@ -426,8 +500,12 @@ const ImageRenamePage: React.FC = () => {
           <button className="neon-card" onClick={handleSelectPage} disabled={items.length === 0}>
             Seite waehlen ({items.length})
           </button>
-          <button className="neon-card" onClick={handleSelectAll} disabled={total === 0}>
-            Alle waehlen ({total})
+          <button
+            className="neon-card"
+            onClick={handleSelectAll}
+            disabled={total === null || total === 0 || isTotalLoading}
+          >
+            Alle waehlen ({total ?? "…"})
           </button>
           <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0}>
             Auswahl loeschen
@@ -445,7 +523,7 @@ const ImageRenamePage: React.FC = () => {
       <section className="settings-card rename-list-card">
         <div className="rename-list-status">
           <div className="rename-list-status__pill">
-            Ausgewählt: <strong>{selectedCount}</strong>
+            Ausgewählt: <strong>{selectionMode === "all" && total === null ? "…" : selectedCount}</strong>
           </div>
           {showLoadingOverlay && (
             <div className="rename-list-status__loading">

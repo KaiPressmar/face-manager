@@ -42,6 +42,7 @@ from .services.storage import (
     assign_cluster_to_person,
     build_filename_person_format_summary,
     build_folder_tree,
+    count_filename_rename_candidates,
     delete_image,
     get_available_image_path,
     get_cluster_distance_threshold,
@@ -990,6 +991,7 @@ def api_get_image_rename_candidates(
     sort_direction: str = Query(default="desc"),
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    include_total: bool = Query(default=True),
 ):
     """List image paths whose filenames should be updated with person names."""
     display_platform = get_display_platform(request)
@@ -1002,6 +1004,15 @@ def api_get_image_rename_candidates(
         limit=limit,
         offset=offset,
     )
+    if include_total:
+        total = count_filename_rename_candidates(
+            folders=normalized_folders,
+            persons=persons,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
+    else:
+        total = None
 
     items = []
     for candidate in candidates:
@@ -1031,9 +1042,27 @@ def api_get_image_rename_candidates(
         "total": total,
         "offset": offset,
         "limit": limit,
-        "has_more": offset + len(items) < total,
+        "has_more": len(items) == limit if total is None else offset + len(items) < total,
         "available_persons": list_available_image_persons(normalized_folders),
     }
+
+
+@app.get("/api/image-renames/count")
+def api_count_image_rename_candidates(
+    folders: List[str] = Query(default=[]),
+    persons: List[str] = Query(default=[]),
+    sort_by: str = Query(default="date"),
+    sort_direction: str = Query(default="desc"),
+):
+    """Count image paths whose filenames should be updated with person names."""
+    normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
+    total = count_filename_rename_candidates(
+        folders=normalized_folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
+    return {"total": total}
 
 
 @app.post("/api/image-renames/apply")

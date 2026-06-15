@@ -1003,53 +1003,183 @@ def list_filename_rename_candidates(
         limit = max(1, min(int(limit), MAX_IMAGE_PAGE_SIZE))
     offset = max(0, int(offset))
 
+    cache_key = (
+        "filename_rename_candidates",
+        suffix_format,
+        block_separator,
+        joiner,
+        tuple(folders),
+        tuple(persons),
+        sort_by,
+        sort_direction,
+        limit,
+        offset,
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     conn = get_conn()
-    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    try:
+        if limit is None:
+            rows = _fetch_filename_rename_candidate_rows(
+                conn,
+                folders=folders,
+                persons=persons,
+                sort_by=sort_by,
+                sort_direction=sort_direction,
+                limit=None,
+                offset=0,
+            )
+            candidates = _build_filename_rename_candidates_from_rows(
+                rows,
+                block_separator=block_separator,
+                joiner=joiner,
+            )
+            result = (candidates, len(candidates))
+        else:
+            scan_size = max(MAX_IMAGE_PAGE_SIZE, limit * 4)
+            raw_offset = 0
+            collected_candidates = []
+            target_size = offset + limit
+
+            while len(collected_candidates) < target_size:
+                rows = _fetch_filename_rename_candidate_rows(
+                    conn,
+                    folders=folders,
+                    persons=persons,
+                    sort_by=sort_by,
+                    sort_direction=sort_direction,
+                    limit=scan_size,
+                    offset=raw_offset,
+                )
+                if not rows:
+                    break
+                collected_candidates.extend(
+                    _build_filename_rename_candidates_from_rows(
+                        rows,
+                        block_separator=block_separator,
+                        joiner=joiner,
+                    )
+                )
+                raw_offset += scan_size
+
+            result = (collected_candidates[offset : offset + limit], 0)
+    finally:
+        conn.close()
+
+    _cache_set(cache_key, result)
+    return result
+
+
+def _filename_rename_location_order(prefix: str, sort_by: str, sort_direction: str):
+    """Return the ORDER BY clause for filename rename candidate locations."""
     direction = "ASC" if sort_direction == "asc" else "DESC"
     if sort_by == "folder":
-        location_order = (
-            "location.directory COLLATE NOCASE "
-            f"{direction}, location.filename COLLATE NOCASE ASC, "
-            "location.path COLLATE NOCASE ASC"
+        return (
+            f"{prefix}directory COLLATE NOCASE {direction}, "
+            f"{prefix}filename COLLATE NOCASE ASC, "
+            f"{prefix}path COLLATE NOCASE ASC"
         )
+    return (
+        f"{prefix}created_at IS NULL ASC, "
+        f"{prefix}created_at {direction}, "
+        f"{prefix}filename COLLATE NOCASE ASC, "
+        f"{prefix}path COLLATE NOCASE ASC"
+    )
+
+
+def _fetch_filename_rename_candidate_rows(
+    conn,
+    *,
+    folders,
+    persons,
+    sort_by: str,
+    sort_direction: str,
+    limit: int | None,
+    offset: int,
+):
+    """Fetch ordered face rows for a slice of image locations."""
+    cte, params = _matching_images_cte(folders=folders, persons=persons)
+    location_order = _filename_rename_location_order(
+        "matching_locations.", sort_by, sort_direction
+    )
+    if limit is None:
+        paging_cte = ""
+        from_table = "matching_locations"
+        query_params = params
     else:
-        location_order = (
-            "location.created_at IS NULL ASC, "
-            f"location.created_at {direction}, "
-            "location.filename COLLATE NOCASE ASC, "
-            "location.path COLLATE NOCASE ASC"
+        paging_cte = f"""
+        , paged_locations AS (
+            SELECT *
+            FROM matching_locations
+            ORDER BY {location_order}
+            LIMIT ? OFFSET ?
         )
-    rows = conn.execute(
+        """
+        from_table = "paged_locations"
+        query_params = [*params, limit, offset]
+
+    return conn.execute(
         f"""
         {cte}
+        , matching_locations AS (
+            SELECT
+                location.id AS location_id,
+                location.image_id,
+                location.path,
+                location.directory,
+                location.filename,
+                location.created_at
+            FROM image_location location
+            JOIN matching_images
+                ON matching_images.image_id = location.image_id
+        )
+        {paging_cte}
         SELECT
-            location.id AS location_id,
-            location.image_id,
-            location.path,
-            location.directory,
-            location.filename,
-            location.created_at,
+            {from_table}.location_id,
+            {from_table}.image_id,
+            {from_table}.path,
+            {from_table}.directory,
+            {from_table}.filename,
+            {from_table}.created_at,
             f.id AS face_id,
             f.bbox_x,
             p.name AS person_name
-        FROM image_location location
-        JOIN matching_images
-            ON matching_images.image_id = location.image_id
-        JOIN face f ON f.image_id = location.image_id
+        FROM {from_table}
+        JOIN face f ON f.image_id = {from_table}.image_id
         JOIN cluster c ON f.cluster_id = c.id
         JOIN person p ON c.person_id = p.id
-        ORDER BY {location_order}, f.bbox_x ASC, f.id ASC
+        ORDER BY {_filename_rename_location_order(f'{from_table}.', sort_by, sort_direction)}, f.bbox_x ASC, f.id ASC
         """,
-        params,
+        query_params,
     ).fetchall()
-    conn.close()
 
-    grouped_rows = defaultdict(list)
-    for row in rows:
-        grouped_rows[row["location_id"]].append(row)
 
+def _build_filename_rename_candidates_from_rows(
+    rows,
+    *,
+    block_separator: str,
+    joiner: str,
+):
+    """Build rename candidates from ordered face rows."""
     candidates = []
-    for location_id, location_rows in grouped_rows.items():
+    grouped_rows = []
+    current_location_rows = []
+    current_location_id = None
+    for row in rows:
+        location_id = row["location_id"]
+        if current_location_id is None or current_location_id == location_id:
+            current_location_rows.append(row)
+            current_location_id = location_id
+            continue
+        grouped_rows.append(current_location_rows)
+        current_location_rows = [row]
+        current_location_id = location_id
+    if current_location_rows:
+        grouped_rows.append(current_location_rows)
+
+    for location_rows in grouped_rows:
         first_row = location_rows[0]
         if not os.path.isfile(first_row["path"]):
             continue
@@ -1063,7 +1193,7 @@ def list_filename_rename_candidates(
             continue
         candidates.append(
             {
-                "location_id": location_id,
+                "location_id": first_row["location_id"],
                 "image_id": first_row["image_id"],
                 "path": first_row["path"],
                 "directory": first_row["directory"],
@@ -1077,12 +1207,88 @@ def list_filename_rename_candidates(
                 "current_suffix_person_names": preview["current_suffix_person_names"],
             }
         )
+    return candidates
 
-    candidates.sort(key=lambda item: item["path"].casefold())
-    total = len(candidates)
-    if limit is None:
-        return candidates[offset:], total
-    return candidates[offset : offset + limit], total
+
+def count_filename_rename_candidates(
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+):
+    """Count rename candidates after preview filtering."""
+    _, total = list_filename_rename_candidates(
+        suffix_format=suffix_format,
+        folders=folders,
+        persons=persons,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=None,
+        offset=0,
+    )
+    return total
+
+
+def list_filename_rename_candidates_for_paths(
+    paths: list[str] | None,
+    *,
+    suffix_format: str | None = None,
+    folders=None,
+    persons=None,
+):
+    """Build rename candidates for specific image paths only."""
+    requested_paths = list(dict.fromkeys(path for path in (paths or []) if path))
+    if not requested_paths:
+        return []
+
+    block_separator = get_filename_person_block_separator()
+    joiner = get_filename_person_joiner()
+    folders = folders or []
+    persons = _normalize_person_filters(persons)
+    placeholders = ",".join("?" for _ in requested_paths)
+
+    conn = get_conn()
+    try:
+        cte, params = _matching_images_cte(folders=folders, persons=persons)
+        rows = conn.execute(
+            f"""
+            {cte}
+            SELECT
+                location.id AS location_id,
+                location.image_id,
+                location.path,
+                location.directory,
+                location.filename,
+                location.created_at,
+                f.id AS face_id,
+                f.bbox_x,
+                p.name AS person_name
+            FROM image_location location
+            JOIN matching_images
+                ON matching_images.image_id = location.image_id
+            JOIN face f ON f.image_id = location.image_id
+            JOIN cluster c ON f.cluster_id = c.id
+            JOIN person p ON c.person_id = p.id
+            WHERE location.path IN ({placeholders})
+            ORDER BY location.path COLLATE NOCASE ASC, f.bbox_x ASC, f.id ASC
+            """,
+            [*params, *requested_paths],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    candidates = _build_filename_rename_candidates_from_rows(
+        rows,
+        block_separator=block_separator,
+        joiner=joiner,
+    )
+    candidate_by_path = {candidate["path"]: candidate for candidate in candidates}
+    return [
+        candidate_by_path[path]
+        for path in requested_paths
+        if path in candidate_by_path
+    ]
 
 
 def list_all_filename_rename_candidates(
@@ -1093,17 +1299,6 @@ def list_all_filename_rename_candidates(
     sort_direction: str = "desc",
 ):
     """Return the complete rename candidate list without pagination."""
-    candidates, total = list_filename_rename_candidates(
-        suffix_format=suffix_format,
-        folders=folders,
-        persons=persons,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        limit=MAX_IMAGE_PAGE_SIZE,
-        offset=0,
-    )
-    if total <= MAX_IMAGE_PAGE_SIZE:
-        return candidates
     candidates, _ = list_filename_rename_candidates(
         suffix_format=suffix_format,
         folders=folders,
@@ -1151,27 +1346,27 @@ def rename_image_locations_to_match_people(
     """Rename selected candidate image locations and sync database metadata."""
     selected_paths = list(dict.fromkeys(selected_paths or []))
     excluded = {path for path in (excluded_paths or []) if path}
-    candidates = list_all_filename_rename_candidates(
-        suffix_format=None,
-        folders=folders,
-        persons=persons,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-    )
-    candidate_by_path = {candidate["path"]: candidate for candidate in candidates}
 
     if rename_all:
+        candidates = list_all_filename_rename_candidates(
+            suffix_format=None,
+            folders=folders,
+            persons=persons,
+            sort_by=sort_by,
+            sort_direction=sort_direction,
+        )
         target_candidates = [
             candidate
             for candidate in candidates
             if candidate["path"] not in excluded
         ]
     else:
-        target_candidates = [
-            candidate
-            for path in selected_paths
-            if (candidate := candidate_by_path.get(path)) is not None
-        ]
+        target_candidates = list_filename_rename_candidates_for_paths(
+            selected_paths,
+            suffix_format=None,
+            folders=folders,
+            persons=persons,
+        )
 
     renamed = []
     skipped = []

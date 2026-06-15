@@ -146,6 +146,7 @@ export interface FetchImagesParams {
   sortDirection?: "desc" | "asc";
   limit?: number;
   offset?: number;
+  signal?: AbortSignal;
 }
 
 export type ImportJobStatus =
@@ -416,7 +417,7 @@ export interface ImageRenameCandidate {
 
 export interface ImageRenamePage {
   items: ImageRenameCandidate[];
-  total: number;
+  total: number | null;
   offset: number;
   limit: number;
   has_more: boolean;
@@ -460,6 +461,7 @@ export async function fetchImageRenameCandidates(
     sortDirection = "desc",
     limit = 100,
     offset = 0,
+    signal,
   }: FetchImagesParams = {},
 ): Promise<ImageRenamePage> {
   const params = new URLSearchParams();
@@ -469,11 +471,36 @@ export async function fetchImageRenameCandidates(
   params.set("sort_direction", sortDirection);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
-  const res = await apiFetch(`${API_BASE}/image-renames?${params.toString()}`);
+  params.set("include_total", "false");
+  const res = await apiFetch(`${API_BASE}/image-renames?${params.toString()}`, {
+    signal,
+  });
   if (!res.ok) {
     throw new Error("Die Umbenennungsvorschau konnte nicht geladen werden.");
   }
   return await res.json();
+}
+
+export async function fetchImageRenameCandidateCount({
+  folders = [],
+  persons = [],
+  sortBy = "date",
+  sortDirection = "desc",
+  signal,
+}: FetchImagesParams = {}): Promise<number> {
+  const params = new URLSearchParams();
+  folders.forEach((folder) => params.append("folders", folder));
+  persons.forEach((person) => params.append("persons", person));
+  params.set("sort_by", sortBy);
+  params.set("sort_direction", sortDirection);
+  const res = await apiFetch(`${API_BASE}/image-renames/count?${params.toString()}`, {
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error("Die Anzahl der Umbenennungsvorschlaege konnte nicht geladen werden.");
+  }
+  const payload = (await res.json()) as { total: number };
+  return payload.total;
 }
 
 export async function applyImageRenames(
