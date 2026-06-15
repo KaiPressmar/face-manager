@@ -56,3 +56,32 @@ class ExecutionProviderTest(unittest.TestCase):
             providers=["CPUExecutionProvider"],
         )
         app.prepare.assert_called_once_with(ctx_id=-1, det_size=(1024, 1024))
+
+    @patch("backend.models.face_model.FaceAnalysis")
+    @patch("backend.models.face_model.preload_gpu_runtime_dlls")
+    @patch(
+        "backend.models.face_model.ort.get_available_providers",
+        return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    def test_model_falls_back_to_cpu_when_gpu_startup_fails(
+        self, _, preload_gpu_runtime_dlls, face_analysis
+    ):
+        gpu_app = Mock()
+        gpu_app.prepare.side_effect = RuntimeError("GPU init failed")
+        cpu_app = Mock()
+        face_analysis.side_effect = [gpu_app, cpu_app]
+
+        model = FaceModel()
+
+        self.assertEqual(model.compute_mode, "cpu")
+        preload_gpu_runtime_dlls.assert_called_once_with()
+        self.assertEqual(face_analysis.call_count, 2)
+        self.assertEqual(
+            face_analysis.call_args_list[0].kwargs["providers"],
+            ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+        self.assertEqual(
+            face_analysis.call_args_list[1].kwargs["providers"],
+            ["CPUExecutionProvider"],
+        )
+        cpu_app.prepare.assert_called_once_with(ctx_id=-1, det_size=(1024, 1024))

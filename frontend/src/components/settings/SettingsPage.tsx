@@ -23,6 +23,28 @@ const FILENAME_TO_NAMES_SEPARATOR_PRESETS = [
 
 const SAMPLE_BASENAME = "img_abc_heute hier morgen da.jpg";
 const SAMPLE_PERSON_NAMES = ["Kai", "Regina"];
+const LOG_LEVEL_OPTIONS = [
+  {
+    label: "Nur Fehler",
+    value: "ERROR",
+    description: "Schreibt nur Fehler und Abstürze in die lokale Logdatei.",
+  },
+  {
+    label: "Warnungen",
+    value: "WARNING",
+    description: "Erfasst zusätzlich auffällige, aber noch nicht fatale Probleme.",
+  },
+  {
+    label: "Informationen",
+    value: "INFO",
+    description: "Hilfreich, wenn im Windows-Build Abläufe nachvollziehbar sein sollen.",
+  },
+  {
+    label: "Debug",
+    value: "DEBUG",
+    description: "Maximale Detailtiefe für die Fehlersuche in problematischen Deployments.",
+  },
+] as const;
 
 function buildSuffixFormatPreview(
   blockSeparator: string,
@@ -46,6 +68,8 @@ const SettingsPage: React.FC = () => {
   const [filenameBlockSeparatorInput, setFilenameBlockSeparatorInput] =
     useState(" ");
   const [personJoinerInput, setPersonJoinerInput] = useState(", ");
+  const [fileLogLevelInput, setFileLogLevelInput] =
+    useState<AppSettings["file_log_level"]>("ERROR");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -70,6 +94,7 @@ const SettingsPage: React.FC = () => {
         setThresholdInput(data.cluster_distance_threshold.toFixed(2));
         setFilenameBlockSeparatorInput(data.filename_person_block_separator);
         setPersonJoinerInput(data.filename_person_joiner);
+        setFileLogLevelInput(data.file_log_level);
       })
       .catch((loadError) => {
         if (cancelled) return;
@@ -142,6 +167,28 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  const handleSaveLogLevel = async () => {
+    setIsSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await updateSettings({
+        file_log_level: fileLogLevelInput,
+      });
+      setSettings(next);
+      setFileLogLevelInput(next.file_log_level);
+      setMessage("Log-Level fuer die lokale Datei gespeichert.");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Das Log-Level konnte nicht gespeichert werden.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleExport = async () => {
     setIsExporting(true);
     setError(null);
@@ -187,6 +234,7 @@ const SettingsPage: React.FC = () => {
       setThresholdInput(next.cluster_distance_threshold.toFixed(2));
       setFilenameBlockSeparatorInput(next.filename_person_block_separator);
       setPersonJoinerInput(next.filename_person_joiner);
+      setFileLogLevelInput(next.file_log_level);
       setMessage("Die Datenbank wurde erfolgreich importiert.");
     } catch (importError) {
       setError(
@@ -391,6 +439,69 @@ const SettingsPage: React.FC = () => {
                     settings.filename_person_block_separator_default,
                   );
                   setPersonJoinerInput(settings.filename_person_joiner_default);
+                }}
+              >
+                Auf Standard zurücksetzen
+              </button>
+            </div>
+          </section>
+
+          <section className="settings-card">
+            <div className="settings-card__kicker">Protokollierung</div>
+            <h2 className="settings-card__title">Lokale Logdatei</h2>
+            <p className="settings-card__copy">
+              Steuern Sie, wie viele Details Face Manager in die lokale
+              Logdatei schreibt. Im Windows-Deployment koennen Sie den Wert bei
+              Problemen temporaer auf <code>INFO</code> oder <code>DEBUG</code>
+              erhöhen und danach wieder reduzieren.
+            </p>
+
+            <label className="settings-field">
+              <span>Log-Level</span>
+              <select
+                className="app-select settings-select-input"
+                value={fileLogLevelInput}
+                onChange={(event) =>
+                  setFileLogLevelInput(
+                    event.target.value as AppSettings["file_log_level"],
+                  )
+                }
+              >
+                {LOG_LEVEL_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({option.value})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="settings-format-help">
+              <span>
+                {
+                  LOG_LEVEL_OPTIONS.find((option) => option.value === fileLogLevelInput)
+                    ?.description
+                }
+              </span>
+            </div>
+
+            <div className="settings-meta">
+              <span>Logdatei</span>
+              <code>{settings?.error_log_path}</code>
+            </div>
+
+            <div className="settings-actions">
+              <button
+                className="neon-card"
+                onClick={handleSaveLogLevel}
+                disabled={isSaving}
+              >
+                {isSaving ? "Speichern…" : "Log-Level speichern"}
+              </button>
+              <button
+                className="neon-card"
+                onClick={() => {
+                  if (!settings) return;
+                  setFileLogLevelInput(settings.file_log_level_default);
                 }}
               >
                 Auf Standard zurücksetzen

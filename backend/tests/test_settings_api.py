@@ -8,17 +8,26 @@ from backend import app
 
 
 class SettingsApiTest(unittest.TestCase):
+    @patch("backend.app.get_error_log_path", return_value="/tmp/face-manager/logs/error.log")
+    @patch("backend.app.get_file_log_level", return_value="WARNING")
     @patch("backend.app.get_filename_person_block_separator", return_value=" - ")
     @patch("backend.app.get_filename_person_joiner", return_value=", ")
     @patch("backend.app.get_cluster_distance_threshold", return_value=0.42)
     def test_get_settings_returns_threshold_and_database_path(
-        self, get_threshold, get_joiner, get_block_separator
+        self,
+        get_threshold,
+        get_joiner,
+        get_block_separator,
+        get_file_log_level,
+        get_error_log_path,
     ):
         result = app.api_get_settings()
 
         get_threshold.assert_called_once_with()
         get_joiner.assert_called_once_with()
         get_block_separator.assert_called_once_with()
+        get_file_log_level.assert_called_once_with()
+        get_error_log_path.assert_called_once_with()
         self.assertEqual(result["cluster_distance_threshold"], 0.42)
         self.assertEqual(
             result["cluster_distance_threshold_default"],
@@ -30,7 +39,10 @@ class SettingsApiTest(unittest.TestCase):
             ", ",
         )
         self.assertEqual(result["filename_person_block_separator"], " - ")
+        self.assertEqual(result["file_log_level"], "WARNING")
+        self.assertEqual(result["file_log_level_default"], app.DEFAULT_FILE_LOG_LEVEL)
         self.assertEqual(result["database_path"], app.DB_PATH)
+        self.assertEqual(result["error_log_path"], "/tmp/face-manager/logs/error.log")
 
     @patch("backend.app.set_cluster_distance_threshold", return_value=0.61)
     def test_update_settings_persists_threshold(self, set_threshold):
@@ -38,6 +50,19 @@ class SettingsApiTest(unittest.TestCase):
 
         set_threshold.assert_called_once_with(0.61)
         self.assertEqual(result["cluster_distance_threshold"], 0.61)
+
+    @patch("backend.app.apply_persisted_file_log_level", return_value="DEBUG")
+    @patch("backend.app.set_file_log_level", return_value="DEBUG")
+    def test_update_settings_persists_file_log_level(
+        self,
+        set_file_log_level,
+        apply_persisted_file_log_level,
+    ):
+        result = app.api_update_settings({"file_log_level": "debug"})
+
+        set_file_log_level.assert_called_once_with("debug")
+        apply_persisted_file_log_level.assert_called_once_with()
+        self.assertEqual(result["file_log_level"], "DEBUG")
 
     @patch("backend.app.set_filename_person_block_separator", return_value=" - ")
     @patch("backend.app.set_filename_person_joiner", return_value=" / ")

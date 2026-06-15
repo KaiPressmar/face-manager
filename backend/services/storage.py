@@ -1,5 +1,7 @@
+import logging
 import os
 import re
+import sqlite3
 import threading
 import time
 from collections import defaultdict
@@ -8,11 +10,20 @@ from typing import List, Tuple
 import numpy as np
 
 from ..db.schema import get_conn
+from ..error_logging import (
+    DEFAULT_FILE_LOG_LEVEL,
+    configure_error_logging,
+    normalize_file_log_level,
+)
+
+configure_error_logging()
+logger = logging.getLogger("face_manager.storage")
 
 DEFAULT_CLUSTER_DISTANCE_THRESHOLD = 0.5
 DEFAULT_FILENAME_PERSON_SUFFIX_FORMAT = " {names}"
 DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR = " "
 DEFAULT_FILENAME_PERSON_JOINER = ", "
+DEFAULT_PERSISTED_FILE_LOG_LEVEL = DEFAULT_FILE_LOG_LEVEL
 UNKNOWN_PERSON_LABEL = "Unbekannt"
 MAX_IMAGE_PAGE_SIZE = 200
 IMAGE_QUERY_CACHE_TTL_SECONDS = 5.0
@@ -103,6 +114,22 @@ def get_filename_person_block_separator() -> str:
     )
 
 
+def get_file_log_level() -> str:
+    """Return the persisted log level used for the local error file."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key = ?",
+        ("file_log_level",),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return DEFAULT_PERSISTED_FILE_LOG_LEVEL
+    try:
+        return normalize_file_log_level(row["value"])
+    except ValueError:
+        return DEFAULT_PERSISTED_FILE_LOG_LEVEL
+
+
 def set_cluster_distance_threshold(value: float) -> float:
     """Persist the clustering distance threshold."""
     threshold = float(value)
@@ -173,6 +200,23 @@ def set_filename_person_block_separator(value: str) -> str:
     conn.commit()
     conn.close()
     return separator
+
+
+def set_file_log_level(value: str) -> str:
+    """Persist the log level used for the local rotating error log."""
+    normalized = normalize_file_log_level(value)
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        ("file_log_level", normalized),
+    )
+    conn.commit()
+    conn.close()
+    return normalized
 
 
 def build_filename_person_format_summary(
@@ -1149,6 +1193,11 @@ def rename_image_locations_to_match_people(
         try:
             os.rename(source_path, target_path)
         except OSError as exc:
+            logger.exception(
+                "Could not rename image from %s to %s",
+                source_path,
+                target_path,
+            )
             errors.append({"path": source_path, "reason": str(exc)})
             continue
 
@@ -1167,9 +1216,19 @@ def rename_image_locations_to_match_people(
             conn.commit()
         except sqlite3.DatabaseError as exc:
             conn.rollback()
+            logger.exception(
+                "Database update failed after renaming %s to %s",
+                source_path,
+                target_path,
+            )
             try:
                 os.rename(target_path, source_path)
             except OSError:
+                logger.exception(
+                    "Could not roll back file rename from %s to %s",
+                    target_path,
+                    source_path,
+                )
                 pass
             errors.append({"path": source_path, "reason": str(exc)})
             conn.close()

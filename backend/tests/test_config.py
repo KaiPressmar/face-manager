@@ -31,3 +31,14 @@ class DataPathTest(unittest.TestCase):
             str(data_root).replace("\\", "/"),
             "C:/Users/Test/AppData/Local/FaceManager",
         )
+
+    def test_error_log_path_lives_inside_log_dir(self):
+        with patch.dict(os.environ, {"FACE_MANAGER_DATA_DIR": "/tmp/face-manager-test"}):
+            self.assertEqual(
+                config.get_log_dir(),
+                Path("/tmp/face-manager-test/logs"),
+            )
+            self.assertEqual(
+                config.get_error_log_path(),
+                Path("/tmp/face-manager-test/logs/error.log"),
+            )

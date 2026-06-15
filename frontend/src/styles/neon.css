@@ -691,6 +691,13 @@ img {
   border-radius: 8px;
   background: #15151b;
   color: #ececf0;
+  color-scheme: dark;
+}
+
+.people-sort-panel__field select option,
+.people-sort-panel__field select optgroup {
+  background: #15151b;
+  color: #ececf0;
 }
 
 .import-folder-button {

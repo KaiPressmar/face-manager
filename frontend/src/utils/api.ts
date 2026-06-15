@@ -92,7 +92,10 @@ export interface AppSettings {
   filename_person_block_separator_default: string;
   filename_person_joiner: string;
   filename_person_joiner_default: string;
+  file_log_level: "DEBUG" | "INFO" | "WARNING" | "ERROR";
+  file_log_level_default: "DEBUG" | "INFO" | "WARNING" | "ERROR";
   database_path: string;
+  error_log_path: string;
 }
 
 export interface UpdateSettingsPayload {
@@ -100,6 +103,7 @@ export interface UpdateSettingsPayload {
   filename_person_suffix_format?: string;
   filename_person_block_separator?: string;
   filename_person_joiner?: string;
+  file_log_level?: "DEBUG" | "INFO" | "WARNING" | "ERROR";
 }
 
 export interface FaceImage {

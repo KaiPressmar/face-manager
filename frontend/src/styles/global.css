@@ -112,7 +112,35 @@ body {
   color: #f3f3f6;
 }
 
+.app-select {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #2a2f38;
+  border-radius: 10px;
+  background: #15151b;
+  color: #f3f3f6;
+  color-scheme: dark;
+  appearance: none;
+}
+
+.app-select:focus {
+  outline: 1px solid rgba(0, 229, 255, 0.45);
+  border-color: rgba(0, 229, 255, 0.45);
+  box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.12);
+}
+
+.app-select option,
+.app-select optgroup {
+  background: #15151b;
+  color: #f3f3f6;
+}
+
 .settings-text-input {
+  width: 100%;
+}
+
+.settings-select-input {
   width: 100%;
 }
 
@@ -380,6 +408,12 @@ body {
   border: 1px solid #2a2f38;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
+  color: #f3f3f6;
+}
+
+.rename-pagination__field select option,
+.rename-pagination__field select optgroup {
+  background: #15151b;
   color: #f3f3f6;
 }
 

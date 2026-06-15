@@ -39,13 +39,12 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
         <div style={{ marginBottom: 16 }}>
           <div style={{ marginBottom: 6 }}>Bestehende Person:</div>
           <select
+            className="app-select"
             value={selected}
             onChange={(e) => setSelected(e.target.value)}
             style={{
               width: "100%",
               padding: 8,
-              background: "#1f1f22",
-              color: "white",
               border: "1px solid #333",
             }}
           >
