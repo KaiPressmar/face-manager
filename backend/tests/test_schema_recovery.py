@@ -45,3 +45,77 @@ class SchemaRecoveryTest(unittest.TestCase):
 
         recover_database.assert_called_once()
         healthy_connection.close()
+
+    def test_init_db_repairs_cluster_integrity_issues(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.sqlite"
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE person (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                );
+                CREATE TABLE cluster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT,
+                    person_id INTEGER
+                );
+                CREATE TABLE image (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_hash TEXT,
+                    processed_at TEXT
+                );
+                CREATE TABLE face (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    cluster_id INTEGER,
+                    embedding BLOB
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO image(path, directory, filename, content_hash, processed_at)
+                VALUES ('/photos/a.jpg', '/photos', 'a.jpg', 'hash-a', CURRENT_TIMESTAMP)
+                """
+            )
+            conn.execute("INSERT INTO person(id, name) VALUES (1, 'Kai')")
+            conn.execute("INSERT INTO cluster(id, label, person_id) VALUES (1, 'empty', 1)")
+            conn.execute("INSERT INTO cluster(id, label, person_id) VALUES (2, 'broken', 99)")
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding)
+                VALUES (1, 0, 0, 1, 1, 2, NULL)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding)
+                VALUES (1, 0, 0, 1, 1, 7, NULL)
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(schema, "DB_PATH", str(db_path)):
+                schema.init_db()
+                conn = schema.get_conn()
+                cluster_rows = conn.execute(
+                    "SELECT id, person_id FROM cluster ORDER BY id"
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(
+                [(row["id"], row["person_id"]) for row in cluster_rows],
+                [(2, None), (7, None)],
+            )

@@ -89,6 +89,52 @@ def _ensure_person_name_indexes(cur):
     )
 
 
+def _repair_cluster_integrity(cur):
+    """Repair common cluster-table inconsistencies."""
+    missing_cluster_ids = [
+        row["cluster_id"]
+        for row in cur.execute(
+            """
+            SELECT DISTINCT f.cluster_id
+            FROM face f
+            LEFT JOIN cluster c ON c.id = f.cluster_id
+            WHERE f.cluster_id IS NOT NULL
+              AND c.id IS NULL
+            ORDER BY f.cluster_id
+            """
+        ).fetchall()
+    ]
+    for cluster_id in missing_cluster_ids:
+        cur.execute(
+            "INSERT INTO cluster(id, label, person_id) VALUES (?, NULL, NULL)",
+            (cluster_id,),
+        )
+
+    cur.execute(
+        """
+        UPDATE cluster
+        SET person_id = NULL
+        WHERE person_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM person p
+              WHERE p.id = cluster.person_id
+          )
+        """
+    )
+
+    cur.execute(
+        """
+        DELETE FROM cluster
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM face
+            WHERE face.cluster_id = cluster.id
+        )
+        """
+    )
+
+
 def _open_connection():
     """Open a configured SQLite connection without recovery side effects."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -539,6 +585,7 @@ def _initialize_schema(conn):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
+    _repair_cluster_integrity(cur)
     _ensure_person_name_indexes(cur)
 
     conn.commit()
