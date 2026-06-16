@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from typing import List, Tuple
@@ -283,6 +284,36 @@ def _extract_trailing_person_names(
         return stem, []
 
     known_names = {name.casefold(): name for name in normalized_names}
+    name_patterns = sorted(normalized_names, key=len, reverse=True)
+    separator_pattern = re.compile(r"[\s,;:+&/|()[\]{}._-]+")
+
+    def _parse_suffix_names(suffix_text: str):
+        stripped_suffix = suffix_text.strip()
+        if not stripped_suffix:
+            return []
+
+        suffix_names = []
+        position = 0
+        while position < len(stripped_suffix):
+            matched_name = None
+            for candidate in name_patterns:
+                candidate_length = len(candidate)
+                if stripped_suffix[position : position + candidate_length].casefold() == (
+                    candidate.casefold()
+                ):
+                    matched_name = known_names[candidate.casefold()]
+                    suffix_names.append(matched_name)
+                    position += candidate_length
+                    break
+            if matched_name is None:
+                return []
+            if position >= len(stripped_suffix):
+                return suffix_names
+            separator_match = separator_pattern.match(stripped_suffix, position)
+            if separator_match is None:
+                return []
+            position = separator_match.end()
+
     search_from = 0
     while True:
         separator_index = stem.find(block_separator, search_from)
@@ -291,23 +322,10 @@ def _extract_trailing_person_names(
 
         suffix_text = stem[separator_index + len(block_separator) :]
         if suffix_text:
-            suffix_parts = (
-                [part.strip() for part in suffix_text.split(joiner)]
-                if joiner
-                else [suffix_text.strip()]
-            )
-            if suffix_parts and not any(not part for part in suffix_parts):
-                suffix_names = []
-                for part in suffix_parts:
-                    canonical_name = known_names.get(part.casefold())
-                    if canonical_name is None:
-                        suffix_names = []
-                        break
-                    suffix_names.append(canonical_name)
-
-                root_stem = stem[:separator_index]
-                if suffix_names and root_stem:
-                    return root_stem, suffix_names
+            suffix_names = _parse_suffix_names(suffix_text)
+            root_stem = stem[:separator_index]
+            if suffix_names and root_stem:
+                return root_stem, suffix_names
 
         search_from = separator_index + len(block_separator)
 
