@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import sqlite3
 from collections import defaultdict
 from typing import List, Tuple
@@ -260,31 +259,58 @@ def _dedupe_names_in_order(names):
     return ordered
 
 
-def _extract_trailing_person_names(stem: str, detected_names: list[str]):
+def _extract_trailing_person_names(
+    stem: str,
+    detected_names: list[str],
+    block_separator: str | None = None,
+    joiner: str | None = None,
+):
     """Split a filename stem into root text and a trailing person appendix."""
-    remaining = stem.rstrip()
-    if not remaining or not detected_names:
-        return stem.rstrip(), []
+    if not stem or not detected_names:
+        return stem, []
 
-    suffix_names_reversed = []
-    name_patterns = sorted(detected_names, key=lambda item: len(item), reverse=True)
-    separator_pattern = re.compile(r"[\s,;:+&()\[\]{}-]+$")
+    block_separator = (
+        DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+        if block_separator is None
+        else block_separator
+    )
+    joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
+    if not block_separator:
+        return stem, []
 
-    while remaining:
-        match_name = None
-        for candidate in name_patterns:
-            pattern = re.compile(rf"(?i)(^|[\s,;:+&()\[\]{{}}-])({re.escape(candidate)})$")
-            match = pattern.search(remaining)
-            if match:
-                match_name = candidate
-                remaining = remaining[: match.start(2)].rstrip()
-                remaining = separator_pattern.sub("", remaining).rstrip()
-                suffix_names_reversed.append(candidate)
-                break
-        if match_name is None:
-            break
+    normalized_names = _dedupe_names_in_order(detected_names)
+    if not normalized_names:
+        return stem, []
 
-    return remaining, list(reversed(suffix_names_reversed))
+    known_names = {name.casefold(): name for name in normalized_names}
+    separator_index = stem.rfind(block_separator)
+    if separator_index < 0:
+        return stem, []
+
+    suffix_text = stem[separator_index + len(block_separator) :]
+    if not suffix_text:
+        return stem, []
+
+    suffix_parts = (
+        [part.strip() for part in suffix_text.split(joiner)]
+        if joiner
+        else [suffix_text.strip()]
+    )
+    if not suffix_parts or any(not part for part in suffix_parts):
+        return stem, []
+
+    suffix_names = []
+    for part in suffix_parts:
+        canonical_name = known_names.get(part.casefold())
+        if canonical_name is None:
+            return stem, []
+        suffix_names.append(canonical_name)
+
+    root_stem = stem[:separator_index]
+    if not root_stem:
+        return stem, []
+
+    return root_stem, suffix_names
 
 
 def build_person_filename_preview(
@@ -305,7 +331,12 @@ def build_person_filename_preview(
     joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
 
     stem, extension = os.path.splitext(filename)
-    root_stem, current_suffix_names = _extract_trailing_person_names(stem, ordered_names)
+    root_stem, current_suffix_names = _extract_trailing_person_names(
+        stem,
+        ordered_names,
+        block_separator=block_separator,
+        joiner=joiner,
+    )
     if not root_stem:
         root_stem = stem
 
