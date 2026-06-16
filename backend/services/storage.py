@@ -283,34 +283,33 @@ def _extract_trailing_person_names(
         return stem, []
 
     known_names = {name.casefold(): name for name in normalized_names}
-    separator_index = stem.rfind(block_separator)
-    if separator_index < 0:
-        return stem, []
-
-    suffix_text = stem[separator_index + len(block_separator) :]
-    if not suffix_text:
-        return stem, []
-
-    suffix_parts = (
-        [part.strip() for part in suffix_text.split(joiner)]
-        if joiner
-        else [suffix_text.strip()]
-    )
-    if not suffix_parts or any(not part for part in suffix_parts):
-        return stem, []
-
-    suffix_names = []
-    for part in suffix_parts:
-        canonical_name = known_names.get(part.casefold())
-        if canonical_name is None:
+    search_from = 0
+    while True:
+        separator_index = stem.find(block_separator, search_from)
+        if separator_index < 0:
             return stem, []
-        suffix_names.append(canonical_name)
 
-    root_stem = stem[:separator_index]
-    if not root_stem:
-        return stem, []
+        suffix_text = stem[separator_index + len(block_separator) :]
+        if suffix_text:
+            suffix_parts = (
+                [part.strip() for part in suffix_text.split(joiner)]
+                if joiner
+                else [suffix_text.strip()]
+            )
+            if suffix_parts and not any(not part for part in suffix_parts):
+                suffix_names = []
+                for part in suffix_parts:
+                    canonical_name = known_names.get(part.casefold())
+                    if canonical_name is None:
+                        suffix_names = []
+                        break
+                    suffix_names.append(canonical_name)
 
-    return root_stem, suffix_names
+                root_stem = stem[:separator_index]
+                if suffix_names and root_stem:
+                    return root_stem, suffix_names
+
+        search_from = separator_index + len(block_separator)
 
 
 def build_person_filename_preview(
