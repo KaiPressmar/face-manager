@@ -639,10 +639,12 @@ def api_assign_person_to_cluster(cluster_id: int, data: dict = Body(...)):
         HTTPException: If no person name is supplied.
     """
     person_name = data.get("person_name") or data.get("personName")
-    if not person_name:
+    if not person_name or not str(person_name).strip():
         raise HTTPException(status_code=400, detail="Missing person_name")
-
-    assign_cluster_to_person(cluster_id, person_name)
+    try:
+        assign_cluster_to_person(cluster_id, str(person_name))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "ok"}
 
 

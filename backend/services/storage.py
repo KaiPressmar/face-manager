@@ -1083,17 +1083,55 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
         cluster_id: Cluster identifier to update.
         person_name: Unique person display name.
     """
+    normalized_person_name = (person_name or "").strip()
+    if not normalized_person_name:
+        raise ValueError("Missing person_name")
+
     conn = get_conn()
     cur = conn.cursor()
-    row = cur.execute("SELECT id FROM person WHERE name = ?", (person_name,)).fetchone()
-    if row:
-        person_id = row["id"]
-    else:
-        cur.execute("INSERT INTO person(name) VALUES (?)", (person_name,))
-        person_id = cur.lastrowid
-    cur.execute("UPDATE cluster SET person_id = ? WHERE id = ?", (person_id, cluster_id))
-    conn.commit()
-    conn.close()
+    try:
+        cluster_row = cur.execute(
+            "SELECT id FROM cluster WHERE id = ?",
+            (cluster_id,),
+        ).fetchone()
+        if cluster_row is None:
+            referenced_face = cur.execute(
+                "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
+                (cluster_id,),
+            ).fetchone()
+            if referenced_face is None:
+                raise LookupError(f"Cluster {cluster_id} not found")
+            cur.execute(
+                "INSERT INTO cluster(id, label, person_id) VALUES (?, NULL, NULL)",
+                (cluster_id,),
+            )
+            logger.warning(
+                "Recreated missing cluster row %s during person assignment",
+                cluster_id,
+            )
+
+        row = cur.execute(
+            "SELECT id FROM person WHERE name = ?",
+            (normalized_person_name,),
+        ).fetchone()
+        if row:
+            person_id = row["id"]
+        else:
+            cur.execute(
+                "INSERT INTO person(name) VALUES (?)",
+                (normalized_person_name,),
+            )
+            person_id = cur.lastrowid
+
+        cur.execute(
+            "UPDATE cluster SET person_id = ? WHERE id = ?",
+            (person_id, cluster_id),
+        )
+        if cur.rowcount == 0:
+            raise LookupError(f"Cluster {cluster_id} not found")
+        conn.commit()
+    finally:
+        conn.close()
     invalidate_image_query_cache()
 
 
