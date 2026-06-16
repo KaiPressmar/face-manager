@@ -6,7 +6,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, deque
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol
@@ -645,8 +645,11 @@ class ImportQueue:
         with self._condition:
             executor = self._executor
             self._executor = None
+            futures = tuple(self._futures.values())
+        if futures:
+            wait(futures, timeout=timeout)
         if executor:
-            executor.shutdown(wait=False, cancel_futures=False)
+            executor.shutdown(wait=True, cancel_futures=False)
 
     def enqueue(self, folder_path: str) -> dict:
         """Append a folder import request.
