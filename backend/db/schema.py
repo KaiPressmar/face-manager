@@ -23,6 +23,72 @@ RECOVERABLE_DATABASE_ERROR_MARKERS = (
 )
 
 
+def _normalize_person_name_key(name: str) -> str:
+    """Normalize a person name for case-insensitive deduplication."""
+    return (name or "").strip().casefold()
+
+
+def _repair_person_name_duplicates(cur):
+    """Merge duplicate people that differ only by case or surrounding whitespace."""
+    rows = cur.execute(
+        "SELECT id, name FROM person ORDER BY id"
+    ).fetchall()
+    grouped = {}
+    for row in rows:
+        normalized_name = (row["name"] or "").strip()
+        if not normalized_name:
+            continue
+        key = _normalize_person_name_key(row["name"])
+        grouped.setdefault(key, []).append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "trimmed_name": normalized_name,
+            }
+        )
+
+    for duplicates in grouped.values():
+        if len(duplicates) < 2:
+            continue
+        duplicates.sort(
+            key=lambda row: (
+                0 if row["name"] == row["trimmed_name"] else 1,
+                row["id"],
+            )
+        )
+        canonical = duplicates[0]
+        duplicate_ids = [row["id"] for row in duplicates[1:]]
+        placeholders = ",".join("?" for _ in duplicate_ids)
+        cur.execute(
+            f"""
+            UPDATE cluster
+            SET person_id = ?
+            WHERE person_id IN ({placeholders})
+            """,
+            (canonical["id"], *duplicate_ids),
+        )
+        cur.execute(
+            f"DELETE FROM person WHERE id IN ({placeholders})",
+            duplicate_ids,
+        )
+        if canonical["name"] != canonical["trimmed_name"]:
+            cur.execute(
+                "UPDATE person SET name = ? WHERE id = ?",
+                (canonical["trimmed_name"], canonical["id"]),
+            )
+
+
+def _ensure_person_name_indexes(cur):
+    """Enforce case-insensitive uniqueness for person names."""
+    _repair_person_name_duplicates(cur)
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_person_name_normalized
+        ON person(TRIM(name) COLLATE NOCASE)
+        """
+    )
+
+
 def _open_connection():
     """Open a configured SQLite connection without recovery side effects."""
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -473,6 +539,7 @@ def _initialize_schema(conn):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
+    _ensure_person_name_indexes(cur)
 
     conn.commit()
 

@@ -260,6 +260,11 @@ def _dedupe_names_in_order(names):
     return ordered
 
 
+def _normalize_person_name_key(name: str) -> str:
+    """Normalize a person name for case-insensitive comparisons."""
+    return (name or "").strip().casefold()
+
+
 def _extract_trailing_person_names(
     stem: str,
     detected_names: list[str],
@@ -445,7 +450,18 @@ def invalidate_image_query_cache():
 
 def _normalize_person_filters(persons):
     """Normalize person names for deterministic SQL filtering."""
-    return [person.strip() for person in dict.fromkeys(persons or []) if person.strip()]
+    normalized = []
+    seen = set()
+    for person in persons or []:
+        trimmed = (person or "").strip()
+        if not trimmed:
+            continue
+        key = _normalize_person_name_key(trimmed)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(trimmed)
+    return normalized
 
 
 def _matching_images_cte(folders=None, persons=None):
@@ -466,12 +482,12 @@ def _matching_images_cte(folders=None, persons=None):
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
             WHERE f.cluster_id IS NOT NULL
-              AND COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') IN ({placeholders})
+              AND LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}'))) IN ({placeholders})
             GROUP BY f.image_id
-            HAVING COUNT(DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')) = ?
+            HAVING COUNT(DISTINCT LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')))) = ?
         )
         """
-        person_params = [*persons, len(persons)]
+        person_params = [*[_normalize_person_name_key(person) for person in persons], len(persons)]
 
     sql = f"""
     WITH ranked_locations AS (
@@ -1086,6 +1102,7 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
     normalized_person_name = (person_name or "").strip()
     if not normalized_person_name:
         raise ValueError("Missing person_name")
+    normalized_name_key = _normalize_person_name_key(normalized_person_name)
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1151,13 +1168,13 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
                 cluster_id,
             )
 
-        normalized_name_key = normalized_person_name.casefold()
         matching_people = cur.execute(
             """
             SELECT id, name
             FROM person
             WHERE LOWER(TRIM(name)) = LOWER(?)
             ORDER BY
+                CASE WHEN TRIM(name) = name THEN 0 ELSE 1 END,
                 CASE WHEN TRIM(name) = ? THEN 0 ELSE 1 END,
                 CASE WHEN name = ? THEN 0 ELSE 1 END,
                 id ASC
@@ -1202,10 +1219,12 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
                     duplicate_person_ids,
                     person_id,
                 )
-            cur.execute(
-                "UPDATE person SET name = ? WHERE id = ? AND name <> ?",
-                (normalized_person_name, person_id, normalized_person_name),
-            )
+            canonical_name = (matching_people[0]["name"] or "").strip()
+            if canonical_name != matching_people[0]["name"]:
+                cur.execute(
+                    "UPDATE person SET name = ? WHERE id = ?",
+                    (canonical_name, person_id),
+                )
 
         cur.execute(
             "UPDATE cluster SET person_id = ? WHERE id = ?",
@@ -1249,7 +1268,9 @@ def list_persons():
 def _load_persons():
     """Load known people from the database."""
     conn = get_conn()
-    rows = conn.execute("SELECT id, name FROM person ORDER BY name").fetchall()
+    rows = conn.execute(
+        "SELECT id, name FROM person ORDER BY name COLLATE NOCASE, id"
+    ).fetchall()
     conn.close()
     return [{"id": r["id"], "name": r["name"]} for r in rows]
 

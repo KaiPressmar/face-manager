@@ -219,6 +219,61 @@ class ClusterAssignmentTest(unittest.TestCase):
                 [(7, 1), (8, 1)],
             )
 
+    def test_assign_cluster_to_person_reuses_existing_person_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "database.sqlite"
+
+            conn = self._make_connection(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE person (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                );
+                CREATE TABLE cluster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT,
+                    person_id INTEGER
+                );
+                CREATE TABLE face (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    cluster_id INTEGER,
+                    embedding BLOB
+                );
+                """
+            )
+            conn.execute("INSERT INTO person(id, name) VALUES (1, 'Kai')")
+            conn.execute("INSERT INTO cluster(id, label, person_id) VALUES (7, 'c7', NULL)")
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding)
+                VALUES (1, 0, 0, 1, 1, 7, NULL)
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with patch("backend.services.storage.get_conn", lambda: self._make_connection(db_path)):
+                storage.assign_cluster_to_person(7, "kai")
+
+                check_conn = self._make_connection(db_path)
+                person_rows = check_conn.execute(
+                    "SELECT id, name FROM person ORDER BY id"
+                ).fetchall()
+                cluster_row = check_conn.execute(
+                    "SELECT person_id FROM cluster WHERE id = 7"
+                ).fetchone()
+                check_conn.close()
+
+            self.assertEqual([(row["id"], row["name"]) for row in person_rows], [(1, "Kai")])
+            self.assertEqual(cluster_row["person_id"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
