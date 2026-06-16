@@ -37,6 +37,7 @@ export interface GalleryImage {
 interface FullscreenImageGalleryProps {
   images: GalleryImage[];
   activeIndex: number;
+  onNavigateToCluster: (clusterId: number) => void;
   onChange: (index: number) => void;
   onClose: () => void;
   onDelete: (image: GalleryImage) => Promise<boolean>;
@@ -69,6 +70,7 @@ async function imageBlobAsPng(source: Blob) {
 const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   images,
   activeIndex,
+  onNavigateToCluster,
   onChange,
   onClose,
   onDelete,
@@ -297,6 +299,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
                 face={face}
                 naturalWidth={naturalSize.width}
                 naturalHeight={naturalSize.height}
+                onNavigateToCluster={onNavigateToCluster}
               />
             ))}
         </div>

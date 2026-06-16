@@ -1,9 +1,10 @@
 import React from "react";
+import type { AppPage } from "../../App";
 import ImportProgress from "../import/ImportProgress";
 
 const Sidebar: React.FC<{
-  page: "people" | "clusters" | "renaming" | "settings";
-  onChangePage: (p: "people" | "clusters" | "renaming" | "settings") => void;
+  page: AppPage;
+  onChangePage: (p: AppPage) => void;
 }> = ({ page, onChangePage }) => {
   return (
     <aside className="sidebar">
