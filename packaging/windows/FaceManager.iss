@@ -228,12 +228,7 @@ begin
   end;
   SilentParams := Trim(SilentParams + ' /SUPPRESSMSGBOXES /NORESTART');
 
-  Log(
-    Format(
-      'Running existing uninstaller: %s %s',
-      [ExistingUninstallExe, SilentParams]
-    )
-  );
+  Log('Running existing uninstaller: ' + ExistingUninstallExe + ' ' + SilentParams);
 
   if not Exec(
     ExistingUninstallExe,
