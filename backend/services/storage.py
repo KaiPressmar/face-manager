@@ -1091,7 +1091,15 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
     cur = conn.cursor()
     try:
         cluster_row = cur.execute(
-            "SELECT id FROM cluster WHERE id = ?",
+            """
+            SELECT
+                c.id,
+                c.person_id,
+                p.id AS resolved_person_id
+            FROM cluster c
+            LEFT JOIN person p ON p.id = c.person_id
+            WHERE c.id = ?
+            """,
             (cluster_id,),
         ).fetchone()
         if cluster_row is None:
@@ -1109,19 +1117,95 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
                 "Recreated missing cluster row %s during person assignment",
                 cluster_id,
             )
+            cluster_row = cur.execute(
+                """
+                SELECT
+                    c.id,
+                    c.person_id,
+                    p.id AS resolved_person_id
+                FROM cluster c
+                LEFT JOIN person p ON p.id = c.person_id
+                WHERE c.id = ?
+                """,
+                (cluster_id,),
+            ).fetchone()
 
-        row = cur.execute(
-            "SELECT id FROM person WHERE name = ?",
-            (normalized_person_name,),
+        referenced_face = cur.execute(
+            "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
+            (cluster_id,),
         ).fetchone()
-        if row:
-            person_id = row["id"]
-        else:
+        if referenced_face is None:
+            raise LookupError(f"Cluster {cluster_id} has no faces")
+
+        if (
+            cluster_row["person_id"] is not None
+            and cluster_row["resolved_person_id"] is None
+        ):
+            cur.execute(
+                "UPDATE cluster SET person_id = NULL WHERE id = ?",
+                (cluster_id,),
+            )
+            logger.warning(
+                "Cleared broken person reference %s from cluster %s during assignment",
+                cluster_row["person_id"],
+                cluster_id,
+            )
+
+        normalized_name_key = normalized_person_name.casefold()
+        matching_people = cur.execute(
+            """
+            SELECT id, name
+            FROM person
+            WHERE LOWER(TRIM(name)) = LOWER(?)
+            ORDER BY
+                CASE WHEN TRIM(name) = ? THEN 0 ELSE 1 END,
+                CASE WHEN name = ? THEN 0 ELSE 1 END,
+                id ASC
+            """,
+            (normalized_person_name, normalized_person_name, normalized_person_name),
+        ).fetchall()
+
+        person_id = None
+        duplicate_person_ids = []
+        for row in matching_people:
+            row_name = (row["name"] or "").strip()
+            if row_name.casefold() != normalized_name_key:
+                continue
+            if person_id is None:
+                person_id = row["id"]
+            else:
+                duplicate_person_ids.append(row["id"])
+
+        if person_id is None:
             cur.execute(
                 "INSERT INTO person(name) VALUES (?)",
                 (normalized_person_name,),
             )
             person_id = cur.lastrowid
+        else:
+            placeholders = ",".join("?" for _ in duplicate_person_ids)
+            if duplicate_person_ids:
+                cur.execute(
+                    f"""
+                    UPDATE cluster
+                    SET person_id = ?
+                    WHERE person_id IN ({placeholders})
+                    """,
+                    (person_id, *duplicate_person_ids),
+                )
+                cur.execute(
+                    f"DELETE FROM person WHERE id IN ({placeholders})",
+                    duplicate_person_ids,
+                )
+                logger.warning(
+                    "Merged duplicate person rows %s into canonical person %s during cluster assignment",
+                    duplicate_person_ids,
+                    person_id,
+                )
+            cur.execute(
+                "UPDATE person SET name = ? WHERE id = ? AND name <> ?",
+                (normalized_person_name, person_id, normalized_person_name),
+            )
 
         cur.execute(
             "UPDATE cluster SET person_id = ? WHERE id = ?",
