@@ -1,10 +1,11 @@
 import React from "react";
+import type { AppPage } from "../../App";
 import Sidebar from "./Sidebar";
 import Topbar from "./Topbar";
 
 const Layout: React.FC<{
-  page: "people" | "clusters" | "renaming" | "settings";
-  onChangePage: (p: "people" | "clusters" | "renaming" | "settings") => void;
+  page: AppPage;
+  onChangePage: (p: AppPage) => void;
   children: React.ReactNode;
 }> = ({ page, onChangePage, children }) => {
   return (

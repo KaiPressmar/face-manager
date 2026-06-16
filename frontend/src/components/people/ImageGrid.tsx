@@ -11,6 +11,7 @@ interface ImageGridProps {
   hasMore: boolean;
   isLoadingMore: boolean;
   showFaceOverlays: boolean;
+  onNavigateToCluster: (clusterId: number) => void;
   onLoadMore: () => void;
   onImageDeleted: (imageId: number) => void;
 }
@@ -31,6 +32,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   hasMore,
   isLoadingMore,
   showFaceOverlays,
+  onNavigateToCluster,
   onLoadMore,
   onImageDeleted,
 }) => {
@@ -283,6 +285,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                       face={face}
                       naturalWidth={dims.w}
                       naturalHeight={dims.h}
+                      onNavigateToCluster={onNavigateToCluster}
                     />
                   ))}
               </div>
@@ -297,6 +300,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         <FullscreenImageGallery
           images={images}
           activeIndex={galleryIndex}
+          onNavigateToCluster={onNavigateToCluster}
           onChange={setGalleryIndex}
           onClose={() => setGalleryIndex(null)}
           onDelete={(image) => removeImage(image as FaceImage)}

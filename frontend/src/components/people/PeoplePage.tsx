@@ -18,7 +18,11 @@ function preloadPageImages(page: ImagePage) {
   });
 }
 
-const PeoplePage = () => {
+interface PeoplePageProps {
+  onNavigateToCluster: (clusterId: number) => void;
+}
+
+const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -357,6 +361,7 @@ const PeoplePage = () => {
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
         showFaceOverlays={showFaceOverlays}
+        onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));

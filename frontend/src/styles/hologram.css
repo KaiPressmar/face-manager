@@ -10,23 +10,92 @@
   }
 }
 
+.hologram-overlay {
+  position: static;
+}
+
 .hologram-box {
   position: absolute;
   border: 2px solid var(--neon-cyan);
   animation: pulseGlow 2.4s infinite ease-in-out;
   pointer-events: auto;
   z-index: 50;
+  background: transparent;
+  padding: 0;
+  border-radius: 14px;
+}
+
+.hologram-box:disabled {
+  cursor: default;
+}
+
+.hologram-box--interactive {
+  cursor: alias;
+  background:
+    linear-gradient(135deg, rgba(0, 229, 255, 0.12), rgba(255, 0, 229, 0.08));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08),
+    0 0 16px rgba(0, 229, 255, 0.12);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.hologram-overlay--interactive:hover .hologram-box--interactive,
+.hologram-overlay--interactive:focus-within .hologram-box--interactive,
+.hologram-box--interactive:hover,
+.hologram-box--interactive:focus-visible {
+  transform: scale(1.025);
+  border-color: #8bf5ff;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 0 999px rgba(125, 245, 255, 0.16),
+    0 0 24px rgba(255, 0, 229, 0.22);
+  background:
+    linear-gradient(135deg, rgba(0, 229, 255, 0.24), rgba(255, 0, 229, 0.16));
+  outline: none;
 }
 
 .hologram-label {
   position: absolute;
-  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
   font-size: 11px;
   background: linear-gradient(90deg, #00e5ff, #ff00e5);
   color: #ffffff;
-  border-radius: 2px;
+  border: 0;
+  border-radius: 999px;
   animation: pulseGlow 2.4s infinite ease-in-out;
   white-space: nowrap;
   z-index: 60;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.32);
 }
 
+.hologram-label:disabled {
+  opacity: 0.8;
+  cursor: default;
+}
+
+.hologram-label--interactive {
+  cursor: alias;
+  transition:
+    transform 0.18s ease,
+    filter 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.hologram-overlay--interactive:hover .hologram-label--interactive,
+.hologram-overlay--interactive:focus-within .hologram-label--interactive,
+.hologram-label--interactive:hover,
+.hologram-label--interactive:focus-visible {
+  transform: translateY(-1px) scale(1.02);
+  filter: saturate(1.1) brightness(1.06);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 12px 32px rgba(255, 0, 229, 0.24);
+  outline: none;
+}

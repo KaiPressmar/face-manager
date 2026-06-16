@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { ClusterNavigationTarget } from "../../App";
 import {
   assignClusterToPerson,
   ClusterDetails,
@@ -20,7 +21,11 @@ interface PersonOption {
   name: string;
 }
 
-const ClusterPage: React.FC = () => {
+interface ClusterPageProps {
+  navigationTarget: ClusterNavigationTarget | null;
+}
+
+const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget }) => {
   const [clusters, setClusters] = useState<ClusterSummary[]>([]);
   const [selectedClusterId, setSelectedClusterId] = useState<number | null>(null);
   const [clusterDetails, setClusterDetails] = useState<ClusterDetails | null>(null);
@@ -31,8 +36,46 @@ const ClusterPage: React.FC = () => {
   const [isListLoading, setIsListLoading] = useState(true);
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
+  const [highlightedClusterId, setHighlightedClusterId] = useState<number | null>(null);
   const listRequestIdRef = useRef(0);
   const detailsRequestIdRef = useRef(0);
+  const pendingNavigationClusterIdRef = useRef<number | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+
+  const loadClusterDetails = React.useCallback((clusterId: number) => {
+    const requestId = detailsRequestIdRef.current + 1;
+    detailsRequestIdRef.current = requestId;
+    setClusterDetails((current) =>
+      current && current.cluster_id === clusterId ? current : null,
+    );
+    setIsDetailsLoading(true);
+
+    void fetchClusterFaces(clusterId)
+      .then((data) => {
+        if (detailsRequestIdRef.current !== requestId) {
+          return;
+        }
+        setClusterDetails(
+          data
+            ? {
+                ...data,
+                faces: Array.isArray(data.faces) ? data.faces : [],
+              }
+            : null,
+        );
+      })
+      .catch((error) => {
+        if (detailsRequestIdRef.current === requestId) {
+          setClusterDetails(null);
+        }
+        console.error("Fehler beim Laden der Clusterdetails:", error);
+      })
+      .finally(() => {
+        if (detailsRequestIdRef.current === requestId) {
+          setIsDetailsLoading(false);
+        }
+      });
+  }, []);
 
   const selectedSummary = useMemo(
     () => clusters.find((cluster) => cluster.cluster_id === selectedClusterId) || null,
@@ -66,6 +109,13 @@ const ClusterPage: React.FC = () => {
       }
 
       setSelectedClusterId((current) => {
+        const pendingClusterId = pendingNavigationClusterIdRef.current;
+        if (
+          pendingClusterId !== null &&
+          nextClusters.some((cluster) => cluster.cluster_id === pendingClusterId)
+        ) {
+          return pendingClusterId;
+        }
         if (current !== null && nextClusters.some((cluster) => cluster.cluster_id === current)) {
           return current;
         }
@@ -125,45 +175,14 @@ const ClusterPage: React.FC = () => {
   }, [isMutating]);
 
   useEffect(() => {
-    let isMounted = true;
-
     if (selectedClusterId === null) {
       setClusterDetails(null);
       setIsDetailsLoading(false);
       return;
     }
 
-    const requestId = detailsRequestIdRef.current + 1;
-    detailsRequestIdRef.current = requestId;
-    setIsDetailsLoading(true);
-
-    fetchClusterFaces(selectedClusterId)
-      .then((data) => {
-        if (!isMounted || detailsRequestIdRef.current !== requestId) {
-          return;
-        }
-        setClusterDetails(
-          data
-            ? {
-                ...data,
-                faces: Array.isArray(data.faces) ? data.faces : [],
-              }
-            : null,
-        );
-      })
-      .catch((error) => {
-        console.error("Fehler beim Laden der Clusterdetails:", error);
-      })
-      .finally(() => {
-        if (isMounted && detailsRequestIdRef.current === requestId) {
-          setIsDetailsLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [selectedClusterId]);
+    loadClusterDetails(selectedClusterId);
+  }, [loadClusterDetails, selectedClusterId]);
 
   useEffect(() => {
     if (selectedSummary === null) {
@@ -181,33 +200,76 @@ const ClusterPage: React.FC = () => {
       clusterDetails.face_count !== selectedSummary.face_count ||
       clusterDetails.person_name !== selectedSummary.person_name
     ) {
-      const requestId = detailsRequestIdRef.current + 1;
-      detailsRequestIdRef.current = requestId;
-      setIsDetailsLoading(true);
-      void fetchClusterFaces(selectedSummary.cluster_id)
-        .then((data) => {
-          if (detailsRequestIdRef.current !== requestId) {
-            return;
-          }
-          setClusterDetails(
-            data
-              ? {
-                  ...data,
-                  faces: Array.isArray(data.faces) ? data.faces : [],
-                }
-              : null,
-          );
-        })
-        .catch((error) => {
-          console.error("Fehler beim Aktualisieren der Clusterdetails:", error);
-        })
-        .finally(() => {
-          if (detailsRequestIdRef.current === requestId) {
-            setIsDetailsLoading(false);
-          }
-        });
+      loadClusterDetails(selectedSummary.cluster_id);
     }
-  }, [clusterDetails, selectedSummary]);
+  }, [clusterDetails, loadClusterDetails, selectedSummary]);
+
+  useEffect(() => {
+    if (selectedSummary === null || isDetailsLoading) {
+      return;
+    }
+
+    const detailsMatchSelection =
+      clusterDetails !== null && clusterDetails.cluster_id === selectedSummary.cluster_id;
+    if (detailsMatchSelection) {
+      return;
+    }
+
+    loadClusterDetails(selectedSummary.cluster_id);
+  }, [clusterDetails, isDetailsLoading, loadClusterDetails, selectedSummary]);
+
+  useEffect(() => {
+    if (!navigationTarget) return;
+
+    pendingNavigationClusterIdRef.current = navigationTarget.clusterId;
+    setSelectedClusterId(navigationTarget.clusterId);
+    setHighlightedClusterId(navigationTarget.clusterId);
+
+    const timeoutId = window.setTimeout(() => {
+      setHighlightedClusterId((current) =>
+        current === navigationTarget.clusterId ? null : current,
+      );
+    }, 2600);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [navigationTarget]);
+
+  useEffect(() => {
+    const pendingClusterId = pendingNavigationClusterIdRef.current;
+    if (pendingClusterId === null) {
+      return;
+    }
+
+    const targetExists = clusters.some((cluster) => cluster.cluster_id === pendingClusterId);
+    if (!targetExists) {
+      return;
+    }
+
+    setSelectedClusterId(pendingClusterId);
+  }, [clusters, selectedClusterId]);
+
+  useEffect(() => {
+    const pendingClusterId = pendingNavigationClusterIdRef.current;
+    if (pendingClusterId === null) {
+      return;
+    }
+
+    const targetReady =
+      selectedSummary !== null && selectedSummary.cluster_id === pendingClusterId;
+    if (!targetReady) {
+      return;
+    }
+
+    pendingNavigationClusterIdRef.current = null;
+    window.requestAnimationFrame(() => {
+      headerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, [selectedSummary]);
 
   const handleRemoveFace = async (faceId: number) => {
     if (selectedClusterId === null || clusterDetails === null || isMutating) {
@@ -318,7 +380,11 @@ const ClusterPage: React.FC = () => {
     }
   };
 
-  const currentCluster = clusterDetails;
+  const currentCluster =
+    clusterDetails && clusterDetails.cluster_id === selectedClusterId
+      ? clusterDetails
+      : null;
+  const currentClusterSummary = currentCluster || selectedSummary;
   const currentFaces = Array.isArray(currentCluster?.faces) ? currentCluster.faces : [];
 
   return (
@@ -336,17 +402,24 @@ const ClusterPage: React.FC = () => {
         <ClusterList
           clusters={clusters}
           selected={selectedClusterId}
+          highlightedClusterId={highlightedClusterId}
           onSelect={setSelectedClusterId}
           isLoading={isListLoading}
         />
       </div>
 
       <div style={{ flex: 1, overflowY: "auto" }}>
-        {isListLoading && !currentCluster ? (
+        {isListLoading && !currentClusterSummary ? (
           <div style={{ opacity: 0.5, paddingTop: 40, textAlign: "center" }}>Geladen wird...</div>
-        ) : currentCluster ? (
+        ) : currentClusterSummary ? (
           <>
             <div
+              ref={headerRef}
+              className={
+                highlightedClusterId === currentClusterSummary.cluster_id
+                  ? "cluster-hero cluster-hero--highlighted"
+                  : "cluster-hero"
+              }
               style={{
                 display: "flex",
                 justifyContent: "space-between",
@@ -355,15 +428,15 @@ const ClusterPage: React.FC = () => {
               }}
             >
               <div>
-                <h2 style={{ margin: 0 }}>Cluster {currentCluster.cluster_id}</h2>
+                <h2 style={{ margin: 0 }}>Cluster {currentClusterSummary.cluster_id}</h2>
                 <p style={{ opacity: 0.5, margin: "4px 0 0 0" }}>
                   Zugeordnet zu:{" "}
                   <strong style={{ color: "var(--neon-cyan)" }}>
-                    {currentCluster.person_name || `Niemand (${UNKNOWN_PERSON_LABEL})`}
+                    {currentClusterSummary.person_name || `Niemand (${UNKNOWN_PERSON_LABEL})`}
                   </strong>
                 </p>
                 <p style={{ opacity: 0.5, margin: "4px 0 0 0" }}>
-                  {currentCluster.face_count} Gesichter
+                  {currentClusterSummary.face_count} Gesichter
                 </p>
               </div>
 
@@ -551,10 +624,10 @@ const ClusterPage: React.FC = () => {
             </div>
 
             <h3 style={{ borderBottom: "1px solid #222", paddingBottom: 8, color: "#fff" }}>
-              Erkannte Gesichter ({currentCluster.face_count})
+              Erkannte Gesichter ({currentClusterSummary.face_count})
             </h3>
 
-            {isDetailsLoading ? (
+            {isDetailsLoading && !currentCluster ? (
               <div style={{ opacity: 0.5, paddingTop: 20, textAlign: "center" }}>
                 Clusterdetails werden geladen...
               </div>

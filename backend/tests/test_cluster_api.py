@@ -64,6 +64,17 @@ class ClusterApiTest(unittest.TestCase):
         self.assertEqual(result["cluster_id"], 5)
         self.assertEqual(len(result["faces"]), 1)
 
+    @patch("backend.app.assign_cluster_to_person", side_effect=LookupError("Cluster 7 not found"))
+    def test_assign_person_returns_not_found_for_missing_cluster(
+        self,
+        assign_cluster_to_person,
+    ):
+        with self.assertRaises(HTTPException) as raised:
+            app.api_assign_person_to_cluster(7, {"person_name": "Kai"})
+
+        assign_cluster_to_person.assert_called_once_with(7, "Kai")
+        self.assertEqual(raised.exception.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

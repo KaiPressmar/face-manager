@@ -260,31 +260,79 @@ def _dedupe_names_in_order(names):
     return ordered
 
 
-def _extract_trailing_person_names(stem: str, detected_names: list[str]):
+def _normalize_person_name_key(name: str) -> str:
+    """Normalize a person name for case-insensitive comparisons."""
+    return (name or "").strip().casefold()
+
+
+def _extract_trailing_person_names(
+    stem: str,
+    detected_names: list[str],
+    block_separator: str | None = None,
+    joiner: str | None = None,
+):
     """Split a filename stem into root text and a trailing person appendix."""
-    remaining = stem.rstrip()
-    if not remaining or not detected_names:
-        return stem.rstrip(), []
+    if not stem or not detected_names:
+        return stem, []
 
-    suffix_names_reversed = []
-    name_patterns = sorted(detected_names, key=lambda item: len(item), reverse=True)
-    separator_pattern = re.compile(r"[\s,;:+&()\[\]{}-]+$")
+    block_separator = (
+        DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR
+        if block_separator is None
+        else block_separator
+    )
+    joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
+    if not block_separator:
+        return stem, []
 
-    while remaining:
-        match_name = None
-        for candidate in name_patterns:
-            pattern = re.compile(rf"(?i)(^|[\s,;:+&()\[\]{{}}-])({re.escape(candidate)})$")
-            match = pattern.search(remaining)
-            if match:
-                match_name = candidate
-                remaining = remaining[: match.start(2)].rstrip()
-                remaining = separator_pattern.sub("", remaining).rstrip()
-                suffix_names_reversed.append(candidate)
-                break
-        if match_name is None:
-            break
+    normalized_names = _dedupe_names_in_order(detected_names)
+    if not normalized_names:
+        return stem, []
 
-    return remaining, list(reversed(suffix_names_reversed))
+    known_names = {name.casefold(): name for name in normalized_names}
+    name_patterns = sorted(normalized_names, key=len, reverse=True)
+    separator_pattern = re.compile(r"[\s,;:+&/|()[\]{}._-]+")
+
+    def _parse_suffix_names(suffix_text: str):
+        stripped_suffix = suffix_text.strip()
+        if not stripped_suffix:
+            return []
+
+        suffix_names = []
+        position = 0
+        while position < len(stripped_suffix):
+            matched_name = None
+            for candidate in name_patterns:
+                candidate_length = len(candidate)
+                if stripped_suffix[position : position + candidate_length].casefold() == (
+                    candidate.casefold()
+                ):
+                    matched_name = known_names[candidate.casefold()]
+                    suffix_names.append(matched_name)
+                    position += candidate_length
+                    break
+            if matched_name is None:
+                return []
+            if position >= len(stripped_suffix):
+                return suffix_names
+            separator_match = separator_pattern.match(stripped_suffix, position)
+            if separator_match is None:
+                return []
+            position = separator_match.end()
+
+    search_from = 0
+    while True:
+        separator_index = stem.find(block_separator, search_from)
+        if separator_index < 0:
+            return stem, []
+
+        suffix_text = stem[separator_index + len(block_separator) :]
+        if suffix_text:
+            suffix_names = _parse_suffix_names(suffix_text)
+            root_stem = stem[:separator_index]
+            if suffix_names and root_stem:
+                return root_stem, suffix_names
+
+        search_from = separator_index + len(block_separator)
 
 
 def build_person_filename_preview(
@@ -305,7 +353,12 @@ def build_person_filename_preview(
     joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
 
     stem, extension = os.path.splitext(filename)
-    root_stem, current_suffix_names = _extract_trailing_person_names(stem, ordered_names)
+    root_stem, current_suffix_names = _extract_trailing_person_names(
+        stem,
+        ordered_names,
+        block_separator=block_separator,
+        joiner=joiner,
+    )
     if not root_stem:
         root_stem = stem
 
@@ -397,7 +450,18 @@ def invalidate_image_query_cache():
 
 def _normalize_person_filters(persons):
     """Normalize person names for deterministic SQL filtering."""
-    return [person.strip() for person in dict.fromkeys(persons or []) if person.strip()]
+    normalized = []
+    seen = set()
+    for person in persons or []:
+        trimmed = (person or "").strip()
+        if not trimmed:
+            continue
+        key = _normalize_person_name_key(trimmed)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(trimmed)
+    return normalized
 
 
 def _matching_images_cte(folders=None, persons=None):
@@ -418,12 +482,12 @@ def _matching_images_cte(folders=None, persons=None):
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
             WHERE f.cluster_id IS NOT NULL
-              AND COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}') IN ({placeholders})
+              AND LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}'))) IN ({placeholders})
             GROUP BY f.image_id
-            HAVING COUNT(DISTINCT COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')) = ?
+            HAVING COUNT(DISTINCT LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')))) = ?
         )
         """
-        person_params = [*persons, len(persons)]
+        person_params = [*[_normalize_person_name_key(person) for person in persons], len(persons)]
 
     sql = f"""
     WITH ranked_locations AS (
@@ -1035,17 +1099,142 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
         cluster_id: Cluster identifier to update.
         person_name: Unique person display name.
     """
+    normalized_person_name = (person_name or "").strip()
+    if not normalized_person_name:
+        raise ValueError("Missing person_name")
+    normalized_name_key = _normalize_person_name_key(normalized_person_name)
+
     conn = get_conn()
     cur = conn.cursor()
-    row = cur.execute("SELECT id FROM person WHERE name = ?", (person_name,)).fetchone()
-    if row:
-        person_id = row["id"]
-    else:
-        cur.execute("INSERT INTO person(name) VALUES (?)", (person_name,))
-        person_id = cur.lastrowid
-    cur.execute("UPDATE cluster SET person_id = ? WHERE id = ?", (person_id, cluster_id))
-    conn.commit()
-    conn.close()
+    try:
+        cluster_row = cur.execute(
+            """
+            SELECT
+                c.id,
+                c.person_id,
+                p.id AS resolved_person_id
+            FROM cluster c
+            LEFT JOIN person p ON p.id = c.person_id
+            WHERE c.id = ?
+            """,
+            (cluster_id,),
+        ).fetchone()
+        if cluster_row is None:
+            referenced_face = cur.execute(
+                "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
+                (cluster_id,),
+            ).fetchone()
+            if referenced_face is None:
+                raise LookupError(f"Cluster {cluster_id} not found")
+            cur.execute(
+                "INSERT INTO cluster(id, label, person_id) VALUES (?, NULL, NULL)",
+                (cluster_id,),
+            )
+            logger.warning(
+                "Recreated missing cluster row %s during person assignment",
+                cluster_id,
+            )
+            cluster_row = cur.execute(
+                """
+                SELECT
+                    c.id,
+                    c.person_id,
+                    p.id AS resolved_person_id
+                FROM cluster c
+                LEFT JOIN person p ON p.id = c.person_id
+                WHERE c.id = ?
+                """,
+                (cluster_id,),
+            ).fetchone()
+
+        referenced_face = cur.execute(
+            "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
+            (cluster_id,),
+        ).fetchone()
+        if referenced_face is None:
+            raise LookupError(f"Cluster {cluster_id} has no faces")
+
+        if (
+            cluster_row["person_id"] is not None
+            and cluster_row["resolved_person_id"] is None
+        ):
+            cur.execute(
+                "UPDATE cluster SET person_id = NULL WHERE id = ?",
+                (cluster_id,),
+            )
+            logger.warning(
+                "Cleared broken person reference %s from cluster %s during assignment",
+                cluster_row["person_id"],
+                cluster_id,
+            )
+
+        matching_people = cur.execute(
+            """
+            SELECT id, name
+            FROM person
+            WHERE LOWER(TRIM(name)) = LOWER(?)
+            ORDER BY
+                CASE WHEN TRIM(name) = name THEN 0 ELSE 1 END,
+                CASE WHEN TRIM(name) = ? THEN 0 ELSE 1 END,
+                CASE WHEN name = ? THEN 0 ELSE 1 END,
+                id ASC
+            """,
+            (normalized_person_name, normalized_person_name, normalized_person_name),
+        ).fetchall()
+
+        person_id = None
+        duplicate_person_ids = []
+        for row in matching_people:
+            row_name = (row["name"] or "").strip()
+            if row_name.casefold() != normalized_name_key:
+                continue
+            if person_id is None:
+                person_id = row["id"]
+            else:
+                duplicate_person_ids.append(row["id"])
+
+        if person_id is None:
+            cur.execute(
+                "INSERT INTO person(name) VALUES (?)",
+                (normalized_person_name,),
+            )
+            person_id = cur.lastrowid
+        else:
+            placeholders = ",".join("?" for _ in duplicate_person_ids)
+            if duplicate_person_ids:
+                cur.execute(
+                    f"""
+                    UPDATE cluster
+                    SET person_id = ?
+                    WHERE person_id IN ({placeholders})
+                    """,
+                    (person_id, *duplicate_person_ids),
+                )
+                cur.execute(
+                    f"DELETE FROM person WHERE id IN ({placeholders})",
+                    duplicate_person_ids,
+                )
+                logger.warning(
+                    "Merged duplicate person rows %s into canonical person %s during cluster assignment",
+                    duplicate_person_ids,
+                    person_id,
+                )
+            canonical_name = (matching_people[0]["name"] or "").strip()
+            if canonical_name != matching_people[0]["name"]:
+                cur.execute(
+                    "UPDATE person SET name = ? WHERE id = ?",
+                    (canonical_name, person_id),
+                )
+
+        cur.execute(
+            "UPDATE cluster SET person_id = ? WHERE id = ?",
+            (person_id, cluster_id),
+        )
+        if cur.rowcount == 0:
+            raise LookupError(f"Cluster {cluster_id} not found")
+        conn.commit()
+    finally:
+        conn.close()
     invalidate_image_query_cache()
 
 
@@ -1079,7 +1268,9 @@ def list_persons():
 def _load_persons():
     """Load known people from the database."""
     conn = get_conn()
-    rows = conn.execute("SELECT id, name FROM person ORDER BY name").fetchall()
+    rows = conn.execute(
+        "SELECT id, name FROM person ORDER BY name COLLATE NOCASE, id"
+    ).fetchall()
     conn.close()
     return [{"id": r["id"], "name": r["name"]} for r in rows]
 

@@ -15,6 +15,45 @@ body {
   height: calc(100vh - 64px);
 }
 
+.cluster-hero {
+  position: relative;
+  padding: 16px 18px;
+  border: 1px solid transparent;
+  border-radius: 20px;
+  transition:
+    border-color 0.25s ease,
+    box-shadow 0.25s ease,
+    background 0.25s ease;
+}
+
+.cluster-hero--highlighted {
+  border-color: rgba(0, 229, 255, 0.38);
+  background:
+    radial-gradient(circle at top left, rgba(0, 229, 255, 0.12), transparent 42%),
+    linear-gradient(180deg, rgba(15, 18, 26, 0.9), rgba(10, 10, 14, 0.9));
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 0 28px rgba(0, 229, 255, 0.12),
+    0 0 52px rgba(255, 0, 229, 0.1);
+}
+
+.cluster-jump-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(0, 229, 255, 0.95), rgba(255, 0, 229, 0.92));
+  color: #090a0f;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24);
+}
+
 .settings-page {
   display: flex;
   flex-direction: column;
