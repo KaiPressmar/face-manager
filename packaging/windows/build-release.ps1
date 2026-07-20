@@ -82,8 +82,9 @@ if (-not (Test-Path $installerPath)) {
 }
 
 $installerVersionInfo = (Get-Item $installerPath).VersionInfo
-if ($installerVersionInfo.ProductVersion -ne $version) {
-    throw "Installer product version is '$($installerVersionInfo.ProductVersion)', expected '$version'"
+$installerProductVersion = $installerVersionInfo.ProductVersion.Trim()
+if ($installerProductVersion -ne $version) {
+    throw "Installer product version is '$installerProductVersion', expected '$version'"
 }
 
 foreach ($artifact in @($appExe, $installerPath)) {
