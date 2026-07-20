@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AppSettings,
   ImageRenameCandidate,
   applyImageRenames,
   fetchImageRenameCandidateCount,
   fetchImageRenameCandidates,
-  fetchSettings,
+  openImageLocation,
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
-import PersonFilter from "../people/PersonFilter";
+import { copyTextToClipboard } from "../../utils/clipboard";
+import LibraryFilterBar from "../shared/LibraryFilterBar";
 import FolderFilterModal from "../shared/FolderFilterModal";
+import { subscribeToTopic } from "../../utils/events";
 
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
@@ -17,8 +18,9 @@ const SKELETON_ROW_COUNT = 6;
 type ImageGroupingMode = "date" | "folder";
 type SortDirection = "desc" | "asc";
 
-const ImageRenamePage: React.FC = () => {
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+const ImageRenamePage: React.FC<{ onOpenFilenameSettings: () => void }> = ({
+  onOpenFilenameSettings,
+}) => {
   const [items, setItems] = useState<ImageRenameCandidate[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -28,6 +30,8 @@ const ImageRenamePage: React.FC = () => {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [total, setTotal] = useState<number | null>(null);
+  // Unfiltered candidate count, so the bar can say "162 von 3.000".
+  const [libraryTotal, setLibraryTotal] = useState<number | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -43,22 +47,6 @@ const ImageRenamePage: React.FC = () => {
   const activeRequestRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchSettings()
-      .then((data) => {
-        if (!cancelled) {
-          setSettings(data);
-        }
-      })
-      .catch(() => {
-        // Keep the page usable even if settings metadata is temporarily unavailable.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const loadTotalCount = async () => {
     const controller = new AbortController();
@@ -131,7 +119,7 @@ const ImageRenamePage: React.FC = () => {
       setError(
         loadError instanceof Error
           ? loadError.message
-          : "Die Umbenennungsvorschlaege konnten nicht geladen werden.",
+          : "Die Umbenennungsvorschläge konnten nicht geladen werden.",
       );
     } finally {
       if (activeRequestRef.current === requestId) {
@@ -216,9 +204,37 @@ const ImageRenamePage: React.FC = () => {
     setExcludedPaths(new Set());
   };
 
+  // Unfiltered candidate count, kept independent of the active filter so the
+  // bar can always say how much the filter narrowed things down.
+  useEffect(() => {
+    let isMounted = true;
+    const refreshLibraryTotal = () => {
+      void fetchImageRenameCandidates({ limit: 1, offset: 0 })
+        .then((page) => {
+          if (isMounted && page.total !== null) setLibraryTotal(page.total);
+        })
+        .catch(() => undefined);
+    };
+    refreshLibraryTotal();
+    const unsubscribe = subscribeToTopic("clusters", refreshLibraryTotal);
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribeClusters = subscribeToTopic("clusters", () => {
+      handleClearSelection();
+      void loadData(offset);
+      void loadTotalCount();
+    });
+    return unsubscribeClusters;
+  }, [groupingMode, offset, pageSize, selectedFolders, selectedPersons, sortDirection]);
+
   const handleSubmit = async () => {
     if (selectedCount === 0) {
-      setError("Bitte waehlen Sie mindestens einen Dateipfad aus.");
+      setError("Wähle mindestens eine Datei aus.");
       return;
     }
 
@@ -245,7 +261,7 @@ const ImageRenamePage: React.FC = () => {
             },
       );
       setMessage(
-        `${result.renamed_count} Dateipfade aktualisiert, ${result.skipped_count} uebersprungen, ${result.error_count} Fehler.`,
+        `${result.renamed_count} Dateinamen aktualisiert, ${result.skipped_count} übersprungen, ${result.error_count} nicht geändert.`,
       );
       handleClearSelection();
       await loadData(offset);
@@ -258,6 +274,44 @@ const ImageRenamePage: React.FC = () => {
       );
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const copyCandidatePath = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    path: string,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setError(null);
+    try {
+      await copyTextToClipboard(path);
+      setMessage("Dateipfad kopiert.");
+    } catch (copyError) {
+      setError(
+        copyError instanceof Error
+          ? copyError.message
+          : "Der Dateipfad konnte nicht kopiert werden.",
+      );
+    }
+  };
+
+  const revealCandidate = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    item: ImageRenameCandidate,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setError(null);
+    try {
+      await openImageLocation(item.image_id, item.path);
+      setMessage("Dateispeicherort geöffnet.");
+    } catch (openError) {
+      setError(
+        openError instanceof Error
+          ? openError.message
+          : "Der Dateispeicherort konnte nicht geöffnet werden.",
+      );
     }
   };
 
@@ -402,79 +456,45 @@ const ImageRenamePage: React.FC = () => {
 
   return (
     <div className="settings-page">
-      <div className="settings-page__header">
+      <div className="settings-page__header rename-page-header">
         <div>
-          <div className="settings-page__eyebrow">Dateinamen</div>
-          <h1 className="settings-page__title">Personennamen an Bilddateien haengen</h1>
+          <div className="settings-page__eyebrow">Bibliothek</div>
+          <h1 className="settings-page__title">Dateinamen</h1>
           <p className="settings-page__copy">
-            Diese Liste zeigt alle Bildpfade, deren Dateiname die erkannten
-            Personen noch nicht vollstaendig oder nicht in der Reihenfolge von
-            links nach rechts enthaelt.
+            Ergänze erkannte Personen im Dateinamen. Du siehst vor jeder Änderung
+            den bisherigen und den vorgeschlagenen Namen.
           </p>
         </div>
+        <button
+          className="rename-settings-link"
+          type="button"
+          onClick={onOpenFilenameSettings}
+        >
+          Benennungsschema ändern
+          <span aria-hidden="true">→</span>
+        </button>
       </div>
 
-      <div className="people-toolbar">
-        <PersonFilter
-          persons={availablePersons}
-          selected={selectedPersons}
-          onChange={setSelectedPersons}
-        />
-
-        <div className="people-toolbar-actions">
-          <div className="people-sort-panel">
-            <label className="people-sort-panel__field">
-              <span>Sortieren nach</span>
-              <select
-                value={groupingMode}
-                onChange={(event) =>
-                  setGroupingMode(event.target.value as ImageGroupingMode)
-                }
-              >
-                <option value="date">Erstellungsdatum</option>
-                <option value="folder">Ordnerpfad</option>
-              </select>
-            </label>
-
-            <label className="people-sort-panel__field">
-              <span>Reihenfolge</span>
-              <select
-                value={sortDirection}
-                onChange={(event) =>
-                  setSortDirection(event.target.value as SortDirection)
-                }
-              >
-                <option value="desc">Absteigend</option>
-                <option value="asc">Aufsteigend</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="people-toolbar-count">
-            {total === null ? "…" : total.toLocaleString()} Dateipfade
-          </div>
-
-          <button
-            className={`folder-filter-trigger${selectedFolders.length ? " folder-filter-trigger--active" : ""}`}
-            onClick={() => setShowFolderFilter(true)}
-          >
-            <span className="folder-icon" aria-hidden="true" />
-            <span>
-              <strong>Ordnerfilter</strong>
-              <small>
-                {selectedFolders.length
-                  ? `${selectedFolders.length} ausgewählt`
-                  : "Alle Ordner"}
-              </small>
-            </span>
-            {selectedFolders.length > 0 && <b>{selectedFolders.length}</b>}
-          </button>
-        </div>
-      </div>
+      <LibraryFilterBar
+        persons={availablePersons}
+        selectedPersons={selectedPersons}
+        onPersonsChange={setSelectedPersons}
+        sortBy={groupingMode}
+        sortDirection={sortDirection}
+        onSortChange={(nextSortBy, nextDirection) => {
+          setGroupingMode(nextSortBy);
+          setSortDirection(nextDirection);
+        }}
+        selectedFolderCount={selectedFolders.length}
+        onOpenFolderFilter={() => setShowFolderFilter(true)}
+        resultCount={total}
+        totalCount={libraryTotal}
+        resultNoun="Dateien"
+      />
 
       {selectedFolders.length > 0 && (
         <div className="active-folder-filters">
-          <span>Aktive Ordner</span>
+          <span>Ausgewählte Ordner</span>
           {selectedFolders.map((folder) => (
             <button
               key={folder}
@@ -490,33 +510,39 @@ const ImageRenamePage: React.FC = () => {
             </button>
           ))}
           <button className="clear-folder-filters" onClick={() => setSelectedFolders([])}>
-            Alle löschen
+            Ordnerfilter entfernen
           </button>
         </div>
       )}
 
       <section className="settings-card rename-toolbar">
-        <div className="settings-actions">
-          <button className="neon-card" onClick={handleSelectPage} disabled={items.length === 0}>
-            Seite waehlen ({items.length})
-          </button>
-          <button
-            className="neon-card"
-            onClick={handleSelectAll}
-            disabled={total === null || total === 0 || isTotalLoading}
-          >
-            Alle waehlen ({total ?? "…"})
-          </button>
-          <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0}>
-            Auswahl loeschen
-          </button>
-          <button className="neon-card" onClick={handleSubmit} disabled={isSubmitting || selectedCount === 0}>
-            {isSubmitting ? "Aktualisieren…" : `${selectedCount} Dateipfade aktualisieren`}
-          </button>
+        <div className="rename-toolbar__heading">
+          <strong>Dateien auswählen und aktualisieren</strong>
+          <span>Wähle einzelne Dateien, die aktuelle Seite oder alle Treffer.</span>
         </div>
-        <div className="settings-meta">
-          <span>Aktuelle Schreibweise</span>
-          <code>{settings?.filename_person_suffix_format || "DATEI Kai, Regina.jpg"}</code>
+        <div className="rename-toolbar__controls">
+          <div className="settings-actions">
+            <button className="neon-card" onClick={handleSelectPage} disabled={items.length === 0}>
+              Seite wählen ({items.length})
+            </button>
+            <button
+              className="neon-card"
+              onClick={handleSelectAll}
+              disabled={total === null || total === 0 || isTotalLoading}
+            >
+              Alle wählen ({total ?? "…"})
+            </button>
+            <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0}>
+              Auswahl aufheben
+            </button>
+          </div>
+          <button
+            className="neon-button rename-toolbar__apply"
+            onClick={handleSubmit}
+            disabled={isSubmitting || selectedCount === 0}
+          >
+            {isSubmitting ? "Dateinamen werden aktualisiert…" : `${selectedCount} Dateinamen aktualisieren`}
+          </button>
         </div>
       </section>
 
@@ -539,18 +565,19 @@ const ImageRenamePage: React.FC = () => {
           renderSkeletonRows()
         ) : items.length === 0 ? (
           <div className="rename-empty-state">
-            Alle bekannten Dateinamen entsprechen bereits dem aktuellen Format.
+            Alle Dateinamen entsprechen bereits deinem Benennungsschema.
           </div>
         ) : (
           <div className="rename-list-shell">
             {showLoadingOverlay && <div className="rename-list-overlay" aria-hidden="true" />}
             <div className="rename-list">
               {items.map((item) => (
-                <label className="rename-row" key={item.path}>
+                <div className="rename-row" key={item.path}>
                   <input
                     type="checkbox"
                     checked={isSelected(item.path)}
                     onChange={() => toggleItem(item.path)}
+                    aria-label={`${item.current_filename} auswählen`}
                   />
                   <div className="rename-row__content">
                     <div className="rename-row__path">{item.path}</div>
@@ -561,8 +588,26 @@ const ImageRenamePage: React.FC = () => {
                     <div className="rename-row__people">
                       Personen: {item.detected_person_names.join(", ")}
                     </div>
+                    <div className="rename-row__file-actions">
+                      <button
+                        type="button"
+                        onClick={(event) => void copyCandidatePath(event, item.path)}
+                        onKeyDown={(event) => event.stopPropagation()}
+                        title="Vollständigen Dateipfad kopieren"
+                      >
+                        Pfad kopieren
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => void revealCandidate(event, item)}
+                        onKeyDown={(event) => event.stopPropagation()}
+                        title="Datei im Explorer oder Dateimanager anzeigen"
+                      >
+                        Speicherort öffnen
+                      </button>
+                    </div>
                   </div>
-                </label>
+                </div>
               ))}
             </div>
           </div>

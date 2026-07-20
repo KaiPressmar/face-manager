@@ -4,6 +4,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.services.import_queue import (
     ImportJob,
@@ -111,6 +112,59 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(snapshot["running_count"], 2)
         self.assertEqual(snapshot["max_concurrent_jobs"], 2)
         self.assertEqual(self.processor.max_active_count, 2)
+
+    def test_overall_eta_uses_parallel_critical_path_instead_of_sum(self):
+        self.queue.stop()
+        self.queue = ImportQueue(
+            self.processor,
+            repository=self.repository,
+            auto_start=False,
+            max_concurrent_jobs=2,
+        )
+        first = self.queue.enqueue("/photos/first")
+        second = self.queue.enqueue("/photos/second")
+        third = self.queue.enqueue("/photos/third")
+        durations = {
+            "/photos/first": 120.0,
+            "/photos/second": 90.0,
+            "/photos/third": 60.0,
+        }
+
+        with patch.object(
+            self.queue,
+            "_estimate_job_total_seconds",
+            side_effect=lambda job, _average: durations[job.folder_path],
+        ):
+            snapshot = self.queue.snapshot()
+
+        etas = {job["id"]: job["eta_seconds"] for job in snapshot["jobs"]}
+        self.assertEqual(etas[first["id"]], 120)
+        self.assertEqual(etas[second["id"]], 90)
+        self.assertEqual(etas[third["id"]], 150)
+        self.assertEqual(snapshot["overall_eta_seconds"], 150)
+
+    def test_on_change_fires_on_enqueue_and_progress(self):
+        self.processor.release.clear()
+        self.queue.stop()
+        changes = threading.Event()
+        change_count = {"n": 0}
+
+        def on_change():
+            change_count["n"] += 1
+            changes.set()
+
+        self.queue = ImportQueue(
+            self.processor,
+            repository=self.repository,
+            on_change=on_change,
+        )
+
+        changes.clear()
+        self.queue.enqueue("/photos/notify")
+        self.assertTrue(changes.wait(1.0), "enqueue did not notify on_change")
+        # Progress updates from the running job must also notify subscribers.
+        self.wait_for(lambda: self.processor.started == ["/photos/notify"])
+        self.assertGreaterEqual(change_count["n"], 2)
 
     def test_queued_job_can_be_removed(self):
         self.queue.enqueue("/photos/running")

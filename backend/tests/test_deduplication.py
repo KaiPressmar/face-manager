@@ -58,6 +58,7 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     bbox_w REAL,
                     bbox_h REAL,
                     cluster_id INTEGER,
+                    review_status TEXT NOT NULL DEFAULT 'active',
                     embedding BLOB,
                     FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
                 );
@@ -175,6 +176,7 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     bbox_w REAL,
                     bbox_h REAL,
                     cluster_id INTEGER,
+                    review_status TEXT NOT NULL DEFAULT 'active',
                     embedding BLOB
                 );
                 """
@@ -301,6 +303,7 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     bbox_w REAL,
                     bbox_h REAL,
                     cluster_id INTEGER,
+                    review_status TEXT NOT NULL DEFAULT 'active',
                     embedding BLOB
                 );
                 """
@@ -388,3 +391,199 @@ class DeduplicationMigrationTest(unittest.TestCase):
 
                 persons = list_available_image_persons([str(photos)])
                 self.assertEqual(persons, ["Kai"])
+
+    def test_hidden_review_status_faces_are_excluded_from_image_results(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photos = root / "photos"
+            photos.mkdir()
+            visible_path = photos / "visible.jpg"
+            hidden_path = photos / "hidden.jpg"
+            visible_path.write_bytes(b"visible")
+            hidden_path.write_bytes(b"hidden")
+            db_path = root / "database.sqlite"
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE person (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                );
+                CREATE TABLE cluster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT,
+                    person_id INTEGER
+                );
+                CREATE TABLE image (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_hash TEXT,
+                    processed_at TEXT
+                );
+                CREATE TABLE image_location (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    created_at TEXT
+                );
+                CREATE TABLE face (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    cluster_id INTEGER,
+                    review_status TEXT NOT NULL DEFAULT 'active',
+                    embedding BLOB
+                );
+                """
+            )
+            for image_id, path, created_at in (
+                (1, visible_path, "2026-06-02T00:00:00+00:00"),
+                (2, hidden_path, "2026-06-01T00:00:00+00:00"),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO image(id, path, directory, filename, content_hash, processed_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (image_id, str(path), str(photos), path.name, f"hash-{image_id}"),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO image_location(image_id, path, directory, filename, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (image_id, str(path), str(photos), path.name, created_at),
+                )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, review_status)
+                VALUES (1, 1, 2, 3, 4, NULL, 'active')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, review_status)
+                VALUES (2, 1, 2, 3, 4, NULL, 'not_face')
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(schema, "DB_PATH", str(db_path)), patch(
+                "backend.services.storage.get_conn", schema.get_conn
+            ):
+                rows, total = list_images_page(
+                    folders=[str(photos)],
+                    persons=[],
+                    sort_by="date",
+                    sort_direction="desc",
+                    limit=10,
+                    offset=0,
+                )
+
+            self.assertEqual(total, 1)
+            self.assertEqual([row["filename"] for row in rows], ["visible.jpg"])
+
+    def test_image_pagination_binds_limit_offset_before_review_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photos = root / "photos"
+            photos.mkdir()
+            image_path = photos / "visible.jpg"
+            image_path.write_bytes(b"visible")
+            db_path = root / "database.sqlite"
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(
+                """
+                CREATE TABLE person (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE
+                );
+                CREATE TABLE cluster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    label TEXT,
+                    person_id INTEGER
+                );
+                CREATE TABLE image (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_hash TEXT,
+                    processed_at TEXT
+                );
+                CREATE TABLE image_location (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    path TEXT NOT NULL UNIQUE,
+                    directory TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    created_at TEXT
+                );
+                CREATE TABLE face (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL,
+                    bbox_x REAL,
+                    bbox_y REAL,
+                    bbox_w REAL,
+                    bbox_h REAL,
+                    cluster_id INTEGER,
+                    review_status TEXT NOT NULL DEFAULT 'active',
+                    embedding BLOB
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO image(id, path, directory, filename, content_hash, processed_at)
+                VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (str(image_path), str(photos), image_path.name, "hash-1"),
+            )
+            conn.execute(
+                """
+                INSERT INTO image_location(image_id, path, directory, filename, created_at)
+                VALUES (1, ?, ?, ?, ?)
+                """,
+                (
+                    str(image_path),
+                    str(photos),
+                    image_path.name,
+                    "2026-06-02T00:00:00+00:00",
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, review_status)
+                VALUES (1, 1, 2, 3, 4, NULL, 'active')
+                """
+            )
+            conn.commit()
+            conn.close()
+
+            with patch.object(schema, "DB_PATH", str(db_path)), patch(
+                "backend.services.storage.get_conn", schema.get_conn
+            ):
+                rows, total = list_images_page(
+                    folders=[str(photos)],
+                    persons=[],
+                    sort_by="date",
+                    sort_direction="desc",
+                    limit=1,
+                    offset=0,
+                )
+
+            self.assertEqual(total, 1)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["filename"], "visible.jpg")

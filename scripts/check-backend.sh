@@ -23,14 +23,19 @@ fi
 "${PYTHON}" -m py_compile \
   "${PROJECT_ROOT}/backend/app.py" \
   "${PROJECT_ROOT}/backend/config.py" \
+  "${PROJECT_ROOT}/backend/changelog.py" \
   "${PROJECT_ROOT}/backend/desktop_main.py" \
   "${PROJECT_ROOT}/backend/db/schema.py" \
   "${PROJECT_ROOT}/backend/models/clustering.py" \
   "${PROJECT_ROOT}/backend/models/face_model.py" \
   "${PROJECT_ROOT}/backend/services/desktop.py" \
+  "${PROJECT_ROOT}/backend/services/face_thumbnails.py" \
+  "${PROJECT_ROOT}/backend/services/face_thumbnail_warmup.py" \
   "${PROJECT_ROOT}/backend/services/import_queue.py" \
+  "${PROJECT_ROOT}/backend/services/idle_recluster.py" \
   "${PROJECT_ROOT}/backend/services/pipeline.py" \
-  "${PROJECT_ROOT}/backend/services/storage.py"
+  "${PROJECT_ROOT}/backend/services/storage.py" \
+  "${PROJECT_ROOT}/backend/services/update_manager.py"
 
 "${PYTHON}" -m unittest discover \
   -s "${PROJECT_ROOT}/backend/tests" \

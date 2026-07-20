@@ -127,23 +127,32 @@ def open_file_location(path: str):
         OSError: If the platform file manager cannot be launched.
         subprocess.SubprocessError: If path conversion fails.
     """
+    normalized_path = str(path or "").strip()
+    if not normalized_path:
+        raise OSError("Missing file path")
+
     if _is_wsl():
         result = subprocess.run(
-            ["wslpath", "-w", path],
+            ["wslpath", "-w", normalized_path],
             check=True,
             capture_output=True,
             text=True,
         )
         windows_path = result.stdout.strip()
+        if not windows_path:
+            raise OSError("Could not translate the file path for Windows Explorer")
         subprocess.Popen(["explorer.exe", f"/select,{windows_path}"])
         return
 
     if sys.platform == "win32":
-        subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+        subprocess.Popen(
+            ["explorer.exe", f"/select,{os.path.normpath(normalized_path)}"]
+        )
         return
 
     if sys.platform == "darwin":
-        subprocess.Popen(["open", "-R", path])
+        subprocess.Popen(["open", "-R", normalized_path])
         return
 
-    subprocess.Popen(["xdg-open", os.path.dirname(path)])
+    containing_directory = os.path.dirname(os.path.abspath(normalized_path))
+    subprocess.Popen(["xdg-open", containing_directory])

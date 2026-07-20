@@ -33,12 +33,19 @@ backend/
 frontend/
   src/                   React application
   package.json           Frontend scripts and dependencies
+.github/workflows/
+  ci.yml                 Pull request and branch validation
+  release.yml            Tag, release, and Windows artifact publication
 packaging/windows/
   build-release.ps1      Windows desktop bundle builder
   FaceManager.iss        Inno Setup installer definition
 scripts/
   setup-dev.sh           Ubuntu development environment installer
   release-version.sh     Semantic release version helper
+CHANGELOG.md              Curated user-facing release notes
+AGENTS.md                 Codex repository instructions
+CLAUDE.md                 Claude repository instructions
+CONTRIBUTING.md           Development and release workflow
 VERSION                  Canonical application release version
 ```
 
@@ -193,7 +200,7 @@ CPU mode. To override this for unusually fast storage or limited memory, set
 
 ```bash
 FACE_MANAGER_IMPORT_WORKERS=3 \
-  python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+  ./scripts/dev-backend.sh
 ```
 
 ### Import Queue
@@ -270,9 +277,13 @@ debugger, start Vite, and attach the browser debugger.
 ### Terminal 1: FastAPI Backend
 
 ```bash
-source backend/.venv/bin/activate
-python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+./scripts/dev-backend.sh
 ```
+
+The script watches only backend runtime Python sources. Frontend files,
+backend tests, the virtual environment, SQLite data, logs, and generated
+thumbnails do not restart the API. Use the same script through the VS Code
+**Backend: Dev server** task; `F5` uses the equivalent restricted watcher.
 
 Useful backend URLs:
 
@@ -289,8 +300,9 @@ npm run dev
 
 Open `http://localhost:5173` in the browser.
 
-The frontend currently expects the backend at `http://localhost:8000`, so keep
-the backend on port `8000` during development.
+Vite forwards `/api` to the backend on port `8000`, including the live event
+stream. Port `5173` is strict: if another stale frontend process already owns
+it, startup fails clearly instead of silently moving to a different address.
 
 ## Importing Images
 
@@ -344,11 +356,17 @@ assignments, clusters, and embeddings.
 
 ## Validation Commands
 
-Run the same checks used by GitHub Actions:
+Run the complete local equivalent of the GitHub Actions checks:
 
 ```bash
 ./scripts/check-all.sh
 ```
+
+This validates version, changelog, and packaging metadata, generates a temporary
+dependency inventory, compiles and tests the backend, type-checks the frontend,
+and creates a production frontend build. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the CI job mapping and pull request
+requirements.
 
 The production frontend can be previewed after building:
 
@@ -359,8 +377,9 @@ npm run preview
 
 ## Windows Desktop Release
 
-Each successful release on `main` now produces Windows installer bundles and
-uploads them to the matching GitHub Release as:
+The publication workflow for a successfully tested release commit on `main`
+produces Windows installer bundles and uploads them to the matching GitHub
+Release as:
 
 ```text
 FaceManager-Setup-X.Y.Z.exe
@@ -388,7 +407,7 @@ When CUDA is unavailable at runtime, the app falls back to CPU execution.
 On a Windows machine with Python 3.10+, Node.js 20+, and Inno Setup 6:
 
 ```powershell
-py -m pip install -r backend/requirements.txt -r backend/requirements-desktop.txt "onnxruntime>=1.21,<2"
+python -m pip install -r backend/requirements.txt -r backend/requirements-desktop.txt "onnxruntime>=1.21,<2"
 ./packaging/windows/build-release.ps1
 
 # GPU-capable installer variant
@@ -403,7 +422,51 @@ dist/FaceManager-Setup-X.Y.Z.exe
 dist/FaceManager-Setup-GPU-X.Y.Z.exe
 ```
 
-## Git Workflow
+The build also writes a matching `.sha256` file next to each installer. The
+release workflow attaches that checksum to the GitHub Release and, for a public
+repository, records a GitHub build-provenance attestation for the installer.
+These records make the artifact origin and integrity verifiable, but they are
+not a replacement for Windows Authenticode signing.
+
+Windows release builds embed the canonical version and neutral project metadata
+in both `FaceManager.exe` and the installer. The current automated workflow does
+not sign either file. The optional `-RequireSigned` switch does not perform
+signing; it is a future guard that makes the build fail unless the application
+and installer already carry valid Authenticode signatures.
+
+Each release also bundles its curated `CHANGELOG.md` section. Face Manager shows
+these high-level notes once on the first start after an update; clicking the
+version number beside the application name in the sidebar opens them again later.
+
+The desktop app checks the latest public GitHub Release at startup and then at
+most once per hour. When a newer semantic version exists, it shows the curated
+release notes and selects the installer matching the embedded CPU/GPU build
+variant. Users can postpone or skip that version, open its GitHub page, or
+download it. Face Manager verifies the downloaded installer against the
+published SHA-256 file and GitHub asset digest before offering installation.
+Installation always needs a second explicit confirmation; the app never runs a
+silent update. Automatic checks can be disabled or triggered manually under
+**Settings > Updates**. A check sends a normal request to GitHub but no local
+image, face, or person data.
+
+Because the installers are currently unsigned, Windows SmartScreen can still
+show a warning after a verified installer is launched. Do not remove the
+confirmation step until Authenticode signing is part of the release pipeline.
+
+### Inspect Declared Dependencies
+
+Generate a factual JSON inventory from the backend requirement manifests and
+the resolved frontend lock file:
+
+```bash
+python scripts/inventory-dependencies.py
+```
+
+This inventory intentionally makes no claims about license compatibility or
+redistribution rights. Windows builds keep a copy under `build/` for review; it
+is not included in the installer or uploaded with releases.
+
+## Development and Release Workflow
 
 Development follows a two-branch model:
 
@@ -421,15 +484,21 @@ git switch -c feature/my-change
 ```
 
 After validation, push the feature branch and open a pull request targeting
-`develop`. See [CONTRIBUTING.md](CONTRIBUTING.md) for naming, validation,
-release steps, and recommended branch-protection settings.
+`develop`. Ordinary changes are squash-merged into `develop`. A release is
+prepared on a dedicated branch and merged through a pull request into `develop`.
+The subsequent release pull request from `develop` to `main` is merged with a
+merge commit.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) is the canonical guide for branch naming,
+local validation, CI jobs, version preparation, release automation, artifacts,
+failure recovery, and recommended branch protection.
 
 ## Release Versioning
 
 Face Manager uses semantic versioning (`MAJOR.MINOR.PATCH`). The canonical
 release number lives in the root `VERSION` file and is:
 
-- Displayed in the application topbar
+- Displayed beside the application name in the sidebar
 - Used as the FastAPI application version
 - Available from `GET /api/version`
 - Mirrored into `frontend/package.json` and `package-lock.json`
@@ -446,19 +515,28 @@ Use the release helper to prepare a version:
 ./scripts/release-version.sh 1.2.0
 ```
 
-The helper only updates version files. It deliberately does not commit or tag
-the release. Commit the version bump on `develop`, then open the release pull
-request from `develop` to `main`:
+The helper updates version files and moves the current `CHANGELOG.md`
+`Unreleased` entries into the dated release section. It deliberately does not
+commit or tag the release. Every commit released from `main` must have a unique version; an
+existing tag or release must never be reused for changed source. Prepare the
+version on a dedicated branch and merge it into `develop` through a pull
+request, then follow the release checklist in
+[CONTRIBUTING.md](CONTRIBUTING.md):
 
 ```bash
-git add VERSION frontend/package.json frontend/package-lock.json
+git switch -c chore/release-1.2.0
+./scripts/release-version.sh 1.2.0
+git add VERSION frontend/package.json frontend/package-lock.json CHANGELOG.md
 git commit -m "Release v1.2.0"
-git push origin develop
+git push -u origin HEAD
 ```
 
 After that PR merges and CI succeeds on `main`, GitHub Actions creates the
-annotated `v1.2.0` tag, publishes a GitHub Release with generated notes, and
-attaches both Windows installer variants for that version.
+annotated `v1.2.0` tag and GitHub Release, then builds and uploads both Windows
+installer variants, their SHA-256 files, and public-repository provenance
+attestations. The GitHub Release and the application's first-start dialog use
+the same curated changelog text. Wait for both Windows matrix jobs before
+announcing the release.
 
 ## Troubleshooting
 

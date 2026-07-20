@@ -1,22 +1,38 @@
+import asyncio
 import logging
 import os
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
+from functools import partial, wraps
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from io import BytesIO
 from pathlib import Path
 from typing import List
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
-from PIL import ExifTags, Image
+from PIL import Image
 
-from .config import APP_VERSION, DB_PATH, get_error_log_path, get_frontend_dist_dir
+from .changelog import ChangelogError, find_release, load_changelog
+from .config import (
+    APP_VERSION,
+    DB_PATH,
+    get_build_variant,
+    get_changelog_path,
+    get_data_root,
+    get_error_log_path,
+    get_frontend_dist_dir,
+)
 from .db.schema import get_conn, init_db
 from .error_logging import (
     DEFAULT_FILE_LOG_LEVEL,
@@ -33,23 +49,52 @@ from .services.desktop import (
     pick_folder,
     to_display_path,
 )
+from .services.face_thumbnails import ensure_face_thumbnail
+from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
+from .services.autocluster_queue import AutoClusterQueue
+from .services.events import event_hub
 from .services.import_queue import ImportQueue
+from .services.idle_recluster import IdleReclusterScheduler
+from .services.update_manager import (
+    UpdateError,
+    parse_semver,
+    schedule_process_exit,
+    update_manager,
+)
 from .services.storage import (
+    DEFAULT_AUTOMATIC_UPDATE_CHECKS,
     DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+    DEFAULT_CLUSTER_STRICTNESS,
     DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
     DEFAULT_FILENAME_PERSON_JOINER,
+    DEFAULT_UI_THEME,
     _safe_float,
     assign_cluster_to_person,
+    accept_person_suggestions,
+    accept_person_suggestion_assignments,
     build_filename_person_format_summary,
     build_folder_tree,
     count_filename_rename_candidates,
     delete_image,
+    create_cluster_from_faces,
+    assign_faces_to_person,
+    auto_tune_cluster_distance_threshold,
+    get_faces_for_review_group,
+    get_image_detail_rows,
     get_available_image_path,
     get_cluster_faces,
+    get_cluster_overview,
     get_cluster_summary,
     get_cluster_distance_threshold,
+    get_clustering_profile,
+    get_applied_clustering_version,
+    get_automatic_update_checks,
+    get_last_seen_changelog_version,
+    get_skipped_update_version,
+    list_face_review_groups,
     get_file_log_level,
+    get_ui_theme,
     get_filename_person_block_separator,
     get_filename_person_joiner,
     get_filename_person_suffix_format,
@@ -60,10 +105,31 @@ from .services.storage import (
     list_images_page,
     list_cluster_summaries,
     list_persons,
-    invalidate_image_query_cache,
+    list_person_suggestions,
+    list_review_suggestions,
+    mark_faces_with_review_status,
+    dismiss_person_suggestion,
+    dismiss_review_suggestion,
+    accept_review_suggestions,
+    normalize_face_review_group,
+    normalize_face_status_filters,
+    rename_cluster,
+    rename_person,
+    delete_person,
     rename_image_locations_to_match_people,
+    restore_faces_to_manual_review,
+    remove_faces_from_cluster,
+    count_reclusterable_faces,
+    count_scoped_reclusterable_faces,
+    recluster_all_active_faces,
     set_cluster_distance_threshold,
+    set_clustering_strictness,
+    set_applied_clustering_version,
+    set_automatic_update_checks,
+    set_last_seen_changelog_version,
+    set_skipped_update_version,
     set_file_log_level,
+    set_ui_theme,
     set_filename_person_block_separator,
     set_filename_person_joiner,
     set_filename_person_suffix_format,
@@ -74,7 +140,316 @@ install_global_exception_hooks()
 logger = logging.getLogger("face_manager.api")
 
 init_db()
-import_queue = ImportQueue(auto_start=False)
+
+_import_activity_lock = threading.Lock()
+_import_was_busy = False
+_version_clustering_lock = threading.Lock()
+_version_clustering_pending = False
+_cluster_operation_lock = threading.RLock()
+_imports_finalizing = 0
+
+
+def _describe_background_activity() -> str | None:
+    """Describe background work for the UI. No longer gates any write."""
+    if _imports_finalizing > 0:
+        return (
+            "Der Bildimport wird gerade sicher abgeschlossen und die Ansichten "
+            "werden aktualisiert. Bitte warten Sie einen kurzen Moment."
+        )
+    import_snapshot = import_queue.snapshot()
+    if isinstance(import_snapshot, dict) and (
+        import_snapshot.get("running_count") or import_snapshot.get("queued_count")
+    ):
+        return (
+            "Ein Bildimport läuft oder wartet. Diese Änderung ist vorübergehend "
+            "gesperrt, damit keine Zuordnungen verloren gehen. Bitte warten Sie, "
+            "bis der Import abgeschlossen ist."
+        )
+    auto_cluster_snapshot = auto_cluster_queue.snapshot()
+    task = (
+        auto_cluster_snapshot.get("task")
+        if isinstance(auto_cluster_snapshot, dict)
+        else None
+    )
+    if task and task.get("status") in {"queued", "running"}:
+        return (
+            "Die Gesichtscluster werden gerade im Hintergrund aktualisiert. "
+            "Diese Änderung ist vorübergehend gesperrt. Die Ansicht wird nach "
+            "Abschluss automatisch neu geladen."
+        )
+    return None
+
+
+# How long an interactive write waits for a background pass to step aside.
+CLUSTER_YIELD_TIMEOUT_SECONDS = 2.0
+
+
+def safe_cluster_mutation(function):
+    """Give interactive writes priority over background clustering.
+
+    Reclustering is a low-priority optimisation, so it must never block the
+    user. SQLite (WAL) allows a single writer, so instead of rejecting the
+    write we ask a running pass to stop at its next group boundary and hand
+    over the writer slot. Nothing is lost: unfinished groups keep their dirty
+    markers and are rebuilt on the next idle run.
+    """
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        auto_cluster_queue.request_cancel(timeout=CLUSTER_YIELD_TIMEOUT_SECONDS)
+        with _cluster_operation_lock:
+            return function(*args, **kwargs)
+
+    return guarded
+
+
+def safe_import_enqueue(function):
+    """Queue an import without waiting for background clustering to finish."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        auto_cluster_queue.request_cancel(timeout=CLUSTER_YIELD_TIMEOUT_SECONDS)
+        with _cluster_operation_lock:
+            return function(*args, **kwargs)
+
+    return guarded
+
+
+def _publish_imports() -> None:
+    """Push the current import-queue snapshot to subscribed clients."""
+    global _import_was_busy
+    snapshot = import_queue.snapshot()
+    event_hub.publish("imports", snapshot)
+    busy = bool(snapshot.get("running_count") or snapshot.get("queued_count"))
+    with _import_activity_lock:
+        became_idle = _import_was_busy and not busy
+        _import_was_busy = busy
+    if became_idle:
+        app_cache.clear()
+        notify_clusters_changed("import_completed")
+        if not schedule_version_clustering_upgrade():
+            mark_cluster_assignments_dirty("import_completed")
+
+
+def _publish_autocluster() -> None:
+    """Push the current autocluster snapshot to subscribed clients."""
+    event_hub.publish("autocluster", auto_cluster_queue.snapshot())
+
+
+def _publish_thumbnail_warmup() -> None:
+    """Push the current thumbnail-warmup snapshot to subscribed clients."""
+    event_hub.publish("thumbnail-warmup", face_thumbnail_warmup_queue.snapshot())
+
+
+def _begin_import_finalization() -> None:
+    """Block interactive writes before an import stops reporting as active."""
+    global _imports_finalizing
+    with _cluster_operation_lock:
+        _imports_finalizing += 1
+
+
+def _end_import_finalization() -> None:
+    """Release writes only after import and cluster events were published."""
+    global _imports_finalizing
+    with _cluster_operation_lock:
+        _imports_finalizing = max(0, _imports_finalizing - 1)
+
+
+def notify_clusters_changed(reason: str) -> None:
+    """Broadcast that cluster/person/image data changed so clients refetch.
+
+    Args:
+        reason: Short label describing what triggered the change.
+    """
+    event_hub.publish("clusters", {"reason": reason})
+
+
+import_queue = ImportQueue(
+    auto_start=False,
+    on_change=_publish_imports,
+    on_before_terminal=_begin_import_finalization,
+    on_after_terminal=_end_import_finalization,
+)
+def _handle_autocluster_success(_repaired_faces: int) -> None:
+    """Refresh resources and continue a version migration waiting for idleness."""
+    reset_import_resources()
+    app_cache.clear()
+    notify_clusters_changed("autocluster")
+    if _version_clustering_pending:
+        schedule_version_clustering_upgrade()
+
+
+auto_cluster_queue = AutoClusterQueue(
+    on_success=_handle_autocluster_success,
+    on_change=_publish_autocluster,
+)
+
+
+def is_backend_idle_for_thumbnail_warmup() -> bool:
+    """Return whether low-priority thumbnail warming may run."""
+    import_snapshot = import_queue.snapshot()
+    if import_snapshot.get("running_count", 0) > 0:
+        return False
+    if import_snapshot.get("queued_count", 0) > 0:
+        return False
+
+    auto_cluster_snapshot = auto_cluster_queue.snapshot()
+    task = auto_cluster_snapshot.get("task")
+    if task and task.get("status") in {"queued", "running"}:
+        return False
+    return True
+
+
+face_thumbnail_warmup_queue = FaceThumbnailWarmupQueue(
+    is_idle=is_backend_idle_for_thumbnail_warmup,
+    on_change=_publish_thumbnail_warmup,
+)
+
+
+def run_startup_repairs(reason: str = "startup") -> dict | None:
+    """Schedule legacy inbox repair work without blocking app startup."""
+    with _cluster_operation_lock:
+        if _describe_background_activity():
+            return None
+        task = auto_cluster_queue.start(reason)
+    if task is not None:
+        logger.info(
+            "Scheduled auto-clustering repair task %s for %s stale inbox faces",
+            task["id"],
+            task["total_faces"],
+        )
+    return task
+
+
+def schedule_full_recluster(
+    reason: str = "cluster_assignment_change",
+    scoped: bool = False,
+) -> dict | None:
+    """Schedule a rebuild of unassigned and per-person subclusters.
+
+    Args:
+        scoped: Rebuild only the groups recorded as dirty instead of the whole
+            library. Used for idle-triggered runs after assignment changes.
+    """
+    with _cluster_operation_lock:
+        if _describe_background_activity():
+            return None
+        task = auto_cluster_queue.start(
+            reason,
+            kind="full_recluster",
+            count_callable=(
+                count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
+            ),
+            repair_callable=(
+                partial(recluster_all_active_faces, scoped=True)
+                if scoped
+                else recluster_all_active_faces
+            ),
+        )
+    if task is not None:
+        logger.info(
+            "Scheduled full reclustering task %s for %s faces",
+            task["id"],
+            task["total_faces"],
+        )
+    return task
+
+
+def _apply_version_clustering_upgrade(progress_callback=None) -> int:
+    """Tune, rebuild, then atomically mark this software version as applied."""
+    try:
+        auto_tune_cluster_distance_threshold()
+    except ValueError as exc:
+        # A fresh or sparsely labelled installation cannot be calibrated yet.
+        # Re-clustering with the safe current/default profile is still required.
+        logger.info("Skipped version-start clustering auto-tune: %s", exc)
+    except Exception:
+        # Tuning is an optimization. A tuning defect must not prevent faces
+        # from being rebuilt with the newest clustering implementation.
+        logger.exception(
+            "Version-start clustering auto-tune failed; continuing with current profile"
+        )
+    rebuilt_faces = recluster_all_active_faces(progress_callback=progress_callback)
+    set_applied_clustering_version(APP_VERSION)
+    logger.info(
+        "Applied clustering algorithm for software version %s to %s faces",
+        APP_VERSION,
+        rebuilt_faces,
+    )
+    return rebuilt_faces
+
+
+def schedule_version_clustering_upgrade() -> bool:
+    """Ensure tuning and full clustering run once for each software version.
+
+    Returns ``True`` when a migration is needed (scheduled, deferred, or
+    completed for an empty installation), and ``False`` when this exact version
+    was already applied.
+    """
+    global _version_clustering_pending
+    with _cluster_operation_lock, _version_clustering_lock:
+        if get_applied_clustering_version() == APP_VERSION:
+            _version_clustering_pending = False
+            return False
+
+        import_snapshot = import_queue.snapshot()
+        if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+            _version_clustering_pending = True
+            logger.info(
+                "Deferred clustering upgrade for version %s until imports are idle",
+                APP_VERSION,
+            )
+            return True
+
+        total_faces = count_reclusterable_faces()
+        if total_faces <= 0:
+            set_applied_clustering_version(APP_VERSION)
+            _version_clustering_pending = False
+            logger.info(
+                "Marked clustering version %s on empty installation",
+                APP_VERSION,
+            )
+            return True
+
+        reason = f"software_version:{APP_VERSION}"
+        task = auto_cluster_queue.start(
+            reason,
+            kind="full_recluster",
+            count_callable=count_reclusterable_faces,
+            repair_callable=_apply_version_clustering_upgrade,
+        )
+        if task and task.get("reason") == reason:
+            _version_clustering_pending = False
+            logger.info(
+                "Scheduled one-time clustering upgrade for software version %s",
+                APP_VERSION,
+            )
+        else:
+            _version_clustering_pending = True
+        return True
+
+
+def is_backend_idle_for_reclustering() -> bool:
+    """Return whether low-priority assignment-triggered clustering may start."""
+    import_snapshot = import_queue.snapshot()
+    if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+        return False
+    task = auto_cluster_queue.snapshot().get("task")
+    return not (task and task.get("status") in {"queued", "running"})
+
+
+# A review session is full of short pauses, so the quiet period must be long
+# enough that thinking time never triggers a rebuild.
+IDLE_RECLUSTER_DEBOUNCE_SECONDS = 90.0
+
+idle_recluster_scheduler = IdleReclusterScheduler(
+    is_backend_idle_for_reclustering,
+    lambda reason: schedule_full_recluster(reason, scoped=True),
+    debounce_seconds=IDLE_RECLUSTER_DEBOUNCE_SECONDS,
+)
+
+
+def mark_cluster_assignments_dirty(reason: str) -> None:
+    """Request one debounced reclustering run after assignment mutations."""
+    idle_recluster_scheduler.mark_dirty(reason)
 
 
 @asynccontextmanager
@@ -88,13 +463,23 @@ async def lifespan(_app: FastAPI):
         Control while the application is accepting requests.
     """
     try:
+        event_hub.bind_loop(asyncio.get_running_loop())
+        idle_recluster_scheduler.start()
         import_queue.start()
+        if not schedule_version_clustering_upgrade():
+            run_startup_repairs()
+        face_thumbnail_warmup_queue.start()
     except Exception:
         logger.exception("Could not start import queue during application startup")
         raise
     try:
         yield
     finally:
+        idle_recluster_scheduler.stop()
+        try:
+            face_thumbnail_warmup_queue.stop()
+        except Exception:
+            logger.exception("Could not stop thumbnail warmup cleanly during shutdown")
         try:
             import_queue.stop()
         except Exception:
@@ -147,6 +532,113 @@ def api_version():
         Version metadata for frontend diagnostics.
     """
     return {"version": APP_VERSION}
+
+
+@app.get("/api/changelog/current")
+def api_current_changelog():
+    """Return high-level notes for the running application version."""
+    try:
+        release = find_release(load_changelog(get_changelog_path()), APP_VERSION)
+    except (ChangelogError, OSError):
+        logger.exception("Could not load release notes for version %s", APP_VERSION)
+        release = None
+    response = release or {"version": APP_VERSION, "date": None, "sections": []}
+    response["seen"] = get_last_seen_changelog_version() == APP_VERSION
+    return response
+
+
+@app.post("/api/changelog/current/acknowledge")
+def api_acknowledge_current_changelog():
+    """Remember that the running version's notes were dismissed."""
+    set_last_seen_changelog_version(APP_VERSION)
+    return {"version": APP_VERSION, "seen": True}
+
+
+@app.get("/api/updates/check")
+def api_check_updates(force: bool = Query(False)):
+    """Check the latest public GitHub release, cached for one hour."""
+    enabled = get_automatic_update_checks()
+    if not enabled and not force:
+        return {
+            "enabled": False,
+            "current_version": APP_VERSION,
+            "update_available": False,
+            "check_interval_seconds": 60 * 60,
+        }
+    try:
+        result = update_manager.check(
+            APP_VERSION,
+            get_build_variant(),
+            force=force,
+        )
+    except UpdateError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    result["enabled"] = enabled
+    result["skipped"] = get_skipped_update_version() == result["latest_version"]
+    result["can_install"] = update_manager.can_install()
+    result["check_interval_seconds"] = 60 * 60
+    return result
+
+
+@app.post("/api/updates/skip")
+def api_skip_update(data: dict = Body(...)):
+    """Suppress one offered release while allowing later releases through."""
+    version = str(data.get("version") or "").strip()
+    try:
+        if parse_semver(version) <= parse_semver(APP_VERSION):
+            raise UpdateError("Es kann nur eine neuere Version übersprungen werden.")
+        update_manager.get_cached_release(version)
+    except UpdateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    set_skipped_update_version(version)
+    return {"version": version, "skipped": True}
+
+
+@app.post("/api/updates/download")
+def api_download_update(data: dict = Body(...)):
+    """Start a verified installer download without blocking the UI."""
+    version = str(data.get("version") or "").strip()
+    try:
+        return update_manager.start_download(version, get_data_root() / "updates")
+    except (OSError, UpdateError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/updates/download")
+def api_update_download_state():
+    """Return progress for the current installer download."""
+    return update_manager.download_state()
+
+
+@app.post("/api/updates/open-release")
+def api_open_update_release(data: dict = Body(...)):
+    """Open the validated GitHub page for the offered release."""
+    try:
+        update_manager.open_release_page(str(data.get("version") or ""))
+    except UpdateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"opened": True}
+
+
+@app.post("/api/updates/install")
+def api_install_update(data: dict = Body(...)):
+    """Launch a verified Windows installer, then close the current app."""
+    activity = _describe_background_activity()
+    if activity is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Das Update kann erst gestartet werden, wenn die laufende "
+                f"Hintergrundarbeit abgeschlossen ist: {activity}"
+            ),
+        )
+    version = str(data.get("version") or "").strip()
+    try:
+        update_manager.launch_downloaded_installer(version)
+    except (OSError, UpdateError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    schedule_process_exit()
+    return {"installing": True, "version": version}
 
 
 @app.get("/api/runtime")
@@ -241,7 +733,7 @@ def ensure_database_is_idle() -> None:
     if snapshot["running_count"] or snapshot["queued_count"]:
         raise HTTPException(
             status_code=409,
-            detail="Database import/export is unavailable while imports are queued or running.",
+            detail="Eine Datensicherung ist erst möglich, wenn alle Bilder hinzugefügt wurden.",
         )
 
 
@@ -258,11 +750,11 @@ def validate_cluster_distance_threshold(value: float) -> float:
     try:
         threshold = float(value)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Threshold must be a number.") from exc
+        raise HTTPException(status_code=400, detail="Die Empfindlichkeit muss eine Zahl sein.") from exc
     if not 0 <= threshold <= 1:
         raise HTTPException(
             status_code=400,
-            detail="Threshold must be between 0.0 and 1.0.",
+            detail="Die Empfindlichkeit muss zwischen 0,0 und 1,0 liegen.",
         )
     return threshold
 
@@ -276,7 +768,10 @@ def validate_database_file(path: Path) -> None:
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     except sqlite3.DatabaseError as exc:
-        raise HTTPException(status_code=400, detail="Uploaded file is not a valid SQLite database.") from exc
+        raise HTTPException(
+            status_code=400,
+            detail="Die ausgewählte Datei ist keine gültige Face-Manager-Sicherung.",
+        ) from exc
     finally:
         if conn is not None:
             conn.close()
@@ -286,7 +781,7 @@ def validate_database_file(path: Path) -> None:
     if not required.issubset(table_names):
         raise HTTPException(
             status_code=400,
-            detail="Uploaded database is missing required Face Manager tables.",
+            detail="In der ausgewählten Datei fehlen benötigte Face-Manager-Daten.",
         )
 
 
@@ -299,7 +794,7 @@ def api_select_folder(request: Request):
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="A native folder picker is unavailable on this host.",
+            detail="Die Ordnerauswahl konnte auf diesem Gerät nicht geöffnet werden.",
         ) from exc
     if not folder_path:
         return {"folder_path": None}
@@ -318,9 +813,13 @@ def api_get_settings():
     def load_settings():
         block_separator = get_filename_person_block_separator()
         joiner = get_filename_person_joiner()
+        clustering_profile = get_clustering_profile()
         return {
             "cluster_distance_threshold": get_cluster_distance_threshold(),
             "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+            "clustering_strictness": clustering_profile["strictness"],
+            "clustering_strictness_default": DEFAULT_CLUSTER_STRICTNESS,
+            "clustering_profile": clustering_profile,
             "filename_person_suffix_format": build_filename_person_format_summary(
                 block_separator=block_separator,
                 joiner=joiner,
@@ -335,6 +834,10 @@ def api_get_settings():
             "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
             "file_log_level": get_file_log_level(),
             "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
+            "ui_theme": get_ui_theme(),
+            "ui_theme_default": DEFAULT_UI_THEME,
+            "automatic_update_checks": get_automatic_update_checks(),
+            "automatic_update_checks_default": DEFAULT_AUTOMATIC_UPDATE_CHECKS,
             "database_path": DB_PATH,
             "error_log_path": str(get_error_log_path()),
         }
@@ -348,16 +851,25 @@ def api_get_settings():
 
 
 @app.put("/api/settings")
+@safe_cluster_mutation
 def api_update_settings(data: dict = Body(...)):
     """Persist mutable application settings."""
     threshold = get_cluster_distance_threshold()
+    clustering_profile = get_clustering_profile()
     block_separator = get_filename_person_block_separator()
     joiner = get_filename_person_joiner()
     file_log_level = get_file_log_level()
+    ui_theme = get_ui_theme()
+    automatic_update_checks = get_automatic_update_checks()
 
     if "cluster_distance_threshold" in data:
         threshold = validate_cluster_distance_threshold(data["cluster_distance_threshold"])
         threshold = set_cluster_distance_threshold(threshold)
+        clustering_profile = get_clustering_profile()
+    if "clustering_strictness" in data:
+        strictness = validate_cluster_distance_threshold(data["clustering_strictness"])
+        clustering_profile = set_clustering_strictness(strictness)
+        threshold = clustering_profile["neighbor_threshold"]
     if "filename_person_block_separator" in data:
         block_separator = set_filename_person_block_separator(
             str(data["filename_person_block_separator"])
@@ -377,22 +889,40 @@ def api_update_settings(data: dict = Body(...)):
             apply_persisted_file_log_level()
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "ui_theme" in data:
+        try:
+            ui_theme = set_ui_theme(str(data["ui_theme"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "automatic_update_checks" in data:
+        try:
+            automatic_update_checks = set_automatic_update_checks(
+                data["automatic_update_checks"]
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if (
         "cluster_distance_threshold" not in data
+        and "clustering_strictness" not in data
         and "filename_person_block_separator" not in data
         and "filename_person_joiner" not in data
         and "filename_person_suffix_format" not in data
         and "file_log_level" not in data
+        and "ui_theme" not in data
+        and "automatic_update_checks" not in data
     ):
         raise HTTPException(
             status_code=400,
-            detail="Missing mutable settings payload.",
+            detail="Es wurde keine Einstellung zum Speichern übermittelt.",
         )
 
     return {
         "cluster_distance_threshold": threshold,
         "cluster_distance_threshold_default": DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
+        "clustering_strictness": clustering_profile["strictness"],
+        "clustering_strictness_default": DEFAULT_CLUSTER_STRICTNESS,
+        "clustering_profile": clustering_profile,
         "filename_person_suffix_format": build_filename_person_format_summary(
             block_separator=block_separator,
             joiner=joiner,
@@ -407,9 +937,26 @@ def api_update_settings(data: dict = Body(...)):
         "filename_person_joiner_default": DEFAULT_FILENAME_PERSON_JOINER,
         "file_log_level": file_log_level,
         "file_log_level_default": DEFAULT_FILE_LOG_LEVEL,
+        "ui_theme": ui_theme,
+        "ui_theme_default": DEFAULT_UI_THEME,
+        "automatic_update_checks": automatic_update_checks,
+        "automatic_update_checks_default": DEFAULT_AUTOMATIC_UPDATE_CHECKS,
         "database_path": DB_PATH,
         "error_log_path": str(get_error_log_path()),
     }
+
+
+@app.post("/api/settings/cluster-threshold/auto-tune")
+@safe_cluster_mutation
+def api_auto_tune_cluster_threshold():
+    """Calibrate and persist the threshold without starting reclustering."""
+    try:
+        result = auto_tune_cluster_distance_threshold()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    validate_cluster_distance_threshold(result["threshold"])
+    return result
 
 
 @app.get("/api/database/export")
@@ -445,11 +992,12 @@ def api_export_database():
 
 
 @app.post("/api/database/import")
+@safe_cluster_mutation
 def api_import_database(payload: bytes = Body(..., media_type="application/octet-stream")):
     """Replace the current database with an uploaded SQLite file."""
     ensure_database_is_idle()
     if not payload:
-        raise HTTPException(status_code=400, detail="Missing database payload.")
+        raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
 
     current_db_path = Path(DB_PATH)
     current_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -475,6 +1023,8 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             if sidecar_path.exists():
                 sidecar_path.unlink()
         init_db()
+        if not schedule_version_clustering_upgrade():
+            run_startup_repairs("database_import")
         reset_import_resources()
         app_cache.clear()
     except HTTPException:
@@ -485,18 +1035,25 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             if backup_path.exists():
                 shutil.move(str(backup_path), DB_PATH)
                 init_db()
+                if not schedule_version_clustering_upgrade():
+                    run_startup_repairs("database_import_recovery")
                 reset_import_resources()
                 app_cache.clear()
             elif current_db_path.exists():
                 current_db_path.unlink()
                 init_db()
+                if not schedule_version_clustering_upgrade():
+                    run_startup_repairs("database_import_recovery")
                 reset_import_resources()
                 app_cache.clear()
         except Exception:
             logger.exception("Automatic recovery after failed database import also failed")
         raise HTTPException(
             status_code=500,
-            detail="Database import failed. Face Manager restored the previous database when possible.",
+            detail=(
+                "Die Sicherung konnte nicht wiederhergestellt werden. "
+                "Face Manager hat nach Möglichkeit den vorherigen Stand beibehalten."
+            ),
         ) from exc
     finally:
         if backup_path.exists():
@@ -508,6 +1065,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
 
 
 @app.post("/api/process-folder")
+@safe_import_enqueue
 def api_process_folder(request: Request, data: dict = Body(...)):
     """Queue a folder import through the legacy endpoint.
 
@@ -534,6 +1092,7 @@ def api_process_status(request: Request):
 
 
 @app.post("/api/imports", status_code=202)
+@safe_import_enqueue
 def api_create_import(request: Request, data: dict = Body(...)):
     """Queue a folder for serialized background import.
 
@@ -547,12 +1106,15 @@ def api_create_import(request: Request, data: dict = Body(...)):
         HTTPException: If the folder path is missing or invalid.
     """
     if "folder_path" not in data:
-        raise HTTPException(status_code=400, detail="Missing folder_path")
+        raise HTTPException(status_code=400, detail="Wähle einen Bilderordner aus.")
 
     folder_path = normalize_import_folder_path(data["folder_path"])
 
     if not os.path.isdir(folder_path):
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {folder_path}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Der ausgewählte Ordner ist nicht verfügbar: {folder_path}",
+        )
 
     payload = import_queue.enqueue(folder_path)
     if get_display_platform(request) == "windows":
@@ -573,6 +1135,38 @@ def api_imports(request: Request):
     )
 
 
+@app.get("/api/autocluster-tasks")
+def api_autocluster_tasks():
+    """Return the current background auto-clustering repair task, if any."""
+    return auto_cluster_queue.snapshot()
+
+
+@app.get("/api/thumbnail-warmup")
+def api_thumbnail_warmup():
+    """Return the current low-priority thumbnail warmup state."""
+    return face_thumbnail_warmup_queue.snapshot()
+
+
+@app.get("/api/events")
+async def api_events():
+    """Stream live backend state to subscribed clients via Server-Sent Events.
+
+    On connect the client receives the latest snapshot for every topic
+    (``imports``, ``autocluster``, ``thumbnail-warmup``, ``clusters``), then
+    incremental updates as they happen. This replaces the previous polling.
+    """
+    return StreamingResponse(
+        event_hub.stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disable proxy buffering so events are flushed immediately.
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.delete("/api/imports/{job_id}")
 def api_cancel_or_remove_import(job_id: str):
     """Cancel a running import or remove another queue entry.
@@ -588,7 +1182,7 @@ def api_cancel_or_remove_import(job_id: str):
     """
     result = import_queue.cancel_or_remove(job_id)
     if result is None:
-        raise HTTPException(status_code=404, detail="Import job not found")
+        raise HTTPException(status_code=404, detail="Die Aufgabe wurde nicht gefunden.")
     return result
 
 
@@ -603,12 +1197,114 @@ def api_clusters():
     return list_cluster_summaries()
 
 
+@app.get("/api/clusters-overview")
+def api_clusters_overview():
+    """Return the cluster-page bootstrap payload in a single round trip."""
+    return get_cluster_overview()
+
+
+@app.get("/api/person-suggestions")
+def api_person_suggestions():
+    """List conservative, reviewable matches for existing people."""
+    return list_person_suggestions()
+
+
+@app.post("/api/person-suggestions/accept")
+@safe_cluster_mutation
+def api_accept_person_suggestions(data: dict = Body(...)):
+    """Confirm one or several proposals in a single user action."""
+    assignments = data.get("assignments")
+    if isinstance(assignments, list):
+        try:
+            updated = accept_person_suggestion_assignments(assignments)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        reset_import_resources()
+        mark_cluster_assignments_dirty("accept_person_suggestions")
+        notify_clusters_changed("accept_person_suggestions")
+        return {"status": "ok", "accepted_count": updated}
+
+    person_id = data.get("person_id") or data.get("personId")
+    cluster_ids = data.get("cluster_ids") or data.get("clusterIds")
+    if person_id is None or not isinstance(cluster_ids, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Wähle eine Person und mindestens eine Gesichtsgruppe aus.",
+        )
+    try:
+        updated = accept_person_suggestions(int(person_id), cluster_ids)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reset_import_resources()
+    mark_cluster_assignments_dirty("accept_person_suggestions")
+    notify_clusters_changed("accept_person_suggestions")
+    return {"status": "ok", "accepted_count": updated}
+
+
+@app.post("/api/person-suggestions/{cluster_id}/dismiss")
+@safe_cluster_mutation
+def api_dismiss_person_suggestion(cluster_id: int):
+    """Dismiss a proposal while leaving its cluster unassigned."""
+    try:
+        dismiss_person_suggestion(cluster_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    notify_clusters_changed("dismiss_person_suggestion")
+    return {"status": "ok"}
+
+
+@app.get("/api/review-suggestions")
+def api_review_suggestions():
+    """List conservative proposals learned from explicit review decisions."""
+    return list_review_suggestions()
+
+
+@app.post("/api/review-suggestions/accept")
+@safe_cluster_mutation
+def api_accept_review_suggestions(data: dict = Body(...)):
+    cluster_ids = data.get("cluster_ids") or data.get("clusterIds") or []
+    try:
+        updated = accept_review_suggestions(cluster_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    reset_import_resources()
+    mark_cluster_assignments_dirty("accept_review_suggestions")
+    notify_clusters_changed("accept_review_suggestions")
+    return {"status": "ok", "accepted_count": updated}
+
+
+@app.post("/api/review-suggestions/{cluster_id}/dismiss")
+@safe_cluster_mutation
+def api_dismiss_review_suggestion(cluster_id: int):
+    try:
+        dismiss_review_suggestion(cluster_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    notify_clusters_changed("dismiss_review_suggestion")
+    return {"status": "ok"}
+
+
+@app.post("/api/clusters/recluster")
+@safe_cluster_mutation
+def api_recluster_clusters():
+    """Schedule a full rebuild including each person's internal subclusters."""
+    idle_recluster_scheduler.clear()
+    task = schedule_full_recluster("manual_recluster")
+    return {"scheduled": task is not None, "task": task}
+
+
+@app.get("/api/face-review-groups")
+def api_face_review_groups():
+    """List non-cluster review queues and their counts."""
+    return list_face_review_groups()
+
+
 @app.get("/api/clusters/{cluster_id}")
 def api_cluster_detail(cluster_id: int):
     """Return compact metadata for one cluster."""
     cluster = get_cluster_summary(cluster_id)
     if cluster is None:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+        raise HTTPException(status_code=404, detail="Die Gesichtsgruppe wurde nicht gefunden.")
     return cluster
 
 
@@ -617,14 +1313,25 @@ def api_cluster_faces(cluster_id: int):
     """Return faces for one cluster only."""
     cluster = get_cluster_summary(cluster_id)
     if cluster is None:
-        raise HTTPException(status_code=404, detail="Cluster not found")
+        raise HTTPException(status_code=404, detail="Die Gesichtsgruppe wurde nicht gefunden.")
     return {
         **cluster,
         "faces": get_cluster_faces(cluster_id),
     }
 
 
+@app.get("/api/face-review-groups/{group_key}/faces")
+def api_face_review_group_faces(group_key: str):
+    """Return faces for one non-cluster review queue."""
+    try:
+        normalize_face_review_group(group_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return get_faces_for_review_group(group_key)
+
+
 @app.post("/api/clusters/{cluster_id}/assign-person")
+@safe_cluster_mutation
 def api_assign_person_to_cluster(cluster_id: int, data: dict = Body(...)):
     """Assign a cluster to a person.
 
@@ -640,15 +1347,36 @@ def api_assign_person_to_cluster(cluster_id: int, data: dict = Body(...)):
     """
     person_name = data.get("person_name") or data.get("personName")
     if not person_name or not str(person_name).strip():
-        raise HTTPException(status_code=400, detail="Missing person_name")
+        raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
     try:
         assign_cluster_to_person(cluster_id, str(person_name))
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    reset_import_resources()
+    mark_cluster_assignments_dirty("assign_person")
+    notify_clusters_changed("assign_person")
+    return {"status": "ok"}
+
+
+@app.patch("/api/clusters/{cluster_id}")
+@safe_cluster_mutation
+def api_rename_cluster(cluster_id: int, data: dict = Body(...)):
+    """Rename one cluster."""
+    label = data.get("label") or data.get("cluster_label") or data.get("clusterLabel")
+    if not label or not str(label).strip():
+        raise HTTPException(status_code=400, detail="Gib einen Namen für die Gesichtsgruppe ein.")
+    try:
+        rename_cluster(cluster_id, str(label))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    notify_clusters_changed("rename_cluster")
     return {"status": "ok"}
 
 
 @app.post("/api/clusters/{cluster_id}/remove-face/{face_id}")
+@safe_cluster_mutation
 def api_remove_face_from_cluster(cluster_id: int, face_id: int):
     """Remove a face from a specific cluster.
 
@@ -662,38 +1390,58 @@ def api_remove_face_from_cluster(cluster_id: int, face_id: int):
     Raises:
         HTTPException: If the face is not assigned to the cluster.
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE face SET cluster_id = NULL WHERE id = ? AND cluster_id = ?",
-        (face_id, cluster_id),
-    )
-    if cur.rowcount == 0:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Face not in this cluster")
-    conn.commit()
-    conn.close()
-    invalidate_image_query_cache()
-    return {"status": "ok"}
+    try:
+        updated = remove_faces_from_cluster(cluster_id, [face_id])
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Das Gesicht gehört nicht mehr zu dieser Gesichtsgruppe.",
+        )
+    reset_import_resources()
+    mark_cluster_assignments_dirty("remove_face")
+    notify_clusters_changed("remove_face")
+    return {"status": "ok", "updated_count": updated}
 
 
-@app.post("/api/clusters/{cluster_id}/dissolve")
-def api_dissolve_cluster(cluster_id: int):
-    """Remove all faces from a cluster.
-
-    Args:
-        cluster_id: Cluster identifier to dissolve.
-
-    Returns:
-        Success status.
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE face SET cluster_id = NULL WHERE cluster_id = ?", (cluster_id,))
-    conn.commit()
-    conn.close()
-    invalidate_image_query_cache()
-    return {"status": "ok"}
+@app.post("/api/faces/batch")
+@safe_cluster_mutation
+def api_batch_update_faces(data: dict = Body(...)):
+    """Apply one batch review action to selected faces."""
+    action = str(data.get("action") or "").strip()
+    face_ids = data.get("face_ids") or data.get("faceIds") or []
+    try:
+        if action == "remove_from_cluster":
+            cluster_id = int(data.get("cluster_id") or data.get("clusterId"))
+            updated = remove_faces_from_cluster(cluster_id, face_ids)
+            response = {"status": "ok", "updated_count": updated}
+        elif action == "create_cluster":
+            cluster_id = create_cluster_from_faces(face_ids)
+            response = {"status": "ok", "cluster_id": cluster_id}
+        elif action == "assign_person":
+            person_name = data.get("person_name") or data.get("personName")
+            if not person_name or not str(person_name).strip():
+                raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
+            cluster_id = assign_faces_to_person(face_ids, str(person_name))
+            response = {"status": "ok", "cluster_id": cluster_id}
+        elif action == "mark_unknown_person":
+            updated = mark_faces_with_review_status(face_ids, "unknown_person")
+            response = {"status": "ok", "updated_count": updated}
+        elif action == "mark_not_face":
+            updated = mark_faces_with_review_status(face_ids, "not_face")
+            response = {"status": "ok", "updated_count": updated}
+        elif action == "restore_to_manual_review":
+            updated = restore_faces_to_manual_review(face_ids)
+            response = {"status": "ok", "updated_count": updated}
+        else:
+            raise HTTPException(status_code=400, detail="Diese Aktion ist nicht verfügbar.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    reset_import_resources()
+    mark_cluster_assignments_dirty(f"faces_batch:{action}")
+    notify_clusters_changed(f"faces_batch:{action}")
+    return response
 
 
 # -----------------------------
@@ -724,6 +1472,40 @@ def api_person_faces(person_id: int):
     return get_person_faces(person_id)
 
 
+@app.patch("/api/persons/{person_id}")
+@safe_cluster_mutation
+def api_rename_person(person_id: int, data: dict = Body(...)):
+    """Rename one person."""
+    name = data.get("name") or data.get("person_name") or data.get("personName")
+    if not name or not str(name).strip():
+        raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
+    try:
+        next_person_id = rename_person(person_id, str(name))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    reset_import_resources()
+    return {"status": "ok", "person_id": next_person_id}
+
+
+@app.delete("/api/persons/{person_id}")
+@safe_cluster_mutation
+def api_delete_person(person_id: int, reassignment_group: str = Query(...)):
+    """Delete one person and reclassify all assigned faces."""
+    try:
+        normalize_face_review_group(reassignment_group)
+        delete_person(person_id, reassignment_group)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    reset_import_resources()
+    mark_cluster_assignments_dirty("delete_person")
+    notify_clusters_changed("delete_person")
+    return {"status": "ok"}
+
+
 # -----------------------------
 # IMAGES
 # -----------------------------
@@ -744,11 +1526,12 @@ def get_image(image_id: int):
     """
     path = get_available_image_path(image_id)
     if not path:
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     return FileResponse(path)
 
 
 @app.delete("/api/images/{image_id}")
+@safe_cluster_mutation
 def remove_image(image_id: int):
     """Delete an image and its dependent records.
 
@@ -762,7 +1545,10 @@ def remove_image(image_id: int):
         HTTPException: If the image does not exist.
     """
     if not delete_image(image_id):
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    reset_import_resources()
+    mark_cluster_assignments_dirty("delete_image")
+    notify_clusters_changed("delete_image")
     return {"status": "deleted"}
 
 
@@ -783,15 +1569,23 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
     preferred_path = data.get("image_path") if data else None
     if preferred_path:
         preferred_path = normalize_import_folder_path(preferred_path)
-    path = get_available_image_path(image_id, preferred_path)
+    path = get_available_image_path(
+        image_id,
+        preferred_path,
+        require_preferred=bool(preferred_path),
+    )
     if not path:
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Der ausgewählte Dateispeicherort ist nicht mehr verfügbar.",
+        )
     try:
         open_file_location(path)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.exception("Could not open image location for %s", path)
         raise HTTPException(
-            status_code=500, detail="Could not open the system file manager"
+            status_code=500,
+            detail="Der Explorer oder Dateimanager konnte nicht geöffnet werden.",
         ) from exc
     return {"status": "opened"}
 
@@ -871,39 +1665,12 @@ def get_folders(request: Request):
     return tree
 
 
-@app.get("/api/images")
-def get_images(
-    request: Request,
-    folders: List[str] = Query(default=[]),
-    persons: List[str] = Query(default=[]),
-    sort_by: str = Query(default="date"),
-    sort_direction: str = Query(default="desc"),
-    limit: int = Query(default=40, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-):
-    """List images and oriented face boxes.
+def _group_image_rows(rows, display_platform: str) -> list[dict]:
+    """Turn image/face rows into the payload the picture views expect.
 
-    Args:
-        folders: Optional folder roots used to filter images.
-        persons: Optional person names used to require matching faces.
-        sort_by: Primary gallery sort key.
-        sort_direction: Primary gallery sort direction.
-        limit: Maximum number of images returned in one page.
-        offset: Starting image offset for pagination.
-
-    Returns:
-        Paginated image dictionaries containing nested face data.
+    Shared by the paged library listing and the single-image lookup so both
+    always describe an image the same way.
     """
-    display_platform = get_display_platform(request)
-    normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
-    rows, total = list_images_page(
-        folders=normalized_folders,
-        persons=persons,
-        sort_by=sort_by,
-        sort_direction=sort_direction,
-        limit=limit,
-        offset=offset,
-    )
     images = {}
 
     for r in rows:
@@ -936,6 +1703,9 @@ def get_images(
             _safe_float(r["bbox_h"]),
         )
 
+        review_status = (
+            r["review_status"] if "review_status" in r.keys() else "active"
+        )
         images[image_id]["faces"].append(
             {
                 "id": r["face_id"],
@@ -945,6 +1715,7 @@ def get_images(
                 "bbox_h": bbox_h,
                 "cluster_id": r["cluster_id"],
                 "person_name": r["person_name"],
+                "review_status": review_status,
             }
         )
 
@@ -953,8 +1724,62 @@ def get_images(
         locations = locations_by_image.get(image_id, [])
         image["locations"] = serialize_image_locations(locations, display_platform)
         image["location_count"] = len(locations)
+    return list(images.values())
 
-    items = list(images.values())
+
+@app.get("/api/images/{image_id}/detail")
+def api_image_detail(request: Request, image_id: int):
+    """Return one image with its faces so a face crop can be shown in context."""
+    rows = get_image_detail_rows(image_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    display_platform = get_display_platform(request)
+    items = _group_image_rows(rows, display_platform)
+
+    locations_by_image = list_image_locations([image_id])
+    for image in items:
+        locations = locations_by_image.get(image["id"], [])
+        image["locations"] = serialize_image_locations(locations, display_platform)
+        image["location_count"] = len(locations)
+    return items[0]
+
+
+@app.get("/api/images")
+def get_images(
+    request: Request,
+    folders: List[str] = Query(default=[]),
+    persons: List[str] = Query(default=[]),
+    sort_by: str = Query(default="date"),
+    sort_direction: str = Query(default="desc"),
+    limit: int = Query(default=40, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    face_statuses: List[str] = Query(default=[]),
+):
+    """List images and oriented face boxes.
+
+    Args:
+        folders: Optional folder roots used to filter images.
+        persons: Optional person names used to require matching faces.
+        sort_by: Primary gallery sort key.
+        sort_direction: Primary gallery sort direction.
+        limit: Maximum number of images returned in one page.
+        offset: Starting image offset for pagination.
+
+    Returns:
+        Paginated image dictionaries containing nested face data.
+    """
+    display_platform = get_display_platform(request)
+    normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
+    rows, total = list_images_page(
+        folders=normalized_folders,
+        persons=persons,
+        face_statuses=normalize_face_status_filters(face_statuses),
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+        limit=limit,
+        offset=offset,
+    )
+    items = _group_image_rows(rows, display_platform)
     return {
         "items": items,
         "total": total,
@@ -1049,6 +1874,7 @@ def api_count_image_rename_candidates(
 
 
 @app.post("/api/image-renames/apply")
+@safe_cluster_mutation
 def api_apply_image_rename_candidates(data: dict = Body(...)):
     """Rename selected image paths and update the database."""
     folders = [
@@ -1080,6 +1906,7 @@ def api_apply_image_rename_candidates(data: dict = Body(...)):
         sort_by=data.get("sort_by", "date"),
         sort_direction=data.get("sort_direction", "desc"),
     )
+    notify_clusters_changed("image_rename")
     return result
 
 
@@ -1113,56 +1940,25 @@ def api_face_crop(face_id: int):
     conn.close()
     path = get_available_image_path(row["image_id"]) if row else None
     if not path:
-        raise HTTPException(status_code=404, detail="Image not found")
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
 
     x = int(_safe_float(row["bbox_x"]))
     y = int(_safe_float(row["bbox_y"]))
     w = int(_safe_float(row["bbox_w"]))
     h = int(_safe_float(row["bbox_h"]))
-    img = Image.open(path)
-
-    # --- EXIF ORIENTATION FIX ---
     try:
-        exif = img._getexif()
-        if exif:
-            orientation_key = next(
-                k for k, v in ExifTags.TAGS.items() if v == "Orientation"
-            )
-            orientation = exif.get(orientation_key, 1)
-
-            if orientation == 3:
-                img = img.rotate(180, expand=True)
-                x = img.width - x - w
-                y = img.height - y - h
-
-            elif orientation == 6:  # 90° CW
-                img = img.rotate(-90, expand=True)
-                x, y, w, h = (
-                    img.width - y - h,
-                    x,
-                    h,
-                    w,
-                )
-
-            elif orientation == 8:  # 270° CW
-                img = img.rotate(90, expand=True)
-                x, y, w, h = (
-                    y,
-                    img.height - x - w,
-                    h,
-                    w,
-                )
-
-    except Exception:
-        pass
-
-    # --- CROP ---
-    crop = img.crop((x, y, x + w, y + h))
-
-    buf = BytesIO()
-    crop.save(buf, format="JPEG")
-    buf.seek(0)
-    return Response(buf.read(), media_type="image/jpeg")
+        thumbnail_path = ensure_face_thumbnail(face_id, path, (x, y, w, h))
+    except (OSError, ValueError) as exc:
+        logger.exception("Could not create face crop thumbnail for face %s", face_id)
+        raise HTTPException(status_code=404, detail="Der Gesichtsausschnitt wurde nicht gefunden.") from exc
+    # A face crop is immutable: re-importing an image assigns a new face id and
+    # deletes the old thumbnail, so a given id always maps to the same pixels.
+    # Let the browser serve it straight from disk cache without revalidating.
+    return FileResponse(
+        thumbnail_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 frontend_dist_dir = get_frontend_dist_dir()

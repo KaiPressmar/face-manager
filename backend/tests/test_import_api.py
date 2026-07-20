@@ -152,6 +152,7 @@ class ImportApiTest(unittest.TestCase):
         list_images_page.assert_called_once_with(
             folders=["/photos"],
             persons=["Alice"],
+            face_statuses=[],
             sort_by="date",
             sort_direction="desc",
             limit=40,

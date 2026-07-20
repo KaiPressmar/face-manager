@@ -56,6 +56,24 @@ def get_frontend_dist_dir() -> Path:
     return get_project_root() / "frontend" / "dist"
 
 
+def get_changelog_path() -> Path:
+    """Return the bundled user-facing changelog."""
+    return get_project_root() / "CHANGELOG.md"
+
+
+def get_build_variant() -> str:
+    """Return the installer flavor embedded by the Windows release build."""
+    override = os.environ.get("FACE_MANAGER_BUILD_VARIANT", "").strip().lower()
+    if override in {"cpu", "gpu"}:
+        return override
+    variant_path = get_project_root() / "BUILD_VARIANT"
+    if variant_path.is_file():
+        variant = variant_path.read_text(encoding="utf-8").strip().lower()
+        if variant in {"cpu", "gpu"}:
+            return variant
+    return "cpu"
+
+
 def get_log_dir() -> Path:
     """Return the directory used for persistent application logs."""
     return get_data_root() / "logs"

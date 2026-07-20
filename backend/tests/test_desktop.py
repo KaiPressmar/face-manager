@@ -32,6 +32,34 @@ class OpenFileLocationTest(unittest.TestCase):
 
         popen.assert_called_once_with(["xdg-open", "/home/user/photos"])
 
+    @patch("backend.services.desktop.subprocess.Popen")
+    @patch("backend.services.desktop.sys.platform", "win32")
+    @patch("backend.services.desktop._is_wsl", return_value=False)
+    def test_windows_reveals_file_with_spaces(self, _is_wsl, popen):
+        desktop.open_file_location(r"C:\Users\Test\My Photos\image one.jpg")
+
+        popen.assert_called_once_with(
+            ["explorer.exe", r"/select,C:\Users\Test\My Photos\image one.jpg"]
+        )
+
+    @patch("backend.services.desktop.subprocess.Popen")
+    @patch("backend.services.desktop.sys.platform", "darwin")
+    @patch("backend.services.desktop._is_wsl", return_value=False)
+    def test_macos_reveals_exact_file(self, _is_wsl, popen):
+        desktop.open_file_location("/Users/test/My Photos/image.jpg")
+
+        popen.assert_called_once_with(
+            ["open", "-R", "/Users/test/My Photos/image.jpg"]
+        )
+
+    @patch("backend.services.desktop.subprocess.run")
+    @patch("backend.services.desktop._is_wsl", return_value=True)
+    def test_wsl_rejects_empty_path_translation(self, _is_wsl, run):
+        run.return_value.stdout = "\n"
+
+        with self.assertRaises(OSError):
+            desktop.open_file_location("/mnt/d/missing.jpg")
+
 
 class ImportFolderPathTest(unittest.TestCase):
     @patch("backend.services.desktop.sys.platform", "win32")

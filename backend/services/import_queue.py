@@ -565,6 +565,9 @@ class ImportQueue:
         history_limit: int = 50,
         max_concurrent_jobs: Optional[int] = None,
         processing_slots: Optional[int] = None,
+        on_change: Optional[Callable[[], None]] = None,
+        on_before_terminal: Optional[Callable[[], None]] = None,
+        on_after_terminal: Optional[Callable[[], None]] = None,
     ):
         """Initialize queue state and optionally start its worker.
 
@@ -575,7 +578,16 @@ class ImportQueue:
             history_limit: Maximum retained terminal jobs.
             max_concurrent_jobs: Optional import request concurrency override.
             processing_slots: Optional processing-stage slot override.
+            on_change: Optional callback invoked after any state transition so
+                subscribers (e.g. the SSE event hub) can push fresh snapshots.
+            on_before_terminal: Enables an external write guard before a job
+                stops being visible as active.
+            on_after_terminal: Releases that guard after terminal state and
+                notifications have been published.
         """
+        self._on_change = on_change
+        self._on_before_terminal = on_before_terminal
+        self._on_after_terminal = on_after_terminal
         self._processor = processor or ImportProcessor()
         self._repository = repository or ImportJobRepository()
         self._history_limit = history_limit
@@ -651,6 +663,15 @@ class ImportQueue:
         if executor:
             executor.shutdown(wait=True, cancel_futures=False)
 
+    def _notify_change(self) -> None:
+        """Notify the change subscriber, isolating it from worker failures."""
+        if self._on_change is None:
+            return
+        try:
+            self._on_change()
+        except Exception:  # pragma: no cover - subscriber must never break work
+            logger.exception("Import queue change notification failed")
+
     def enqueue(self, folder_path: str) -> dict:
         """Append a folder import request.
 
@@ -672,6 +693,7 @@ class ImportQueue:
             self._cancel_events[job.id] = threading.Event()
             position = len(self._pending)
             self._condition.notify()
+        self._notify_change()
         return job.to_dict(position)
 
     def snapshot(self) -> dict:
@@ -1017,6 +1039,7 @@ class ImportQueue:
                 job.status = "cancelling"
                 self._repository.update(job)
                 self._cancel_events[job_id].set()
+                self._notify_change()
                 return {"id": job_id, "status": "cancelling"}
 
             if job_id in self._pending:
@@ -1024,6 +1047,7 @@ class ImportQueue:
             self._repository.delete(job_id)
             del self._jobs[job_id]
             self._cancel_events.pop(job_id, None)
+            self._notify_change()
             return {"id": job_id, "status": "removed"}
 
     def _worker_loop(self) -> None:
@@ -1070,6 +1094,7 @@ class ImportQueue:
                         done_future,
                     )
                 )
+            self._notify_change()
 
     def _run_job(self, job_id: str, cancel_event: threading.Event) -> tuple[str, Optional[str]]:
         """Execute one job and return terminal status with optional error."""
@@ -1094,32 +1119,41 @@ class ImportQueue:
         except Exception as exc:  # pragma: no cover - callback safety
             logger.exception("Import job callback failed for %s", job_id)
             final_status, error_message = "failed", str(exc)
-        with self._condition:
-            job = self._jobs.get(job_id)
-            if job is None:
-                return
+        if self._on_before_terminal is not None:
+            self._on_before_terminal()
+        try:
+            with self._condition:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    return
 
-            self._record_stage_stats(job)
-            if error_message:
-                job.last_error = error_message
-            job.status = final_status
-            job.finished_at = _utc_now()
-            if final_status == "completed":
-                job.stage = "completed"
-                if job.total_images > 0:
-                    prior = self._avg_images_per_completed_job
-                    if prior is None:
-                        self._avg_images_per_completed_job = float(job.total_images)
-                    else:
-                        self._avg_images_per_completed_job = prior * 0.8 + job.total_images * 0.2
-            job.current_file = None
-            self._repository.update(job)
-            self._active_job_ids.discard(job_id)
-            self._cancel_events.pop(job_id, None)
-            self._last_progress_persisted.pop(job_id, None)
-            self._futures.pop(job_id, None)
-            self._trim_history()
-            self._condition.notify_all()
+                self._record_stage_stats(job)
+                if error_message:
+                    job.last_error = error_message
+                job.status = final_status
+                job.finished_at = _utc_now()
+                if final_status == "completed":
+                    job.stage = "completed"
+                    if job.total_images > 0:
+                        prior = self._avg_images_per_completed_job
+                        if prior is None:
+                            self._avg_images_per_completed_job = float(job.total_images)
+                        else:
+                            self._avg_images_per_completed_job = (
+                                prior * 0.8 + job.total_images * 0.2
+                            )
+                job.current_file = None
+                self._repository.update(job)
+                self._active_job_ids.discard(job_id)
+                self._cancel_events.pop(job_id, None)
+                self._last_progress_persisted.pop(job_id, None)
+                self._futures.pop(job_id, None)
+                self._trim_history()
+                self._condition.notify_all()
+            self._notify_change()
+        finally:
+            if self._on_after_terminal is not None:
+                self._on_after_terminal()
 
     def _record_stage_stats(self, job: ImportJob) -> None:
         """Capture observed stage timing for future ETA prediction."""
@@ -1181,6 +1215,7 @@ class ImportQueue:
                 if import_finished or job.last_error or now - last_persisted >= 0.5:
                     self._repository.update(job)
                     self._last_progress_persisted[job_id] = now
+            self._notify_change()
 
         return update
 
