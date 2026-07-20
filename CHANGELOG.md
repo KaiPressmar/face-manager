@@ -13,6 +13,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+- Windows-Installationsdateien werden für neue Versionen wieder vollständig zum Download bereitgestellt.
+
 ## [0.6.0] - 2026-07-20
 
 ### Neu
