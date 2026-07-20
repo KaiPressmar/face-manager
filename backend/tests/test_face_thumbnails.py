@@ -64,11 +64,11 @@ class FaceThumbnailTest(unittest.TestCase):
                 # A single decode is shared across every requested face.
                 self.assertEqual(open_spy.call_count, 1)
 
-            for face_id, _ in faces:
-                thumbnail_path = get_face_thumbnail_path(face_id)
-                self.assertTrue(thumbnail_path.exists())
-                with Image.open(thumbnail_path) as thumbnail:
-                    self.assertLessEqual(max(thumbnail.size), 256)
+                for face_id, _ in faces:
+                    thumbnail_path = get_face_thumbnail_path(face_id)
+                    self.assertTrue(thumbnail_path.exists())
+                    with Image.open(thumbnail_path) as thumbnail:
+                        self.assertLessEqual(max(thumbnail.size), 256)
 
     def test_create_face_thumbnails_for_image_skips_existing_and_bad_faces(self):
         with tempfile.TemporaryDirectory() as temp_dir:
