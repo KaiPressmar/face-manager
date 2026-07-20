@@ -48,12 +48,32 @@ class SettingsApiTest(unittest.TestCase):
         self.assertEqual(result["database_path"], app.DB_PATH)
         self.assertEqual(result["error_log_path"], "/tmp/face-manager/logs/error.log")
 
+    @patch("backend.app.schedule_full_recluster")
     @patch("backend.app.set_cluster_distance_threshold", return_value=0.61)
-    def test_update_settings_persists_threshold(self, set_threshold):
+    def test_update_settings_persists_threshold_without_scheduling_recluster(
+        self,
+        set_threshold,
+        schedule_full_recluster,
+    ):
         result = app.api_update_settings({"cluster_distance_threshold": 0.61})
 
         set_threshold.assert_called_once_with(0.61)
+        schedule_full_recluster.assert_not_called()
         self.assertEqual(result["cluster_distance_threshold"], 0.61)
+
+    @patch("backend.app.schedule_full_recluster")
+    @patch("backend.app.set_cluster_distance_threshold", return_value=0.50)
+    def test_update_settings_skips_recluster_when_threshold_is_unchanged(
+        self,
+        set_threshold,
+        schedule_full_recluster,
+    ):
+        with patch("backend.app.get_cluster_distance_threshold", return_value=0.5):
+            result = app.api_update_settings({"cluster_distance_threshold": 0.5})
+
+        set_threshold.assert_called_once_with(0.5)
+        schedule_full_recluster.assert_not_called()
+        self.assertEqual(result["cluster_distance_threshold"], 0.5)
 
     @patch("backend.app.apply_persisted_file_log_level", return_value="DEBUG")
     @patch("backend.app.set_file_log_level", return_value="DEBUG")
@@ -67,6 +87,16 @@ class SettingsApiTest(unittest.TestCase):
         set_file_log_level.assert_called_once_with("debug")
         apply_persisted_file_log_level.assert_called_once_with()
         self.assertEqual(result["file_log_level"], "DEBUG")
+
+    @patch("backend.app.set_automatic_update_checks", return_value=False)
+    @patch("backend.app.get_automatic_update_checks", return_value=True)
+    def test_update_settings_persists_automatic_update_opt_out(
+        self, _get_automatic_update_checks, set_automatic_update_checks
+    ):
+        result = app.api_update_settings({"automatic_update_checks": False})
+
+        set_automatic_update_checks.assert_called_once_with(False)
+        self.assertFalse(result["automatic_update_checks"])
 
     @patch("backend.app.set_filename_person_block_separator", return_value=" - ")
     @patch("backend.app.set_filename_person_joiner", return_value=" / ")
@@ -96,6 +126,29 @@ class SettingsApiTest(unittest.TestCase):
         self.assertEqual(result["filename_person_joiner"], " / ")
         self.assertEqual(result["filename_person_block_separator"], " - ")
 
+    @patch("backend.app.get_ui_theme", return_value="dark")
+    def test_get_settings_includes_ui_theme(self, get_ui_theme):
+        result = app.api_get_settings()
+
+        get_ui_theme.assert_called_once_with()
+        self.assertEqual(result["ui_theme"], "dark")
+        self.assertEqual(result["ui_theme_default"], app.DEFAULT_UI_THEME)
+
+    @patch("backend.app.set_ui_theme", return_value="light")
+    def test_update_settings_persists_ui_theme(self, set_ui_theme):
+        result = app.api_update_settings({"ui_theme": "light"})
+
+        set_ui_theme.assert_called_once_with("light")
+        self.assertEqual(result["ui_theme"], "light")
+        self.assertEqual(result["ui_theme_default"], app.DEFAULT_UI_THEME)
+
+    @patch("backend.app.set_ui_theme", side_effect=ValueError("Invalid UI theme"))
+    def test_update_settings_rejects_invalid_ui_theme(self, set_ui_theme):
+        with self.assertRaises(HTTPException) as raised:
+            app.api_update_settings({"ui_theme": "rainbow"})
+
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_update_settings_rejects_invalid_threshold(self):
         with self.assertRaises(HTTPException) as raised:
             app.api_update_settings({"cluster_distance_threshold": 1.5})
@@ -107,6 +160,37 @@ class SettingsApiTest(unittest.TestCase):
             app.api_update_settings({})
 
         self.assertEqual(raised.exception.status_code, 400)
+
+    @patch("backend.app.schedule_full_recluster")
+    @patch("backend.app.auto_tune_cluster_distance_threshold")
+    def test_auto_tune_threshold_does_not_schedule_recluster(
+        self,
+        auto_tune,
+        schedule_full_recluster,
+    ):
+        auto_tune.return_value = {
+            "threshold": 0.37,
+            "sample_size": 12,
+            "person_count": 3,
+            "same_person_accuracy": 0.9,
+            "different_person_accuracy": 0.95,
+            "balanced_accuracy": 0.925,
+        }
+
+        result = app.api_auto_tune_cluster_threshold()
+
+        self.assertEqual(result["threshold"], 0.37)
+        schedule_full_recluster.assert_not_called()
+
+    @patch(
+        "backend.app.auto_tune_cluster_distance_threshold",
+        side_effect=ValueError("Assign more people."),
+    )
+    def test_auto_tune_threshold_reports_insufficient_training_data(self, auto_tune):
+        with self.assertRaises(HTTPException) as raised:
+            app.api_auto_tune_cluster_threshold()
+
+        self.assertEqual(raised.exception.status_code, 422)
 
     @patch("backend.app.list_available_image_persons", return_value=["Kai"])
     @patch("backend.app.count_filename_rename_candidates", return_value=1)

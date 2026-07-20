@@ -24,6 +24,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -35,6 +37,21 @@ jobs:
 
       - name: Validate release version
         run: ./scripts/check-version.sh
+
+      - name: Validate changelog
+        run: python3 scripts/changelog.py check
+
+      - name: Require changelog coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 scripts/check-changelog-change.py
+          --base "${BASE_SHA}"
+          --event-path "${GITHUB_EVENT_PATH}"
+
+      - name: Validate packaging metadata
+        run: python3 scripts/check-packaging.py
 
   backend:
     name: Backend

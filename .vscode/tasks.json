@@ -22,21 +22,7 @@
     {
       "label": "Backend: Dev server",
       "type": "shell",
-      "command": "${workspaceFolder}/backend/.venv/bin/python",
-      "args": [
-        "-m",
-        "uvicorn",
-        "backend.app:app",
-        "--reload",
-        "--reload-dir",
-        "${workspaceFolder}/backend",
-        "--reload-include",
-        "*.py",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000"
-      ],
+      "command": "./scripts/dev-backend.sh",
       "options": {
         "cwd": "${workspaceFolder}"
       },

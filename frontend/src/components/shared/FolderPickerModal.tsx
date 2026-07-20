@@ -42,7 +42,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Der Import konnte nicht eingereiht werden."
+          : "Der Ordner konnte nicht hinzugefügt werden."
       );
       setIsStarting(false);
     }
@@ -62,20 +62,20 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
     >
       <div
         style={{
-          background: "#141418",
+          background: "var(--surface-1)",
+          color: "var(--text)",
           padding: 24,
           borderRadius: 6,
           width: 520,
-          border: "1px solid #2a2a30",
+          border: "1px solid var(--border-strong)",
         }}
       >
-        <h3 style={{ marginTop: 0 }}>Ordner importieren</h3>
+        <h3 style={{ marginTop: 0 }}>Bilderordner hinzufügen</h3>
 
         <p style={{ opacity: 0.75, lineHeight: 1.5 }}>
-          Wähle am besten direkt einen Ordner im Dateisystem aus. Wenn der
-          Dialog auf deinem System nicht verfügbar ist, kannst du den Pfad auch
-          manuell einfügen. Windows-Pfade werden im Backend automatisch korrekt
-          erkannt.
+          Wähle den Ordner aus, in dem deine Bilder liegen. Falls sich der
+          Ordnerdialog nicht öffnet, kannst du den Speicherort darunter
+          manuell einfügen.
         </p>
 
         <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
@@ -84,23 +84,23 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
             disabled={isBrowsing || isStarting}
             style={{
               padding: "10px 14px",
-              background: "#00e5ff",
-              color: "#04131a",
+              background: "var(--neon-cyan)",
+              color: "var(--on-accent)",
               border: "none",
               fontWeight: "bold",
               cursor: isBrowsing || isStarting ? "default" : "pointer",
               opacity: isBrowsing || isStarting ? 0.65 : 1,
             }}
           >
-            {isBrowsing ? "Öffne Dialog…" : "Ordner auswählen"}
+            {isBrowsing ? "Ordnerauswahl wird geöffnet…" : "Ordner auswählen"}
           </button>
           <div
             style={{
               flex: 1,
               padding: 12,
-              background: "#1f1f22",
-              border: "1px solid #333",
-              color: folderPath ? "#d9f7ff" : "#777",
+              background: "var(--surface-raise)",
+              border: "1px solid var(--border-solid)",
+              color: folderPath ? "var(--accent-text)" : "var(--text-faint)",
               borderRadius: 4,
               fontFamily: "monospace",
               fontSize: 13,
@@ -121,32 +121,32 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
             opacity: 0.75,
           }}
         >
-          Alternativ Pfad manuell einfügen
+          Speicherort manuell einfügen
         </label>
         <input
           type="text"
           value={folderPath}
           onChange={(event) => setFolderPath(event.target.value)}
-          placeholder="C:\\Users\\Kai\\Pictures oder /home/kai/photos"
+          placeholder="C:\\Users\\Name\\Pictures oder /home/name/photos"
           disabled={isStarting}
           style={{
             width: "100%",
             padding: 12,
-            background: "#1f1f22",
-            border: "1px solid #333",
-            color: "white",
+            background: "var(--panel-solid)",
+            border: "1px solid var(--border-solid)",
+            color: "var(--text)",
             marginBottom: 16,
           }}
         />
 
         {isStarting && (
-          <div style={{ color: "#00e5ff", marginBottom: 12 }}>
-            Import wird gestartet…
+          <div style={{ color: "var(--accent-text)", marginBottom: 12 }}>
+            Ordner wird hinzugefügt…
           </div>
         )}
 
         {error && (
-          <div style={{ color: "#ff6d89", marginBottom: 12 }}>{error}</div>
+          <div style={{ color: "var(--danger)", marginBottom: 12 }}>{error}</div>
         )}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
@@ -155,9 +155,9 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
             disabled={isStarting || isBrowsing}
             style={{
               padding: "6px 12px",
-              background: "#333",
-              color: "white",
-              border: "none",
+              background: "var(--surface-raise)",
+              color: "var(--text)",
+              border: "1px solid var(--border-solid)",
               opacity: isStarting || isBrowsing ? 0.5 : 1,
             }}
           >
@@ -169,8 +169,8 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
             disabled={!folderPath.trim() || isStarting || isBrowsing}
             style={{
               padding: "6px 12px",
-              background: folderPath.trim() ? "#00e5ff" : "#555",
-              color: "#000",
+              background: folderPath.trim() ? "var(--neon-cyan)" : "var(--surface-raise)",
+              color: folderPath.trim() ? "var(--on-accent)" : "var(--text-faint)",
               border: "none",
               fontWeight: "bold",
               cursor:
@@ -180,7 +180,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
               opacity: isStarting || isBrowsing ? 0.5 : 1,
             }}
           >
-            {isStarting ? "Starte…" : "Import starten"}
+            {isStarting ? "Wird hinzugefügt…" : "Bilder hinzufügen"}
           </button>
         </div>
       </div>

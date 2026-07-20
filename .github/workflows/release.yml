@@ -13,8 +13,7 @@ concurrency:
   group: release-main
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
@@ -25,6 +24,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     env:
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+    permissions:
+      contents: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -58,6 +59,15 @@ jobs:
             echo "release_exists=false" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Resolve curated release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_NOTES_PATH: ${{ runner.temp }}/face-manager-release-notes.md
+        run: >-
+          python3 scripts/changelog.py notes
+          --version "${VERSION}"
+          --output "${RELEASE_NOTES_PATH}"
+
       - name: Create annotated tag
         if: steps.version.outputs.tag_exists == 'false'
         env:
@@ -73,10 +83,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_NOTES_PATH: ${{ runner.temp }}/face-manager-release-notes.md
         run: |
           gh release create "v${VERSION}" \
             --title "Face Manager v${VERSION}" \
-            --generate-notes \
+            --notes-file "${RELEASE_NOTES_PATH}" \
             --target "${RELEASE_SHA}"
 
       - name: Report existing release
@@ -101,6 +112,10 @@ jobs:
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
       VERSION: ${{ needs.release.outputs.version }}
       INSTALLER_SUFFIX: ${{ matrix.variant == 'gpu' && '-GPU' || '' }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -130,6 +145,12 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/build-release.ps1 -Variant ${{ matrix.variant }}
 
+      - name: Attest Windows installer provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/FaceManager-Setup${{ env.INSTALLER_SUFFIX }}-${{ env.VERSION }}.exe
+
       - name: Upload installer to GitHub Release
         shell: pwsh
         env:
@@ -137,4 +158,5 @@ jobs:
         run: |
           gh release upload "v$env:VERSION" `
             "dist/FaceManager-Setup$env:INSTALLER_SUFFIX-$env:VERSION.exe" `
+            "dist/FaceManager-Setup$env:INSTALLER_SUFFIX-$env:VERSION.exe.sha256" `
             --clobber

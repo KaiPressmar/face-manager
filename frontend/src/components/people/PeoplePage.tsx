@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
-import PersonFilter from "./PersonFilter";
-import ImageGrid from "./ImageGrid";
+import LibraryFilterBar from "../shared/LibraryFilterBar";
+import ImageGrid, { type FaceOverlayMode } from "./ImageGrid";
 import FolderFilterModal from "../shared/FolderFilterModal";
+import FolderPickerModal from "../shared/FolderPickerModal";
+import { subscribeToTopic } from "../../utils/events";
 
 export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
@@ -19,7 +21,7 @@ function preloadPageImages(page: ImagePage) {
 }
 
 interface PeoplePageProps {
-  onNavigateToCluster: (clusterId: number) => void;
+  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
 }
 
 const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
@@ -27,12 +29,17 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
   const [showFolderFilter, setShowFolderFilter] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
-  const [showFaceOverlays, setShowFaceOverlays] = useState(true);
+  // Archived faces are hidden unless explicitly filtered for.
+  const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
+  const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [totalImages, setTotalImages] = useState(0);
+  // Unfiltered library size, so the bar can say "162 von 3.000".
+  const [libraryTotal, setLibraryTotal] = useState<number | null>(null);
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const latestQueryRef = useRef(0);
@@ -50,10 +57,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     queryKeyRef.current = JSON.stringify({
       folders: selectedFolders,
       persons: selectedPersons,
+      faceStatuses,
       sortBy: groupingMode,
       sortDirection,
     });
-  }, [groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   const scheduleNextPagePrefetch = async (
     requestId: number,
@@ -66,6 +74,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
       const page = await fetchImages({
         folders: selectedFolders,
         persons: selectedPersons,
+        faceStatuses,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -102,6 +111,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     const queryKey = JSON.stringify({
       folders: selectedFolders,
       persons: selectedPersons,
+      faceStatuses,
       sortBy: groupingMode,
       sortDirection,
     });
@@ -118,6 +128,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         const page = await fetchImages({
           folders: selectedFolders,
           persons: selectedPersons,
+          faceStatuses,
           sortBy: groupingMode,
           sortDirection,
           limit,
@@ -151,7 +162,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     return () => {
       isMounted = false;
     };
-  }, [groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
     let isMounted = true;
@@ -160,6 +171,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
       void fetchImages({
         folders: selectedFolders,
         persons: selectedPersons,
+        faceStatuses,
         sortBy: groupingMode,
         sortDirection,
         limit: loadedCountRef.current,
@@ -198,13 +210,27 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("focus", handleWindowFocus);
+    const refreshLibraryTotal = () => {
+      void fetchImages({ limit: 1, offset: 0 })
+        .then((page) => {
+          if (isMounted) setLibraryTotal(page.total);
+        })
+        .catch(() => undefined);
+    };
+    refreshLibraryTotal();
+
+    const unsubscribeClusters = subscribeToTopic("clusters", () => {
+      refreshVisibleImages();
+      refreshLibraryTotal();
+    });
 
     return () => {
       isMounted = false;
+      unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
     if (isLoading || isLoadingMore || !hasMore) return;
@@ -245,6 +271,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
       const page = await fetchImages({
         folders: selectedFolders,
         persons: selectedPersons,
+        faceStatuses,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -257,84 +284,85 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     }
   };
 
+  // An entirely empty library is a setup problem, not an empty filter result —
+  // so point at the setup area instead of suggesting a different filter.
+  const libraryIsEmpty =
+    !isLoading &&
+    totalImages === 0 &&
+    selectedPersons.length === 0 &&
+    selectedFolders.length === 0;
+
+  const pageHeader = (
+    <header className="people-page-heading">
+      <div>
+        <span>Bibliothek</span>
+        <h1>Bilder</h1>
+        <p>Durchsuche deine Fotos und filtere sie nach Personen, Ordnern oder Aufnahmedatum.</p>
+      </div>
+    </header>
+  );
+
+  if (libraryIsEmpty) {
+    return (
+      <>
+        {pageHeader}
+        <section className="home-empty-state">
+          <div className="home-empty-state__visual" aria-hidden="true">◎</div>
+          <h2>Noch keine Bilder vorhanden</h2>
+          <p>
+            Füge zuerst einen Bilderordner hinzu. Gesichter werden automatisch erkannt,
+            danach kannst du deine Bilder hier nach Personen filtern.
+          </p>
+          <button className="neon-button" onClick={() => setShowImport(true)} type="button">
+            Ersten Bilderordner hinzufügen
+          </button>
+          {showImport && (
+            <FolderPickerModal onClose={() => setShowImport(false)} />
+          )}
+        </section>
+      </>
+    );
+  }
+
   return (
     <>
-      <div className="people-toolbar">
-        <PersonFilter
-          persons={availablePersons}
-          selected={selectedPersons}
-          onChange={setSelectedPersons}
-        />
-
-        <div className="people-toolbar-actions">
-          <div className="people-sort-panel">
-            <label className="people-sort-panel__field">
-              <span>Sortieren nach</span>
-              <select
-                value={groupingMode}
-                onChange={(event) =>
-                  setGroupingMode(event.target.value as ImageGroupingMode)
-                }
-              >
-                <option value="date">Erstellungsdatum</option>
-                <option value="folder">Ordnerpfad</option>
-              </select>
-            </label>
-
-            <label className="people-sort-panel__field">
-              <span>Reihenfolge</span>
-              <select
-                value={sortDirection}
-                onChange={(event) =>
-                  setSortDirection(event.target.value as SortDirection)
-                }
-              >
-                <option value="desc">Absteigend</option>
-                <option value="asc">Aufsteigend</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="people-toolbar-count">
-            {totalImages.toLocaleString()} Bilder
-          </div>
-
-          <button
-            className={`people-visual-toggle${showFaceOverlays ? " people-visual-toggle--active" : ""}`}
-            onClick={() => setShowFaceOverlays((current) => !current)}
-            type="button"
-          >
-            <span className="people-visual-toggle__indicator" aria-hidden="true" />
-            <span>
-              <strong>Gesichtserkennung</strong>
-              <small>
-                {showFaceOverlays ? "Markierungen sichtbar" : "Markierungen ausgeblendet"}
-              </small>
-            </span>
-          </button>
-
-          <button
-            className={`folder-filter-trigger${selectedFolders.length ? " folder-filter-trigger--active" : ""}`}
-            onClick={() => setShowFolderFilter(true)}
-          >
-            <span className="folder-icon" aria-hidden="true" />
-            <span>
-              <strong>Ordnerfilter</strong>
-              <small>
-                {selectedFolders.length
-                  ? `${selectedFolders.length} ausgewählt`
-                  : "Alle Ordner"}
-              </small>
-            </span>
-            {selectedFolders.length > 0 && <b>{selectedFolders.length}</b>}
-          </button>
-
-        </div>
-      </div>
+      {pageHeader}
+      <LibraryFilterBar
+        persons={availablePersons}
+        selectedPersons={selectedPersons}
+        onPersonsChange={setSelectedPersons}
+        sortBy={groupingMode}
+        sortDirection={sortDirection}
+        onSortChange={(nextSortBy, nextDirection) => {
+          setGroupingMode(nextSortBy);
+          setSortDirection(nextDirection);
+        }}
+        selectedFolderCount={selectedFolders.length}
+        onOpenFolderFilter={() => setShowFolderFilter(true)}
+        resultCount={totalImages}
+        totalCount={libraryTotal}
+        resultNoun="Bilder"
+        faceStatuses={faceStatuses}
+        onFaceStatusesChange={setFaceStatuses}
+      >
+        <select
+          className="filter-bar__control filter-bar__select"
+          aria-label="Gesichtsmarkierungen"
+          value={faceOverlayMode}
+          onChange={(event) =>
+            setFaceOverlayMode(event.target.value as FaceOverlayMode)
+          }
+          title="Welche Gesichter im Bild markiert werden"
+        >
+          <option value="all">Alle Gesichter markieren</option>
+          <option value="assigned">Nur zugewiesene markieren</option>
+          <option value="none">Keine Markierungen</option>
+        </select>
+      </LibraryFilterBar>
 
       {selectedFolders.length > 0 && (
         <div className="active-folder-filters">
-          <span>Aktive Ordner</span>
+          <span>Ausgewählte Ordner</span>
           {selectedFolders.map((folder) => (
             <button
               key={folder}
@@ -350,7 +378,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
             </button>
           ))}
           <button className="clear-folder-filters" onClick={() => setSelectedFolders([])}>
-            Alle löschen
+            Ordnerfilter entfernen
           </button>
         </div>
       )}
@@ -360,7 +388,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         isLoading={isLoading}
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
-        showFaceOverlays={showFaceOverlays}
+        faceOverlayMode={faceOverlayMode}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
         onImageDeleted={(imageId) => {

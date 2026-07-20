@@ -16,6 +16,26 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    strictPort: true,
     host: true,
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: false,
+      },
+    },
+    watch: {
+      ignored: [
+        "**/dist/**",
+        "**/build/**",
+        "**/.git/**",
+        "**/.mypy_cache/**",
+        "**/.pytest_cache/**",
+        "**/__pycache__/**",
+        "**/backend/**",
+        "**/packaging/**",
+        "**/scripts/**",
+      ],
+    },
   },
 });
