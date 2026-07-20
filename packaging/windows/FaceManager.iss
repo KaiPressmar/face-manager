@@ -1,5 +1,6 @@
 #define MyAppName "Face Manager"
-#define MyAppPublisher "Face Manager"
+#define MyAppPublisher "Face Manager Project"
+#define MyAppURL "https://github.com/KaiPressmar/face-manager"
 #define MyAppExeName "FaceManager.exe"
 #ifndef InstallerSuffix
   #define InstallerSuffix ""
@@ -9,7 +10,12 @@
 AppId={{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}
 AppName={#MyAppName}
 AppVersion={#AppVersion}
+AppVerName={#MyAppName} {#AppVersion}
 AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}/issues
+AppUpdatesURL={#MyAppURL}/releases
+AppComments=Local desktop application for organizing photos by recognized faces
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
@@ -21,6 +27,12 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 SetupIconFile={#SourceDir}\packaging\windows\assets\face-manager-icon.ico
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} installer
+VersionInfoOriginalFileName=FaceManager-Setup{#InstallerSuffix}-{#AppVersion}.exe
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
 CloseApplications=yes
 CloseApplicationsFilter={#MyAppExeName}
 

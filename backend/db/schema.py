@@ -15,6 +15,14 @@ logger = logging.getLogger("face_manager.db")
 
 HASH_CHUNK_SIZE = 1024 * 1024
 DATABASE_RECOVERY_LOCK = threading.Lock()
+FACE_REVIEW_STATUS_ACTIVE = "active"
+FACE_REVIEW_STATUS_UNKNOWN_PERSON = "unknown_person"
+FACE_REVIEW_STATUS_NOT_FACE = "not_face"
+VALID_FACE_REVIEW_STATUSES = {
+    FACE_REVIEW_STATUS_ACTIVE,
+    FACE_REVIEW_STATUS_UNKNOWN_PERSON,
+    FACE_REVIEW_STATUS_NOT_FACE,
+}
 RECOVERABLE_DATABASE_ERROR_MARKERS = (
     "database disk image is malformed",
     "malformed",
@@ -89,8 +97,51 @@ def _ensure_person_name_indexes(cur):
     )
 
 
+def _reassign_zero_cluster_id(cur):
+    """Migrate the legacy cluster id 0 onto a fresh positive identifier.
+
+    Older clustering runs numbered clusters from 0. A cluster id of 0 is falsy
+    in both Python and JavaScript, which lets it slip through "no cluster"
+    guards and, when the row is missing entirely, leaves faces pointing at a
+    cluster that never appears in the overview. Rewriting id 0 to a normal
+    positive id removes the ambiguity for good.
+    """
+    references_zero = cur.execute(
+        """
+        SELECT 1
+        FROM face
+        WHERE cluster_id = 0
+        LIMIT 1
+        """
+    ).fetchone()
+    zero_cluster = cur.execute(
+        "SELECT id, label, person_id FROM cluster WHERE id = 0"
+    ).fetchone()
+    if references_zero is None and zero_cluster is None:
+        return
+
+    label = zero_cluster["label"] if zero_cluster is not None else None
+    person_id = zero_cluster["person_id"] if zero_cluster is not None else None
+    cur.execute(
+        "INSERT INTO cluster(label, person_id) VALUES (?, ?)",
+        (label, person_id),
+    )
+    new_cluster_id = int(cur.lastrowid)
+    cur.execute(
+        "UPDATE face SET cluster_id = ? WHERE cluster_id = 0",
+        (new_cluster_id,),
+    )
+    cur.execute("DELETE FROM cluster WHERE id = 0")
+    logger.info(
+        "Reassigned legacy cluster id 0 to cluster %s during integrity repair",
+        new_cluster_id,
+    )
+
+
 def _repair_cluster_integrity(cur):
     """Repair common cluster-table inconsistencies."""
+    _reassign_zero_cluster_id(cur)
+
     missing_cluster_ids = [
         row["cluster_id"]
         for row in cur.execute(
@@ -411,11 +462,38 @@ def _create_face_table(cur, table_name="face"):
             bbox_w REAL,
             bbox_h REAL,
             cluster_id INTEGER,
+            review_status TEXT NOT NULL DEFAULT '{FACE_REVIEW_STATUS_ACTIVE}',
             embedding BLOB,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE,
             FOREIGN KEY(cluster_id) REFERENCES cluster(id)
         )
         """
+    )
+
+
+def _ensure_face_review_columns(cur):
+    """Ensure the face review lifecycle columns exist and contain valid values."""
+    columns = {
+        row["name"]
+        for row in cur.execute("PRAGMA table_info(face)").fetchall()
+    }
+    if "review_status" not in columns:
+        cur.execute(
+            f"""
+            ALTER TABLE face
+            ADD COLUMN review_status TEXT NOT NULL DEFAULT '{FACE_REVIEW_STATUS_ACTIVE}'
+            """
+        )
+    placeholders = ",".join("?" for _ in VALID_FACE_REVIEW_STATUSES)
+    cur.execute(
+        f"""
+        UPDATE face
+        SET review_status = ?
+        WHERE review_status IS NULL
+           OR TRIM(review_status) = ''
+           OR review_status NOT IN ({placeholders})
+        """,
+        (FACE_REVIEW_STATUS_ACTIVE, *sorted(VALID_FACE_REVIEW_STATUSES)),
     )
 
 
@@ -484,6 +562,22 @@ def _create_app_settings_table(cur):
     )
 
 
+def _create_recluster_dirty_person_table(cur):
+    """Track which persons still need their subclusters rebuilt.
+
+    Rows are written in the same transaction as the assignment change, so the
+    scope can never drift from the data. ``person_id = -1`` is the sentinel for
+    the pool of faces that belong to no person yet.
+    """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recluster_dirty_person (
+            person_id INTEGER PRIMARY KEY
+        )
+        """
+    )
+
+
 def _migrate_legacy_faces(conn):
     """Migrate face rows that referenced image paths directly.
 
@@ -510,14 +604,15 @@ def _migrate_legacy_faces(conn):
     cur.execute(
         """
         INSERT INTO face_migrated(
-            id, image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, embedding
+            id, image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, review_status, embedding
         )
         SELECT
             f.id, i.id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
-            f.cluster_id, f.embedding
+            f.cluster_id, ?, f.embedding
         FROM face f
         JOIN image i ON i.path = f.image_path
-        """
+        """,
+        (FACE_REVIEW_STATUS_ACTIVE,),
     )
     cur.execute("DROP TABLE face")
     cur.execute("ALTER TABLE face_migrated RENAME TO face")
@@ -545,6 +640,43 @@ def _initialize_schema(conn):
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cluster_person_suggestion (
+            cluster_id INTEGER PRIMARY KEY,
+            person_id INTEGER NOT NULL,
+            confidence REAL NOT NULL,
+            best_distance REAL NOT NULL,
+            runner_up_margin REAL NOT NULL,
+            support_count INTEGER NOT NULL,
+            face_count INTEGER NOT NULL,
+            support_ratio REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'dismissed')),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(cluster_id) REFERENCES cluster(id) ON DELETE CASCADE,
+            FOREIGN KEY(person_id) REFERENCES person(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cluster_review_suggestion (
+            cluster_id INTEGER PRIMARY KEY,
+            review_status TEXT NOT NULL
+                CHECK(review_status IN ('unknown_person', 'not_face')),
+            confidence REAL NOT NULL,
+            best_distance REAL NOT NULL,
+            support_count INTEGER NOT NULL,
+            face_count INTEGER NOT NULL,
+            support_ratio REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'dismissed')),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(cluster_id) REFERENCES cluster(id) ON DELETE CASCADE
+        )
+        """
+    )
     _create_image_table(cur)
 
     face_exists = cur.execute(
@@ -554,10 +686,12 @@ def _initialize_schema(conn):
         _migrate_legacy_faces(conn)
     else:
         _create_face_table(cur)
+    _ensure_face_review_columns(cur)
 
     _migrate_image_locations(conn)
     _create_import_job_table(cur)
     _create_app_settings_table(cur)
+    _create_recluster_dirty_person_table(cur)
 
     cur.execute(
         """
@@ -585,6 +719,21 @@ def _initialize_schema(conn):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cluster_person_suggestion_person "
+        "ON cluster_person_suggestion(person_id, status, confidence DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cluster_review_suggestion_status "
+        "ON cluster_review_suggestion(review_status, status, confidence DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_face_review_status ON face(review_status)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_face_review_cluster "
+        "ON face(review_status, cluster_id)"
+    )
     _repair_cluster_integrity(cur)
     _ensure_person_name_indexes(cur)
 

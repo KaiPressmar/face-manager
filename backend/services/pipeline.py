@@ -17,7 +17,9 @@ from PIL import Image
 from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
+from .face_thumbnails import create_face_thumbnails_for_image, delete_face_thumbnail
 from .storage import (
+    FACE_REVIEW_STATUS_ACTIVE,
     get_cluster_distance_threshold,
     invalidate_image_query_cache,
     load_all_embeddings,
@@ -244,9 +246,13 @@ class ImportResources:
 
                 self._clusterer = FaceClustering()
             if not self._clusterer_loaded:
-                embeddings, cluster_ids = load_all_embeddings()
+                embeddings, cluster_ids, person_ids = load_all_embeddings()
                 if embeddings.size > 0:
-                    self._clusterer.load_existing(embeddings, cluster_ids)
+                    self._clusterer.load_existing(
+                        embeddings,
+                        cluster_ids,
+                        person_ids,
+                    )
                 self._clusterer_loaded = True
             return self._clusterer
 
@@ -408,6 +414,7 @@ class ImportProcessor:
                                 cursor,
                                 conn,
                                 image_id,
+                                str(primary.path),
                                 image_np,
                                 model,
                                 clusterer,
@@ -548,6 +555,7 @@ class ImportProcessor:
         cursor,
         connection,
         image_id: int,
+        image_path: str,
         image_np: np.ndarray,
         model: FaceModel,
         clusterer: FaceClustering,
@@ -559,20 +567,36 @@ class ImportProcessor:
             cursor: SQLite cursor used for reads and writes.
             connection: SQLite connection controlling transactions.
             image_id: Canonical image identifier.
+            image_path: Source image path used to create face crop thumbnails.
             image_np: Decoded RGB image pixels.
             model: Face detection and recognition model.
             clusterer: Incremental face clustering index.
             progress_callback: Callback receiving face progress updates.
         """
+        existing_face_ids = [
+            int(row["id"])
+            for row in cursor.execute(
+                "SELECT id FROM face WHERE image_id = ?",
+                (image_id,),
+            ).fetchall()
+        ]
         cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
+        for face_id in existing_face_ids:
+            delete_face_thumbnail(face_id)
         faces = model.detect_and_embed(image_np)
         distance_threshold = get_cluster_distance_threshold()
+        thumbnail_jobs: list[tuple[int, tuple[int, int, int, int]]] = []
         for face in faces:
             x1, y1, width, height = face["bbox"]
             embedding = face["embedding"]
             cluster_ids, _ = clusterer.add_and_assign(
                 np.expand_dims(embedding, axis=0),
                 distance_threshold=distance_threshold,
+                # Confirmed person clusters are reference data, not an
+                # authorization to silently attach newly imported faces.
+                # Person matches are generated as reviewable suggestions by
+                # the post-import/reclustering workflow instead.
+                allow_person_matches=False,
             )
             cluster_id = int(cluster_ids[0])
             cursor.execute(
@@ -583,9 +607,9 @@ class ImportProcessor:
                 """
                 INSERT INTO face(
                     image_id, bbox_x, bbox_y, bbox_w, bbox_h,
-                    cluster_id, embedding
+                    cluster_id, review_status, embedding
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     image_id,
@@ -594,9 +618,17 @@ class ImportProcessor:
                     float(width),
                     float(height),
                     cluster_id,
+                    FACE_REVIEW_STATUS_ACTIVE,
                     embedding.astype("float32").tobytes(),
                 ),
             )
+            face_id = int(cursor.lastrowid)
+            thumbnail_jobs.append(
+                (face_id, (int(x1), int(y1), int(width), int(height)))
+            )
+
+        # Render every face crop for this image from a single decode/orient.
+        create_face_thumbnails_for_image(image_path, thumbnail_jobs)
 
         cursor.execute(
             "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",

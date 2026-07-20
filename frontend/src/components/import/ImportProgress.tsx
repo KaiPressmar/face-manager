@@ -1,14 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  fetchImportQueue,
   ImportJob,
   ImportStation,
   ImportQueueState,
   removeImportJob,
 } from "../../utils/api";
-
-const IDLE_POLL_INTERVAL_MS = 5000;
-const ACTIVE_POLL_INTERVAL_MS = 1000;
+import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
 
 const statusLabels: Record<ImportJob["status"], string> = {
   queued: "Wartet",
@@ -22,11 +19,11 @@ const statusLabels: Record<ImportJob["status"], string> = {
 const stageLabels: Record<NonNullable<ImportJob["stage"]>, string> = {
   scanning: "Ordner wird durchsucht",
   hashing: "Dateien werden geprüft",
-  loading_model: "Gesichtsmodell wird geladen",
-  loading_index: "Gesichtsindex wird geladen",
+  loading_model: "Bilderkennung wird vorbereitet",
+  loading_index: "Bekannte Gesichter werden abgeglichen",
   processing: "Gesichter werden erkannt",
-  finalizing: "Import wird abgeschlossen",
-  completed: "Import abgeschlossen",
+  finalizing: "Ergebnisse werden gespeichert",
+  completed: "Bilder wurden hinzugefügt",
 };
 
 const stationStateLabels: Record<ImportStation["state"], string> = {
@@ -86,8 +83,8 @@ function stationEtaLabel(station: ImportStation) {
   if (station.eta_seconds == null) return null;
   const formatted = formatDuration(station.eta_seconds);
   if (!formatted) return null;
-  if (station.state === "queued") return `Start+${formatted}`;
-  if (station.state === "active") return `ETA ${formatted}`;
+  if (station.state === "queued") return `Start in ca. ${formatted}`;
+  if (station.state === "active") return `Noch ca. ${formatted}`;
   return formatted;
 }
 
@@ -184,7 +181,7 @@ const ImportJobCard: React.FC<{
           <span>{collapsedSummary}</span>
           <div>
             {elapsed && <span>Vergangen: {elapsed}</span>}
-            {eta && <span>ETA: {eta}</span>}
+            {eta && <span>Noch ca. {eta}</span>}
           </div>
         </div>
       )}
@@ -209,9 +206,9 @@ const ImportJobCard: React.FC<{
           {isActive && (
             <>
               <div className="import-job__stage">
-                <span>{stageLabel ?? "Import wird vorbereitet"}</span>
+                <span>{stageLabel ?? "Bilder werden vorbereitet"}</span>
                 {stationEta ? (
-                  <b>Station ETA {stationEta}</b>
+                  <b>{stationEta}</b>
                 ) : (
                   <b>{Math.round(progressPercent(job))}%</b>
                 )}
@@ -257,7 +254,7 @@ const ImportJobCard: React.FC<{
           {!isActive && elapsed && (
             <div className="import-job__timing">
               <span>Laufzeit: {elapsed}</span>
-              {eta && <span>ETA: {eta}</span>}
+              {eta && <span>Geschätzte Restzeit: {eta}</span>}
             </div>
           )}
         </>
@@ -288,46 +285,22 @@ const ImportProgress = () => {
     {},
   );
 
-  const poll = useCallback(async () => {
-    const nextQueue = await fetchImportQueue();
-    setQueue(nextQueue);
-    setError(null);
-    return nextQueue;
-  }, []);
-
   useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-
-    const schedule = async () => {
-      try {
-        const nextQueue = await poll();
-        if (cancelled) return;
-        const isActive =
-          nextQueue.active_job_id !== null || nextQueue.queued_count > 0;
-        timeoutId = setTimeout(
-          schedule,
-          isActive ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS,
-        );
-      } catch {
-        if (cancelled) return;
-        setError("Import-Warteschlange nicht erreichbar");
-        timeoutId = setTimeout(schedule, IDLE_POLL_INTERVAL_MS);
-      }
-    };
-
-    const refresh = () => {
-      void poll();
-    };
-
-    window.addEventListener("face-manager:imports-changed", refresh);
-    void schedule();
+    const unsubscribeQueue = subscribeToTopic<ImportQueueState>(
+      "imports",
+      (next) => {
+        setQueue(next);
+        setError(null);
+      },
+    );
+    const unsubscribeStatus = subscribeToConnectionStatus((status) => {
+      setError(status === "closed" ? "Status der Bildimporte nicht erreichbar" : null);
+    });
     return () => {
-      cancelled = true;
-      window.removeEventListener("face-manager:imports-changed", refresh);
-      if (timeoutId) clearTimeout(timeoutId);
+      unsubscribeQueue();
+      unsubscribeStatus();
     };
-  }, [poll]);
+  }, []);
 
   const visibleJobs = useMemo(() => {
     if (!queue) return [];
@@ -346,13 +319,13 @@ const ImportProgress = () => {
 
   const handleRemove = async (jobId: string) => {
     try {
+      // The queue snapshot refreshes itself via the imports subscription.
       await removeImportJob(jobId);
-      await poll();
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Importauftrag konnte nicht geändert werden",
+          : "Die Aufgabe konnte nicht geändert werden",
       );
     }
   };
@@ -380,7 +353,7 @@ const ImportProgress = () => {
   return (
     <section className="import-queue">
       <div className="import-queue__title">
-        <span>Importe</span>
+        <span>Bilder hinzufügen</span>
         <div>
           {queue?.overall_eta_seconds != null && (
             <span>Gesamt: ca. {formatDuration(queue.overall_eta_seconds)}</span>
@@ -390,10 +363,10 @@ const ImportProgress = () => {
       </div>
       {queue && (
         <div className="import-queue__summary">
-          <span>Laufend: {runningCount}</span>
-          <span>Slots: {slotCount}</span>
-          <span>Queued: {queue.queued_count}</span>
-          <span>Requests: {queue.jobs.length}</span>
+          <span>Aktiv: {runningCount}</span>
+          <span>Gleichzeitig möglich: {slotCount}</span>
+          <span>Wartend: {queue.queued_count}</span>
+          <span>Aufgaben insgesamt: {queue.jobs.length}</span>
         </div>
       )}
       {error && <div className="import-queue__error">{error}</div>}

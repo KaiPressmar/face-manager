@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import (
@@ -11,6 +12,13 @@ from PyInstaller.utils.hooks import (
 project_root = Path.cwd()
 frontend_dist = project_root / "frontend" / "dist"
 icon_path = project_root / "packaging" / "windows" / "assets" / "face-manager-icon.ico"
+version_info_path = project_root / "build" / "windows-version-info.txt"
+build_variant = os.environ.get("FACE_MANAGER_BUILD_VARIANT", "cpu").strip().lower()
+if build_variant not in {"cpu", "gpu"}:
+    raise ValueError(f"Unsupported FACE_MANAGER_BUILD_VARIANT: {build_variant}")
+build_variant_path = project_root / "build" / "BUILD_VARIANT"
+build_variant_path.parent.mkdir(parents=True, exist_ok=True)
+build_variant_path.write_text(build_variant + "\n", encoding="ascii")
 
 
 def optional_collect(package_name):
@@ -32,6 +40,8 @@ def optional_copy_metadata(distribution_name):
 
 datas = [
     (str(project_root / "VERSION"), "."),
+    (str(project_root / "CHANGELOG.md"), "."),
+    (str(build_variant_path), "."),
     (str(frontend_dist), "frontend/dist"),
 ]
 datas += collect_data_files("insightface")
@@ -97,9 +107,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     console=False,
     icon=str(icon_path),
+    version=str(version_info_path),
 )
 
 coll = COLLECT(
@@ -107,7 +118,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="FaceManager",
 )

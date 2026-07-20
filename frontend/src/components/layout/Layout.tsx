@@ -6,18 +6,22 @@ import Topbar from "./Topbar";
 const Layout: React.FC<{
   page: AppPage;
   onChangePage: (p: AppPage) => void;
+  onShowReleaseNotes?: () => void;
+  onShowUpdate?: () => void;
   children: React.ReactNode;
-}> = ({ page, onChangePage, children }) => {
+}> = ({ page, onChangePage, onShowReleaseNotes, onShowUpdate, children }) => {
   return (
-    <div style={{ display: "flex", height: "100vh" }}>
-      <Sidebar page={page} onChangePage={onChangePage} />
+    <div className="app-shell">
+      <Sidebar
+        page={page}
+        onChangePage={onChangePage}
+        onShowReleaseNotes={onShowReleaseNotes}
+        onShowUpdate={onShowUpdate}
+      />
 
-      <div style={{ flex: 1, position: "relative" }}>
+      <div className="app-main">
         <Topbar />
-
-        <div className="page-content">
-          {children}
-        </div>
+        <div className="app-viewport">{children}</div>
       </div>
     </div>
   );

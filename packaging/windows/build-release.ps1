@@ -1,6 +1,7 @@
 param(
     [ValidateSet("cpu", "gpu")]
-    [string]$Variant = "cpu"
+    [string]$Variant = "cpu",
+    [switch]$RequireSigned
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,9 @@ $buildDir = Join-Path $projectRoot "build"
 $specPath = Join-Path $projectRoot "packaging/windows/face-manager.spec"
 $desktopRequirements = Join-Path $projectRoot "backend/requirements-desktop.txt"
 $gpuRequirements = Join-Path $projectRoot "backend/requirements-desktop-gpu.txt"
+$versionInfoPath = Join-Path $buildDir "windows-version-info.txt"
+$dependencyInventoryPath = Join-Path $buildDir "dependency-inventory.json"
+$buildVariantPath = Join-Path $buildDir "BUILD_VARIANT"
 
 Set-Location $projectRoot
 
@@ -23,9 +27,15 @@ if (Test-Path $distDir) {
 if (Test-Path $buildDir) {
     Remove-Item -Recurse -Force $buildDir
 }
+New-Item -ItemType Directory -Force $buildDir | Out-Null
+Set-Content -Path $buildVariantPath -Value $Variant -Encoding ascii
+$env:FACE_MANAGER_BUILD_VARIANT = $Variant
 
 npm --prefix frontend ci
 npm --prefix frontend run build
+
+python scripts/inventory-dependencies.py --project-root $projectRoot --output $dependencyInventoryPath
+python packaging/windows/generate-version-info.py --version $version --output $versionInfoPath
 
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt -r $desktopRequirements
@@ -38,6 +48,19 @@ if ($Variant -eq "gpu") {
 }
 
 pyinstaller --noconfirm --clean $specPath
+
+$appExe = Join-Path $distDir "FaceManager/FaceManager.exe"
+if (-not (Test-Path $appExe)) {
+    throw "PyInstaller did not create $appExe"
+}
+
+$appVersionInfo = (Get-Item $appExe).VersionInfo
+if ($appVersionInfo.ProductVersion -ne $version) {
+    throw "FaceManager.exe product version is '$($appVersionInfo.ProductVersion)', expected '$version'"
+}
+if ($appVersionInfo.ProductName -ne "Face Manager") {
+    throw "FaceManager.exe product name is '$($appVersionInfo.ProductName)', expected 'Face Manager'"
+}
 
 $installerSuffix = if ($Variant -eq "gpu") { "-GPU" } else { "" }
 
@@ -52,3 +75,28 @@ if (-not (Test-Path $iscc)) {
     "/DOutputDir=$distDir" `
     "/DInstallerSuffix=$installerSuffix" `
     (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
+
+$installerPath = Join-Path $distDir "FaceManager-Setup$installerSuffix-$version.exe"
+if (-not (Test-Path $installerPath)) {
+    throw "Inno Setup did not create $installerPath"
+}
+
+$installerVersionInfo = (Get-Item $installerPath).VersionInfo
+if ($installerVersionInfo.ProductVersion -ne $version) {
+    throw "Installer product version is '$($installerVersionInfo.ProductVersion)', expected '$version'"
+}
+
+foreach ($artifact in @($appExe, $installerPath)) {
+    $signature = Get-AuthenticodeSignature $artifact
+    if ($RequireSigned -and $signature.Status -ne "Valid") {
+        throw "$artifact does not have a valid Authenticode signature (status: $($signature.Status))"
+    }
+}
+
+$checksumPath = "$installerPath.sha256"
+$checksum = (Get-FileHash -Algorithm SHA256 $installerPath).Hash.ToLowerInvariant()
+"$checksum  $(Split-Path -Leaf $installerPath)" | Set-Content -Encoding ascii $checksumPath
+
+Write-Host "Built installer: $installerPath"
+Write-Host "SHA-256 checksum: $checksumPath"
+Write-Host "Dependency inventory: $dependencyInventoryPath"
