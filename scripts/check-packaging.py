@@ -72,6 +72,14 @@ def main() -> None:
         raise RuntimeError("Windows release builds do not emit the updater variant")
     if "$env:FACE_MANAGER_BUILD_VARIANT = $Variant" not in build_script:
         raise RuntimeError("Windows release builds do not pass the updater variant")
+    if (
+        "$installerProductVersion = $installerVersionInfo.ProductVersion.Trim()"
+        not in build_script
+        or "if ($installerProductVersion -ne $version)" not in build_script
+    ):
+        raise RuntimeError(
+            "Windows installer validation does not normalize version metadata"
+        )
 
     installer = (PROJECT_ROOT / "packaging/windows/FaceManager.iss").read_text(
         encoding="utf-8"
