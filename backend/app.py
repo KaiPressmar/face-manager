@@ -62,6 +62,7 @@ from .services.autocluster_queue import (
 from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
+from .services.image_path_cleanup import ImagePathCleanup
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -259,6 +260,7 @@ def _publish_imports() -> None:
         # let the thumbnail warmer start immediately instead of on its next poll.
         auto_cluster_queue.notify_ready()
         face_thumbnail_warmup_queue.wake()
+        image_path_cleanup.schedule("import_completed", delay_seconds=15.0)
 
 
 def _publish_autocluster() -> None:
@@ -382,6 +384,28 @@ def is_backend_idle_for_thumbnail_warmup() -> bool:
 face_thumbnail_warmup_queue = FaceThumbnailWarmupQueue(
     is_idle=is_backend_idle_for_thumbnail_warmup,
     on_change=_publish_thumbnail_warmup,
+)
+
+
+def is_backend_idle_for_path_cleanup() -> bool:
+    """Keep filesystem validation behind all user-facing background work."""
+    if not is_backend_idle_for_thumbnail_warmup():
+        return False
+    thumbnail_task = face_thumbnail_warmup_queue.snapshot()
+    return thumbnail_task.get("status") not in {"queued", "running"}
+
+
+def _publish_image_path_cleanup(snapshot: dict) -> None:
+    """Publish maintenance progress and refresh views after actual removals."""
+    event_hub.publish("image-path-cleanup", snapshot)
+    if snapshot.get("status") == "completed" and snapshot.get("removed_paths"):
+        reset_import_resources()
+        notify_clusters_changed("image_path_cleanup")
+
+
+image_path_cleanup = ImagePathCleanup(
+    is_idle=is_backend_idle_for_path_cleanup,
+    on_change=_publish_image_path_cleanup,
 )
 
 
@@ -577,6 +601,8 @@ async def lifespan(_app: FastAPI):
         if not schedule_version_clustering_upgrade():
             run_startup_repairs()
         face_thumbnail_warmup_queue.start()
+        image_path_cleanup.resume()
+        image_path_cleanup.schedule("startup", delay_seconds=60.0)
     except Exception:
         logger.exception("Could not start import queue during application startup")
         raise
@@ -584,6 +610,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         idle_recluster_scheduler.stop()
+        image_path_cleanup.stop()
         _publish_imports_throttled.flush()
         _publish_autocluster_throttled.flush()
         try:
@@ -1920,6 +1947,18 @@ def get_folders(request: Request):
         serialize_folder_tree(root, display_platform) for root in tree["roots"]
     ]
     return tree
+
+
+@app.get("/api/maintenance/image-paths")
+def api_get_image_path_cleanup():
+    """Return the current or most recent image path validation state."""
+    return image_path_cleanup.snapshot()
+
+
+@app.post("/api/maintenance/image-paths")
+def api_start_image_path_cleanup():
+    """Queue a low-priority validation of every stored image location."""
+    return image_path_cleanup.start("manual")
 
 
 def _group_image_rows(rows, display_platform: str) -> list[dict]:

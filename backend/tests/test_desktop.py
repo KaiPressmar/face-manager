@@ -1,26 +1,44 @@
+import base64
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import MagicMock, call, mock_open, patch
 
 from backend.services import desktop
 
 
 class OpenFileLocationTest(unittest.TestCase):
-    @patch("backend.services.desktop.subprocess.Popen")
     @patch("backend.services.desktop.subprocess.run")
     @patch.dict("os.environ", {"WSL_DISTRO_NAME": "Ubuntu"})
-    def test_wsl_opens_windows_explorer_and_selects_file(self, run, popen):
-        run.return_value.stdout = "D:\\Photos\\image.jpg\n"
+    def test_wsl_opens_windows_explorer_and_selects_file(self, run):
+        windows_path = r"D:\Photos & Familie\O'Brien $(1) 100%.jpg"
+        translated = MagicMock(stdout=f"{windows_path}\n")
+        revealed = MagicMock(stdout="")
+        run.side_effect = [translated, revealed]
 
         desktop.open_file_location("/mnt/d/Photos/image.jpg")
 
-        run.assert_called_once_with(
-            ["wslpath", "-w", "/mnt/d/Photos/image.jpg"],
-            check=True,
-            capture_output=True,
-            text=True,
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(
+            run.call_args_list[0],
+            call(
+                ["wslpath", "-w", "/mnt/d/Photos/image.jpg"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ),
         )
-        popen.assert_called_once_with(
-            ["explorer.exe", "/select,D:\\Photos\\image.jpg"]
+        reveal_command = run.call_args_list[1].args[0]
+        self.assertEqual(reveal_command[:4], [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"
+        ])
+        decoded_script = base64.b64decode(reveal_command[4]).decode("utf-16-le")
+        self.assertNotIn(windows_path, decoded_script)
+        path_payload = base64.b64encode(windows_path.encode("utf-8")).decode(
+            "ascii"
+        )
+        self.assertIn(path_payload, decoded_script)
+        self.assertEqual(
+            run.call_args_list[1].kwargs,
+            {"check": True, "capture_output": True, "text": True},
         )
 
     @patch("backend.services.desktop.subprocess.Popen")
@@ -32,14 +50,30 @@ class OpenFileLocationTest(unittest.TestCase):
 
         popen.assert_called_once_with(["xdg-open", "/home/user/photos"])
 
-    @patch("backend.services.desktop.subprocess.Popen")
+    @patch("backend.services.desktop._reveal_with_windows_shell")
     @patch("backend.services.desktop.sys.platform", "win32")
     @patch("backend.services.desktop._is_wsl", return_value=False)
-    def test_windows_reveals_file_with_spaces(self, _is_wsl, popen):
-        desktop.open_file_location(r"C:\Users\Test\My Photos\image one.jpg")
+    def test_windows_reveals_file_with_spaces_and_special_characters(
+        self, _is_wsl, reveal
+    ):
+        desktop.open_file_location(
+            r"C:\Users\Test\My Photos & 100%\März_[1] # Urlaub.jpg"
+        )
 
-        popen.assert_called_once_with(
-            ["explorer.exe", r"/select,C:\Users\Test\My Photos\image one.jpg"]
+        reveal.assert_called_once_with(
+            r"C:\Users\Test\My Photos & 100%\März_[1] # Urlaub.jpg"
+        )
+
+    @patch("backend.services.desktop._reveal_with_windows_shell")
+    @patch("backend.services.desktop.sys.platform", "win32")
+    @patch("backend.services.desktop._is_wsl", return_value=False)
+    def test_windows_preserves_unc_path(self, _is_wsl, reveal):
+        desktop.open_file_location(
+            r"\\server name\Family Photos\Sommer & Meer\Bild 01.jpg"
+        )
+
+        reveal.assert_called_once_with(
+            r"\\server name\Family Photos\Sommer & Meer\Bild 01.jpg"
         )
 
     @patch("backend.services.desktop.subprocess.Popen")

@@ -13,6 +13,22 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.10.0] - 2026-07-22
+
+### Neu
+
+- Nicht mehr vorhandene Bilddateien werden im Leerlauf bereinigt; zusätzlich lässt sich die Prüfung unter „Daten und Wartung“ jederzeit manuell starten.
+
+### Verbessert
+
+- Große Bilderordner werden schneller importiert; bereits bekannte Dateien werden zügiger übersprungen und Vorschaubilder bremsen den Import nicht mehr aus.
+
+### Behoben
+
+- Die Ordnerfilterung berücksichtigt unter Windows wieder zuverlässig alle Unterordner, auch bei Leerzeichen und Sonderzeichen im Pfad.
+- Liefert ein Bilderfilter keine Treffer, bleibt die Bibliothek mit einer Möglichkeit zum Zurücksetzen sichtbar, statt fälschlich zum ersten Import aufzufordern.
+- Bilddateien lassen sich aus Face Manager zuverlässig im Windows-Explorer öffnen und markieren, auch bei Netzwerkpfaden, Leerzeichen und Sonderzeichen.
+
 ## [0.9.1] - 2026-07-22
 
 ### Verbessert

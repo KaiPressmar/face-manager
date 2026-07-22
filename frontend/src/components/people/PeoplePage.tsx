@@ -458,13 +458,17 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     }
   };
 
-  // An entirely empty library is a setup problem, not an empty filter result —
-  // so point at the setup area instead of suggesting a different filter.
+  const hasActiveFilters =
+    selectedPersons.length > 0 ||
+    selectedFolders.length > 0 ||
+    faceStatuses.length > 0;
+  // Only the unfiltered total can decide whether setup is still required.
+  // The current result may legitimately be empty for a status/person/folder.
+  const knownLibraryTotal =
+    libraryTotal ?? (!hasActiveFilters ? totalImages : null);
   const libraryIsEmpty =
     !isLoading &&
-    totalImages === 0 &&
-    selectedPersons.length === 0 &&
-    selectedFolders.length === 0;
+    knownLibraryTotal === 0;
   const imageGridSizeIndex = Math.max(
     0,
     IMAGE_GRID_SIZE_OPTIONS.findIndex((option) => option.value === imageGridSize),
@@ -611,9 +615,18 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         gridSize={imageGridSize}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
+        hasActiveFilters={hasActiveFilters}
+        onResetFilters={() => {
+          setSelectedPersons([]);
+          setSelectedFolders([]);
+          setFaceStatuses([]);
+        }}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
           setTotalImages((current) => Math.max(0, current - 1));
+          setLibraryTotal((current) =>
+            current === null ? current : Math.max(0, current - 1),
+          );
         }}
       />
 
