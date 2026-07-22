@@ -15,6 +15,7 @@ Requests, nicht in diese Versionshinweise.
 ### Verbessert
 
 - Zuordnungen lassen sich während eines Bildimports sicher weiterbearbeiten; manuelle Änderungen behalten Vorrang und neue Gesichter werden zuverlässig einsortiert.
+- Filter, Sortierung und Darstellungsoptionen sind in den Bilder- und Dateiansichten übersichtlicher angeordnet und bleiben auch auf schmalen Fenstern gut bedienbar.
 
 ### Behoben
 

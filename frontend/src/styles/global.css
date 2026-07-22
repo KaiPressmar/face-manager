@@ -164,10 +164,9 @@ button:disabled {
 }
 
 .filter-bar__controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: end;
   gap: 8px 14px;
 }
 
@@ -192,8 +191,32 @@ button:disabled {
 .filter-bar__tools {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.filter-bar__tool-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.filter-bar__tool-label,
+.filter-bar__row-label {
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.filter-bar__tool-group-controls {
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -380,6 +403,11 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.filter-bar__row-label {
+  flex: 0 0 auto;
+  margin-right: 2px;
+}
+
 /* Categories share the person chip design; the divider is what separates
    them, so they stay findable without a heading shouting at the user. */
 .filter-bar__categories {
@@ -397,17 +425,34 @@ button:disabled {
   line-height: 1.45;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 1180px) {
   .filter-bar__controls {
-    align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .filter-bar__tools {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .filter-bar__tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .filter-bar__tool-group,
+  .filter-bar__tool-group--view {
     width: 100%;
   }
 
+  .filter-bar__tool-group-controls {
+    flex-wrap: wrap;
+  }
+
   /* Let the controls share the row evenly instead of each claiming its own. */
-  .filter-bar__tools > * {
+  .filter-bar__tool-group-controls > * {
     flex: 1 1 130px;
     justify-content: center;
   }
@@ -415,6 +460,10 @@ button:disabled {
   .filter-bar__search {
     width: auto;
     flex-basis: 100%;
+  }
+
+  .filter-bar__grid-size {
+    min-width: min(258px, 100%);
   }
 }
 
