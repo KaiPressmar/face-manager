@@ -11,7 +11,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -44,6 +44,49 @@ CREATE TABLE recluster_dirty_person (
     person_id INTEGER PRIMARY KEY
 );
 """
+
+
+class _VariableLimitedCursor:
+    """Emulate the conservative SQLite parameter limit used in production."""
+
+    def __init__(self, cursor, limit=999):
+        self._cursor = cursor
+        self._limit = limit
+
+    def execute(self, statement, parameters=()):
+        if len(parameters) > self._limit:
+            raise sqlite3.OperationalError("too many SQL variables")
+        self._cursor.execute(statement, parameters)
+        return self
+
+    def executemany(self, statement, parameters):
+        self._cursor.executemany(statement, parameters)
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _VariableLimitedConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    @property
+    def isolation_level(self):
+        return self._connection.isolation_level
+
+    @isolation_level.setter
+    def isolation_level(self, value):
+        self._connection.isolation_level = value
+
+    def cursor(self):
+        return _VariableLimitedCursor(self._connection.cursor())
+
+    def execute(self, statement, parameters=()):
+        return self.cursor().execute(statement, parameters)
+
+    def close(self):
+        self._connection.close()
 
 
 class ReclusterConcurrencyTest(unittest.TestCase):
@@ -120,6 +163,47 @@ class ReclusterConcurrencyTest(unittest.TestCase):
             self.assertEqual(claimed, 1, "only the still-unassigned face may be claimed")
             self.assertEqual(rows[1], 99, "the user's assignment must survive")
             self.assertEqual(rows[2], 50)
+
+    def test_large_group_stays_below_sqlite_variable_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.sqlite"
+            faces = [
+                (face_id, 10, None, float(face_id % 3))
+                for face_id in range(1, 1201)
+            ]
+            self._seed(db_path, faces=faces)
+
+            def limited_connection():
+                return _VariableLimitedConnection(self._make_connection(db_path))
+
+            clusterer = Mock()
+            clusterer.add_and_assign.return_value = (np.array([0]), None)
+            with (
+                patch("backend.services.storage.get_conn", limited_connection),
+                patch("backend.services.storage.FaceClustering", return_value=clusterer),
+                patch(
+                    "backend.services.storage.consolidate_small_clusters",
+                    side_effect=lambda _embeddings, cluster_ids, *_args, **_kwargs: cluster_ids,
+                ),
+                patch(
+                    "backend.services.storage.split_heterogeneous_clusters",
+                    side_effect=lambda _embeddings, cluster_ids, *_args, **_kwargs: cluster_ids,
+                ),
+                patch(
+                    "backend.services.storage.get_cluster_distance_threshold",
+                    return_value=0.15,
+                ),
+            ):
+                rebuilt = storage.recluster_all_active_faces()
+
+            check = self._make_connection(db_path)
+            assigned = check.execute(
+                "SELECT COUNT(*) FROM face WHERE cluster_id IS NOT NULL"
+            ).fetchone()[0]
+            check.close()
+
+            self.assertEqual(rebuilt, 1200)
+            self.assertEqual(assigned, 1200)
 
     def test_cancelling_between_groups_keeps_state_consistent(self):
         """A cancelled pass leaves finished groups done and the rest untouched."""
