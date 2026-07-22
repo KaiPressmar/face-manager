@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.10.0] - 2026-07-22
+
+### Neu
+
 - Nicht mehr vorhandene Bilddateien werden im Leerlauf bereinigt; zusätzlich lässt sich die Prüfung unter „Daten und Wartung“ jederzeit manuell starten.
 
 ### Verbessert
