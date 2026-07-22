@@ -37,6 +37,9 @@ class RecordingProcessor:
         )
         try:
             while not self.release.wait(0.01):
+                wait_if_paused = getattr(cancel_event, "wait_if_paused", None)
+                if callable(wait_if_paused) and wait_if_paused():
+                    raise ImportCancelled()
                 if cancel_event.is_set():
                     raise ImportCancelled()
         finally:
@@ -186,6 +189,53 @@ class ImportQueueTest(unittest.TestCase):
         result = self.queue.cancel_or_remove(job["id"])
         self.assertEqual(result["status"], "cancelling")
         self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "cancelled")
+
+    def test_running_job_can_be_paused_resumed_and_cancelled(self):
+        job = self.queue.enqueue("/photos/running")
+        self.wait_for(lambda: self.processor.started == ["/photos/running"])
+
+        paused = self.queue.pause(job["id"])
+        self.assertEqual(paused["status"], "paused")
+        self.assertEqual(self.queue.snapshot()["jobs"][0]["status"], "paused")
+
+        resumed = self.queue.resume(job["id"])
+        self.assertEqual(resumed["status"], "running")
+        self.assertEqual(self.queue.snapshot()["jobs"][0]["status"], "running")
+
+        self.queue.pause(job["id"])
+        cancelling = self.queue.cancel(job["id"])
+        self.assertEqual(cancelling["status"], "cancelling")
+        self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "cancelled")
+
+    def test_paused_queued_job_keeps_its_place_until_resumed(self):
+        self.queue.enqueue("/photos/running")
+        paused_job = self.queue.enqueue("/photos/paused")
+        later_job = self.queue.enqueue("/photos/later")
+        self.wait_for(lambda: self.processor.started == ["/photos/running"])
+
+        self.queue.pause(paused_job["id"])
+        self.processor.release.set()
+        self.wait_for(lambda: "/photos/later" in self.processor.started)
+        self.assertNotIn("/photos/paused", self.processor.started)
+
+        self.queue.resume(paused_job["id"])
+        self.wait_for(lambda: "/photos/paused" in self.processor.started)
+        jobs = {job["id"]: job for job in self.queue.snapshot()["jobs"]}
+        self.assertIn(jobs[later_job["id"]]["status"], {"running", "completed"})
+
+    def test_terminal_history_can_be_deleted_individually_or_together(self):
+        self.processor.release.set()
+        first = self.queue.enqueue("/photos/first")
+        second = self.queue.enqueue("/photos/second")
+        self.wait_for(
+            lambda: all(
+                job["status"] == "completed" for job in self.queue.snapshot()["jobs"]
+            )
+        )
+
+        self.assertEqual(self.queue.delete_terminal(first["id"])["status"], "removed")
+        self.assertEqual(self.queue.clear_history(), 1)
+        self.assertEqual(self.queue.snapshot()["jobs"], [])
 
     def test_terminal_history_is_bounded(self):
         self.processor.release.set()

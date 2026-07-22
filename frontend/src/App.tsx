@@ -254,7 +254,12 @@ const App: React.FC = () => {
   const renderPage = (target: AppPage, active: boolean): React.ReactNode => {
     switch (target) {
       case "people":
-        return <PeoplePage onNavigateToCluster={handleNavigateToCluster} />;
+        return (
+          <PeoplePage
+            active={active}
+            onNavigateToCluster={handleNavigateToCluster}
+          />
+        );
       case "review":
         return (
           <ErrorBoundary title="„Gesichter prüfen“ konnte nicht angezeigt werden">
@@ -265,7 +270,12 @@ const App: React.FC = () => {
           </ErrorBoundary>
         );
       case "renaming":
-        return <ImageRenamePage onOpenFilenameSettings={handleOpenFilenameSettings} />;
+        return (
+          <ImageRenamePage
+            active={active}
+            onOpenFilenameSettings={handleOpenFilenameSettings}
+          />
+        );
       case "settings":
         return (
           <SettingsPage

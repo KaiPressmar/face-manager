@@ -3717,7 +3717,12 @@ def recluster_all_active_faces(
         Number of faces that were rebuilt.
     """
     def _cancelled() -> bool:
-        return cancel_token is not None and cancel_token.is_set()
+        if cancel_token is None:
+            return False
+        wait_if_paused = getattr(cancel_token, "wait_if_paused", None)
+        if callable(wait_if_paused) and wait_if_paused():
+            return True
+        return cancel_token.is_set()
 
     conn = get_conn()
     conn.isolation_level = None  # explicit, short transactions per group
