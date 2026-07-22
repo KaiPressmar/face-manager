@@ -12,12 +12,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile, UnidentifiedImageError
 
 from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
 from .face_thumbnails import delete_face_thumbnail
+from .filesystem_paths import (
+    filesystem_path as _filesystem_path,
+    stored_path as _stored_filesystem_path,
+)
 from .storage import (
     FACE_REVIEW_STATUS_ACTIVE,
     get_cluster_distance_threshold,
@@ -27,6 +31,10 @@ from .storage import (
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.pipeline")
+
+# Cameras and synchronization tools sometimes leave JPEG files without their
+# final marker even though all pixel data is available. Recover those files.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 if TYPE_CHECKING:
     from ..models.clustering import FaceClustering
@@ -112,9 +120,10 @@ class ImagePreparer:
             Hashed image metadata used for import planning.
         """
         normalized_path = os.path.normpath(str(path))
-        stat_result = os.stat(normalized_path)
-        content_hash = calculate_file_hash(normalized_path)
-        created_at = get_file_created_at(normalized_path, stat_result)
+        filesystem_path = _filesystem_path(normalized_path)
+        stat_result = os.stat(filesystem_path)
+        content_hash = calculate_file_hash(filesystem_path)
+        created_at = get_file_created_at(filesystem_path, stat_result)
         return HashedImage(
             path,
             normalized_path,
@@ -134,7 +143,7 @@ class ImagePreparer:
         Returns:
             RGB image represented as a NumPy array.
         """
-        with Image.open(path) as image:
+        with Image.open(_filesystem_path(path)) as image:
             return np.asarray(image.convert("RGB"))
 
     def iter_hashed(
@@ -318,7 +327,7 @@ class ImportProcessor:
             FileNotFoundError: If the queued folder no longer exists.
         """
         folder = Path(folder_path)
-        if not folder.is_dir():
+        if not os.path.isdir(_filesystem_path(folder)):
             raise FileNotFoundError(f"Import folder no longer exists: {folder_path}")
 
         progress_callback(
@@ -404,6 +413,19 @@ class ImportProcessor:
                     else:
                         primary = hashed
                         try:
+                            try:
+                                image_np = preparer.decode(primary.path)
+                            except (UnidentifiedImageError, OSError) as exc:
+                                logger.warning(
+                                    "Skipping unreadable image %s: %s",
+                                    primary.path,
+                                    exc,
+                                )
+                                progress_callback(
+                                    {"last_error": f"{primary.path}: {exc}"}
+                                )
+                                continue
+
                             if not processing_started:
                                 self._acquire_processing_slot(cancel_event)
                                 processing_slot_acquired = True
@@ -447,7 +469,6 @@ class ImportProcessor:
                             # instead of keeping a stale person/cluster map for
                             # the remainder of the job.
                             clusterer = self.resources.get_clusterer()
-                            image_np = preparer.decode(primary.path)
                             progress_callback({"current_file": str(primary.path)})
                             self._process_image(
                                 cursor,
@@ -477,6 +498,15 @@ class ImportProcessor:
                             )
                 except ImportCancelled:
                     raise
+                except (FileNotFoundError, PermissionError) as exc:
+                    logger.warning(
+                        "Skipping inaccessible image %s: %s",
+                        image_path,
+                        exc,
+                    )
+                    progress_callback({"last_error": f"{image_path}: {exc}"})
+                    completed_images += 1
+                    progress_callback({"processed_images": completed_images})
                 except Exception as exc:
                     logger.exception("Import hashing/planning failed for %s", image_path)
                     progress_callback({"last_error": f"{image_path}: {exc}"})
@@ -557,20 +587,20 @@ class ImportProcessor:
             Sorted image paths for deterministic queue processing.
         """
         image_paths = []
-        for root, directories, filenames in os.walk(folder):
+        for root, directories, filenames in os.walk(_filesystem_path(folder)):
             directories.sort()
             filenames.sort()
             if cancel_event is not None:
                 cls._raise_if_cancelled(cancel_event)
             for filename in filenames:
-                path = Path(root) / filename
+                path = Path(_stored_filesystem_path(root)) / filename
                 if path.suffix.lower() in cls.IMAGE_SUFFIXES:
                     image_paths.append(path)
             if progress_callback is not None:
                 progress_callback(
                     {
                         "stage_current": len(image_paths),
-                        "current_file": root,
+                        "current_file": _stored_filesystem_path(root),
                     }
                 )
         return image_paths
@@ -631,7 +661,7 @@ class ImportProcessor:
                 needs_hash.append(path)
                 continue
             try:
-                stat_result = os.stat(normalized_path)
+                stat_result = os.stat(_filesystem_path(normalized_path))
             except OSError:
                 needs_hash.append(path)
                 continue
@@ -969,7 +999,8 @@ class ImportProcessor:
                 continue
             try:
                 location_is_valid = (
-                    os.path.isfile(path) and calculate_file_hash(path) == expected_hash
+                    os.path.isfile(_filesystem_path(path))
+                    and calculate_file_hash(_filesystem_path(path)) == expected_hash
                 )
             except OSError:
                 location_is_valid = False

@@ -50,6 +50,7 @@ from .services.desktop import (
     to_display_path,
 )
 from .services.face_thumbnails import ensure_face_thumbnail
+from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
 from .services.autocluster_queue import (
@@ -1811,7 +1812,7 @@ def get_image(image_id: int):
     path = get_available_image_path(image_id)
     if not path:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    return FileResponse(path)
+    return FileResponse(filesystem_path(path))
 
 
 @app.delete("/api/images/{image_id}")
@@ -1885,7 +1886,7 @@ def get_image_orientation(path):
         Orientation value, width, and height.
     """
     try:
-        with Image.open(path) as img:
+        with Image.open(filesystem_path(path)) as img:
             exif = img.getexif()
             orientation = exif.get(274, 1)
             return orientation, img.width, img.height

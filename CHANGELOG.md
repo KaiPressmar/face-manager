@@ -15,6 +15,9 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+- Die Neuordnung sehr großer Bildbestände bricht bei vielen noch nicht zugeordneten Gesichtern nicht mehr vorzeitig ab.
+- Sehr lange Windows-Pfade und leicht unvollständige Bilddateien werden beim Import zuverlässiger verarbeitet; Dateien, die tatsächlich keine Bilder sind, werden sicher übersprungen.
+
 ## [0.10.1] - 2026-07-22
 
 ### Behoben

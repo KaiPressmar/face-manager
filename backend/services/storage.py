@@ -27,6 +27,7 @@ from ..models.clustering import (
     tune_distance_threshold,
 )
 from .cache import app_cache
+from .filesystem_paths import filesystem_path
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.storage")
@@ -42,6 +43,15 @@ VALID_UI_THEMES = ("system", "light", "dark")
 DEFAULT_AUTOMATIC_UPDATE_CHECKS = True
 UNKNOWN_PERSON_LABEL = "Unbekannt"
 MAX_IMAGE_PAGE_SIZE = 200
+SQLITE_SAFE_ID_BATCH_SIZE = 500
+_RECLUSTER_FACE_IDS_TABLE = "face_manager_recluster_face_ids"
+_RECLUSTER_PROTECTED_CLUSTER_IDS_TABLE = (
+    "face_manager_recluster_protected_cluster_ids"
+)
+_RECLUSTER_TEMP_ID_TABLES = {
+    _RECLUSTER_FACE_IDS_TABLE,
+    _RECLUSTER_PROTECTED_CLUSTER_IDS_TABLE,
+}
 QUERY_CACHE_TTL_SECONDS = 5.0
 QUERY_CACHE_TAG_IMAGES = "images"
 QUERY_CACHE_TAG_FOLDERS = "folders"
@@ -59,6 +69,27 @@ VALID_FACE_REVIEW_GROUPS = {
     REVIEW_GROUP_UNKNOWN_PERSON,
     REVIEW_GROUP_NOT_FACE,
 }
+
+
+def _id_batches(values: list[int], batch_size: int = SQLITE_SAFE_ID_BATCH_SIZE):
+    """Yield bounded ID batches below every supported SQLite variable limit."""
+    for start in range(0, len(values), batch_size):
+        yield values[start : start + batch_size]
+
+
+def _replace_recluster_temp_ids(cur, table_name: str, values) -> None:
+    """Populate one internal temporary ID table without a giant SQL list."""
+    if table_name not in _RECLUSTER_TEMP_ID_TABLES:
+        raise ValueError("Unsupported reclustering temporary table")
+    cur.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {table_name} "
+        "(id INTEGER PRIMARY KEY) WITHOUT ROWID"
+    )
+    cur.execute(f"DELETE FROM {table_name}")
+    cur.executemany(
+        f"INSERT OR IGNORE INTO {table_name}(id) VALUES (?)",
+        ((int(value),) for value in values),
+    )
 
 
 def _safe_float(v):
@@ -1034,15 +1065,7 @@ def _create_cluster_for_faces(cur, face_ids: list[int], person_id: int | None = 
         (None, person_id),
     )
     cluster_id = int(cur.lastrowid)
-    placeholders = ",".join("?" for _ in face_ids)
-    cur.execute(
-        f"""
-        UPDATE face
-        SET cluster_id = ?, review_status = ?
-        WHERE id IN ({placeholders})
-        """,
-        (cluster_id, FACE_REVIEW_STATUS_ACTIVE, *face_ids),
-    )
+    _assign_faces_to_cluster(cur, face_ids, cluster_id)
     return cluster_id
 
 
@@ -1241,20 +1264,23 @@ def _assign_faces_to_cluster(
     Returns:
         Number of faces actually attached.
     """
-    placeholders = ",".join("?" for _ in face_ids)
+    updated = 0
     guard = " AND cluster_id IS NULL AND review_status = ?" if only_unclaimed else ""
-    params: list[object] = [cluster_id, FACE_REVIEW_STATUS_ACTIVE, *face_ids]
-    if only_unclaimed:
-        params.append(FACE_REVIEW_STATUS_ACTIVE)
-    cur.execute(
-        f"""
-        UPDATE face
-        SET cluster_id = ?, review_status = ?
-        WHERE id IN ({placeholders}){guard}
-        """,
-        params,
-    )
-    return int(cur.rowcount or 0)
+    for batch in _id_batches(face_ids):
+        placeholders = ",".join("?" for _ in batch)
+        params: list[object] = [cluster_id, FACE_REVIEW_STATUS_ACTIVE, *batch]
+        if only_unclaimed:
+            params.append(FACE_REVIEW_STATUS_ACTIVE)
+        cur.execute(
+            f"""
+            UPDATE face
+            SET cluster_id = ?, review_status = ?
+            WHERE id IN ({placeholders}){guard}
+            """,
+            params,
+        )
+        updated += int(cur.rowcount or 0)
+    return updated
 
 
 def _move_faces_to_hidden_review_status(
@@ -1335,17 +1361,21 @@ def _recluster_active_faces_into_inbox(
 
     excluded_cluster_ids = excluded_cluster_ids or set()
     normalized_face_ids = sorted({int(face_id) for face_id in face_ids})
-    target_placeholders = ",".join("?" for _ in normalized_face_ids)
+    _replace_recluster_temp_ids(
+        cur,
+        _RECLUSTER_FACE_IDS_TABLE,
+        normalized_face_ids,
+    )
     target_rows = cur.execute(
         f"""
-        SELECT id, embedding
+        SELECT face.id, face.embedding
         FROM face
-        WHERE id IN ({target_placeholders})
-          AND review_status = ?
-          AND cluster_id IS NULL
-        ORDER BY id ASC
+        JOIN {_RECLUSTER_FACE_IDS_TABLE} target ON target.id = face.id
+        WHERE face.review_status = ?
+          AND face.cluster_id IS NULL
+        ORDER BY face.id ASC
         """,
-        (*normalized_face_ids, FACE_REVIEW_STATUS_ACTIVE),
+        (FACE_REVIEW_STATUS_ACTIVE,),
     ).fetchall()
     if not target_rows:
         return 0
@@ -1353,9 +1383,18 @@ def _recluster_active_faces_into_inbox(
     candidate_params: list[object] = [FACE_REVIEW_STATUS_ACTIVE]
     candidate_exclusions = ""
     if excluded_cluster_ids:
-        exclusion_placeholders = ",".join("?" for _ in excluded_cluster_ids)
-        candidate_exclusions = f" AND f.cluster_id NOT IN ({exclusion_placeholders})"
-        candidate_params.extend(sorted(excluded_cluster_ids))
+        _replace_recluster_temp_ids(
+            cur,
+            _RECLUSTER_PROTECTED_CLUSTER_IDS_TABLE,
+            excluded_cluster_ids,
+        )
+        candidate_exclusions = f"""
+          AND NOT EXISTS (
+              SELECT 1
+              FROM {_RECLUSTER_PROTECTED_CLUSTER_IDS_TABLE} protected
+              WHERE protected.id = f.cluster_id
+          )
+        """
 
     candidate_rows = cur.execute(
         f"""
@@ -2081,7 +2120,10 @@ def get_available_image_path(
             (image_id, preferred_path),
         ).fetchall()
     conn.close()
-    return next((row["path"] for row in rows if os.path.isfile(row["path"])), None)
+    return next(
+        (row["path"] for row in rows if os.path.isfile(filesystem_path(row["path"]))),
+        None,
+    )
 
 
 def delete_image(image_id: int):
@@ -3614,14 +3656,14 @@ def recluster_unassigned_faces(progress_callback=None) -> int:
         conn.close()
         return 0
 
-    placeholders = ",".join("?" for _ in face_ids)
+    _replace_recluster_temp_ids(cur, _RECLUSTER_FACE_IDS_TABLE, face_ids)
     cur.execute(
         f"""
         UPDATE face
         SET cluster_id = NULL, review_status = ?
-        WHERE id IN ({placeholders})
+        WHERE id IN (SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE})
         """,
-        (FACE_REVIEW_STATUS_ACTIVE, *face_ids),
+        (FACE_REVIEW_STATUS_ACTIVE,),
     )
     _delete_empty_clusters(cur)
     reclustered_count = _recluster_active_faces_into_inbox(
@@ -3762,10 +3804,17 @@ def recluster_all_active_faces(
                     cur.execute("COMMIT")
                     continue
 
-                placeholders = ",".join("?" for _ in face_ids)
-                cur.execute(
-                    f"UPDATE face SET cluster_id = NULL WHERE id IN ({placeholders})",
+                _replace_recluster_temp_ids(
+                    cur,
+                    _RECLUSTER_FACE_IDS_TABLE,
                     face_ids,
+                )
+                cur.execute(
+                    f"""
+                    UPDATE face
+                    SET cluster_id = NULL
+                    WHERE id IN (SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE})
+                    """
                 )
                 # Exclude every surviving cluster so the group is rebuilt from
                 # scratch instead of merging back into stale groupings.
@@ -3795,11 +3844,13 @@ def recluster_all_active_faces(
                         WHERE id IN (
                             SELECT DISTINCT cluster_id
                             FROM face
-                            WHERE id IN ({placeholders})
+                            WHERE id IN (
+                                SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE}
+                            )
                               AND cluster_id IS NOT NULL
                         )
                         """,
-                        (person_id, *face_ids),
+                        (person_id,),
                     )
 
                 _clear_dirty_recluster_person(cur, person_id)
@@ -4062,7 +4113,7 @@ def _build_filename_rename_candidates_from_rows(
 
     for location_rows in grouped_rows:
         first_row = location_rows[0]
-        if not os.path.isfile(first_row["path"]):
+        if not os.path.isfile(filesystem_path(first_row["path"])):
             continue
         preview = build_person_filename_preview(
             first_row["filename"],
@@ -4285,15 +4336,17 @@ def rename_image_locations_to_match_people(
         if source_path == target_path:
             skipped.append({"path": source_path, "reason": "already_matches"})
             continue
-        if not os.path.isfile(source_path):
+        source_filesystem_path = filesystem_path(source_path)
+        target_filesystem_path = filesystem_path(target_path)
+        if not os.path.isfile(source_filesystem_path):
             skipped.append({"path": source_path, "reason": "missing_source"})
             continue
-        if os.path.exists(target_path):
+        if os.path.exists(target_filesystem_path):
             skipped.append({"path": source_path, "reason": "target_exists"})
             continue
 
         try:
-            os.rename(source_path, target_path)
+            os.rename(source_filesystem_path, target_filesystem_path)
         except OSError as exc:
             logger.exception(
                 "Could not rename image from %s to %s",
@@ -4324,7 +4377,7 @@ def rename_image_locations_to_match_people(
                 target_path,
             )
             try:
-                os.rename(target_path, source_path)
+                os.rename(target_filesystem_path, source_filesystem_path)
             except OSError:
                 logger.exception(
                     "Could not roll back file rename from %s to %s",

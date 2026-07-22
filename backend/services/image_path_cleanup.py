@@ -11,6 +11,7 @@ from typing import Callable
 from ..db.schema import get_conn
 from .cache import app_cache
 from .face_thumbnails import delete_face_thumbnail
+from .filesystem_paths import filesystem_path
 from .storage import invalidate_image_query_cache
 
 logger = logging.getLogger("face_manager.image_path_cleanup")
@@ -183,7 +184,7 @@ class ImagePathCleanup:
                         return
                     if not self._wait_until_idle():
                         return
-                    if not os.path.isfile(row["path"]):
+                    if not os.path.isfile(filesystem_path(row["path"])):
                         missing_paths.append(row["path"])
                     with self._lock:
                         self._state["scanned_paths"] += 1
@@ -230,7 +231,7 @@ class ImagePathCleanup:
             removed_paths = 0
             for path in paths:
                 # A removable drive or network share may have returned meanwhile.
-                if os.path.isfile(path):
+                if os.path.isfile(filesystem_path(path)):
                     continue
                 row = cur.execute(
                     "SELECT image_id FROM image_location WHERE path = ?", (path,)
