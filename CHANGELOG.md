@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.8.0] - 2026-07-22
+
+### Neu
+
 - Bilder und Gesichtsgruppen aktualisieren sich während laufender Importe und Neu-Gruppierungen automatisch, ohne die aktuelle Arbeitsposition zu verändern.
 - In der Bilderansicht lässt sich die Größe der Bilder im Raster jetzt zwischen sehr klein, klein, mittel und groß wählen; die Auswahl bleibt für den nächsten Start erhalten.
 
