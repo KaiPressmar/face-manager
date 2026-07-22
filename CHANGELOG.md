@@ -9,9 +9,15 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
-- Laufende Importe, Neuordnungen und Vorschauarbeiten lassen sich pausieren, fortsetzen oder abbrechen; beendete Aufgaben können einzeln oder vollständig aus der Historie gelöscht werden.
-
 ### Verbessert
+
+### Behoben
+
+## [0.9.0] - 2026-07-22
+
+### Neu
+
+- Laufende Importe, Neuordnungen und Vorschauarbeiten lassen sich pausieren, fortsetzen oder abbrechen; beendete Aufgaben können einzeln oder vollständig aus der Historie gelöscht werden.
 
 ### Behoben
 
