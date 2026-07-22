@@ -11,6 +11,7 @@ from backend.services.import_queue import (
     ImportJobRepository,
     ImportQueue,
     LiveStageTiming,
+    StableEta,
 )
 from backend.services.pipeline import ImportCancelled
 
@@ -167,20 +168,70 @@ class ImportQueueTest(unittest.TestCase):
         )
         self.queue._live_stage_timing[job.id] = tracker
 
-        first_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+        with patch("backend.services.import_queue.time.monotonic", return_value=100.0):
+            first_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
         tracker.observe(110, 110.0)
         job.processed_images = 110
         job.stage_current = 110
-        steady_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+        with patch("backend.services.import_queue.time.monotonic", return_value=110.0):
+            steady_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
 
         tracker.observe(111, 210.0)
         job.processed_images = 111
         job.stage_current = 111
-        outlier_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+        with patch("backend.services.import_queue.time.monotonic", return_value=210.0):
+            outlier_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
 
         self.assertEqual(first_eta, 900.0)
         self.assertLess(steady_eta, first_eta)
         self.assertLess(outlier_eta, steady_eta)
+
+    def test_live_eta_adds_only_overdue_current_image_time(self):
+        job = ImportJob(
+            id="slow-current-image",
+            folder_path="/photos/variable",
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+            stage="processing",
+            total_images=20,
+            processed_images=10,
+            stage_current=10,
+            stage_total=20,
+        )
+        self.queue._live_stage_timing[job.id] = LiveStageTiming(
+            stage="processing",
+            last_progress=10,
+            last_sample_at=100.0,
+            samples=[2.0] * 10,
+        )
+
+        with patch("backend.services.import_queue.time.monotonic", return_value=110.0):
+            eta = self.queue._estimate_stage_remaining_seconds(job, 20)
+
+        # Ten normal images need 20 seconds; the currently slow image adds its
+        # eight overdue seconds once instead of multiplying that delay by ten.
+        self.assertEqual(eta, 28.0)
+
+    def test_stable_eta_limits_fast_upward_and_downward_jumps(self):
+        eta = StableEta(seconds=600.0, updated_at=100.0)
+
+        corrected_up = eta.update(900.0, 101.0)
+        corrected_down = eta.update(300.0, 102.0)
+
+        self.assertGreater(corrected_up, 599.0)
+        self.assertLess(corrected_up, 610.0)
+        self.assertLess(corrected_down, corrected_up)
+        self.assertGreater(corrected_down, 570.0)
+
+    def test_stable_eta_countdown_is_independent_of_snapshot_frequency(self):
+        frequent = StableEta(seconds=600.0, updated_at=100.0)
+        sparse = StableEta(seconds=600.0, updated_at=100.0)
+
+        for observed_at in range(101, 111):
+            frequent.update(900.0, float(observed_at))
+        sparse.update(900.0, 110.0)
+
+        self.assertAlmostEqual(frequent.seconds, sparse.seconds, delta=1.0)
 
     def test_live_eta_calibrates_from_first_completed_interval(self):
         tracker = LiveStageTiming(
@@ -193,6 +244,69 @@ class ImportQueueTest(unittest.TestCase):
 
         self.assertEqual(tracker.seconds_per_unit, 2.0)
 
+    def test_running_eta_waits_for_size_and_live_throughput(self):
+        scanning = ImportJob(
+            id="scanning",
+            folder_path="/photos/scanning",
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+            stage="scanning",
+            stage_current=500,
+        )
+        processing = ImportJob(
+            id="calibrating",
+            folder_path="/photos/calibrating",
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+            stage="processing",
+            total_images=1000,
+            processed_images=100,
+            stage_current=100,
+            stage_total=1000,
+        )
+        tracker = LiveStageTiming(
+            stage="processing",
+            last_progress=100,
+            last_sample_at=10.0,
+        )
+        self.queue._live_stage_timing[processing.id] = tracker
+
+        self.assertFalse(self.queue._has_reliable_live_eta(scanning))
+        self.assertFalse(self.queue._has_reliable_live_eta(processing))
+
+        tracker.observe(101, 12.0)
+
+        self.assertTrue(self.queue._has_reliable_live_eta(processing))
+        self.assertTrue(self.queue._has_reliable_job_eta(processing))
+
+    def test_station_eta_does_not_guess_unmeasured_processing_time(self):
+        job = ImportJob(
+            id="hashing-first-import",
+            folder_path="/photos/first",
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+            stage="hashing",
+            total_images=1000,
+            hashed_images=100,
+            stage_current=100,
+            stage_total=1000,
+        )
+        self.queue._live_stage_timing[job.id] = LiveStageTiming(
+            stage="hashing",
+            last_progress=100,
+            last_sample_at=12.0,
+            samples=[0.02] * 5,
+        )
+
+        with patch("backend.services.import_queue.time.monotonic", return_value=12.0):
+            etas = self.queue._estimate_station_etas(job)
+
+        self.assertIsNotNone(etas["hashing"])
+        self.assertIsNotNone(etas["loading_model"])
+        self.assertIsNone(etas["processing"])
+        self.assertIsNone(etas["finalizing"])
+        self.assertFalse(self.queue._has_reliable_job_eta(job))
+
     def test_resume_rebases_live_eta_sample_after_pause(self):
         job = self.queue.enqueue("/photos/paused-eta")
         self.wait_for(lambda: self.processor.started == ["/photos/paused-eta"])
@@ -204,6 +318,8 @@ class ImportQueueTest(unittest.TestCase):
             samples=[1.0, 1.0, 1.0],
         )
         self.queue._live_stage_timing[job["id"]] = tracker
+        stable_eta = StableEta(seconds=120.0, updated_at=10.0)
+        self.queue._stable_etas[(job["id"], "job")] = stable_eta
 
         self.queue.pause(job["id"])
         with patch("backend.services.import_queue.time.monotonic", return_value=1000.0):
@@ -211,6 +327,8 @@ class ImportQueueTest(unittest.TestCase):
 
         self.assertEqual(tracker.last_sample_at, 1000.0)
         self.assertEqual(tracker.seconds_per_unit, 1.0)
+        self.assertEqual(stable_eta.updated_at, 1000.0)
+        self.assertEqual(stable_eta.seconds, 120.0)
 
     def test_on_change_fires_on_enqueue_and_progress(self):
         self.processor.release.clear()

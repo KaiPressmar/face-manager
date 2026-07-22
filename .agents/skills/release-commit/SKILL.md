@@ -100,7 +100,18 @@ git switch -c fix/<short-topic> origin/develop   # pick the right prefix
 
 Confirm the branch name with the user if the prefix is ambiguous.
 
-### 4. Commit (Conventional Commits)
+### 4. Run the full validation gate
+
+Validate the finished diff before creating its dedicated commit:
+
+```bash
+./scripts/check-all.sh
+```
+
+Fix anything it reports, review the complete diff again, and confirm the
+classification and changelog still match the final implementation.
+
+### 5. Commit (Conventional Commits)
 
 Stage intentionally and commit. Follow the `caveman-commit` conventions:
 `<type>(<scope>): <imperative summary>`, types `feat|fix|refactor|perf|docs|test|
@@ -108,22 +119,19 @@ chore|build|ci|style|revert`, imperative, lowercase after the colon, no trailing
 period, subject ≤50 (hard cap 72). Add a body only for a non-obvious *why*,
 breaking changes, or migrations. Reference issues at the end (`Closes #42`).
 
-### 5. Run the full validation gate
-
-```bash
-./scripts/check-all.sh
-```
-
-Fix anything it reports before continuing.
-
 ### 6. Push and open the PR into develop
 
 ```bash
 git push -u origin HEAD
-gh pr create --base develop --title "<conventional-commit-style title>" --body "<template>"
+gh pr create --base develop --title "<conventional-commit-style title>" \
+  --body-file <completed-pr-body-file>
 ```
 
-Fill the PR template (`.github/PULL_REQUEST_TEMPLATE.md`):
+Copy `.github/PULL_REQUEST_TEMPLATE.md` to a unique temporary file, fill it, and
+pass it with `--body-file`. Avoid a long inline `--body`: quoting errors are easy
+and rerunning a check after correcting the PR body retains the old event payload.
+
+Fill the template:
 
 - **Change Classification** — check exactly one box. Mixed ⇒ **User-visible
   change**.
@@ -137,10 +145,12 @@ Fill the PR template (`.github/PULL_REQUEST_TEMPLATE.md`):
 ### 7. Auto-merge
 
 ```bash
-gh pr merge --squash --auto
+gh pr merge <pr-number> --squash --auto
 ```
 
 Report the PR URL and its merge state. PRs into `develop` are squash-merged.
+Passing checks do not guarantee auto-merge has completed; always verify the PR
+itself reports `state=MERGED` and has a merge commit.
 
 ### 8. Sync local branches after the merge
 
@@ -148,14 +158,17 @@ Once the PR actually merges, bring the local repo up to date so the next task
 starts clean:
 
 ```bash
-gh pr checks --watch          # wait for the merge to land
+gh pr checks <pr-number> --watch
+gh pr view <pr-number> --json state,mergedAt,mergeCommit,url
 git switch develop
 git pull --ff-only origin develop
-git branch -d <work-branch>   # the squash-merged branch is now redundant
 ```
 
-If you keep working on a follow-up branch, cut it (or rebase it) from the freshly
-updated `develop` so it never lags behind.
+Delete the local work branch only after the merge is confirmed and the worktree
+is clean. Because squash merging deliberately replaces its commit, `git branch
+-d` may reject the redundant branch; `git branch -D <work-branch>` is appropriate
+only after those checks. If you keep working on a follow-up branch, cut it (or
+rebase it) from the freshly updated `develop` so it never lags behind.
 
 ## Boundaries
 
