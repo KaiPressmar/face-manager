@@ -9,9 +9,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Bilder und Gesichtsgruppen aktualisieren sich während laufender Importe und Neu-Gruppierungen automatisch, ohne die aktuelle Arbeitsposition zu verändern.
+- In der Bilderansicht lässt sich die Größe der Bilder im Raster jetzt zwischen sehr klein, klein, mittel und groß wählen; die Auswahl bleibt für den nächsten Start erhalten.
+
 ### Verbessert
 
+- Zuordnungen lassen sich während eines Bildimports sicher weiterbearbeiten; manuelle Änderungen behalten Vorrang und neue Gesichter werden zuverlässig einsortiert.
+- Filter, Sortierung und Darstellungsoptionen sind in den Bilder- und Dateiansichten übersichtlicher angeordnet und bleiben auch auf schmalen Fenstern gut bedienbar.
+
 ### Behoben
+
+- Der Sprung von einem Bild zu einer Gesichtsgruppe zeigt jetzt bereits beim ersten Versuch zuverlässig die ausgewählte Gruppe und ihre Gesichter.
 
 ## [0.7.1] - 2026-07-22
 

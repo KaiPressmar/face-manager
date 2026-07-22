@@ -399,7 +399,6 @@ class ImportProcessor:
                                 )
                                 model = self.resources.get_model()
                                 progress_callback({"stage": "loading_index"})
-                                clusterer = self.resources.get_clusterer()
                                 resources_loaded = True
                                 progress_callback(
                                     {
@@ -408,6 +407,12 @@ class ImportProcessor:
                                         "stage_total": len(image_paths),
                                     }
                                 )
+                            # Interactive assignments reset the shared resource
+                            # between images. Resolve the clusterer for every
+                            # image so a running import observes that reset
+                            # instead of keeping a stale person/cluster map for
+                            # the remainder of the job.
+                            clusterer = self.resources.get_clusterer()
                             image_np = preparer.decode(primary.path)
                             progress_callback({"current_file": str(primary.path)})
                             self._process_image(
@@ -573,6 +578,24 @@ class ImportProcessor:
             clusterer: Incremental face clustering index.
             progress_callback: Callback receiving face progress updates.
         """
+        # Detection and in-memory clustering are the expensive part. Do them
+        # before the first database write so SQLite's single WAL writer remains
+        # available to interactive assignments while inference is running.
+        faces = model.detect_and_embed(image_np)
+        distance_threshold = get_cluster_distance_threshold()
+        proposed_faces: list[tuple[dict, int]] = []
+        for face in faces:
+            cluster_ids, _ = clusterer.add_and_assign(
+                np.expand_dims(face["embedding"], axis=0),
+                distance_threshold=distance_threshold,
+                # Confirmed person clusters are reference data, not an
+                # authorization to silently attach newly imported faces.
+                # Person matches are generated as reviewable suggestions by
+                # the post-import/reclustering workflow instead.
+                allow_person_matches=False,
+            )
+            proposed_faces.append((face, int(cluster_ids[0])))
+
         existing_face_ids = [
             int(row["id"])
             for row in cursor.execute(
@@ -581,27 +604,15 @@ class ImportProcessor:
             ).fetchall()
         ]
         cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
-        for face_id in existing_face_ids:
-            delete_face_thumbnail(face_id)
-        faces = model.detect_and_embed(image_np)
-        distance_threshold = get_cluster_distance_threshold()
         thumbnail_jobs: list[tuple[int, tuple[int, int, int, int]]] = []
-        for face in faces:
+        fallback_cluster_ids: dict[int, int] = {}
+        for face, proposed_cluster_id in proposed_faces:
             x1, y1, width, height = face["bbox"]
             embedding = face["embedding"]
-            cluster_ids, _ = clusterer.add_and_assign(
-                np.expand_dims(embedding, axis=0),
-                distance_threshold=distance_threshold,
-                # Confirmed person clusters are reference data, not an
-                # authorization to silently attach newly imported faces.
-                # Person matches are generated as reviewable suggestions by
-                # the post-import/reclustering workflow instead.
-                allow_person_matches=False,
-            )
-            cluster_id = int(cluster_ids[0])
-            cursor.execute(
-                "INSERT OR IGNORE INTO cluster(id, label) VALUES (?, ?)",
-                (cluster_id, f"Cluster {cluster_id}"),
+            cluster_id = self._resolve_import_cluster_id(
+                cursor,
+                proposed_cluster_id,
+                fallback_cluster_ids,
             )
             cursor.execute(
                 """
@@ -627,14 +638,16 @@ class ImportProcessor:
                 (face_id, (int(x1), int(y1), int(width), int(height)))
             )
 
-        # Render every face crop for this image from a single decode/orient.
-        create_face_thumbnails_for_image(image_path, thumbnail_jobs)
-
         cursor.execute(
             "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",
             (image_id,),
         )
         connection.commit()
+        for face_id in existing_face_ids:
+            delete_face_thumbnail(face_id)
+        # Thumbnail rendering performs filesystem work and is recoverable on
+        # demand, so do it only after releasing SQLite's writer slot.
+        create_face_thumbnails_for_image(image_path, thumbnail_jobs)
         invalidate_image_query_cache()
         progress_callback(
             {
@@ -642,6 +655,42 @@ class ImportProcessor:
                 "processed_faces_increment": len(faces),
             }
         )
+
+    @staticmethod
+    def _resolve_import_cluster_id(
+        cursor,
+        proposed_cluster_id: int,
+        fallback_cluster_ids: dict[int, int],
+    ) -> int:
+        """Keep stale import proposals out of user-confirmed person groups.
+
+        A person assignment may happen after the import read its in-memory
+        clustering index. The insert below starts the short write transaction;
+        checking ``person_id`` while that writer slot is held makes the choice
+        atomic with the following face insert. Similar faces from the same
+        image share one fresh fallback cluster.
+        """
+        cursor.execute(
+            "INSERT OR IGNORE INTO cluster(id, label) VALUES (?, ?)",
+            (proposed_cluster_id, f"Cluster {proposed_cluster_id}"),
+        )
+        row = cursor.execute(
+            "SELECT person_id FROM cluster WHERE id = ?",
+            (proposed_cluster_id,),
+        ).fetchone()
+        if row is not None and row["person_id"] is None:
+            return proposed_cluster_id
+
+        fallback = fallback_cluster_ids.get(proposed_cluster_id)
+        if fallback is not None:
+            return fallback
+        cursor.execute(
+            "INSERT INTO cluster(label, person_id) VALUES (?, NULL)",
+            ("Neue Gesichtsgruppe",),
+        )
+        fallback = int(cursor.lastrowid)
+        fallback_cluster_ids[proposed_cluster_id] = fallback
+        return fallback
 
     @classmethod
     def _create_image(

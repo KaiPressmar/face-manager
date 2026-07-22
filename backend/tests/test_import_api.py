@@ -105,6 +105,72 @@ class ImportApiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    @patch.object(app, "event_hub")
+    @patch.object(app, "_publish_background_cluster_progress_throttled")
+    @patch.object(app, "import_queue")
+    def test_committed_import_progress_publishes_library_update(
+        self,
+        import_queue,
+        publish_library_progress,
+        _event_hub,
+    ):
+        previous_progress = app._last_import_progress
+        previous_busy = app._import_was_busy
+        try:
+            app._last_import_progress = {"job-1": (1, 0)}
+            app._import_was_busy = True
+            import_queue.snapshot.return_value = {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "processed_images": 2,
+                        "processed_faces": 3,
+                    }
+                ],
+                "running_count": 1,
+                "queued_count": 0,
+            }
+
+            app._publish_imports()
+
+            publish_library_progress.assert_called_once_with()
+        finally:
+            app._last_import_progress = previous_progress
+            app._import_was_busy = previous_busy
+
+    @patch.object(app, "event_hub")
+    @patch.object(app, "_publish_background_cluster_progress_throttled")
+    @patch.object(app, "import_queue")
+    def test_unchanged_import_progress_does_not_refresh_library(
+        self,
+        import_queue,
+        publish_library_progress,
+        _event_hub,
+    ):
+        previous_progress = app._last_import_progress
+        previous_busy = app._import_was_busy
+        try:
+            app._last_import_progress = {"job-1": (2, 3)}
+            app._import_was_busy = True
+            import_queue.snapshot.return_value = {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "processed_images": 2,
+                        "processed_faces": 3,
+                    }
+                ],
+                "running_count": 1,
+                "queued_count": 0,
+            }
+
+            app._publish_imports()
+
+            publish_library_progress.assert_not_called()
+        finally:
+            app._last_import_progress = previous_progress
+            app._import_was_busy = previous_busy
+
     @patch("backend.app.list_available_image_persons", return_value=["Alice", "Unbekannt"])
     @patch("backend.app.list_image_locations", return_value={1: []})
     @patch("backend.app.list_images_page")

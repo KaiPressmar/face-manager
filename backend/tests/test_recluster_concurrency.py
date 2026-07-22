@@ -178,6 +178,16 @@ class ReclusterConcurrencyTest(unittest.TestCase):
             conn.commit()
             conn.close()
 
+            committed_checkpoints = []
+
+            def after_commit(processed, total):
+                checkpoint_conn = self._make_connection(db_path)
+                visible = checkpoint_conn.execute(
+                    "SELECT COUNT(*) FROM face WHERE cluster_id IS NOT NULL"
+                ).fetchone()[0]
+                checkpoint_conn.close()
+                committed_checkpoints.append((processed, total, visible))
+
             with (
                 patch(
                     "backend.services.storage.get_conn",
@@ -188,7 +198,10 @@ class ReclusterConcurrencyTest(unittest.TestCase):
                     return_value=0.15,
                 ),
             ):
-                storage.recluster_all_active_faces(scoped=True)
+                storage.recluster_all_active_faces(
+                    scoped=True,
+                    commit_callback=after_commit,
+                )
 
             check = self._make_connection(db_path)
             faces = dict(
@@ -209,6 +222,7 @@ class ReclusterConcurrencyTest(unittest.TestCase):
                 faces[1], faces[2], "Anna was dirty, so her faces get re-split"
             )
             self.assertNotIn(1, remaining_dirty, "a rebuilt person is no longer dirty")
+            self.assertEqual(committed_checkpoints, [(2, 2, 4)])
 
 
 if __name__ == "__main__":
