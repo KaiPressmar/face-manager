@@ -7,8 +7,9 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from statistics import median
 from typing import Callable, Optional, Protocol
 
 from ..models.face_model import get_compute_mode
@@ -109,6 +110,48 @@ class StageTimingStats:
             self.avg_seconds_fixed = (
                 self.avg_seconds_fixed * (1 - alpha) + duration_seconds * alpha
             )
+
+
+@dataclass
+class LiveStageTiming:
+    """Track recent unit throughput without letting one outlier dominate ETA."""
+
+    stage: str
+    last_progress: int
+    last_sample_at: float
+    samples: list[float] = field(default_factory=list)
+
+    def observe(self, progress: int, observed_at: float) -> None:
+        """Record elapsed time per newly completed unit."""
+        if progress < self.last_progress:
+            self.last_progress = progress
+            self.last_sample_at = observed_at
+            self.samples.clear()
+            return
+
+        completed = progress - self.last_progress
+        elapsed = max(0.0, observed_at - self.last_sample_at)
+        if completed <= 0:
+            return
+
+        sample = elapsed / completed
+        if sample > 0:
+            if self.samples:
+                baseline = median(self.samples)
+                sample = max(baseline * 0.25, min(sample, baseline * 4.0))
+            self.samples.append(sample)
+            del self.samples[:-9]
+        self.last_progress = progress
+        self.last_sample_at = observed_at
+
+    def rebase(self, progress: int, observed_at: float) -> None:
+        """Exclude a pause from the next throughput interval."""
+        self.last_progress = progress
+        self.last_sample_at = observed_at
+
+    @property
+    def seconds_per_unit(self) -> Optional[float]:
+        return median(self.samples) if self.samples else None
 
 
 @dataclass
@@ -639,6 +682,7 @@ class ImportQueue:
         self._stage_stats: dict[str, StageTimingStats] = {
             stage: StageTimingStats() for stage in self.STAGE_ORDER
         }
+        self._live_stage_timing: dict[str, LiveStageTiming] = {}
         self._avg_images_per_completed_job: Optional[float] = None
         self._stopping = False
         jobs, pending_ids = self._repository.load()
@@ -1047,7 +1091,12 @@ class ImportQueue:
             if total <= current:
                 return 0.0
 
-            if elapsed is not None and current > 0:
+            tracker = self._live_stage_timing.get(job.id)
+            if tracker is not None and tracker.stage == stage:
+                live_rate = tracker.seconds_per_unit
+                if live_rate is not None:
+                    rate = live_rate
+            elif elapsed is not None and current > 0:
                 live_rate = elapsed / current
                 rate = rate * 0.6 + live_rate * 0.4
             return (total - current) * rate
@@ -1115,6 +1164,12 @@ class ImportQueue:
             if job_id in self._active_job_ids:
                 control.resume()
                 job.status = "running"
+                tracker = self._live_stage_timing.get(job_id)
+                if tracker is not None and tracker.stage == job.stage:
+                    tracker.rebase(
+                        self._stage_progress(job),
+                        time.monotonic(),
+                    )
             else:
                 job.status = "queued"
                 ordered_ids = list(self._jobs)
@@ -1272,6 +1327,7 @@ class ImportQueue:
                 self._active_job_ids.discard(job_id)
                 self._cancel_events.pop(job_id, None)
                 self._last_progress_persisted.pop(job_id, None)
+                self._live_stage_timing.pop(job_id, None)
                 self._futures.pop(job_id, None)
                 self._trim_history()
                 self._condition.notify_all()
@@ -1288,17 +1344,44 @@ class ImportQueue:
         if elapsed is None:
             return
         units = self._stage_unit_count(job.stage, job)
+        if job.stage in self.STAGE_DEFAULT_UNIT_SECONDS and not units:
+            return
         self._stage_stats[job.stage].update(elapsed, units)
 
     @staticmethod
     def _stage_unit_count(stage: str, job: ImportJob) -> Optional[int]:
         if stage == "scanning":
-            return max(1, job.total_images)
+            return max(0, job.stage_current)
         if stage == "hashing":
-            return max(1, job.stage_total or job.total_images)
+            return max(0, job.hashed_images)
         if stage == "processing":
-            return max(1, job.total_images)
+            return max(0, job.processed_images)
         return None
+
+    @staticmethod
+    def _stage_progress(job: ImportJob) -> int:
+        if job.stage == "processing":
+            return max(0, job.processed_images)
+        if job.stage == "hashing":
+            return max(0, job.hashed_images)
+        return max(0, job.stage_current)
+
+    def _observe_live_stage_timing(self, job: ImportJob, observed_at: float) -> None:
+        """Update the recent-throughput window for a unit-based stage."""
+        if job.stage not in self.STAGE_DEFAULT_UNIT_SECONDS:
+            self._live_stage_timing.pop(job.id, None)
+            return
+
+        progress = self._stage_progress(job)
+        tracker = self._live_stage_timing.get(job.id)
+        if tracker is None or tracker.stage != job.stage:
+            self._live_stage_timing[job.id] = LiveStageTiming(
+                stage=job.stage,
+                last_progress=progress,
+                last_sample_at=observed_at,
+            )
+            return
+        tracker.observe(progress, observed_at)
 
     def _progress_callback(self, job_id: str) -> Callable[[dict], None]:
         """Create a synchronized progress callback for one job.
@@ -1333,6 +1416,7 @@ class ImportQueue:
                     if hasattr(job, key):
                         setattr(job, key, value)
                 now = time.monotonic()
+                self._observe_live_stage_timing(job, now)
                 last_persisted = self._last_progress_persisted.get(job_id, 0.0)
                 import_finished = (
                     job.total_images > 0 and job.processed_images >= job.total_images

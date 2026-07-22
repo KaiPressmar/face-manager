@@ -9,6 +9,7 @@ import {
   resumeImportJob,
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
+import TaskActionIcon from "./TaskActionIcon";
 
 const statusLabels: Record<ImportJob["status"], string> = {
   queued: "Wartet",
@@ -272,27 +273,47 @@ const ImportJobCard: React.FC<{
 
       <div className="import-job__actions">
         {job.status === "paused" ? (
-          <button type="button" className="import-job__action" onClick={() => void onAction(job, "resume")}>
-            Fortsetzen
+          <button
+            type="button"
+            className="import-job__action task-icon-button"
+            onClick={() => void onAction(job, "resume")}
+            aria-label={`${folderName(job.folder_path)} fortsetzen`}
+            title="Fortsetzen"
+          >
+            <TaskActionIcon name="resume" />
           </button>
         ) : !isTerminal && job.status !== "cancelling" ? (
-          <button type="button" className="import-job__action" onClick={() => void onAction(job, "pause")}>
-            Pausieren
+          <button
+            type="button"
+            className="import-job__action task-icon-button"
+            onClick={() => void onAction(job, "pause")}
+            aria-label={`${folderName(job.folder_path)} pausieren`}
+            title="Pausieren"
+          >
+            <TaskActionIcon name="pause" />
           </button>
         ) : null}
         {!isTerminal && (
           <button
             type="button"
-            className="import-job__action"
+            className="import-job__action task-icon-button task-icon-button--danger"
             disabled={job.status === "cancelling"}
             onClick={() => void onAction(job, "cancel")}
+            aria-label={`${folderName(job.folder_path)} abbrechen`}
+            title="Abbrechen"
           >
-            Abbrechen
+            <TaskActionIcon name="cancel" />
           </button>
         )}
         {isTerminal && (
-          <button type="button" className="import-job__action" onClick={() => void onAction(job, "delete")}>
-            Aus Historie löschen
+          <button
+            type="button"
+            className="import-job__action task-icon-button task-icon-button--danger"
+            onClick={() => void onAction(job, "delete")}
+            aria-label={`${folderName(job.folder_path)} aus der Historie löschen`}
+            title="Aus Historie löschen"
+          >
+            <TaskActionIcon name="delete" />
           </button>
         )}
       </div>
