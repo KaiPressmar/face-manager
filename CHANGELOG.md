@@ -13,6 +13,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.7.1] - 2026-07-22
+
+### Verbessert
+
+- Face Manager hat ein neues, klareres App-Icon, das im Programmfenster, im Browser-Tab und in der Seitenleiste einheitlich erscheint.
+
 ## [0.7.0] - 2026-07-22
 
 ### Verbessert
