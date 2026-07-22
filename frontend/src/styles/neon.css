@@ -866,6 +866,59 @@ button.sidebar__version:hover {
   color: var(--danger);
 }
 
+.activity-center__section-title .task-icon-button,
+.activity-task__actions .task-icon-button,
+.import-job__actions .task-icon-button {
+  display: inline-grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface-1) 84%, transparent);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.task-icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.task-icon-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  transform: translateY(-1px);
+}
+
+.task-icon-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.task-icon-button.task-icon-button--danger {
+  color: var(--danger);
+}
+
+.task-icon-button.task-icon-button--danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-1));
+  color: var(--danger);
+}
+
 .activity-center__tasks,
 .activity-center__history {
   display: grid;
@@ -2109,6 +2162,213 @@ img {
   box-shadow: var(--shadow-card-hover);
 }
 
+.folder-picker-modal {
+  width: min(560px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xl);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-dialog);
+  animation: modal-rise-in 0.2s ease-out;
+}
+
+.folder-picker-modal__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 26px 20px;
+  border-bottom: 1px solid var(--surface-raise);
+}
+
+.folder-picker-modal__eyebrow {
+  color: var(--neon-cyan);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.folder-picker-modal--dev .folder-picker-modal__eyebrow {
+  color: var(--warning);
+}
+
+.folder-picker-modal__header h2 {
+  margin: 5px 0 6px;
+  color: var(--text-strong);
+  font-size: 22px;
+}
+
+.folder-picker-modal__header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.folder-picker-modal__form {
+  display: grid;
+}
+
+.folder-picker-modal__content {
+  display: grid;
+  gap: 14px;
+  padding: 22px 26px 24px;
+}
+
+.folder-picker-modal__native-picker,
+.folder-picker-modal__dev-input {
+  display: grid;
+  gap: 12px;
+}
+
+.folder-picker-modal__browse {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+
+.folder-picker-modal__browse:hover:not(:disabled) {
+  border-color: var(--neon-cyan);
+  background: color-mix(in srgb, var(--accent-soft) 82%, var(--surface-2));
+  transform: translateY(-1px);
+}
+
+.folder-picker-modal__browse .folder-icon {
+  width: 24px;
+  height: 17px;
+}
+
+.folder-picker-modal__browse > span:last-child {
+  min-width: 0;
+}
+
+.folder-picker-modal__browse strong,
+.folder-picker-modal__browse small {
+  display: block;
+}
+
+.folder-picker-modal__browse strong {
+  font-size: 13px;
+}
+
+.folder-picker-modal__browse small {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.folder-picker-modal__selected {
+  min-width: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+}
+
+.folder-picker-modal__selected span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.folder-picker-modal__selected strong {
+  display: block;
+  overflow: hidden;
+  color: var(--accent-text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-picker-modal__dev-input label {
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.folder-picker-modal__dev-input input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--border-solid);
+  border-radius: var(--radius-md);
+  outline: 0;
+  background: var(--surface-1);
+  color: var(--text-strong);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+}
+
+.folder-picker-modal__dev-input input:focus {
+  border-color: var(--accent-border);
+  box-shadow: var(--focus-ring);
+}
+
+.folder-picker-modal__dev-input p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.folder-picker-modal__dev-input code {
+  color: var(--accent-text);
+}
+
+.folder-picker-modal__status,
+.folder-picker-modal__error {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.folder-picker-modal__status {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.folder-picker-modal__error {
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  color: var(--danger);
+}
+
+.folder-picker-modal__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 16px 26px 20px;
+  border-top: 1px solid var(--surface-raise);
+}
+
+.folder-picker-modal button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.folder-picker-modal__footer .primary-button:disabled {
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
 @keyframes modal-fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -2148,6 +2408,17 @@ img {
   .folder-browser-footer {
     padding-left: 16px;
     padding-right: 16px;
+  }
+
+  .folder-picker-modal__header,
+  .folder-picker-modal__content,
+  .folder-picker-modal__footer {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .folder-picker-modal__footer > button {
+    flex: 1;
   }
 
   .folder-browser-toolbar {

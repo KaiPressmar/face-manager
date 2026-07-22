@@ -27,13 +27,30 @@ def _wait_for(predicate, timeout: float = 2.0) -> bool:
 
 
 class AutoClusterQueueTest(unittest.TestCase):
+    def _new_queue(self, **kwargs) -> AutoClusterQueue:
+        queue = AutoClusterQueue(**kwargs)
+        self.addCleanup(self._join_worker, queue)
+        return queue
+
+    @staticmethod
+    def _join_worker(queue: AutoClusterQueue) -> None:
+        queue.request_cancel()
+        for _ in range(3):
+            with queue._lock:
+                thread = queue._thread
+            if thread is None:
+                return
+            thread.join(2.0)
+            if not thread.is_alive():
+                return
+
     def _status(self, queue: AutoClusterQueue):
         task = queue.snapshot()["task"]
         return task["status"] if task else None
 
     def test_request_runs_immediately_when_gate_open(self):
         ran = threading.Event()
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 5,
             repair_callable=lambda progress_callback=None: ran.set() or 5,
             ready_gate=lambda: True,
@@ -48,7 +65,7 @@ class AutoClusterQueueTest(unittest.TestCase):
     def test_request_stays_queued_until_gate_opens(self):
         gate_open = threading.Event()
         ran = threading.Event()
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 5,
             repair_callable=lambda progress_callback=None: ran.set() or 5,
             ready_gate=gate_open.is_set,
@@ -68,7 +85,7 @@ class AutoClusterQueueTest(unittest.TestCase):
         self.assertTrue(_wait_for(lambda: self._status(queue) == "completed"))
 
     def test_request_never_returns_none_while_work_exists(self):
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 0,
             repair_callable=lambda progress_callback=None: 0,
             ready_gate=lambda: True,
@@ -84,7 +101,7 @@ class AutoClusterQueueTest(unittest.TestCase):
             seen_kinds.append("ran")
             return 3
 
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 3,
             repair_callable=repair,
             ready_gate=gate_open.is_set,
@@ -112,7 +129,7 @@ class AutoClusterQueueTest(unittest.TestCase):
             second_ran.set()
             return 2
 
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 4,
             repair_callable=first,
             ready_gate=lambda: True,
@@ -148,7 +165,7 @@ class AutoClusterQueueTest(unittest.TestCase):
                 time.sleep(0.01)
             return processed
 
-        queue = AutoClusterQueue(
+        queue = self._new_queue(
             count_callable=lambda: 20,
             repair_callable=repair,
             ready_gate=lambda: True,
