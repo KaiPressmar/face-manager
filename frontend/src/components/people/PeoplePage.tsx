@@ -15,6 +15,9 @@ export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
 const PREFETCH_IMAGE_COUNT = PAGE_SIZE;
+const LIVE_REFRESH_BATCH_MS = 2500;
+const FINAL_REFRESH_DELAY_MS = 120;
+const USER_IDLE_DELAY_MS = 900;
 const IMAGE_GRID_SIZE_STORAGE_KEY = "face-manager:image-grid-size";
 const IMAGE_GRID_SIZE_OPTIONS: Array<{
   value: ImageGridSize;
@@ -59,10 +62,11 @@ function preloadPageImages(page: ImagePage) {
 }
 
 interface PeoplePageProps {
+  active: boolean;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -89,6 +93,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   const queryKeyRef = useRef("");
   const pageHeaderRef = useRef<HTMLElement | null>(null);
   const liveRefreshTimerRef = useRef<number | null>(null);
+  const hasActivatedLiveRefreshRef = useRef(false);
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
@@ -206,7 +211,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
     let isMounted = true;
+    let refreshInFlight = false;
+    let refreshPending = false;
+    let userBusyUntil = 0;
     const captureViewportAnchor = () => {
       const scroller = pageHeaderRef.current?.closest(".page-content");
       if (!(scroller instanceof HTMLElement) || scroller.scrollTop < 80) {
@@ -243,20 +254,38 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
       });
     };
 
-    const refreshVisibleImages = (preserveViewport = true) => {
+    const refreshVisibleImages = async (preserveViewport = true) => {
       const requestId = latestQueryRef.current;
       const anchor = preserveViewport ? captureViewportAnchor() : null;
-      void fetchImages({
-        folders: selectedFolders,
-        persons: selectedPersons,
-        faceStatuses,
-        sortBy: groupingMode,
-        sortDirection,
-        limit: loadedCountRef.current,
-        offset: 0,
-      }).then((page) => {
+      try {
+        const page = await fetchImages({
+          folders: selectedFolders,
+          persons: selectedPersons,
+          faceStatuses,
+          sortBy: groupingMode,
+          sortDirection,
+          limit: loadedCountRef.current,
+          offset: 0,
+        });
         if (!isMounted || latestQueryRef.current !== requestId) return;
-        setImages(page.items);
+        // Keep existing cards at their current array index while the user is
+        // below the top. New imports are appended to this live snapshot instead
+        // of redistributing the masonry columns underneath the user's pointer.
+        if (anchor) {
+          setImages((current) => {
+            const freshById = new Map(page.items.map((image) => [image.id, image]));
+            const stable = current
+              .map((image) => freshById.get(image.id))
+              .filter((image): image is FaceImage => image !== undefined);
+            const knownIds = new Set(stable.map((image) => image.id));
+            return [
+              ...stable,
+              ...page.items.filter((image) => !knownIds.has(image.id)),
+            ];
+          });
+        } else {
+          setImages(page.items);
+        }
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
@@ -272,44 +301,96 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
             queryKeyRef.current,
           );
         }
-      });
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible" && !isLoadingMore) {
-        refreshVisibleImages(false);
+      } catch (error) {
+        console.error("Live-Aktualisierung der Bilder fehlgeschlagen:", error);
       }
     };
 
-    const handleWindowFocus = () => {
-      if (!isLoadingMore) {
-        refreshVisibleImages(false);
+    const refreshLibraryTotal = async () => {
+      try {
+        const page = await fetchImages({ limit: 1, offset: 0 });
+        if (isMounted) setLibraryTotal(page.total);
+      } catch {
+        // A later checkpoint or focus event retries without disturbing the UI.
       }
     };
 
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleWindowFocus);
-    const refreshLibraryTotal = () => {
-      void fetchImages({ limit: 1, offset: 0 })
-        .then((page) => {
-          if (isMounted) setLibraryTotal(page.total);
-        })
-        .catch(() => undefined);
+    const runRefresh = async (preserveViewport = true) => {
+      if (document.visibilityState !== "visible" || isLoadingMore) return;
+      const idleIn = userBusyUntil - performance.now();
+      if (idleIn > 0) {
+        scheduleRefresh(preserveViewport, idleIn + 50);
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await Promise.all([
+          refreshVisibleImages(preserveViewport),
+          refreshLibraryTotal(),
+        ]);
+      } finally {
+        refreshInFlight = false;
+        if (isMounted && refreshPending) {
+          refreshPending = false;
+          scheduleRefresh(true, LIVE_REFRESH_BATCH_MS);
+        }
+      }
     };
-    refreshLibraryTotal();
 
-    const unsubscribeClusters = subscribeToTopic("clusters", () => {
+    const scheduleRefresh = (
+      preserveViewport = true,
+      delay = LIVE_REFRESH_BATCH_MS,
+      replacePending = false,
+    ) => {
       if (liveRefreshTimerRef.current !== null) {
+        if (!replacePending) return;
         window.clearTimeout(liveRefreshTimerRef.current);
       }
       // Coalesce rapid import/reclustering checkpoints. Existing cards stay
       // visually anchored while new results are folded into the live list.
       liveRefreshTimerRef.current = window.setTimeout(() => {
         liveRefreshTimerRef.current = null;
-        refreshVisibleImages(true);
-        refreshLibraryTotal();
-      }, 450);
-    });
+        void runRefresh(preserveViewport);
+      }, delay);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
+      }
+    };
+    const handleWindowFocus = () =>
+      scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
+    const noteUserActivity = () => {
+      userBusyUntil = performance.now() + USER_IDLE_DELAY_MS;
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("scroll", noteUserActivity, true);
+    document.addEventListener("pointerdown", noteUserActivity, true);
+    window.addEventListener("focus", handleWindowFocus);
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
+      "clusters",
+      (update) => {
+        const isBackgroundCheckpoint = update?.reason === "background_progress";
+        scheduleRefresh(
+          true,
+          isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
+          !isBackgroundCheckpoint,
+        );
+      },
+    );
+
+    if (hasActivatedLiveRefreshRef.current) {
+      scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
+    } else {
+      hasActivatedLiveRefreshRef.current = true;
+      void refreshLibraryTotal();
+    }
 
     return () => {
       isMounted = false;
@@ -319,9 +400,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
       }
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("scroll", noteUserActivity, true);
+      document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
     if (isLoading || isLoadingMore || !hasMore) return;

@@ -823,6 +823,49 @@ button.sidebar__version:hover {
   text-transform: uppercase;
 }
 
+.activity-center__section-title > div,
+.activity-task__actions,
+.import-job__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-center__section-title button,
+.activity-task__actions button {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0;
+  padding: 4px 7px;
+  text-transform: none;
+}
+
+.activity-center__section-title button:hover,
+.activity-task__actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.activity-center__section-title button:disabled,
+.activity-task__actions button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.activity-task__actions {
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+.activity-task__actions button:last-child {
+  color: var(--danger);
+}
+
 .activity-center__tasks,
 .activity-center__history {
   display: grid;
@@ -988,6 +1031,11 @@ button.sidebar__version:hover {
 .import-job__action:disabled {
   cursor: wait;
   opacity: 0.5;
+}
+
+.import-job__actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .import-queue__error {

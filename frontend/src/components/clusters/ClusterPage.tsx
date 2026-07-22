@@ -78,6 +78,9 @@ interface FaceGalleryContext {
 
 /** How many stacked groups render before the "show more" step. */
 const SECTION_BATCH_SIZE = 25;
+const LIVE_REFRESH_BATCH_MS = 2500;
+const FINAL_REFRESH_DELAY_MS = 120;
+const USER_IDLE_DELAY_MS = 900;
 
 const DEFAULT_REVIEW_GROUPS: FaceReviewGroupSummary[] = [
   { group_key: "unknown_person", label: "Unbekannte Personen", face_count: 0, cluster_count: 0 },
@@ -198,6 +201,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const detailContentRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const liveRefreshTimerRef = useRef<number | null>(null);
+  const needsCatchUpRefreshRef = useRef(false);
 
   const selectedClusterId =
     selectedTarget?.type === "cluster" ? selectedTarget.clusterId : null;
@@ -777,51 +781,117 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     // Pause background polling while the cluster page is not the visible one so
     // we do not hit the backend from a kept-alive page in the background.
     if (!active) {
+      needsCatchUpRefreshRef.current = true;
       return;
     }
+    let isMounted = true;
+    let refreshInFlight = false;
+    let refreshPending = false;
+    let userBusyUntil = 0;
 
     const refreshVisibleData = async () => {
-      if (document.visibilityState !== "visible" || isMutating) {
+      if (document.visibilityState !== "visible") {
+        needsCatchUpRefreshRef.current = true;
         return;
       }
+      if (isMutating) {
+        needsCatchUpRefreshRef.current = true;
+        return;
+      }
+      const idleIn = userBusyUntil - performance.now();
+      if (idleIn > 0) {
+        maybeRefreshVisibleData(idleIn + 50);
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
       // Reclustering is scoped now, so a change usually touches only some
       // groups. Dropping every cached group here would collapse all sections to
       // their reserved height and throw the user's scroll position and marking
       // away. Instead just refetch, and let the reconciliation effect below
       // discard exactly the groups that really changed.
-      const anchor = captureDetailAnchor();
-      await loadSidebarData(true);
-      await refreshTargetDetails(selectedTarget);
-      restoreDetailAnchor(anchor);
+      try {
+        const anchor = captureDetailAnchor();
+        await loadSidebarData(true);
+        await refreshTargetDetails(selectedTarget);
+        restoreDetailAnchor(anchor);
+        needsCatchUpRefreshRef.current = false;
+      } finally {
+        refreshInFlight = false;
+        if (isMounted && refreshPending) {
+          refreshPending = false;
+          maybeRefreshVisibleData(LIVE_REFRESH_BATCH_MS);
+        }
+      }
     };
 
-    const maybeRefreshVisibleData = () => {
+    const maybeRefreshVisibleData = (
+      delay = LIVE_REFRESH_BATCH_MS,
+      replacePending = false,
+    ) => {
       if (liveRefreshTimerRef.current !== null) {
+        if (!replacePending) return;
         window.clearTimeout(liveRefreshTimerRef.current);
       }
       liveRefreshTimerRef.current = window.setTimeout(() => {
         liveRefreshTimerRef.current = null;
         void refreshVisibleData();
-      }, 450);
+      }, delay);
     };
 
-    // Refresh the sidebar the moment the backend reports cluster/person/image
-    // data changed, instead of polling on a fixed interval.
-    const unsubscribeClusters = subscribeToTopic(
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        needsCatchUpRefreshRef.current = true;
+        maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+      } else {
+        needsCatchUpRefreshRef.current = true;
+      }
+    };
+    const handleWindowFocus = () => {
+      needsCatchUpRefreshRef.current = true;
+      maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+    };
+    const noteUserActivity = () => {
+      userBusyUntil = performance.now() + USER_IDLE_DELAY_MS;
+    };
+
+    // Import checkpoints are applied in bounded batches. Final and explicit
+    // changes arrive quickly, but even those wait until scrolling/pointer work
+    // has been idle briefly so the page never moves underneath the user.
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
-      maybeRefreshVisibleData,
+      (update) => {
+        needsCatchUpRefreshRef.current = true;
+        const isBackgroundCheckpoint = update?.reason === "background_progress";
+        maybeRefreshVisibleData(
+          isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
+          !isBackgroundCheckpoint,
+        );
+      },
     );
-    document.addEventListener("visibilitychange", maybeRefreshVisibleData);
-    window.addEventListener("focus", maybeRefreshVisibleData);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("scroll", noteUserActivity, true);
+    document.addEventListener("pointerdown", noteUserActivity, true);
+    window.addEventListener("focus", handleWindowFocus);
+
+    if (needsCatchUpRefreshRef.current && !isMutating) {
+      maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+    }
 
     return () => {
+      isMounted = false;
       if (liveRefreshTimerRef.current !== null) {
         window.clearTimeout(liveRefreshTimerRef.current);
         liveRefreshTimerRef.current = null;
       }
       unsubscribeClusters();
-      document.removeEventListener("visibilitychange", maybeRefreshVisibleData);
-      window.removeEventListener("focus", maybeRefreshVisibleData);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("scroll", noteUserActivity, true);
+      document.removeEventListener("pointerdown", noteUserActivity, true);
+      window.removeEventListener("focus", handleWindowFocus);
     };
   }, [
     active,

@@ -15,6 +15,7 @@ from ..models.face_model import get_compute_mode
 from ..db.schema import get_conn
 from ..error_logging import configure_error_logging
 from .pipeline import ImportCancelled, ImportProcessor, configure_processing_slots
+from .task_control import BackgroundTaskControl
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.import_queue")
@@ -376,6 +377,29 @@ class ImportJobRepository:
         finally:
             connection.close()
 
+    def delete_terminal_history(self) -> set[str]:
+        """Delete every completed, failed, or cancelled job permanently."""
+        connection = self._connection_factory()
+        try:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM import_job
+                WHERE status IN ('completed', 'failed', 'cancelled')
+                """
+            ).fetchall()
+            deleted_ids = {row["id"] for row in rows}
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
+                connection.execute(
+                    f"DELETE FROM import_job WHERE id IN ({placeholders})",
+                    tuple(deleted_ids),
+                )
+                connection.commit()
+            return deleted_ids
+        finally:
+            connection.close()
+
     def _ensure_schema(self) -> None:
         """Create the import job table for standalone queue construction."""
         connection = self._connection_factory()
@@ -607,7 +631,7 @@ class ImportQueue:
         self._pending = deque()
         self._condition = threading.Condition()
         self._active_job_ids: set[str] = set()
-        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events: dict[str, BackgroundTaskControl] = {}
         self._last_progress_persisted: dict[str, float] = {}
         self._worker: Optional[threading.Thread] = None
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -620,8 +644,9 @@ class ImportQueue:
         jobs, pending_ids = self._repository.load()
         self._jobs.update((job.id, job) for job in jobs)
         self._pending.extend(pending_ids)
-        for job_id in pending_ids:
-            self._cancel_events[job_id] = threading.Event()
+        for job in jobs:
+            if job.status not in self.TERMINAL_STATUSES:
+                self._cancel_events[job.id] = BackgroundTaskControl()
         if auto_start:
             self.start()
 
@@ -650,6 +675,8 @@ class ImportQueue:
         """
         with self._condition:
             self._stopping = True
+            for job_id in self._active_job_ids:
+                self._cancel_events[job_id].set()
             self._condition.notify_all()
             worker = self._worker
         if worker:
@@ -690,7 +717,7 @@ class ImportQueue:
             self._repository.insert(job)
             self._jobs[job.id] = job
             self._pending.append(job.id)
-            self._cancel_events[job.id] = threading.Event()
+            self._cancel_events[job.id] = BackgroundTaskControl()
             position = len(self._pending)
             self._condition.notify()
         self._notify_change()
@@ -720,13 +747,17 @@ class ImportQueue:
                 )
                 for job in self._jobs.values()
             ]
-            overall_eta = max(job_etas.values()) if job_etas else None
+            known_etas = [eta for eta in job_etas.values() if eta is not None]
+            overall_eta = max(known_etas) if known_etas else None
             return {
                 "jobs": jobs,
                 "active_job_id": active_ids[0] if active_ids else None,
                 "active_job_ids": active_ids,
                 "running_count": len(active_ids),
                 "queued_count": len(self._pending),
+                "paused_count": sum(
+                    1 for job in self._jobs.values() if job.status == "paused"
+                ),
                 "max_concurrent_jobs": self._max_concurrent_jobs,
                 "overall_eta_seconds": (
                     round(overall_eta) if overall_eta is not None else None
@@ -902,6 +933,11 @@ class ImportQueue:
 
     def _estimate_job_etas(self, active_ids: list[str]) -> dict[str, Optional[float]]:
         """Estimate request-level ETA in a bounded parallel scheduler."""
+        if any(self._jobs[job_id].status == "paused" for job_id in active_ids):
+            return {
+                job_id: None
+                for job_id in [*active_ids, *self._pending]
+            }
         avg_images = self._average_images_per_job()
         job_etas: dict[str, Optional[float]] = {}
 
@@ -1049,6 +1085,95 @@ class ImportQueue:
             self._cancel_events.pop(job_id, None)
             self._notify_change()
             return {"id": job_id, "status": "removed"}
+
+    def pause(self, job_id: str) -> Optional[dict]:
+        """Pause a queued or running import at its next safe checkpoint."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in self.TERMINAL_STATUSES or job.status == "cancelling":
+                return None
+            if job.status == "paused":
+                return {"id": job_id, "status": "paused"}
+            control = self._cancel_events[job_id]
+            if job_id in self._active_job_ids:
+                control.pause()
+            elif job_id in self._pending:
+                self._pending.remove(job_id)
+            job.status = "paused"
+            self._repository.update(job)
+            self._condition.notify_all()
+        self._notify_change()
+        return {"id": job_id, "status": "paused"}
+
+    def resume(self, job_id: str) -> Optional[dict]:
+        """Resume a paused import without discarding committed progress."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "paused":
+                return None
+            control = self._cancel_events.setdefault(job_id, BackgroundTaskControl())
+            if job_id in self._active_job_ids:
+                control.resume()
+                job.status = "running"
+            else:
+                job.status = "queued"
+                ordered_ids = list(self._jobs)
+                insert_at = len(self._pending)
+                for index, pending_id in enumerate(self._pending):
+                    if ordered_ids.index(job_id) < ordered_ids.index(pending_id):
+                        insert_at = index
+                        break
+                self._pending.insert(insert_at, job_id)
+            self._repository.update(job)
+            self._condition.notify_all()
+        self._notify_change()
+        return {"id": job_id, "status": job.status}
+
+    def cancel(self, job_id: str) -> Optional[dict]:
+        """Cancel an import while retaining a terminal history entry."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in self.TERMINAL_STATUSES:
+                return None
+            if job_id in self._active_job_ids:
+                job.status = "cancelling"
+                self._repository.update(job)
+                self._cancel_events[job_id].set()
+                result = {"id": job_id, "status": "cancelling"}
+            else:
+                if job_id in self._pending:
+                    self._pending.remove(job_id)
+                job.status = "cancelled"
+                job.finished_at = _utc_now()
+                job.current_file = None
+                self._repository.update(job)
+                self._cancel_events.pop(job_id, None)
+                self._trim_history()
+                result = {"id": job_id, "status": "cancelled"}
+            self._condition.notify_all()
+        self._notify_change()
+        return result
+
+    def delete_terminal(self, job_id: str) -> Optional[dict]:
+        """Permanently delete one terminal import history entry."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status not in self.TERMINAL_STATUSES:
+                return None
+            self._repository.delete(job_id)
+            del self._jobs[job_id]
+        self._notify_change()
+        return {"id": job_id, "status": "removed"}
+
+    def clear_history(self) -> int:
+        """Permanently delete every terminal import history entry."""
+        with self._condition:
+            deleted_ids = self._repository.delete_terminal_history()
+            for job_id in deleted_ids:
+                self._jobs.pop(job_id, None)
+        if deleted_ids:
+            self._notify_change()
+        return len(deleted_ids)
 
     def _worker_loop(self) -> None:
         """Dispatch queued jobs while respecting concurrency limits."""

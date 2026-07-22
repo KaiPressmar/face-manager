@@ -313,6 +313,7 @@ export interface FetchImagesParams {
 export type ImportJobStatus =
   | "queued"
   | "running"
+  | "paused"
   | "cancelling"
   | "completed"
   | "failed"
@@ -368,6 +369,7 @@ export interface ImportQueueState {
   active_job_ids?: string[];
   running_count?: number;
   queued_count: number;
+  paused_count?: number;
   max_concurrent_jobs?: number;
   overall_eta_seconds: number | null;
 }
@@ -376,7 +378,7 @@ export interface AutoClusterTask {
   id: string;
   kind: "auto_cluster_repair" | "unassigned_recluster" | "full_recluster";
   reason: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "paused" | "cancelling" | "completed" | "failed" | "cancelled";
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -393,7 +395,7 @@ export interface AutoClusterTaskState {
 }
 
 export interface ThumbnailWarmupTask {
-  status: "stopped" | "idle" | "paused" | "running" | "failed";
+  status: "stopped" | "idle" | "paused" | "running" | "failed" | "cancelled";
   started_at: string | null;
   last_run_at: string | null;
   next_face_id: number;
@@ -407,6 +409,7 @@ export interface ThumbnailWarmupTask {
   eta_seconds: number | null;
   last_error: string | null;
   cache_complete: boolean;
+  user_paused?: boolean;
 }
 
 export interface ThumbnailWarmupState {
@@ -1095,6 +1098,43 @@ export async function removeImportJob(jobId: string) {
   }
   return await res.json();
 }
+
+async function runBackgroundTaskAction(url: string, method: "POST" | "DELETE" = "POST") {
+  const res = await apiFetch(`${API_BASE}${url}`, { method });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Die Aufgabe konnte nicht geändert werden."));
+  }
+  return await res.json();
+}
+
+export const pauseImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/pause`);
+export const resumeImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/resume`);
+export const cancelImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/cancel`);
+export const deleteImportHistoryEntry = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/history`, "DELETE");
+export const clearImportHistory = () =>
+  runBackgroundTaskAction("/imports/history", "DELETE");
+
+export const pauseAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/pause`);
+export const resumeAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/resume`);
+export const cancelAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/cancel`);
+export const deleteAutoClusterHistoryEntry = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}`, "DELETE");
+
+export const pauseThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/pause");
+export const resumeThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/resume");
+export const cancelThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/cancel");
+export const deleteThumbnailWarmupHistory = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/history", "DELETE");
 
 export async function openImageLocation(imageId: number, imagePath: string) {
   const res = await apiFetch(`${API_BASE}/images/${imageId}/open-location`, {

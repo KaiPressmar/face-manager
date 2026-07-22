@@ -42,6 +42,14 @@ class ImportCancelled(Exception):
     """Signal that an import job was cancelled by the user."""
 
 
+def _control_cancelled(control) -> bool:
+    """Honor an optional pause checkpoint before checking cancellation."""
+    wait_if_paused = getattr(control, "wait_if_paused", None)
+    if callable(wait_if_paused) and wait_if_paused():
+        return True
+    return bool(control and control.is_set())
+
+
 def configure_processing_slots(slot_count: int) -> None:
     """Configure the shared concurrent processing slot budget.
 
@@ -139,7 +147,7 @@ class ImagePreparer:
             thread_name_prefix="image-prep",
         ) as executor:
             for _ in range(self.worker_count):
-                if cancel_event and cancel_event.is_set():
+                if cancel_event and _control_cancelled(cancel_event):
                     break
                 try:
                     path = next(iterator)
@@ -149,7 +157,7 @@ class ImagePreparer:
 
             while pending:
                 path, future = pending.popleft()
-                if not cancel_event or not cancel_event.is_set():
+                if not cancel_event or not _control_cancelled(cancel_event):
                     try:
                         next_path = next(iterator)
                     except StopIteration:
@@ -185,7 +193,7 @@ class ImagePreparer:
             thread_name_prefix="image-prep",
         ) as executor:
             for _ in range(self.worker_count):
-                if cancel_event and cancel_event.is_set():
+                if cancel_event and _control_cancelled(cancel_event):
                     break
                 try:
                     path = next(iterator)
@@ -203,7 +211,7 @@ class ImagePreparer:
                     path = pending.pop(future)
                     yield path, future
 
-                    if cancel_event and cancel_event.is_set():
+                    if cancel_event and _control_cancelled(cancel_event):
                         continue
                     try:
                         next_path = next(iterator)
@@ -497,7 +505,7 @@ class ImportProcessor:
     def _acquire_processing_slot(cancel_event: threading.Event) -> None:
         """Acquire the shared processing slot with cancellation checks."""
         while True:
-            if cancel_event.is_set():
+            if _control_cancelled(cancel_event):
                 raise ImportCancelled()
             acquired = _PROCESSING_SLOT_SEMAPHORE.acquire(timeout=0.2)
             if acquired:
@@ -552,7 +560,7 @@ class ImportProcessor:
         Raises:
             ImportCancelled: If the event is set.
         """
-        if cancel_event.is_set():
+        if _control_cancelled(cancel_event):
             raise ImportCancelled()
 
     def _process_image(

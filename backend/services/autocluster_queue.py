@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .storage import count_active_inbox_faces, repair_active_inbox_faces
+from .task_control import BackgroundTaskControl
 
 logger = logging.getLogger("face_manager.autocluster_queue")
 
@@ -124,7 +125,7 @@ class AutoClusterQueue:
         self._lock = threading.Lock()
         self._task: Optional[AutoClusterTask] = None
         self._thread: Optional[threading.Thread] = None
-        self._cancel_event = threading.Event()
+        self._cancel_event = BackgroundTaskControl()
         # Request bound to ``self._task`` (queued or running).
         self._active_request: Optional[ReclusterRequest] = None
         # Single coalesced request to run once the active task finishes.
@@ -152,8 +153,10 @@ class AutoClusterQueue:
             repair_callable=repair_callable or self._repair_callable,
         )
         with self._lock:
-            active = self._task is not None and self._task.status in {"queued", "running"}
-            if active and self._task.status == "running":
+            active = self._task is not None and self._task.status in {
+                "queued", "running", "paused", "cancelling"
+            }
+            if active and self._task.status in {"running", "paused", "cancelling"}:
                 # Coalesce behind the running task; it is picked up on completion.
                 self._coalesce_pending_locked(request)
                 result = self._task.to_dict()
@@ -219,7 +222,7 @@ class AutoClusterQueue:
             return False
 
         task_id = self._task.id
-        self._cancel_event = threading.Event()
+        self._cancel_event = BackgroundTaskControl()
         self._task.status = "running"
         self._task.started_at = _utc_now()
         self._task.stage = "processing"
@@ -245,18 +248,94 @@ class AutoClusterQueue:
         Returns:
             Whether no clustering pass is active anymore.
         """
+        notify = False
+        promote_task_id = None
         with self._lock:
-            active = self._task is not None and self._task.status in {"queued", "running"}
+            active = self._task is not None and self._task.status in {
+                "queued", "running", "paused", "cancelling"
+            }
             if not active:
                 return True
-            self._cancel_event.set()
+            if self._thread is None or not self._thread.is_alive():
+                self._task.status = "cancelled"
+                self._task.finished_at = _utc_now()
+                self._task.stage = "cancelled"
+                promote_task_id = self._task.id
+                notify = True
+            else:
+                self._task.status = "cancelling"
+                self._cancel_event.set()
             thread = self._thread
+        if notify:
+            self._notify_change()
+            self._promote_pending(promote_task_id)
         if timeout > 0 and thread is not None:
             thread.join(timeout)
         with self._lock:
             return not (
-                self._task is not None and self._task.status in {"queued", "running"}
+                self._task is not None and self._task.status in {
+                    "queued", "running", "paused", "cancelling"
+                }
             )
+
+    def pause(self, task_id: str) -> Optional[dict]:
+        """Pause queued or running clustering at a committed group boundary."""
+        with self._lock:
+            if (
+                self._task is None
+                or self._task.id != task_id
+                or self._task.status not in {"queued", "running"}
+            ):
+                return None
+            if self._task.status == "running":
+                self._cancel_event.pause()
+            self._task.status = "paused"
+            result = self._task.to_dict()
+        self._notify_change()
+        return result
+
+    def resume(self, task_id: str) -> Optional[dict]:
+        """Resume a paused clustering task."""
+        with self._lock:
+            if self._task is None or self._task.id != task_id or self._task.status != "paused":
+                return None
+            if self._thread is not None and self._thread.is_alive():
+                self._task.status = "running"
+                self._cancel_event.resume()
+            else:
+                self._task.status = "queued"
+                self._maybe_launch_locked()
+            result = self._task.to_dict()
+        self._notify_change()
+        return result
+
+    def cancel(self, task_id: str) -> Optional[dict]:
+        """Cancel a queued, running, or paused clustering task."""
+        with self._lock:
+            if (
+                self._task is None
+                or self._task.id != task_id
+                or self._task.status not in {"queued", "running", "paused", "cancelling"}
+            ):
+                return None
+        self.request_cancel()
+        with self._lock:
+            return self._task.to_dict() if self._task is not None else None
+
+    def dismiss(self, task_id: str) -> bool:
+        """Remove one terminal clustering task from visible history."""
+        with self._lock:
+            if (
+                self._task is None
+                or self._task.id != task_id
+                or self._task.status not in {"completed", "failed", "cancelled"}
+            ):
+                return False
+            self._task = None
+            self._active_request = None
+            self._thread = None
+        self._notify_change()
+        return True
 
     def snapshot(self) -> dict:
         with self._lock:
