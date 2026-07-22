@@ -21,6 +21,29 @@ $buildVariantPath = Join-Path $buildDir "BUILD_VARIANT"
 
 Set-Location $projectRoot
 
+function Invoke-PipInstallWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [int]$MaxAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            python -m pip install @Arguments
+            return
+        } catch {
+            if ($attempt -eq $MaxAttempts) {
+                throw
+            }
+
+            $delaySeconds = 15 * $attempt
+            Write-Warning "pip install attempt $attempt failed; retrying in $delaySeconds seconds"
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+}
+
 if (Test-Path $distDir) {
     Remove-Item -Recurse -Force $distDir
 }
@@ -37,14 +60,14 @@ npm --prefix frontend run build
 python scripts/inventory-dependencies.py --project-root $projectRoot --output $dependencyInventoryPath
 python packaging/windows/generate-version-info.py --version $version --output $versionInfoPath
 
-python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt -r $desktopRequirements
+Invoke-PipInstallWithRetry @("--upgrade", "pip")
+Invoke-PipInstallWithRetry @("-r", "backend/requirements.txt", "-r", $desktopRequirements)
 
 if ($Variant -eq "gpu") {
     python -m pip uninstall -y onnxruntime
-    python -m pip install -r $gpuRequirements
+    Invoke-PipInstallWithRetry @("-r", $gpuRequirements)
 } else {
-    python -m pip install "onnxruntime>=1.21,<2"
+    Invoke-PipInstallWithRetry @("onnxruntime>=1.21,<2")
 }
 
 pyinstaller --noconfirm --clean $specPath

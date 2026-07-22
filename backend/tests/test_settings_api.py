@@ -298,6 +298,7 @@ class SettingsApiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 409)
 
+    @patch("backend.app.schedule_version_clustering_upgrade", return_value=True)
     @patch("backend.app.validate_database_file")
     @patch("backend.app.reset_import_resources")
     @patch("backend.app.init_db")
@@ -314,6 +315,7 @@ class SettingsApiTest(unittest.TestCase):
         init_db,
         reset_import_resources,
         validate_database_file,
+        schedule_version_clustering_upgrade,
     ):
         import_queue.snapshot.return_value = {"running_count": 0, "queued_count": 0}
         mkstemp.return_value = (12, "/tmp/import.sqlite")
@@ -327,5 +329,6 @@ class SettingsApiTest(unittest.TestCase):
         validate_database_file.assert_called_once()
         move.assert_called_once_with("/tmp/import.sqlite", app.DB_PATH)
         init_db.assert_called_once_with()
+        schedule_version_clustering_upgrade.assert_called_once_with()
         reset_import_resources.assert_called_once_with()
         self.assertEqual(result, {"status": "imported"})

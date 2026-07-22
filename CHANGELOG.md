@@ -13,6 +13,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.10.1] - 2026-07-22
+
+### Behoben
+
+- Nach einem Update zeigen Desktop und Startmenü zuverlässig das aktuelle einheitliche Anwendungssymbol statt einer alten zwischengespeicherten Version.
+
 ## [0.10.0] - 2026-07-22
 
 ### Neu

@@ -4,10 +4,11 @@ description: >
   Cut the next Face Manager version end to end. Runs the release-preparation
   runbook: bumps VERSION via scripts/release-version.sh, finalizes the German
   CHANGELOG Unreleased section into a dated release, opens and auto-merges the
-  release-prep PR into develop, then the release PR from develop into main, and
-  reports the release that CI publishes. Use when the user says "cut a release",
-  "create the next release", "release a new version", "/release-cut". Does not tag
-  or create the GitHub release itself — CI does that.
+  release-prep PR into develop, then the release PR from develop into main,
+  monitors publishing, recovers transient artifact failures, and reports the
+  release that CI publishes. Use when the user says "cut a release", "create the
+  next release", "release a new version", "/release-cut". Does not tag or create
+  the GitHub release itself — CI does that.
 ---
 
 Drive the release runbook from `CONTRIBUTING.md`. Land committed work first with
@@ -78,7 +79,8 @@ touch sections from earlier, already-released versions.
 git add VERSION frontend/package.json frontend/package-lock.json CHANGELOG.md
 git commit -m "Release v$(cat VERSION)"
 git push -u origin HEAD
-gh pr create --base develop --title "Release v$(cat VERSION)" --body "<template: Internal-only / release mechanics>"
+gh pr create --base develop --title "Release v$(cat VERSION)" \
+  --body-file .agents/skills/release-cut/assets/release-prep-pr.md
 gh pr merge --squash --auto
 ```
 
@@ -89,12 +91,29 @@ Wait for CI to pass and the PR to actually merge before the next hop
 
 ```bash
 git switch develop && git pull --ff-only origin develop
-gh pr create --base main --head develop --title "Release v$(cat VERSION)" --body "Release vX.Y.Z"
+gh pr create --base main --head develop --title "Release v$(cat VERSION)" \
+  --body-file .agents/skills/release-cut/assets/release-pr.md
 gh pr merge --merge --auto
 ```
 
 The base is `main`, the head is `develop`. The Main Branch Policy workflow only
-allows PRs into `main` from `develop`. Wait for CI to pass and the merge to land.
+allows PRs into `main` from `develop`. The body asset deliberately selects the
+user-visible classification required by the changelog coverage gate; do not
+replace it with a one-line body.
+
+Because each previous release adds a merge commit only to `main`, GitHub can mark
+the new release PR as `BEHIND`. Inspect `mergeStateStatus` immediately after PR
+creation. If it is `BEHIND`, use GitHub's update-branch operation once:
+
+```bash
+gh pr view --json mergeStateStatus
+gh pr update-branch
+```
+
+This merges the previous release boundary into `develop` without a direct push
+and starts a fresh PR event with the correct body. Then wait for all current CI
+checks and the auto-merge to land. Do not rerun a failed old PR event after
+editing its body; reruns retain the original event payload.
 
 ### 7. Let CI publish; then report
 
@@ -102,11 +121,24 @@ Do **not** tag or create the release. Monitor the automated publish and report t
 result:
 
 ```bash
-gh run watch          # the "Publish Release" workflow_run
+gh run watch          # main CI, then the "Publish Release" workflow_run
 gh release view "v$(cat VERSION)" --web
 ```
 
-Report the release URL and the uploaded installers
+If an installer job fails, inspect its failed log before changing code. Retry the
+failed jobs once only when the log proves a transient infrastructure problem such
+as an incomplete package download or runner timeout:
+
+```bash
+gh run view <run-id> --log-failed
+gh run rerun <run-id> --failed
+gh run watch <run-id> --exit-status
+```
+
+For deterministic build, test, signing, or upload failures, fix the cause through
+the normal PR flow and cut a newer version; never mutate an existing tag.
+
+Verify and report the release URL, asset sizes and digests, and the uploaded installers
 (`FaceManager-Setup-X.Y.Z.exe`, `FaceManager-Setup-GPU-X.Y.Z.exe`, and their
 `.sha256`). If CI failed before publishing, report that instead — never fill the
 gap by tagging or creating the release manually.
@@ -119,7 +151,7 @@ Bring both long-lived branches up to date so the next cycle starts clean:
 git fetch --all --tags --prune
 git switch main   && git pull --ff-only origin main
 git switch develop && git pull --ff-only origin develop
-git branch -d chore/release-preparation   # squash-merged, now redundant
+git branch -d chore/release-preparation   # only when it still exists locally
 ```
 
 `develop` and `main` should now agree on the released version. If `develop` has
