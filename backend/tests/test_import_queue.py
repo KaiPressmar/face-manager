@@ -10,6 +10,7 @@ from backend.services.import_queue import (
     ImportJob,
     ImportJobRepository,
     ImportQueue,
+    LiveStageTiming,
 )
 from backend.services.pipeline import ImportCancelled
 
@@ -145,6 +146,71 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(etas[second["id"]], 90)
         self.assertEqual(etas[third["id"]], 150)
         self.assertEqual(snapshot["overall_eta_seconds"], 150)
+
+    def test_large_import_eta_uses_recent_throughput_and_ignores_outlier(self):
+        job = ImportJob(
+            id="large-import",
+            folder_path="/photos/large",
+            status="running",
+            created_at="2026-01-01T00:00:00+00:00",
+            stage="processing",
+            total_images=1000,
+            processed_images=100,
+            stage_current=100,
+            stage_total=1000,
+        )
+        tracker = LiveStageTiming(
+            stage="processing",
+            last_progress=100,
+            last_sample_at=100.0,
+            samples=[1.0, 1.0, 1.0, 1.0, 1.0],
+        )
+        self.queue._live_stage_timing[job.id] = tracker
+
+        first_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+        tracker.observe(110, 110.0)
+        job.processed_images = 110
+        job.stage_current = 110
+        steady_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+
+        tracker.observe(111, 210.0)
+        job.processed_images = 111
+        job.stage_current = 111
+        outlier_eta = self.queue._estimate_stage_remaining_seconds(job, 1000)
+
+        self.assertEqual(first_eta, 900.0)
+        self.assertLess(steady_eta, first_eta)
+        self.assertLess(outlier_eta, steady_eta)
+
+    def test_live_eta_calibrates_from_first_completed_interval(self):
+        tracker = LiveStageTiming(
+            stage="processing",
+            last_progress=0,
+            last_sample_at=10.0,
+        )
+
+        tracker.observe(2, 14.0)
+
+        self.assertEqual(tracker.seconds_per_unit, 2.0)
+
+    def test_resume_rebases_live_eta_sample_after_pause(self):
+        job = self.queue.enqueue("/photos/paused-eta")
+        self.wait_for(lambda: self.processor.started == ["/photos/paused-eta"])
+        stored_job = self.queue._jobs[job["id"]]
+        tracker = LiveStageTiming(
+            stage="processing",
+            last_progress=stored_job.processed_images,
+            last_sample_at=10.0,
+            samples=[1.0, 1.0, 1.0],
+        )
+        self.queue._live_stage_timing[job["id"]] = tracker
+
+        self.queue.pause(job["id"])
+        with patch("backend.services.import_queue.time.monotonic", return_value=1000.0):
+            self.queue.resume(job["id"])
+
+        self.assertEqual(tracker.last_sample_at, 1000.0)
+        self.assertEqual(tracker.seconds_per_unit, 1.0)
 
     def test_on_change_fires_on_enqueue_and_progress(self):
         self.processor.release.clear()

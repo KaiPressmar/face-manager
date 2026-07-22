@@ -22,6 +22,7 @@ import {
   ThumbnailWarmupTask,
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
+import TaskActionIcon from "./TaskActionIcon";
 
 type TaskTone = "active" | "waiting" | "completed" | "failed" | "cancelled";
 type TaskKind = "import" | "groups" | "previews";
@@ -634,10 +635,13 @@ const BackgroundTasksStatus: React.FC = () => {
                 {history.length > 0 && (
                   <button
                     type="button"
+                    className="task-icon-button task-icon-button--danger"
                     disabled={busyTaskId !== null}
                     onClick={() => void clearHistory()}
+                    aria-label="Gesamte Aktivitäten-Historie löschen"
+                    title="Gesamte Historie löschen"
                   >
-                    Alle löschen
+                    <TaskActionIcon name="delete" />
                   </button>
                 )}
               </div>
@@ -712,16 +716,52 @@ const TaskRow: React.FC<{
       </div>
       <div className="activity-task__actions">
         {!history && task.controlState === "paused" && onResume && (
-          <button type="button" disabled={busy} onClick={onResume}>Fortsetzen</button>
+          <button
+            type="button"
+            className="task-icon-button"
+            disabled={busy}
+            onClick={onResume}
+            aria-label={`${task.title} fortsetzen`}
+            title="Fortsetzen"
+          >
+            <TaskActionIcon name="resume" />
+          </button>
         )}
         {!history && ["queued", "running"].includes(task.controlState) && onPause && (
-          <button type="button" disabled={busy} onClick={onPause}>Pausieren</button>
+          <button
+            type="button"
+            className="task-icon-button"
+            disabled={busy}
+            onClick={onPause}
+            aria-label={`${task.title} pausieren`}
+            title="Pausieren"
+          >
+            <TaskActionIcon name="pause" />
+          </button>
         )}
         {!history && task.controlState !== "cancelling" && onCancel && (
-          <button type="button" disabled={busy} onClick={onCancel}>Abbrechen</button>
+          <button
+            type="button"
+            className="task-icon-button task-icon-button--danger"
+            disabled={busy}
+            onClick={onCancel}
+            aria-label={`${task.title} abbrechen`}
+            title="Abbrechen"
+          >
+            <TaskActionIcon name="cancel" />
+          </button>
         )}
         {history && onDelete && (
-          <button type="button" disabled={busy} onClick={onDelete}>Löschen</button>
+          <button
+            type="button"
+            className="task-icon-button task-icon-button--danger"
+            disabled={busy}
+            onClick={onDelete}
+            aria-label={`${task.title} aus der Historie löschen`}
+            title="Aus Historie löschen"
+          >
+            <TaskActionIcon name="delete" />
+          </button>
         )}
       </div>
     </article>
