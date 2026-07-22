@@ -9,9 +9,15 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Bilder und Gesichtsgruppen aktualisieren sich während laufender Importe und Neu-Gruppierungen automatisch, ohne die aktuelle Arbeitsposition zu verändern.
+
 ### Verbessert
 
+- Zuordnungen lassen sich während eines Bildimports sicher weiterbearbeiten; manuelle Änderungen behalten Vorrang und neue Gesichter werden zuverlässig einsortiert.
+
 ### Behoben
+
+- Der Sprung von einem Bild zu einer Gesichtsgruppe zeigt jetzt bereits beim ersten Versuch zuverlässig die ausgewählte Gruppe und ihre Gesichter.
 
 ## [0.7.1] - 2026-07-22
 
