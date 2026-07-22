@@ -304,11 +304,13 @@ const SettingsPage: React.FC<{
     setError(null);
     setMessage(null);
     try {
-      const scheduled = await reclusterAllFaces();
+      const { scheduled, status } = await reclusterAllFaces();
       setMessage(
-        scheduled
-          ? "Die Gesichtsgruppen werden jetzt neu geordnet."
-          : "Die Gesichtsgruppen werden bereits neu geordnet oder es sind keine Gesichter vorhanden.",
+        !scheduled
+          ? "Es sind keine Gesichter vorhanden, die neu geordnet werden könnten."
+          : status === "queued"
+            ? "Das Neu-Ordnen ist eingeplant und startet automatisch, sobald der laufende Import abgeschlossen ist."
+            : "Die Gesichtsgruppen werden jetzt neu geordnet.",
       );
     } catch (reclusterError) {
       setError(

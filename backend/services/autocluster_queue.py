@@ -1,4 +1,15 @@
-"""Track background auto-clustering repair work for UI consumers."""
+"""Coordinate background clustering work so requests are never dropped.
+
+Reclustering shares SQLite's single writer with imports, so the two cannot run
+at the same time. Instead of rejecting a reclustering request while an import
+is busy (which silently lost the user's action), the queue *accepts* every
+request and keeps it visible as ``queued`` until the writer is free. A readiness
+gate decides when a queued task may actually start, and :meth:`notify_ready`
+re-checks that gate whenever the surrounding activity changes (an import
+finishes, finalization ends). Only one clustering task runs at a time; a request
+that arrives while another runs is coalesced into a single pending slot, with
+higher-priority requests superseding lower-priority ones.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +17,21 @@ import inspect
 import logging
 import threading
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .storage import count_active_inbox_faces, repair_active_inbox_faces
 
 logger = logging.getLogger("face_manager.autocluster_queue")
+
+
+# Relative importance when several requests compete for the single pending slot.
+# A more thorough or more urgent request supersedes a lighter one.
+PRIORITY_STARTUP_REPAIR = 5
+PRIORITY_IDLE_RECLUSTER = 10
+PRIORITY_MANUAL_RECLUSTER = 20
+PRIORITY_VERSION_UPGRADE = 30
 
 
 def _utc_now() -> str:
@@ -53,6 +72,17 @@ def _duration_seconds(started_at: Optional[str], finished_at: Optional[str] = No
 
 
 @dataclass
+class ReclusterRequest:
+    """One accepted clustering request awaiting or occupying the worker."""
+
+    reason: str
+    kind: str
+    priority: int
+    count_callable: Callable[[], int]
+    repair_callable: Callable[..., int]
+
+
+@dataclass
 class AutoClusterTask:
     id: str
     kind: str
@@ -74,7 +104,7 @@ class AutoClusterTask:
 
 
 class AutoClusterQueue:
-    """Run one visible background auto-clustering repair task at a time."""
+    """Run one clustering task at a time without ever dropping a request."""
 
     def __init__(
         self,
@@ -82,19 +112,23 @@ class AutoClusterQueue:
         repair_callable: Callable[..., int] = repair_active_inbox_faces,
         on_success: Optional[Callable[[int], None]] = None,
         on_change: Optional[Callable[[], None]] = None,
+        ready_gate: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._count_callable = count_callable
         self._repair_callable = repair_callable
         self._on_success = on_success
         self._on_change = on_change
+        # Whether a queued task may start now. When it returns ``False`` the task
+        # stays visibly queued until :meth:`notify_ready` finds the gate open.
+        self._ready_gate = ready_gate or (lambda: True)
         self._lock = threading.Lock()
         self._task: Optional[AutoClusterTask] = None
         self._thread: Optional[threading.Thread] = None
-        # Set when an interactive write asks the running pass to step aside.
         self._cancel_event = threading.Event()
-        # Repair callable bound to the currently scheduled task. Only one task
-        # runs at a time, so a single slot guarded by the lock is sufficient.
-        self._active_repair_callable: Callable[..., int] = repair_callable
+        # Request bound to ``self._task`` (queued or running).
+        self._active_request: Optional[ReclusterRequest] = None
+        # Single coalesced request to run once the active task finishes.
+        self._pending_request: Optional[ReclusterRequest] = None
 
     def start(
         self,
@@ -103,40 +137,100 @@ class AutoClusterQueue:
         kind: str = "auto_cluster_repair",
         count_callable: Optional[Callable[[], int]] = None,
         repair_callable: Optional[Callable[..., int]] = None,
+        priority: int = 0,
     ) -> Optional[dict]:
-        """Start a visible background clustering task when work exists."""
+        """Accept a clustering request, queuing or starting it as appropriate.
+
+        Returns the visible task (``queued`` while deferred, ``running`` once it
+        starts). Returns ``None`` only when there is genuinely nothing to do.
+        """
+        request = ReclusterRequest(
+            reason=reason,
+            kind=kind,
+            priority=priority,
+            count_callable=count_callable or self._count_callable,
+            repair_callable=repair_callable or self._repair_callable,
+        )
         with self._lock:
-            if self._task is not None and self._task.status in {"queued", "running"}:
-                return self._task.to_dict()
-
-            effective_count_callable = count_callable or self._count_callable
-            effective_repair_callable = repair_callable or self._repair_callable
-            total_faces = effective_count_callable()
-            if total_faces <= 0:
-                return None
-
-            task = AutoClusterTask(
-                id=f"autocluster-{uuid.uuid4().hex[:12]}",
-                kind=kind,
-                reason=reason,
-                status="queued",
-                created_at=_utc_now(),
-                total_faces=total_faces,
-                stage="preparing",
-            )
-            self._active_repair_callable = effective_repair_callable
-            self._cancel_event = threading.Event()
-            self._task = task
-            self._thread = threading.Thread(
-                target=self._run_task,
-                args=(task.id,),
-                name=f"autocluster-repair-{task.id}",
-                daemon=True,
-            )
-            self._thread.start()
-            result = task.to_dict()
+            active = self._task is not None and self._task.status in {"queued", "running"}
+            if active and self._task.status == "running":
+                # Coalesce behind the running task; it is picked up on completion.
+                self._coalesce_pending_locked(request)
+                result = self._task.to_dict()
+            elif active:  # a deferred (queued, not yet started) task exists
+                if request.priority >= self._active_request.priority:
+                    self._active_request = request
+                    self._task.kind = request.kind
+                    self._task.reason = request.reason
+                    self._task.total_faces = max(0, request.count_callable())
+                self._maybe_launch_locked()
+                result = self._task.to_dict()
+            else:
+                total_faces = request.count_callable()
+                if total_faces <= 0:
+                    return None
+                self._task = AutoClusterTask(
+                    id=f"autocluster-{uuid.uuid4().hex[:12]}",
+                    kind=request.kind,
+                    reason=request.reason,
+                    status="queued",
+                    created_at=_utc_now(),
+                    total_faces=total_faces,
+                    stage="preparing",
+                )
+                self._active_request = request
+                self._maybe_launch_locked()
+                result = self._task.to_dict()
         self._notify_change()
         return result
+
+    def notify_ready(self) -> None:
+        """Re-check the readiness gate after surrounding activity changed."""
+        launched = False
+        with self._lock:
+            if (
+                self._task is not None
+                and self._task.status == "queued"
+                and self._active_request is not None
+            ):
+                launched = self._maybe_launch_locked()
+        if launched:
+            self._notify_change()
+
+    def _coalesce_pending_locked(self, request: ReclusterRequest) -> None:
+        """Keep the highest-priority request in the single pending slot."""
+        if (
+            self._pending_request is None
+            or request.priority >= self._pending_request.priority
+        ):
+            self._pending_request = request
+
+    def _maybe_launch_locked(self) -> bool:
+        """Start the queued task if the writer is free. Caller holds the lock."""
+        if self._task is None or self._task.status != "queued":
+            return False
+        if self._active_request is None:
+            return False
+        try:
+            if not self._ready_gate():
+                return False
+        except Exception:  # pragma: no cover - a gate defect must not lose work
+            logger.exception("Auto-cluster readiness gate failed; deferring")
+            return False
+
+        task_id = self._task.id
+        self._cancel_event = threading.Event()
+        self._task.status = "running"
+        self._task.started_at = _utc_now()
+        self._task.stage = "processing"
+        self._thread = threading.Thread(
+            target=self._run_task,
+            args=(task_id,),
+            name=f"autocluster-repair-{task_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        return True
 
     def request_cancel(self, timeout: float = 0.0) -> bool:
         """Ask a running pass to stop so an interactive write can proceed.
@@ -183,12 +277,6 @@ class AutoClusterQueue:
             logger.exception("Auto-cluster change notification failed")
 
     def _run_task(self, task_id: str) -> None:
-        with self._lock:
-            if self._task is None or self._task.id != task_id:
-                return
-            self._task.status = "running"
-            self._task.started_at = _utc_now()
-            self._task.stage = "processing"
         self._notify_change()
 
         def progress_callback(processed: int, total: int) -> None:
@@ -199,10 +287,12 @@ class AutoClusterQueue:
                 self._task.total_faces = total
             self._notify_change()
 
+        repaired_faces = 0
         try:
             with self._lock:
-                repair_callable = self._active_repair_callable
+                request = self._active_request
                 cancel_event = self._cancel_event
+            repair_callable = request.repair_callable if request else self._repair_callable
             repaired_faces = _call_repair(
                 repair_callable,
                 progress_callback,
@@ -246,4 +336,38 @@ class AutoClusterQueue:
                 self._task.finished_at = _utc_now()
                 self._task.stage = "failed"
                 self._task.last_error = str(exc)
+            self._notify_change()
+        finally:
+            self._promote_pending(task_id)
+
+    def _promote_pending(self, finished_task_id: str) -> None:
+        """Start the coalesced pending request once the worker is free."""
+        launched = False
+        with self._lock:
+            if self._task is None or self._task.id != finished_task_id:
+                return
+            if self._task.status not in {"completed", "failed", "cancelled"}:
+                return
+            request = self._pending_request
+            self._pending_request = None
+            if request is None:
+                self._active_request = None
+                return
+            total_faces = max(0, request.count_callable())
+            if total_faces <= 0:
+                self._active_request = None
+                return
+            self._task = AutoClusterTask(
+                id=f"autocluster-{uuid.uuid4().hex[:12]}",
+                kind=request.kind,
+                reason=request.reason,
+                status="queued",
+                created_at=_utc_now(),
+                total_faces=total_faces,
+                stage="preparing",
+            )
+            self._active_request = request
+            self._maybe_launch_locked()
+            launched = True
+        if launched:
             self._notify_change()

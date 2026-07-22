@@ -163,6 +163,38 @@ def find_release(document: dict[str, Any], version: str) -> dict[str, Any] | Non
     return None
 
 
+def _release_view(release: dict[str, Any]) -> dict[str, Any]:
+    """Return a release with only its non-empty categories, ready for the UI."""
+    return {
+        "version": release["version"],
+        "date": release["date"],
+        "sections": [
+            {
+                "title": section["title"],
+                "items": list(section["items"]),
+            }
+            for section in release["sections"]
+            if section["items"]
+        ],
+    }
+
+
+def released_versions(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every released version with content, newest first.
+
+    The ``Unreleased`` section and any release without user-facing items are
+    omitted so the full changelog only shows finished, meaningful entries.
+    """
+    views = []
+    for release in document["releases"]:
+        if release["version"] == "Unreleased":
+            continue
+        view = _release_view(release)
+        if view["sections"]:
+            views.append(view)
+    return views
+
+
 def render_document(document: dict[str, Any]) -> str:
     lines = list(document["preamble"])
     while lines and not lines[-1]:

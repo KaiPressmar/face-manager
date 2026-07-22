@@ -112,6 +112,10 @@ export interface ReleaseNotes {
   version: string;
   date: string | null;
   sections: ReleaseNotesSection[];
+}
+
+export interface UnseenReleaseNotes {
+  versions: ReleaseNotes[];
   seen: boolean;
 }
 
@@ -417,12 +421,21 @@ export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
   return await res.json();
 }
 
-export async function fetchCurrentReleaseNotes(): Promise<ReleaseNotes> {
+export async function fetchUnseenReleaseNotes(): Promise<UnseenReleaseNotes> {
   const res = await apiFetch(`${API_BASE}/changelog/current`);
   if (!res.ok) {
     throw new Error("Die Versionshinweise sind nicht verfügbar.");
   }
   return await res.json();
+}
+
+export async function fetchFullChangelog(): Promise<ReleaseNotes[]> {
+  const res = await apiFetch(`${API_BASE}/changelog`);
+  if (!res.ok) {
+    throw new Error("Das Änderungsprotokoll ist nicht verfügbar.");
+  }
+  const payload = await res.json();
+  return Array.isArray(payload?.versions) ? payload.versions : [];
 }
 
 export async function acknowledgeCurrentReleaseNotes(): Promise<void> {
@@ -529,7 +542,12 @@ export async function autoTuneClusterThreshold(): Promise<ThresholdAutoTuneResul
   return await res.json();
 }
 
-export async function reclusterAllFaces(): Promise<boolean> {
+export interface ReclusterResult {
+  scheduled: boolean;
+  status: "queued" | "running" | "noop" | string;
+}
+
+export async function reclusterAllFaces(): Promise<ReclusterResult> {
   const res = await apiFetch(`${API_BASE}/clusters/recluster`, {
     method: "POST",
   });
@@ -539,7 +557,10 @@ export async function reclusterAllFaces(): Promise<boolean> {
     );
   }
   const payload = await res.json();
-  return Boolean(payload?.scheduled);
+  return {
+    scheduled: Boolean(payload?.scheduled),
+    status: typeof payload?.status === "string" ? payload.status : "noop",
+  };
 }
 
 export async function exportDatabase(): Promise<Blob> {

@@ -23,7 +23,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .changelog import ChangelogError, find_release, load_changelog
+from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
     APP_VERSION,
     DB_PATH,
@@ -52,7 +52,13 @@ from .services.desktop import (
 from .services.face_thumbnails import ensure_face_thumbnail
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
-from .services.autocluster_queue import AutoClusterQueue
+from .services.autocluster_queue import (
+    AutoClusterQueue,
+    PRIORITY_IDLE_RECLUSTER,
+    PRIORITY_MANUAL_RECLUSTER,
+    PRIORITY_STARTUP_REPAIR,
+    PRIORITY_VERSION_UPGRADE,
+)
 from .services.events import event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
@@ -227,6 +233,8 @@ def _publish_imports() -> None:
         notify_clusters_changed("import_completed")
         if not schedule_version_clustering_upgrade():
             mark_cluster_assignments_dirty("import_completed")
+        # Release any clustering task that was queued while the import ran.
+        auto_cluster_queue.notify_ready()
 
 
 def _publish_autocluster() -> None:
@@ -251,6 +259,8 @@ def _end_import_finalization() -> None:
     global _imports_finalizing
     with _cluster_operation_lock:
         _imports_finalizing = max(0, _imports_finalizing - 1)
+    # Finalization no longer blocks the writer; start any deferred clustering.
+    auto_cluster_queue.notify_ready()
 
 
 def notify_clusters_changed(reason: str) -> None:
@@ -277,9 +287,25 @@ def _handle_autocluster_success(_repaired_faces: int) -> None:
         schedule_version_clustering_upgrade()
 
 
+def _reclustering_writer_available() -> bool:
+    """Return whether the single SQLite writer is free for a clustering pass.
+
+    Reclustering shares the writer with imports, so a queued clustering task
+    must wait while an import is running, queued, or finalizing. It does not
+    consult the auto-cluster queue itself, which serialises its own tasks.
+    """
+    if _imports_finalizing > 0:
+        return False
+    import_snapshot = import_queue.snapshot()
+    return not (
+        import_snapshot.get("running_count") or import_snapshot.get("queued_count")
+    )
+
+
 auto_cluster_queue = AutoClusterQueue(
     on_success=_handle_autocluster_success,
     on_change=_publish_autocluster,
+    ready_gate=_reclustering_writer_available,
 )
 
 
@@ -305,11 +331,12 @@ face_thumbnail_warmup_queue = FaceThumbnailWarmupQueue(
 
 
 def run_startup_repairs(reason: str = "startup") -> dict | None:
-    """Schedule legacy inbox repair work without blocking app startup."""
-    with _cluster_operation_lock:
-        if _describe_background_activity():
-            return None
-        task = auto_cluster_queue.start(reason)
+    """Schedule legacy inbox repair work without blocking app startup.
+
+    The request is accepted even when an import is still resuming; the queue's
+    readiness gate holds it until the writer is free.
+    """
+    task = auto_cluster_queue.start(reason, priority=PRIORITY_STARTUP_REPAIR)
     if task is not None:
         logger.info(
             "Scheduled auto-clustering repair task %s for %s stale inbox faces",
@@ -325,29 +352,33 @@ def schedule_full_recluster(
 ) -> dict | None:
     """Schedule a rebuild of unassigned and per-person subclusters.
 
+    The request is always accepted. When an import currently holds the writer
+    the task is queued and starts automatically once the import finishes, so a
+    user-triggered reclustering is never silently dropped.
+
     Args:
         scoped: Rebuild only the groups recorded as dirty instead of the whole
             library. Used for idle-triggered runs after assignment changes.
     """
-    with _cluster_operation_lock:
-        if _describe_background_activity():
-            return None
-        task = auto_cluster_queue.start(
-            reason,
-            kind="full_recluster",
-            count_callable=(
-                count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
-            ),
-            repair_callable=(
-                partial(recluster_all_active_faces, scoped=True)
-                if scoped
-                else recluster_all_active_faces
-            ),
-        )
+    priority = PRIORITY_IDLE_RECLUSTER if scoped else PRIORITY_MANUAL_RECLUSTER
+    task = auto_cluster_queue.start(
+        reason,
+        kind="full_recluster",
+        count_callable=(
+            count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
+        ),
+        repair_callable=(
+            partial(recluster_all_active_faces, scoped=True)
+            if scoped
+            else recluster_all_active_faces
+        ),
+        priority=priority,
+    )
     if task is not None:
         logger.info(
-            "Scheduled full reclustering task %s for %s faces",
+            "Scheduled full reclustering task %s (%s) for %s faces",
             task["id"],
+            task["status"],
             task["total_faces"],
         )
     return task
@@ -415,6 +446,7 @@ def schedule_version_clustering_upgrade() -> bool:
             kind="full_recluster",
             count_callable=count_reclusterable_faces,
             repair_callable=_apply_version_clustering_upgrade,
+            priority=PRIORITY_VERSION_UPGRADE,
         )
         if task and task.get("reason") == reason:
             _version_clustering_pending = False
@@ -536,15 +568,67 @@ def api_version():
 
 @app.get("/api/changelog/current")
 def api_current_changelog():
-    """Return high-level notes for the running application version."""
+    """Return unseen release notes up to the running version.
+
+    After an update that skipped several releases the user must see every
+    intermediate version's notes, not only the newest. On a fresh install
+    (no recorded last-seen version) only the running version is offered so the
+    first launch does not dump the entire history.
+    """
+    last_seen = get_last_seen_changelog_version()
     try:
-        release = find_release(load_changelog(get_changelog_path()), APP_VERSION)
+        document = load_changelog(get_changelog_path())
     except (ChangelogError, OSError):
         logger.exception("Could not load release notes for version %s", APP_VERSION)
-        release = None
-    response = release or {"version": APP_VERSION, "date": None, "sections": []}
-    response["seen"] = get_last_seen_changelog_version() == APP_VERSION
-    return response
+        document = None
+
+    versions: list[dict] = []
+    if document is not None:
+        try:
+            current_version = parse_semver(APP_VERSION)
+        except ValueError:
+            current_version = None
+        try:
+            seen_version = parse_semver(last_seen) if last_seen else None
+        except ValueError:
+            seen_version = None
+
+        for release in released_versions(document):
+            try:
+                release_version = parse_semver(release["version"])
+            except ValueError:
+                continue
+            if current_version is not None and release_version > current_version:
+                continue
+            if seen_version is None:
+                # Without a recorded history only surface the running version.
+                if current_version is not None and release_version != current_version:
+                    continue
+            elif release_version <= seen_version:
+                continue
+            versions.append(release)
+
+    if not versions:
+        # Preserve a stable shape so the UI can distinguish "nothing new" from
+        # a changelog that failed to load.
+        current = find_release(document, APP_VERSION) if document is not None else None
+        versions = [current] if current else []
+
+    return {
+        "versions": versions,
+        "seen": last_seen == APP_VERSION,
+    }
+
+
+@app.get("/api/changelog")
+def api_full_changelog():
+    """Return the complete released changelog history, newest first."""
+    try:
+        document = load_changelog(get_changelog_path())
+    except (ChangelogError, OSError):
+        logger.exception("Could not load full changelog")
+        return {"versions": []}
+    return {"versions": released_versions(document)}
 
 
 @app.post("/api/changelog/current/acknowledge")
@@ -1287,10 +1371,15 @@ def api_dismiss_review_suggestion(cluster_id: int):
 @app.post("/api/clusters/recluster")
 @safe_cluster_mutation
 def api_recluster_clusters():
-    """Schedule a full rebuild including each person's internal subclusters."""
+    """Schedule a full rebuild including each person's internal subclusters.
+
+    The request is always accepted: if an import currently holds the writer the
+    task is queued and starts on its own once the import finishes.
+    """
     idle_recluster_scheduler.clear()
     task = schedule_full_recluster("manual_recluster")
-    return {"scheduled": task is not None, "task": task}
+    status = task.get("status") if task else "noop"
+    return {"scheduled": task is not None, "status": status, "task": task}
 
 
 @app.get("/api/face-review-groups")
