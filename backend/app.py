@@ -165,7 +165,9 @@ def _describe_background_activity() -> str | None:
         )
     import_snapshot = import_queue.snapshot()
     if isinstance(import_snapshot, dict) and (
-        import_snapshot.get("running_count") or import_snapshot.get("queued_count")
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
     ):
         return (
             "Ein Bildimport läuft oder wartet. Diese Änderung ist vorübergehend "
@@ -178,7 +180,7 @@ def _describe_background_activity() -> str | None:
         if isinstance(auto_cluster_snapshot, dict)
         else None
     )
-    if task and task.get("status") in {"queued", "running"}:
+    if task and task.get("status") in {"queued", "running", "paused", "cancelling"}:
         return (
             "Die Gesichtscluster werden gerade im Hintergrund aktualisiert. "
             "Diese Änderung ist vorübergehend gesperrt. Die Ansicht wird nach "
@@ -225,7 +227,11 @@ def _publish_imports() -> None:
     global _import_was_busy, _last_import_progress
     snapshot = import_queue.snapshot()
     event_hub.publish("imports", snapshot)
-    busy = bool(snapshot.get("running_count") or snapshot.get("queued_count"))
+    busy = bool(
+        snapshot.get("running_count")
+        or snapshot.get("queued_count")
+        or snapshot.get("paused_count")
+    )
     current_progress = {
         str(job.get("id")): (
             int(job.get("processed_images") or 0),
@@ -303,7 +309,10 @@ _publish_imports_throttled = TrailingThrottle(_publish_imports, interval=0.2)
 _publish_autocluster_throttled = TrailingThrottle(_publish_autocluster, interval=0.2)
 _publish_background_cluster_progress_throttled = TrailingThrottle(
     _publish_background_cluster_progress,
-    interval=0.75,
+    # A checkpoint invalidates several potentially large query caches. Keep
+    # imports live, but batch adjacent images so the UI cannot turn a fast
+    # import into a continuous stream of expensive overview rebuilds.
+    interval=2.0,
 )
 
 
@@ -340,7 +349,9 @@ def _reclustering_writer_available() -> bool:
         return False
     import_snapshot = import_queue.snapshot()
     return not (
-        import_snapshot.get("running_count") or import_snapshot.get("queued_count")
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
     )
 
 
@@ -358,10 +369,12 @@ def is_backend_idle_for_thumbnail_warmup() -> bool:
         return False
     if import_snapshot.get("queued_count", 0) > 0:
         return False
+    if import_snapshot.get("paused_count", 0) > 0:
+        return False
 
     auto_cluster_snapshot = auto_cluster_queue.snapshot()
     task = auto_cluster_snapshot.get("task")
-    if task and task.get("status") in {"queued", "running"}:
+    if task and task.get("status") in {"queued", "running", "paused", "cancelling"}:
         return False
     return True
 
@@ -474,7 +487,11 @@ def schedule_version_clustering_upgrade() -> bool:
             return False
 
         import_snapshot = import_queue.snapshot()
-        if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+        if (
+            import_snapshot.get("running_count")
+            or import_snapshot.get("queued_count")
+            or import_snapshot.get("paused_count")
+        ):
             _version_clustering_pending = True
             logger.info(
                 "Deferred clustering upgrade for version %s until imports are idle",
@@ -514,10 +531,17 @@ def schedule_version_clustering_upgrade() -> bool:
 def is_backend_idle_for_reclustering() -> bool:
     """Return whether low-priority assignment-triggered clustering may start."""
     import_snapshot = import_queue.snapshot()
-    if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+    if (
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
+    ):
         return False
     task = auto_cluster_queue.snapshot().get("task")
-    return not (task and task.get("status") in {"queued", "running"})
+    return not (
+        task
+        and task.get("status") in {"queued", "running", "paused", "cancelling"}
+    )
 
 
 # A review session is full of short pauses, so the quiet period must be long
@@ -868,7 +892,7 @@ def serialize_import_snapshot(snapshot, display_platform: str):
 def ensure_database_is_idle() -> None:
     """Reject database mutation while imports are queued or running."""
     snapshot = import_queue.snapshot()
-    if snapshot["running_count"] or snapshot["queued_count"]:
+    if snapshot["running_count"] or snapshot["queued_count"] or snapshot.get("paused_count"):
         raise HTTPException(
             status_code=409,
             detail="Eine Datensicherung ist erst möglich, wenn alle Bilder hinzugefügt wurden.",
@@ -1285,6 +1309,59 @@ def api_thumbnail_warmup():
     return face_thumbnail_warmup_queue.snapshot()
 
 
+@app.post("/api/thumbnail-warmup/pause")
+def api_pause_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.pause()}
+
+
+@app.post("/api/thumbnail-warmup/resume")
+def api_resume_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.resume()}
+
+
+@app.post("/api/thumbnail-warmup/cancel")
+def api_cancel_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.cancel()}
+
+
+@app.delete("/api/thumbnail-warmup/history")
+def api_delete_thumbnail_warmup_history():
+    if not face_thumbnail_warmup_queue.dismiss_history():
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return {"status": "removed"}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/pause")
+def api_pause_autocluster_task(task_id: str):
+    task = auto_cluster_queue.pause(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht pausiert werden.")
+    return {"task": task}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/resume")
+def api_resume_autocluster_task(task_id: str):
+    task = auto_cluster_queue.resume(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht fortgesetzt werden.")
+    return {"task": task}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/cancel")
+def api_cancel_autocluster_task(task_id: str):
+    task = auto_cluster_queue.cancel(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht abgebrochen werden.")
+    return {"task": task}
+
+
+@app.delete("/api/autocluster-tasks/{task_id}")
+def api_delete_autocluster_task(task_id: str):
+    if not auto_cluster_queue.dismiss(task_id):
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return {"status": "removed"}
+
+
 @app.get("/api/events")
 async def api_events():
     """Stream live backend state to subscribed clients via Server-Sent Events.
@@ -1303,6 +1380,43 @@ async def api_events():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.delete("/api/imports/history")
+def api_delete_import_history():
+    return {"removed_count": import_queue.clear_history()}
+
+
+@app.post("/api/imports/{job_id}/pause")
+def api_pause_import(job_id: str):
+    result = import_queue.pause(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht pausiert werden.")
+    return result
+
+
+@app.post("/api/imports/{job_id}/resume")
+def api_resume_import(job_id: str):
+    result = import_queue.resume(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht fortgesetzt werden.")
+    return result
+
+
+@app.post("/api/imports/{job_id}/cancel")
+def api_cancel_import(job_id: str):
+    result = import_queue.cancel(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht abgebrochen werden.")
+    return result
+
+
+@app.delete("/api/imports/{job_id}/history")
+def api_delete_import_history_entry(job_id: str):
+    result = import_queue.delete_terminal(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return result
 
 
 @app.delete("/api/imports/{job_id}")

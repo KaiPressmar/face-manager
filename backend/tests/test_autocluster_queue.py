@@ -134,6 +134,41 @@ class AutoClusterQueueTest(unittest.TestCase):
         release_first.set()
         self.assertTrue(second_ran.wait(2.0))
 
+    def test_running_task_can_pause_resume_cancel_and_be_dismissed(self):
+        started = threading.Event()
+
+        def repair(progress_callback=None, cancel_token=None):
+            started.set()
+            processed = 0
+            while processed < 20:
+                if cancel_token.wait_if_paused() or cancel_token.is_set():
+                    return processed
+                processed += 1
+                progress_callback(processed, 20)
+                time.sleep(0.01)
+            return processed
+
+        queue = AutoClusterQueue(
+            count_callable=lambda: 20,
+            repair_callable=repair,
+            ready_gate=lambda: True,
+        )
+        task = queue.start("manual", kind="full_recluster")
+        self.assertTrue(started.wait(1))
+
+        self.assertEqual(queue.pause(task["id"])["status"], "paused")
+        paused_progress = queue.snapshot()["task"]["processed_faces"]
+        time.sleep(0.05)
+        self.assertEqual(queue.snapshot()["task"]["processed_faces"], paused_progress)
+
+        self.assertEqual(queue.resume(task["id"])["status"], "running")
+        self.assertTrue(_wait_for(lambda: queue.snapshot()["task"]["processed_faces"] > paused_progress))
+        queue.pause(task["id"])
+        queue.cancel(task["id"])
+        self.assertTrue(_wait_for(lambda: self._status(queue) == "cancelled"))
+        self.assertTrue(queue.dismiss(task["id"]))
+        self.assertIsNone(queue.snapshot()["task"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,17 +3,35 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AutoClusterTask,
   AutoClusterTaskState,
+  cancelAutoClusterTask,
+  cancelImportJob,
+  cancelThumbnailWarmup,
+  clearImportHistory,
+  deleteAutoClusterHistoryEntry,
+  deleteImportHistoryEntry,
+  deleteThumbnailWarmupHistory,
   ImportJob,
   ImportQueueState,
+  pauseAutoClusterTask,
+  pauseImportJob,
+  pauseThumbnailWarmup,
+  resumeAutoClusterTask,
+  resumeImportJob,
+  resumeThumbnailWarmup,
   ThumbnailWarmupState,
   ThumbnailWarmupTask,
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
 
 type TaskTone = "active" | "waiting" | "completed" | "failed" | "cancelled";
+type TaskKind = "import" | "groups" | "previews";
+type TaskControlState = "queued" | "running" | "paused" | "cancelling" | "terminal";
 
 export type BackgroundTaskView = {
   id: string;
+  sourceId: string;
+  kind: TaskKind;
+  controlState: TaskControlState;
   title: string;
   status: string;
   summary: string;
@@ -68,6 +86,7 @@ function importProgress(job: ImportJob): number | null {
 
 function importSummary(job: ImportJob): string {
   if (job.status === "queued") return "Wartet, bis eine andere Aufgabe fertig ist";
+  if (job.status === "paused") return "Pausiert und kann jederzeit fortgesetzt werden";
   if (job.status === "cancelling") return "Wird sicher beendet";
   if (job.status === "completed") {
     return `${job.processed_images} Bilder wurden geprüft`;
@@ -96,6 +115,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
   const status: Record<ImportJob["status"], string> = {
     queued: "Wartet",
     running: "In Arbeit",
+    paused: "Pausiert",
     cancelling: "Wird beendet",
     completed: "Abgeschlossen",
     failed: "Nicht abgeschlossen",
@@ -104,6 +124,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
   const tone: Record<ImportJob["status"], TaskTone> = {
     queued: "waiting",
     running: "active",
+    paused: "waiting",
     cancelling: "waiting",
     completed: "completed",
     failed: "failed",
@@ -111,6 +132,11 @@ function importTask(job: ImportJob): BackgroundTaskView {
   };
   return {
     id: `import:${job.id}`,
+    sourceId: job.id,
+    kind: "import",
+    controlState: ["completed", "failed", "cancelled"].includes(job.status)
+      ? "terminal"
+      : job.status as "queued" | "running" | "paused" | "cancelling",
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
     summary: importSummary(job),
@@ -152,11 +178,16 @@ function autoClusterTask(task: AutoClusterTask): BackgroundTaskView {
         ? "cancelled"
         : task.status === "completed"
           ? "completed"
-          : task.status === "queued"
+            : task.status === "queued" || task.status === "paused" || task.status === "cancelling"
             ? "waiting"
             : "active";
   return {
     id: `groups:${task.id}`,
+    sourceId: task.id,
+    kind: "groups",
+    controlState: isTerminal
+      ? "terminal"
+      : task.status as "queued" | "running" | "paused" | "cancelling",
     title,
     status:
       task.status === "failed"
@@ -167,6 +198,10 @@ function autoClusterTask(task: AutoClusterTask): BackgroundTaskView {
             ? "Abgeschlossen"
             : task.status === "queued"
               ? "Wartet"
+              : task.status === "paused"
+                ? "Pausiert"
+                : task.status === "cancelling"
+                  ? "Wird beendet"
               : "In Arbeit",
     summary:
       task.status === "failed"
@@ -177,6 +212,10 @@ function autoClusterTask(task: AutoClusterTask): BackgroundTaskView {
             ? "Die Gesichtsgruppen sind wieder auf dem aktuellen Stand"
             : task.status === "queued"
               ? "Beginnt, sobald andere wichtige Aufgaben fertig sind"
+              : task.status === "paused"
+                ? "Pausiert und kann jederzeit fortgesetzt werden"
+                : task.status === "cancelling"
+                  ? "Wird an einer sicheren Stelle beendet"
               : task.total_faces > 0
                 ? `${task.processed_faces} von ${task.total_faces} Gesichtern geprüft`
                 : "Gesichter werden neu geordnet",
@@ -194,31 +233,45 @@ function autoClusterTask(task: AutoClusterTask): BackgroundTaskView {
 
 function thumbnailTask(task: ThumbnailWarmupTask): BackgroundTaskView {
   const failed = task.status === "failed";
+  const cancelled = task.status === "cancelled";
   const completed = task.cache_complete;
   return {
     id: `previews:${task.started_at ?? task.last_run_at ?? "current"}`,
+    sourceId: "thumbnail-warmup",
+    kind: "previews",
+    controlState: failed || cancelled || completed
+      ? "terminal"
+      : task.user_paused
+        ? "paused"
+        : "running",
     title: "Bildvorschauen vorbereiten",
     status: failed
       ? "Nicht abgeschlossen"
+      : cancelled
+        ? "Abgebrochen"
       : completed
         ? "Abgeschlossen"
         : task.status === "paused"
-          ? "Wartet kurz"
+          ? task.user_paused ? "Pausiert" : "Wartet kurz"
           : "In Arbeit",
     summary: failed
       ? "Vorschauen werden bei Bedarf weiterhin direkt erstellt"
+      : cancelled
+        ? "Die Vorbereitung wurde beendet"
       : completed
         ? "Alle Gesichtsansichten können schneller angezeigt werden"
         : task.status === "paused"
-          ? "Andere Aufgaben haben gerade Vorrang"
+          ? task.user_paused
+            ? "Pausiert und kann jederzeit fortgesetzt werden"
+            : "Andere Aufgaben haben gerade Vorrang"
           : task.total_faces > 0
             ? `${task.cycle_scanned_faces} von ${task.total_faces} Vorschauen geprüft`
             : "Bildvorschauen werden vorbereitet",
-    tone: failed ? "failed" : completed ? "completed" : task.status === "paused" ? "waiting" : "active",
+    tone: failed ? "failed" : cancelled ? "cancelled" : completed ? "completed" : task.status === "paused" ? "waiting" : "active",
     progress: completed ? 100 : boundedProgress(task.cycle_scanned_faces, task.total_faces),
-    etaSeconds: completed || failed ? null : finiteDuration(task.eta_seconds),
+    etaSeconds: completed || failed || cancelled ? null : finiteDuration(task.eta_seconds),
     elapsedSeconds: null,
-    finishedAt: completed || failed ? task.last_run_at : null,
+    finishedAt: completed || failed || cancelled ? task.last_run_at : null,
   };
 }
 
@@ -238,7 +291,8 @@ export function calculateOverallEta(
   const importsPending = Boolean(
     queue &&
       ((queue.running_count ?? queue.active_job_ids?.length ?? 0) > 0 ||
-        queue.queued_count > 0),
+        queue.queued_count > 0 ||
+        (queue.paused_count ?? 0) > 0),
   );
   if (importsPending) {
     const eta = finiteDuration(queue?.overall_eta_seconds);
@@ -246,7 +300,7 @@ export function calculateOverallEta(
     durations.push(eta);
   }
 
-  if (clustering && (clustering.status === "queued" || clustering.status === "running")) {
+  if (clustering && ["queued", "running", "paused", "cancelling"].includes(clustering.status)) {
     const eta = estimateAutoClusterEta(clustering);
     if (eta == null) return null;
     durations.push(eta);
@@ -324,7 +378,7 @@ const BackgroundTasksStatus: React.FC = () => {
     });
     const unsubscribeThumbnails = subscribeToTopic<ThumbnailWarmupState>("thumbnail-warmup", (next) => {
       const task = next.task;
-      if (task?.cache_complete || task?.status === "failed") {
+      if (task?.cache_complete || task?.status === "failed" || task?.status === "cancelled") {
         const view = thumbnailTask(task);
         setSessionHistory((current) => [view, ...current.filter((entry) => entry.id !== view.id)].slice(0, 8));
       }
@@ -332,7 +386,7 @@ const BackgroundTasksStatus: React.FC = () => {
       const justFinished = Boolean(
         previousThumbnailState.current &&
           previousThumbnailState.current !== stateKey &&
-          (task?.cache_complete || task?.status === "failed"),
+          (task?.cache_complete || task?.status === "failed" || task?.status === "cancelled"),
       );
       if (justFinished) {
         setUnseenFinished((count) => count + 1);
@@ -356,7 +410,7 @@ const BackgroundTasksStatus: React.FC = () => {
     const tasks = queue?.jobs
       .filter((job) => !TERMINAL_IMPORT_STATUSES.has(job.status))
       .map(importTask) ?? [];
-    if (clustering && (clustering.status === "queued" || clustering.status === "running")) {
+    if (clustering && ["queued", "running", "paused", "cancelling"].includes(clustering.status)) {
       tasks.push(autoClusterTask(clustering));
     }
     if (
@@ -385,6 +439,86 @@ const BackgroundTasksStatus: React.FC = () => {
   const waitingCount = activeTasks.length - runningCount;
   const parallelImports = queue?.running_count ?? queue?.active_job_ids?.length ?? 0;
   const open = isHovered || hasFocus || isPinned;
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const controlTask = async (
+    task: BackgroundTaskView,
+    action: "pause" | "resume" | "cancel",
+  ) => {
+    setBusyTaskId(task.id);
+    setActionError(null);
+    try {
+      if (task.kind === "import") {
+        await (action === "pause"
+          ? pauseImportJob(task.sourceId)
+          : action === "resume"
+            ? resumeImportJob(task.sourceId)
+            : cancelImportJob(task.sourceId));
+      } else if (task.kind === "groups") {
+        await (action === "pause"
+          ? pauseAutoClusterTask(task.sourceId)
+          : action === "resume"
+            ? resumeAutoClusterTask(task.sourceId)
+            : cancelAutoClusterTask(task.sourceId));
+      } else {
+        await (action === "pause"
+          ? pauseThumbnailWarmup()
+          : action === "resume"
+            ? resumeThumbnailWarmup()
+            : cancelThumbnailWarmup());
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Die Aufgabe konnte nicht geändert werden.");
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
+
+  const deleteHistoryTask = async (task: BackgroundTaskView) => {
+    if (!window.confirm("Diesen Eintrag dauerhaft aus der Historie löschen?")) return;
+    setBusyTaskId(task.id);
+    setActionError(null);
+    try {
+      if (task.kind === "import") {
+        await deleteImportHistoryEntry(task.sourceId);
+      } else if (task.kind === "groups") {
+        if (clustering?.id === task.sourceId) {
+          await deleteAutoClusterHistoryEntry(task.sourceId);
+        }
+        setSessionHistory((current) => current.filter((entry) => entry.id !== task.id));
+      } else {
+        await deleteThumbnailWarmupHistory();
+        setSessionHistory((current) => current.filter((entry) => entry.id !== task.id));
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Der Eintrag konnte nicht gelöscht werden.");
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
+
+  const clearHistory = async () => {
+    if (!window.confirm("Die gesamte Aufgabenhistorie dauerhaft löschen?")) return;
+    setBusyTaskId("history");
+    setActionError(null);
+    try {
+      await clearImportHistory();
+      const cleanup: Promise<unknown>[] = [];
+      if (clustering && ["completed", "failed", "cancelled"].includes(clustering.status)) {
+        cleanup.push(deleteAutoClusterHistoryEntry(clustering.id));
+      }
+      if (thumbnails && (thumbnails.cache_complete || ["failed", "cancelled"].includes(thumbnails.status))) {
+        cleanup.push(deleteThumbnailWarmupHistory());
+      }
+      await Promise.allSettled(cleanup);
+      setSessionHistory([]);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Die Historie konnte nicht gelöscht werden.");
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
 
   useEffect(() => {
     if (open) setUnseenFinished(0);
@@ -474,7 +608,14 @@ const BackgroundTasksStatus: React.FC = () => {
               </div>
               <div className="activity-center__tasks">
                 {activeTasks.map((task) => (
-                  <TaskRow key={task.id} task={task} />
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    busy={busyTaskId === task.id}
+                    onPause={() => void controlTask(task, "pause")}
+                    onResume={() => void controlTask(task, "resume")}
+                    onCancel={() => void controlTask(task, "cancel")}
+                  />
                 ))}
               </div>
               {parallelImports > 1 && (
@@ -488,12 +629,29 @@ const BackgroundTasksStatus: React.FC = () => {
           <div className="activity-center__section activity-center__section--history">
             <div className="activity-center__section-title">
               <span>Zuletzt beendet</span>
-              <span>{history.length}</span>
+              <div>
+                <span>{history.length}</span>
+                {history.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={busyTaskId !== null}
+                    onClick={() => void clearHistory()}
+                  >
+                    Alle löschen
+                  </button>
+                )}
+              </div>
             </div>
             {history.length > 0 ? (
               <div className="activity-center__history">
                 {history.map((task) => (
-                  <TaskRow key={task.id} task={task} history />
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    history
+                    busy={busyTaskId === task.id}
+                    onDelete={() => void deleteHistoryTask(task)}
+                  />
                 ))}
               </div>
             ) : (
@@ -504,13 +662,30 @@ const BackgroundTasksStatus: React.FC = () => {
           {connectionError && (
             <p className="activity-center__connection">Der Aufgabenstatus wird gerade neu verbunden.</p>
           )}
+          {actionError && <p className="activity-center__connection">{actionError}</p>}
         </section>
       )}
     </div>
   );
 };
 
-const TaskRow: React.FC<{ task: BackgroundTaskView; history?: boolean }> = ({ task, history = false }) => {
+const TaskRow: React.FC<{
+  task: BackgroundTaskView;
+  history?: boolean;
+  busy?: boolean;
+  onPause?: () => void;
+  onResume?: () => void;
+  onCancel?: () => void;
+  onDelete?: () => void;
+}> = ({
+  task,
+  history = false,
+  busy = false,
+  onPause,
+  onResume,
+  onCancel,
+  onDelete,
+}) => {
   const duration = formatFriendlyDuration(history ? task.elapsedSeconds : task.etaSeconds);
   return (
     <article className={`activity-task activity-task--${task.tone}`}>
@@ -534,6 +709,20 @@ const TaskRow: React.FC<{ task: BackgroundTaskView; history?: boolean }> = ({ ta
       <div className="activity-task__meta">
         <span>{history ? finishedLabel(task.finishedAt) : duration ? `Fertig in ca. ${duration}` : "Zeit wird berechnet"}</span>
         {history && duration && <span>Dauer: {duration}</span>}
+      </div>
+      <div className="activity-task__actions">
+        {!history && task.controlState === "paused" && onResume && (
+          <button type="button" disabled={busy} onClick={onResume}>Fortsetzen</button>
+        )}
+        {!history && ["queued", "running"].includes(task.controlState) && onPause && (
+          <button type="button" disabled={busy} onClick={onPause}>Pausieren</button>
+        )}
+        {!history && task.controlState !== "cancelling" && onCancel && (
+          <button type="button" disabled={busy} onClick={onCancel}>Abbrechen</button>
+        )}
+        {history && onDelete && (
+          <button type="button" disabled={busy} onClick={onDelete}>Löschen</button>
+        )}
       </div>
     </article>
   );

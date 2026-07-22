@@ -9,9 +9,13 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Laufende Importe, Neuordnungen und Vorschauarbeiten lassen sich pausieren, fortsetzen oder abbrechen; beendete Aufgaben können einzeln oder vollständig aus der Historie gelöscht werden.
+
 ### Verbessert
 
 ### Behoben
+
+- Während laufender Importe bleiben alle Ansichten reaktionsfähig; neue Inhalte werden ruhig gebündelt und unterbrechen weder Scrollposition noch Auswahl.
 
 ## [0.8.0] - 2026-07-22
 

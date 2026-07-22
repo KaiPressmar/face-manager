@@ -105,6 +105,20 @@ class ImportApiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    @patch.object(app, "import_queue")
+    def test_import_control_endpoints_delegate_to_queue(self, import_queue):
+        import_queue.pause.return_value = {"id": "job-1", "status": "paused"}
+        import_queue.resume.return_value = {"id": "job-1", "status": "running"}
+        import_queue.cancel.return_value = {"id": "job-1", "status": "cancelling"}
+        import_queue.delete_terminal.return_value = {"id": "job-1", "status": "removed"}
+        import_queue.clear_history.return_value = 3
+
+        self.assertEqual(app.api_pause_import("job-1")["status"], "paused")
+        self.assertEqual(app.api_resume_import("job-1")["status"], "running")
+        self.assertEqual(app.api_cancel_import("job-1")["status"], "cancelling")
+        self.assertEqual(app.api_delete_import_history_entry("job-1")["status"], "removed")
+        self.assertEqual(app.api_delete_import_history(), {"removed_count": 3})
+
     @patch.object(app, "event_hub")
     @patch.object(app, "_publish_background_cluster_progress_throttled")
     @patch.object(app, "import_queue")

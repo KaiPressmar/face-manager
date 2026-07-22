@@ -11,6 +11,18 @@ class ClusterApiTest(unittest.TestCase):
     def setUp(self):
         app_cache.clear()
 
+    @patch("backend.app.auto_cluster_queue")
+    def test_autocluster_control_endpoints_delegate_to_queue(self, queue):
+        queue.pause.return_value = {"id": "task-1", "status": "paused"}
+        queue.resume.return_value = {"id": "task-1", "status": "running"}
+        queue.cancel.return_value = {"id": "task-1", "status": "cancelling"}
+        queue.dismiss.return_value = True
+
+        self.assertEqual(app.api_pause_autocluster_task("task-1")["task"]["status"], "paused")
+        self.assertEqual(app.api_resume_autocluster_task("task-1")["task"]["status"], "running")
+        self.assertEqual(app.api_cancel_autocluster_task("task-1")["task"]["status"], "cancelling")
+        self.assertEqual(app.api_delete_autocluster_task("task-1"), {"status": "removed"})
+
     @patch("backend.app.list_cluster_summaries")
     def test_clusters_returns_compact_summaries(self, list_cluster_summaries):
         list_cluster_summaries.return_value = [
