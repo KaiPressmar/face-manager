@@ -247,6 +247,113 @@ button:disabled {
   appearance: auto;
 }
 
+.filter-bar__grid-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 258px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.filter-bar__grid-size:hover,
+.filter-bar__grid-size:focus-within {
+  border-color: var(--accent-border);
+}
+
+.filter-bar__grid-size:focus-within {
+  box-shadow: var(--focus-ring);
+}
+
+.filter-bar__grid-size-label,
+.filter-bar__grid-size output {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.filter-bar__grid-size output {
+  min-width: 52px;
+  color: var(--accent-text);
+  text-align: right;
+}
+
+.filter-bar__grid-size-icon {
+  color: var(--text-faint);
+  line-height: 1;
+  user-select: none;
+}
+
+.filter-bar__grid-size-icon--small {
+  font-size: 11px;
+}
+
+.filter-bar__grid-size-icon--large {
+  font-size: 17px;
+}
+
+.filter-bar__grid-size input[type="range"] {
+  --grid-size-position: 50%;
+  flex: 1 1 72px;
+  min-width: 72px;
+  height: 16px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.filter-bar__grid-size input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--grid-size-position),
+    var(--border-strong) var(--grid-size-position) 100%
+  );
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.filter-bar__grid-size input[type="range"]::-webkit-slider-thumb {
+  width: 15px;
+  height: 15px;
+  margin-top: -5.5px;
+  border: 2px solid var(--surface-1);
+  border-radius: 50%;
+  appearance: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--surface-1);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
 .filter-bar__search {
   width: 160px;
   height: 34px;

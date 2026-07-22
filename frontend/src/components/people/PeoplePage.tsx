@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
-import ImageGrid, { type FaceOverlayMode } from "./ImageGrid";
+import ImageGrid, {
+  type FaceOverlayMode,
+  type ImageGridSize,
+} from "./ImageGrid";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import FolderPickerModal from "../shared/FolderPickerModal";
 import { subscribeToTopic } from "../../utils/events";
@@ -12,6 +15,41 @@ export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
 const PREFETCH_IMAGE_COUNT = PAGE_SIZE;
+const IMAGE_GRID_SIZE_STORAGE_KEY = "face-manager:image-grid-size";
+const IMAGE_GRID_SIZE_OPTIONS: Array<{
+  value: ImageGridSize;
+  label: string;
+}> = [
+  { value: "xsmall", label: "Sehr klein" },
+  { value: "small", label: "Klein" },
+  { value: "medium", label: "Mittel" },
+  { value: "large", label: "Groß" },
+];
+
+function readImageGridSize(): ImageGridSize {
+  try {
+    const stored = window.localStorage.getItem(IMAGE_GRID_SIZE_STORAGE_KEY);
+    if (
+      stored === "xsmall" ||
+      stored === "small" ||
+      stored === "medium" ||
+      stored === "large"
+    ) {
+      return stored;
+    }
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+  return "medium";
+}
+
+function persistImageGridSize(size: ImageGridSize) {
+  try {
+    window.localStorage.setItem(IMAGE_GRID_SIZE_STORAGE_KEY, size);
+  } catch {
+    // The in-memory choice still works for the current session.
+  }
+}
 
 function preloadPageImages(page: ImagePage) {
   page.items.slice(0, PREFETCH_IMAGE_COUNT).forEach((image) => {
@@ -34,6 +72,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   // Archived faces are hidden unless explicitly filtered for.
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
+  const [imageGridSize, setImageGridSize] = useState<ImageGridSize>(readImageGridSize);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -343,6 +382,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     totalImages === 0 &&
     selectedPersons.length === 0 &&
     selectedFolders.length === 0;
+  const imageGridSizeIndex = Math.max(
+    0,
+    IMAGE_GRID_SIZE_OPTIONS.findIndex((option) => option.value === imageGridSize),
+  );
 
   const pageHeader = (
     <header ref={pageHeaderRef} className="people-page-heading">
@@ -397,6 +440,47 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         faceStatuses={faceStatuses}
         onFaceStatusesChange={setFaceStatuses}
       >
+        <label
+          className="filter-bar__grid-size"
+          title={`Bildgröße im Raster: ${IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}`}
+        >
+          <span className="filter-bar__grid-size-label">Bildgröße</span>
+          <span
+            className="filter-bar__grid-size-icon filter-bar__grid-size-icon--small"
+            aria-hidden="true"
+          >
+            ▦
+          </span>
+          <input
+            type="range"
+            min="0"
+            max={IMAGE_GRID_SIZE_OPTIONS.length - 1}
+            step="1"
+            value={imageGridSizeIndex}
+            aria-label="Bildgröße im Raster"
+            aria-valuetext={IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}
+            style={
+              {
+                "--grid-size-position": `${
+                  (imageGridSizeIndex / (IMAGE_GRID_SIZE_OPTIONS.length - 1)) * 100
+                }%`,
+              } as React.CSSProperties
+            }
+            onChange={(event) => {
+              const option = IMAGE_GRID_SIZE_OPTIONS[Number(event.target.value)];
+              if (!option) return;
+              setImageGridSize(option.value);
+              persistImageGridSize(option.value);
+            }}
+          />
+          <span
+            className="filter-bar__grid-size-icon filter-bar__grid-size-icon--large"
+            aria-hidden="true"
+          >
+            ▦
+          </span>
+          <output>{IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}</output>
+        </label>
         <select
           className="filter-bar__control filter-bar__select"
           aria-label="Gesichtsmarkierungen"
@@ -441,6 +525,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
+        gridSize={imageGridSize}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
         onImageDeleted={(imageId) => {
