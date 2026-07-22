@@ -11,11 +11,15 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.9.1] - 2026-07-22
+
+### Verbessert
+
 - Die Steuerung laufender Aktivitäten ist mit kompakten, klar erkennbaren Symbolen übersichtlicher und platzsparender.
 - Die geschätzte Restzeit großer Importe passt sich stabiler an und wird durch einzelne langsame Bilder oder Pausen weniger verzerrt.
 - Beim Hinzufügen von Bilderordnern zeigt die installierte Anwendung nur noch die passende Windows-Ordnerauswahl; die manuelle Pfadeingabe bleibt gezielt der Entwicklungsumgebung vorbehalten.
-
-### Behoben
 
 ## [0.9.0] - 2026-07-22
 
