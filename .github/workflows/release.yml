@@ -142,6 +142,7 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-desktop.txt
+            backend/requirements-desktop-gpu.txt
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
