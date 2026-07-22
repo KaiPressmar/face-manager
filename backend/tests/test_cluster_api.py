@@ -11,6 +11,11 @@ class ClusterApiTest(unittest.TestCase):
     def setUp(self):
         app_cache.clear()
 
+    def tearDown(self):
+        app._publish_imports_throttled.flush()
+        app._publish_autocluster_throttled.flush()
+        app._publish_background_cluster_progress_throttled.flush()
+
     @patch("backend.app.auto_cluster_queue")
     def test_autocluster_control_endpoints_delegate_to_queue(self, queue):
         queue.pause.return_value = {"id": "task-1", "status": "paused"}
