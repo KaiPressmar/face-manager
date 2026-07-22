@@ -1,12 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   AppSettings,
+  ImagePathCleanupStatus,
   autoTuneClusterThreshold,
   checkForUpdates,
   exportDatabase,
   fetchSettings,
+  fetchImagePathCleanup,
   importDatabase,
   reclusterAllFaces,
+  startImagePathCleanup,
   updateSettings,
 } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
@@ -120,6 +123,7 @@ const SettingsPage: React.FC<{
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -165,6 +169,39 @@ const SettingsPage: React.FC<{
       }
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchImagePathCleanup()
+      .then((next) => {
+        if (!cancelled) setPathCleanup(next);
+      })
+      .catch(() => {
+        // Maintenance state is supplementary; the settings remain usable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const pathCleanupIsActive =
+    pathCleanup?.status === "queued" || pathCleanup?.status === "running";
+
+  useEffect(() => {
+    if (!pathCleanupIsActive) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void fetchImagePathCleanup()
+        .then((next) => {
+          if (!cancelled) setPathCleanup(next);
+        })
+        .catch(() => undefined);
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pathCleanupIsActive]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -471,6 +508,33 @@ const SettingsPage: React.FC<{
       setIsImporting(false);
     }
   };
+
+  const handleImagePathCleanup = async () => {
+    setError(null);
+    setMessage(null);
+    try {
+      const next = await startImagePathCleanup();
+      setPathCleanup(next);
+    } catch (cleanupError) {
+      setError(
+        cleanupError instanceof Error
+          ? cleanupError.message
+          : "Die Pfadprüfung konnte nicht gestartet werden.",
+      );
+    }
+  };
+
+  const cleanupSummary = pathCleanup
+    ? pathCleanup.status === "queued"
+      ? "Die Prüfung wartet, bis keine wichtigeren Hintergrundaufgaben laufen."
+      : pathCleanup.status === "running"
+        ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft…`
+        : pathCleanup.status === "completed"
+          ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft, ${pathCleanup.removed_paths.toLocaleString("de-DE")} ungültige Speicherorte und ${pathCleanup.removed_images.toLocaleString("de-DE")} nicht mehr verfügbare Bilder entfernt.`
+          : pathCleanup.status === "failed"
+            ? "Die letzte Pfadprüfung konnte nicht abgeschlossen werden."
+            : "Noch keine Pfadprüfung in dieser Sitzung ausgeführt."
+    : "Der Status der letzten Prüfung wird geladen…";
 
   return (
     <div className="settings-page">
@@ -950,6 +1014,27 @@ const SettingsPage: React.FC<{
                   }}
                 >
                   Auf Standard zurücksetzen
+                </button>
+              </div>
+            </section>
+            <section className="settings-card">
+              <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
+              <p className="settings-card__copy">
+                Prüft alle gespeicherten Bildpfade und entfernt Einträge für Dateien,
+                die nicht mehr vorhanden sind. Die automatische Prüfung läuft mit
+                niedriger Priorität, wenn Face Manager gerade nichts Wichtigeres tut.
+              </p>
+              <div className="settings-maintenance-status" aria-live="polite">
+                {cleanupSummary}
+              </div>
+              <div className="settings-actions">
+                <button
+                  className="neon-card"
+                  type="button"
+                  onClick={() => void handleImagePathCleanup()}
+                  disabled={pathCleanupIsActive}
+                >
+                  {pathCleanupIsActive ? "Pfadprüfung läuft…" : "Jetzt Pfade prüfen"}
                 </button>
               </div>
             </section>

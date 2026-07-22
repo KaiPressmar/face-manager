@@ -1,3 +1,6 @@
+import base64
+import ctypes
+import ntpath
 import os
 import re
 import subprocess
@@ -10,6 +13,57 @@ from tkinter import filedialog
 WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 WINDOWS_UNC_PATH = re.compile(r"^\\\\[^\\]+\\[^\\]+")
 WSL_DRIVE_PATH = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
+
+
+POWERSHELL_REVEAL_TYPE = r"""
+using System;
+using System.Runtime.InteropServices;
+
+public static class FaceManagerExplorerReveal
+{
+    [DllImport("ole32.dll")]
+    private static extern int CoInitializeEx(IntPtr reserved, uint mode);
+
+    [DllImport("ole32.dll")]
+    private static extern void CoUninitialize();
+
+    [DllImport("ole32.dll")]
+    private static extern void CoTaskMemFree(IntPtr pointer);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHParseDisplayName(
+        string name, IntPtr bindContext, out IntPtr itemId, uint attributesIn,
+        out uint attributesOut);
+
+    [DllImport("shell32.dll", PreserveSig = true)]
+    private static extern int SHOpenFolderAndSelectItems(
+        IntPtr itemId, uint childCount, IntPtr children, uint flags);
+
+    public static void Open(string path)
+    {
+        const int RpcChangedMode = unchecked((int)0x80010106);
+        int initialized = CoInitializeEx(IntPtr.Zero, 2);
+        bool uninitialize = initialized == 0 || initialized == 1;
+        if (initialized < 0 && initialized != RpcChangedMode)
+            Marshal.ThrowExceptionForHR(initialized);
+
+        IntPtr itemId = IntPtr.Zero;
+        try
+        {
+            uint attributes;
+            int parsed = SHParseDisplayName(path, IntPtr.Zero, out itemId, 0, out attributes);
+            if (parsed < 0) Marshal.ThrowExceptionForHR(parsed);
+            int opened = SHOpenFolderAndSelectItems(itemId, 0, IntPtr.Zero, 0);
+            if (opened < 0) Marshal.ThrowExceptionForHR(opened);
+        }
+        finally
+        {
+            if (itemId != IntPtr.Zero) CoTaskMemFree(itemId);
+            if (uninitialize) CoUninitialize();
+        }
+    }
+}
+"""
 
 
 def _is_wsl():
@@ -117,6 +171,98 @@ def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
         root.destroy()
 
 
+def _reveal_with_windows_shell(path: str) -> None:
+    """Select a filesystem item through the Unicode-aware Windows Shell API."""
+    from ctypes import wintypes
+
+    ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    co_initialize = ole32.CoInitializeEx
+    co_initialize.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    co_initialize.restype = ctypes.c_long
+    co_uninitialize = ole32.CoUninitialize
+    co_uninitialize.argtypes = []
+    co_uninitialize.restype = None
+    free_item_id = ole32.CoTaskMemFree
+    free_item_id.argtypes = [ctypes.c_void_p]
+    free_item_id.restype = None
+    parse_name = shell32.SHParseDisplayName
+    parse_name.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    parse_name.restype = ctypes.c_long
+    open_and_select = shell32.SHOpenFolderAndSelectItems
+    open_and_select.argtypes = [
+        ctypes.c_void_p,
+        wintypes.UINT,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    open_and_select.restype = ctypes.c_long
+
+    rpc_changed_mode = -2147417850  # 0x80010106: COM was initialized differently.
+    initialized = co_initialize(None, 2)  # COINIT_APARTMENTTHREADED
+    should_uninitialize = initialized in (0, 1)
+    if initialized < 0 and initialized != rpc_changed_mode:
+        raise OSError(
+            "Could not initialize the Windows Shell "
+            f"(0x{initialized & 0xFFFFFFFF:08X})"
+        )
+
+    item_id = ctypes.c_void_p()
+    try:
+        attributes = wintypes.DWORD()
+        result = parse_name(
+            path,
+            None,
+            ctypes.byref(item_id),
+            0,
+            ctypes.byref(attributes),
+        )
+        if result < 0:
+            raise OSError(
+                "Windows could not resolve the image path "
+                f"(0x{result & 0xFFFFFFFF:08X})"
+            )
+        result = open_and_select(item_id, 0, None, 0)
+        if result < 0:
+            raise OSError(
+                "Windows Explorer could not select the image "
+                f"(0x{result & 0xFFFFFFFF:08X})"
+            )
+    finally:
+        if item_id.value:
+            free_item_id(item_id)
+        if should_uninitialize:
+            co_uninitialize()
+
+
+def _build_powershell_reveal_command(path: str) -> list[str]:
+    """Build an injection-safe WSL bridge to the same native Shell API."""
+    path_payload = base64.b64encode(path.encode("utf-8")).decode("ascii")
+    type_payload = base64.b64encode(
+        POWERSHELL_REVEAL_TYPE.encode("utf-8")
+    ).decode("ascii")
+    script = (
+        f'$type = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{type_payload}")); '
+        "Add-Type -TypeDefinition $type; "
+        f'$path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{path_payload}")); '
+        "[FaceManagerExplorerReveal]::Open($path)"
+    )
+    encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        encoded_script,
+    ]
+
+
 def open_file_location(path: str):
     """Open the system file manager and reveal a file.
 
@@ -141,13 +287,17 @@ def open_file_location(path: str):
         windows_path = result.stdout.strip()
         if not windows_path:
             raise OSError("Could not translate the file path for Windows Explorer")
-        subprocess.Popen(["explorer.exe", f"/select,{windows_path}"])
+        subprocess.run(
+            _build_powershell_reveal_command(windows_path),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         return
 
     if sys.platform == "win32":
-        subprocess.Popen(
-            ["explorer.exe", f"/select,{os.path.normpath(normalized_path)}"]
-        )
+        windows_path = ntpath.normpath(normalized_path.replace("/", "\\"))
+        _reveal_with_windows_shell(windows_path)
         return
 
     if sys.platform == "darwin":

@@ -167,6 +167,17 @@ export interface AppSettings {
   error_log_path: string;
 }
 
+export interface ImagePathCleanupStatus {
+  status: "idle" | "queued" | "running" | "completed" | "failed";
+  reason: string | null;
+  scanned_paths: number;
+  removed_paths: number;
+  removed_images: number;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+
 export interface UpdateSettingsPayload {
   cluster_distance_threshold?: number;
   clustering_strictness?: number;
@@ -529,6 +540,24 @@ export async function updateSettings(
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Einstellungen konnten nicht gespeichert werden."));
+  }
+  return await res.json();
+}
+
+export async function fetchImagePathCleanup(): Promise<ImagePathCleanupStatus> {
+  const res = await apiFetch(`${API_BASE}/maintenance/image-paths`);
+  if (!res.ok) {
+    throw new Error("Die Pfadprüfung ist nicht verfügbar.");
+  }
+  return await res.json();
+}
+
+export async function startImagePathCleanup(): Promise<ImagePathCleanupStatus> {
+  const res = await apiFetch(`${API_BASE}/maintenance/image-paths`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Die Pfadprüfung konnte nicht gestartet werden."));
   }
   return await res.json();
 }

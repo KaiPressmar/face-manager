@@ -17,7 +17,7 @@ from PIL import Image
 from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
-from .face_thumbnails import create_face_thumbnails_for_image, delete_face_thumbnail
+from .face_thumbnails import delete_face_thumbnail
 from .storage import (
     FACE_REVIEW_STATUS_ACTIVE,
     get_cluster_distance_threshold,
@@ -74,12 +74,16 @@ class HashedImage:
         normalized_path: Platform-normalized path used for database lookups.
         content_hash: SHA-256 digest used for duplicate detection.
         created_at: Best available filesystem creation timestamp.
+        file_size: Source size used to recognize unchanged paths cheaply.
+        modified_at_ns: High-resolution modification time for change detection.
     """
 
     path: Path
     normalized_path: str
     content_hash: str
     created_at: str | None
+    file_size: int
+    modified_at_ns: int
 
 
 class ImagePreparer:
@@ -108,9 +112,17 @@ class ImagePreparer:
             Hashed image metadata used for import planning.
         """
         normalized_path = os.path.normpath(str(path))
+        stat_result = os.stat(normalized_path)
         content_hash = calculate_file_hash(normalized_path)
-        created_at = get_file_created_at(normalized_path)
-        return HashedImage(path, normalized_path, content_hash, created_at)
+        created_at = get_file_created_at(normalized_path, stat_result)
+        return HashedImage(
+            path,
+            normalized_path,
+            content_hash,
+            created_at,
+            int(stat_result.st_size),
+            int(stat_result.st_mtime_ns),
+        )
 
     @staticmethod
     def decode(path: Path) -> np.ndarray:
@@ -340,12 +352,26 @@ class ImportProcessor:
             preparer = ImagePreparer(worker_count)
             resources_loaded = False
             content_groups: dict[str, list[HashedImage]] = {}
-            completed_images = 0
-            hashed_images = 0
+            paths_to_hash, unchanged_paths = self._partition_unchanged_paths(
+                cursor,
+                image_paths,
+                cancel_event,
+            )
+            completed_images = len(unchanged_paths)
+            hashed_images = len(unchanged_paths)
             processing_started = False
+            if unchanged_paths:
+                progress_callback(
+                    {
+                        "processed_images": completed_images,
+                        "hashed_images": hashed_images,
+                        "stage_current": hashed_images,
+                        "current_file": str(unchanged_paths[-1]),
+                    }
+                )
 
             for image_path, future in preparer.iter_hashed_completed(
-                image_paths, cancel_event
+                paths_to_hash, cancel_event
             ):
                 self._raise_if_cancelled(cancel_event)
                 try:
@@ -394,7 +420,7 @@ class ImportProcessor:
                             image_id = (
                                 matching_content["id"]
                                 if matching_content
-                                else self._create_image(cursor, conn, primary)
+                                else self._create_image(cursor, primary)
                             )
                             self._attach_location(cursor, conn, image_id, primary)
                             self._raise_if_cancelled(cancel_event)
@@ -427,7 +453,6 @@ class ImportProcessor:
                                 cursor,
                                 conn,
                                 image_id,
-                                str(primary.path),
                                 image_np,
                                 model,
                                 clusterer,
@@ -563,12 +588,67 @@ class ImportProcessor:
         if _control_cancelled(cancel_event):
             raise ImportCancelled()
 
+    @classmethod
+    def _partition_unchanged_paths(
+        cls,
+        cursor,
+        image_paths: list[Path],
+        cancel_event: threading.Event,
+    ) -> tuple[list[Path], list[Path]]:
+        """Skip hashing when a processed path has identical size and mtime."""
+        paths_by_normalized = {
+            os.path.normpath(str(path)): path for path in image_paths
+        }
+        known_locations = {}
+        normalized_paths = list(paths_by_normalized)
+        for start in range(0, len(normalized_paths), 400):
+            cls._raise_if_cancelled(cancel_event)
+            chunk = normalized_paths[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = cursor.execute(
+                f"""
+                SELECT location.path, location.file_size,
+                       location.modified_at_ns, image.processed_at
+                FROM image_location location
+                JOIN image ON image.id = location.image_id
+                WHERE location.path IN ({placeholders})
+                """,
+                chunk,
+            ).fetchall()
+            known_locations.update({row["path"]: row for row in rows})
+
+        unchanged = []
+        needs_hash = []
+        for normalized_path, path in paths_by_normalized.items():
+            cls._raise_if_cancelled(cancel_event)
+            known = known_locations.get(normalized_path)
+            if (
+                known is None
+                or not known["processed_at"]
+                or known["file_size"] is None
+                or known["modified_at_ns"] is None
+            ):
+                needs_hash.append(path)
+                continue
+            try:
+                stat_result = os.stat(normalized_path)
+            except OSError:
+                needs_hash.append(path)
+                continue
+            if (
+                int(known["file_size"]) == int(stat_result.st_size)
+                and int(known["modified_at_ns"]) == int(stat_result.st_mtime_ns)
+            ):
+                unchanged.append(path)
+            else:
+                needs_hash.append(path)
+        return needs_hash, unchanged
+
     def _process_image(
         self,
         cursor,
         connection,
         image_id: int,
-        image_path: str,
         image_np: np.ndarray,
         model: FaceModel,
         clusterer: FaceClustering,
@@ -580,7 +660,6 @@ class ImportProcessor:
             cursor: SQLite cursor used for reads and writes.
             connection: SQLite connection controlling transactions.
             image_id: Canonical image identifier.
-            image_path: Source image path used to create face crop thumbnails.
             image_np: Decoded RGB image pixels.
             model: Face detection and recognition model.
             clusterer: Incremental face clustering index.
@@ -612,7 +691,6 @@ class ImportProcessor:
             ).fetchall()
         ]
         cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
-        thumbnail_jobs: list[tuple[int, tuple[int, int, int, int]]] = []
         fallback_cluster_ids: dict[int, int] = {}
         for face, proposed_cluster_id in proposed_faces:
             x1, y1, width, height = face["bbox"]
@@ -641,10 +719,6 @@ class ImportProcessor:
                     embedding.astype("float32").tobytes(),
                 ),
             )
-            face_id = int(cursor.lastrowid)
-            thumbnail_jobs.append(
-                (face_id, (int(x1), int(y1), int(width), int(height)))
-            )
 
         cursor.execute(
             "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -653,9 +727,9 @@ class ImportProcessor:
         connection.commit()
         for face_id in existing_face_ids:
             delete_face_thumbnail(face_id)
-        # Thumbnail rendering performs filesystem work and is recoverable on
-        # demand, so do it only after releasing SQLite's writer slot.
-        create_face_thumbnails_for_image(image_path, thumbnail_jobs)
+        # Face crops are generated on demand and by the idle warmup worker.
+        # Keeping that recoverable JPEG work out of the critical import path
+        # lets detection immediately continue with the next image.
         invalidate_image_query_cache()
         progress_callback(
             {
@@ -704,14 +778,12 @@ class ImportProcessor:
     def _create_image(
         cls,
         cursor,
-        connection,
         hashed: HashedImage,
     ) -> int:
         """Create a canonical image row for new content.
 
         Args:
             cursor: SQLite cursor used for image lookups and writes.
-            connection: SQLite connection used to release write locks.
             hashed: Hashed image metadata.
 
         Returns:
@@ -735,7 +807,6 @@ class ImportProcessor:
             ),
         )
         image_id = cursor.lastrowid
-        connection.commit()
         return image_id
 
     @classmethod
@@ -759,6 +830,20 @@ class ImportProcessor:
             (hashed.normalized_path,),
         ).fetchone()
         if existing and existing["image_id"] == image_id:
+            cursor.execute(
+                """
+                UPDATE image_location
+                SET created_at = ?, file_size = ?, modified_at_ns = ?
+                WHERE path = ?
+                """,
+                (
+                    hashed.created_at,
+                    hashed.file_size,
+                    hashed.modified_at_ns,
+                    hashed.normalized_path,
+                ),
+            )
+            connection.commit()
             return
         if existing:
             cls._detach_path(cursor, hashed.normalized_path)
@@ -766,9 +851,10 @@ class ImportProcessor:
         cursor.execute(
             """
             INSERT INTO image_location(
-                image_id, path, directory, filename, created_at
+                image_id, path, directory, filename, created_at,
+                file_size, modified_at_ns
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_id,
@@ -776,6 +862,8 @@ class ImportProcessor:
                 os.path.dirname(hashed.normalized_path),
                 os.path.basename(hashed.normalized_path),
                 hashed.created_at,
+                hashed.file_size,
+                hashed.modified_at_ns,
             ),
         )
         connection.commit()
@@ -912,8 +1000,8 @@ def get_import_worker_count(
 
     available_cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
     if compute_mode == "gpu":
-        return min(4, available_cpus, max(2, available_cpus // 3))
-    return min(2, max(1, available_cpus // 4))
+        return min(8, available_cpus, max(2, available_cpus // 2))
+    return min(4, available_cpus, max(1, available_cpus // 2))
 
 
 _default_processor = ImportProcessor()
