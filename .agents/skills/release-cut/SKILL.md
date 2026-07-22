@@ -84,8 +84,14 @@ gh pr create --base develop --title "Release v$(cat VERSION)" \
 gh pr merge --squash --auto
 ```
 
-Wait for CI to pass and the PR to actually merge before the next hop
-(`gh pr checks --watch`, `gh run watch`).
+Capture the PR number. Wait for CI, then verify `state=MERGED` and a non-null
+`mergedAt` before the next hop. Passing checks alone do not prove that auto-merge
+has landed:
+
+```bash
+gh pr checks <pr-number> --watch
+gh pr view <pr-number> --json state,mergedAt,mergeCommit,url
+```
 
 ### 6. Release PR from develop into main (merge commit, auto-merge, wait for CI)
 
@@ -106,8 +112,8 @@ the new release PR as `BEHIND`. Inspect `mergeStateStatus` immediately after PR
 creation. If it is `BEHIND`, use GitHub's update-branch operation once:
 
 ```bash
-gh pr view --json mergeStateStatus
-gh pr update-branch
+gh pr view <pr-number> --json mergeStateStatus
+gh pr update-branch <pr-number>
 ```
 
 This merges the previous release boundary into `develop` without a direct push
@@ -117,13 +123,23 @@ editing its body; reruns retain the original event payload.
 
 ### 7. Let CI publish; then report
 
-Do **not** tag or create the release. Monitor the automated publish and report the
-result:
+Do **not** tag or create the release. Capture the release PR's merge commit, find
+the main CI run for that commit, and wait for it to succeed. Then find the
+subsequent `Publish Release` workflow run triggered by `workflow_run`.
+
+Prefer low-noise JSON status queries every 30–60 seconds over an unbounded
+`gh run watch`: the latter repeats the full job tree and can flood the working
+context during long Windows builds.
 
 ```bash
-gh run watch          # main CI, then the "Publish Release" workflow_run
-gh release view "v$(cat VERSION)" --web
+gh run view <run-id> --json status,conclusion,jobs \
+  --jq '{status,conclusion,jobs:[.jobs[]|{name,status,conclusion}]}'
+gh release view "v$(cat VERSION)" --json url,tagName,targetCommitish,assets
 ```
+
+The publish job creates the GitHub Release before the CPU and GPU bundles finish.
+An initially empty `assets` array is therefore expected, not a failure. Keep
+monitoring until the complete publish workflow finishes.
 
 If an installer job fails, inspect its failed log before changing code. Retry the
 failed jobs once only when the log proves a transient infrastructure problem such
@@ -138,10 +154,12 @@ gh run watch <run-id> --exit-status
 For deterministic build, test, signing, or upload failures, fix the cause through
 the normal PR flow and cut a newer version; never mutate an existing tag.
 
-Verify and report the release URL, asset sizes and digests, and the uploaded installers
-(`FaceManager-Setup-X.Y.Z.exe`, `FaceManager-Setup-GPU-X.Y.Z.exe`, and their
-`.sha256`). If CI failed before publishing, report that instead — never fill the
-gap by tagging or creating the release manually.
+After a successful workflow, require exactly the four expected deliverables:
+`FaceManager-Setup-X.Y.Z.exe`, `FaceManager-Setup-X.Y.Z.exe.sha256`,
+`FaceManager-Setup-GPU-X.Y.Z.exe`, and its `.sha256`. Verify that each asset has a
+non-zero size, URL, and digest; report both installer sizes and SHA-256 digests.
+If CI failed before publishing, report that instead — never fill the gap by
+tagging or creating the release manually.
 
 ### 8. Sync local branches after the release
 
@@ -151,12 +169,20 @@ Bring both long-lived branches up to date so the next cycle starts clean:
 git fetch --all --tags --prune
 git switch main   && git pull --ff-only origin main
 git switch develop && git pull --ff-only origin develop
-git branch -d chore/release-preparation   # only when it still exists locally
+git status --short --branch
+git diff --exit-code origin/main origin/develop
+git rev-list --left-right --count origin/main...origin/develop
 ```
 
-`develop` and `main` should now agree on the released version. If `develop` has
-already moved ahead, rebase or fast-forward any in-flight work branch onto the
-updated `develop` before continuing.
+The two remote branches should have identical file content immediately after the
+release, although `main` normally has one additional release merge commit. Do not
+mistake that expected graph difference for content drift. Delete a leftover local
+release-prep branch only after its PR is confirmed merged and the worktree is
+clean; a squash-merged branch may require `git branch -D` because its original
+commit is intentionally not an ancestor of `develop`.
+
+If `develop` has already moved ahead, report that fact instead of forcing content
+equality, and base subsequent work on the updated `develop`.
 
 ## Boundaries
 

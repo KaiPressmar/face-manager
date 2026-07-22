@@ -11,6 +11,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Die Restzeit großer Bilderimporte wird ruhiger und verlässlicher angezeigt und springt bei einzelnen schnellen oder langsamen Bildern nicht mehr ständig hin und her.
+
 ### Behoben
 
 ## [0.10.1] - 2026-07-22

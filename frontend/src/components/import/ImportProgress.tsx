@@ -75,6 +75,17 @@ function formatDuration(seconds: number | null) {
   return `${hours} Std. ${remainingMinutes} Min.`;
 }
 
+function formatEtaDuration(seconds: number | null) {
+  if (seconds === null || !Number.isFinite(seconds)) return null;
+  const rounded = Math.max(0, Math.round(seconds));
+  if (rounded < 45) return "weniger als 1 Min.";
+  if (rounded < 3600) return `${Math.max(1, Math.ceil(rounded / 60))} Min.`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.ceil((rounded % 3600) / 300) * 5;
+  if (minutes >= 60) return `${hours + 1} Std.`;
+  return minutes > 0 ? `${hours} Std. ${minutes} Min.` : `${hours} Std.`;
+}
+
 function currentItemName(path: string) {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).at(-1) ?? path;
@@ -86,7 +97,7 @@ function stationKeyLabel(station: ImportStation) {
 
 function stationEtaLabel(station: ImportStation) {
   if (station.eta_seconds == null) return null;
-  const formatted = formatDuration(station.eta_seconds);
+  const formatted = formatEtaDuration(station.eta_seconds);
   if (!formatted) return null;
   if (station.state === "queued") return `Start in ca. ${formatted}`;
   if (station.state === "active") return `Noch ca. ${formatted}`;
@@ -142,13 +153,13 @@ const ImportJobCard: React.FC<{
   const isActive = job.status === "running" || job.status === "paused" || job.status === "cancelling";
   const isTerminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
   const stageLabel = job.stage ? stageLabels[job.stage] : null;
-  const eta = formatDuration(job.eta_seconds);
+  const eta = formatEtaDuration(job.eta_seconds);
   const elapsed = formatDuration(job.elapsed_seconds);
   const stations = job.stations ?? [];
   const activeStation = stations.find((station) => station.state === "active");
   const activeStations = stations.filter((station) => station.state === "active");
   const stationEta = activeStation
-    ? formatDuration(activeStation.eta_seconds)
+    ? formatEtaDuration(activeStation.eta_seconds)
     : null;
   const parallelTasksLabel =
     activeStations.length > 1
@@ -407,7 +418,7 @@ const ImportProgress = () => {
         <span>Bilder hinzufügen</span>
         <div>
           {queue?.overall_eta_seconds != null && (
-            <span>Gesamt: ca. {formatDuration(queue.overall_eta_seconds)}</span>
+            <span>Gesamt: ca. {formatEtaDuration(queue.overall_eta_seconds)}</span>
           )}
           {queue && queue.queued_count > 0 && <b>{queue.queued_count}</b>}
         </div>
