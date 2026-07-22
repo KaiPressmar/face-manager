@@ -184,6 +184,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
   const listRequestIdRef = useRef(0);
   const detailsRequestIdRef = useRef(0);
+  const appliedNavigationTokenRef = useRef<number | null>(null);
   const pendingNavigationClusterIdRef = useRef<number | null>(null);
   const pendingMainScrollClusterIdRef = useRef<number | null>(null);
   const selectionSourceRef = useRef<"explicit" | "navigation" | "scroll" | "system">("system");
@@ -362,7 +363,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   }, [scopeResetKey]);
 
   /** Scroll one stacked group into view. Returns false if it is not rendered. */
-  const scrollToSection = React.useCallback((sectionKey: string) => {
+  const scrollToSection = React.useCallback((
+    sectionKey: string,
+    behavior: ScrollBehavior = "smooth",
+  ) => {
     const node = sectionRefs.current[sectionKey];
     const scroller = detailContentRef.current;
     if (!node || !scroller) {
@@ -373,7 +377,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       node.getBoundingClientRect().top -
       scroller.getBoundingClientRect().top -
       8;
-    scroller.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
+    scroller.scrollTo({ top: Math.max(0, nextTop), behavior });
     return true;
   }, []);
 
@@ -959,6 +963,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (!navigationTarget) {
       return;
     }
+    if (appliedNavigationTokenRef.current === navigationTarget.token) {
+      return;
+    }
+    appliedNavigationTokenRef.current = navigationTarget.token;
     if (navigationTarget.groupKey) {
       setWorkspaceView("archive");
       pendingNavigationClusterIdRef.current = null;
@@ -972,18 +980,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       return;
     }
 
-    const destination = clusters.find(
-      (cluster) => cluster.cluster_id === navigationTarget.clusterId,
-    );
     // The caller usually knows the person already, so the work area can switch
     // before the cluster list has arrived. `null` is a real answer here ("no
-    // person"), so distinguish it from "no hint given".
-    const personName =
-      navigationTarget.personName !== undefined
-        ? navigationTarget.personName
-        : destination?.person_name;
-    if (personName !== undefined) {
-      setWorkspaceView(personName ? "people" : "open");
+    // person"), so distinguish it from "no hint given". If no hint exists, a
+    // separate effect resolves the destination from the loaded summaries.
+    if (navigationTarget.personName !== undefined) {
+      setWorkspaceView(navigationTarget.personName ? "people" : "open");
     }
 
     pendingNavigationClusterIdRef.current = navigationTarget.clusterId;
@@ -1001,7 +1003,18 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [clusters, navigationTarget]);
+  }, [navigationTarget]);
+
+  useEffect(() => {
+    const pendingClusterId = pendingNavigationClusterIdRef.current;
+    if (pendingClusterId === null) return;
+    const destination = clusters.find(
+      (cluster) => cluster.cluster_id === pendingClusterId,
+    );
+    if (destination) {
+      setWorkspaceView(destination.person_name?.trim() ? "people" : "open");
+    }
+  }, [clusters]);
 
   /**
    * After a group was emptied by an assignment, continue with the one that
@@ -1085,11 +1098,26 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (selectedTarget.clusterId !== pendingClusterId) {
       return;
     }
-    // Groups are stacked, so jump to the selected one instead of the top. Keep
-    // the request pending until its section is actually rendered.
-    if (scrollToSection(`cluster-${pendingClusterId}`)) {
-      pendingMainScrollClusterIdRef.current = null;
-    }
+    // Wait until the target's real face grid has replaced its placeholder, then
+    // wait two frames for masonry/layout measurements. Scrolling earlier can
+    // land on a neighbouring group when the first navigation causes the detail
+    // pane to mount and expand at the same time.
+    if (!clusterDetailsMap[pendingClusterId]) return;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (
+          pendingMainScrollClusterIdRef.current === pendingClusterId &&
+          scrollToSection(`cluster-${pendingClusterId}`, "auto")
+        ) {
+          pendingMainScrollClusterIdRef.current = null;
+        }
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
   }, [selectedTarget, clusterDetailsMap, scopedClusterIds, scrollToSection]);
 
   useEffect(() => {
