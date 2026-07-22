@@ -196,6 +196,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const headerRef = useRef<HTMLDivElement | null>(null);
   const detailContentRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
+  const liveRefreshTimerRef = useRef<number | null>(null);
 
   const selectedClusterId =
     selectedTarget?.type === "cluster" ? selectedTarget.clusterId : null;
@@ -375,6 +376,46 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     scroller.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
     return true;
   }, []);
+
+  const captureDetailAnchor = React.useCallback(() => {
+    const scroller = detailContentRef.current;
+    if (!scroller || pendingMainScrollClusterIdRef.current !== null) {
+      return null;
+    }
+    const scrollerTop = scroller.getBoundingClientRect().top;
+    const anchor = Object.entries(sectionRefs.current)
+      .map(([key, node]) => ({ key, node }))
+      .filter((entry): entry is { key: string; node: HTMLElement } => !!entry.node)
+      .sort(
+        (a, b) =>
+          a.node.getBoundingClientRect().top - b.node.getBoundingClientRect().top,
+      )
+      .find((entry) => entry.node.getBoundingClientRect().bottom > scrollerTop);
+    if (!anchor) return null;
+    return {
+      key: anchor.key,
+      offset: anchor.node.getBoundingClientRect().top - scrollerTop,
+    };
+  }, []);
+
+  const restoreDetailAnchor = React.useCallback(
+    (anchor: ReturnType<typeof captureDetailAnchor>) => {
+      if (!anchor || pendingMainScrollClusterIdRef.current !== null) return;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const scroller = detailContentRef.current;
+          const node = sectionRefs.current[anchor.key];
+          if (!scroller || !node || pendingMainScrollClusterIdRef.current !== null) {
+            return;
+          }
+          const nextOffset =
+            node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+          scroller.scrollTop += nextOffset - anchor.offset;
+        });
+      });
+    },
+    [],
+  );
 
   // Compact shape for the sidebar, which lists the archive sub-groups the same
   // way "Neue Gesichter" and "Personen korrigieren" list their clusters.
@@ -643,6 +684,33 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       });
   }, [mergeClusterDetails, normalizeClusterDetails, updateLoadingClusterIds]);
 
+  const refreshTargetDetails = React.useCallback(
+    async (target: SelectionTarget | null) => {
+      if (!target) return;
+      const requestId = detailsRequestIdRef.current + 1;
+      detailsRequestIdRef.current = requestId;
+      try {
+        if (target.type === "cluster") {
+          const data = await fetchClusterFaces(target.clusterId);
+          if (detailsRequestIdRef.current !== requestId || !data) return;
+          const normalized = normalizeClusterDetails(data);
+          setClusterDetails(normalized);
+          mergeClusterDetails({ [target.clusterId]: normalized });
+          return;
+        }
+        const data = await fetchFaceReviewGroupFaces(target.groupKey);
+        if (detailsRequestIdRef.current !== requestId || !data) return;
+        setReviewGroupDetails({
+          ...data,
+          faces: Array.isArray(data.faces) ? data.faces : [],
+        });
+      } catch (error) {
+        console.error("Live-Aktualisierung der Gesichter fehlgeschlagen:", error);
+      }
+    },
+    [mergeClusterDetails, normalizeClusterDetails],
+  );
+
   // One-time bootstrap: fetch the summaries, review-group counts and the first
   // cluster's faces in a single round trip so the initial view paints without a
   // second request. Falls back to the split loaders if the overview fails.
@@ -708,7 +776,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       return;
     }
 
-    const maybeRefreshVisibleData = () => {
+    const refreshVisibleData = async () => {
       if (document.visibilityState !== "visible" || isMutating) {
         return;
       }
@@ -717,7 +785,20 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       // their reserved height and throw the user's scroll position and marking
       // away. Instead just refetch, and let the reconciliation effect below
       // discard exactly the groups that really changed.
-      void loadSidebarData(true).then(() => loadTargetDetails(selectedTarget));
+      const anchor = captureDetailAnchor();
+      await loadSidebarData(true);
+      await refreshTargetDetails(selectedTarget);
+      restoreDetailAnchor(anchor);
+    };
+
+    const maybeRefreshVisibleData = () => {
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+      }
+      liveRefreshTimerRef.current = window.setTimeout(() => {
+        liveRefreshTimerRef.current = null;
+        void refreshVisibleData();
+      }, 450);
     };
 
     // Refresh the sidebar the moment the backend reports cluster/person/image
@@ -730,11 +811,23 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     window.addEventListener("focus", maybeRefreshVisibleData);
 
     return () => {
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+        liveRefreshTimerRef.current = null;
+      }
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", maybeRefreshVisibleData);
       window.removeEventListener("focus", maybeRefreshVisibleData);
     };
-  }, [active, isMutating, loadSidebarData, loadTargetDetails, selectedTarget]);
+  }, [
+    active,
+    captureDetailAnchor,
+    isMutating,
+    loadSidebarData,
+    refreshTargetDetails,
+    restoreDetailAnchor,
+    selectedTarget,
+  ]);
 
   // Reconcile cached faces with a refreshed cluster list. A background rebuild
   // touches only some groups, so anything whose face count still matches is

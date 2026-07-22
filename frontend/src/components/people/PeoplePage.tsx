@@ -48,6 +48,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   const prefetchedOffsetRef = useRef<number | null>(null);
   const prefetchPromiseRef = useRef<Promise<void> | null>(null);
   const queryKeyRef = useRef("");
+  const pageHeaderRef = useRef<HTMLElement | null>(null);
+  const liveRefreshTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
@@ -166,8 +168,45 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
 
   useEffect(() => {
     let isMounted = true;
-    const refreshVisibleImages = () => {
+    const captureViewportAnchor = () => {
+      const scroller = pageHeaderRef.current?.closest(".page-content");
+      if (!(scroller instanceof HTMLElement) || scroller.scrollTop < 80) {
+        return null;
+      }
+      const scrollerTop = scroller.getBoundingClientRect().top;
+      const cards = Array.from(
+        scroller.querySelectorAll<HTMLElement>("[data-image-id]"),
+      );
+      const anchor = cards.find((card) => card.getBoundingClientRect().bottom > scrollerTop);
+      if (!anchor) return null;
+      return {
+        scroller,
+        imageId: anchor.dataset.imageId ?? "",
+        offset: anchor.getBoundingClientRect().top - scrollerTop,
+      };
+    };
+
+    const restoreViewportAnchor = (
+      anchor: ReturnType<typeof captureViewportAnchor>,
+    ) => {
+      if (!anchor) return;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const node = anchor.scroller.querySelector<HTMLElement>(
+            `[data-image-id="${anchor.imageId}"]`,
+          );
+          if (!node) return;
+          const nextOffset =
+            node.getBoundingClientRect().top -
+            anchor.scroller.getBoundingClientRect().top;
+          anchor.scroller.scrollTop += nextOffset - anchor.offset;
+        });
+      });
+    };
+
+    const refreshVisibleImages = (preserveViewport = true) => {
       const requestId = latestQueryRef.current;
+      const anchor = preserveViewport ? captureViewportAnchor() : null;
       void fetchImages({
         folders: selectedFolders,
         persons: selectedPersons,
@@ -182,6 +221,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
+        restoreViewportAnchor(anchor);
         prefetchedPageRef.current = null;
         prefetchedOffsetRef.current = null;
         prefetchPromiseRef.current = null;
@@ -198,13 +238,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible" && !isLoadingMore) {
-        refreshVisibleImages();
+        refreshVisibleImages(false);
       }
     };
 
     const handleWindowFocus = () => {
       if (!isLoadingMore) {
-        refreshVisibleImages();
+        refreshVisibleImages(false);
       }
     };
 
@@ -220,12 +260,24 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     refreshLibraryTotal();
 
     const unsubscribeClusters = subscribeToTopic("clusters", () => {
-      refreshVisibleImages();
-      refreshLibraryTotal();
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+      }
+      // Coalesce rapid import/reclustering checkpoints. Existing cards stay
+      // visually anchored while new results are folded into the live list.
+      liveRefreshTimerRef.current = window.setTimeout(() => {
+        liveRefreshTimerRef.current = null;
+        refreshVisibleImages(true);
+        refreshLibraryTotal();
+      }, 450);
     });
 
     return () => {
       isMounted = false;
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+        liveRefreshTimerRef.current = null;
+      }
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
@@ -293,7 +345,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     selectedFolders.length === 0;
 
   const pageHeader = (
-    <header className="people-page-heading">
+    <header ref={pageHeaderRef} className="people-page-heading">
       <div>
         <span>Bibliothek</span>
         <h1>Bilder</h1>

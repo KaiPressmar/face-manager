@@ -316,7 +316,10 @@ class ClusterApiTest(unittest.TestCase):
 
         self.assertEqual(rebuilt, 8)
         auto_tune.assert_called_once_with()
-        recluster.assert_called_once_with(progress_callback=progress)
+        recluster.assert_called_once_with(
+            progress_callback=progress,
+            commit_callback=app._notify_recluster_commit,
+        )
         set_version.assert_called_once_with(app.APP_VERSION)
 
     @patch.object(app, "auto_cluster_queue")

@@ -275,6 +275,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
             return (
               <div
                 key={img.id}
+                data-image-id={img.id}
                 className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
                 role="button"
                 tabIndex={0}
