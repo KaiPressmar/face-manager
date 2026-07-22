@@ -54,7 +54,14 @@ const Sidebar: React.FC<{
   return (
     <aside className="sidebar">
       <div className="sidebar__header">
-        <div className="sidebar__brand-mark" aria-hidden="true">FM</div>
+        <img
+          className="sidebar__brand-mark"
+          src="/favicon.svg"
+          alt=""
+          width={36}
+          height={36}
+          aria-hidden="true"
+        />
         <div className="sidebar__brand-copy">
           <div className="sidebar__brand-line">
             <div className="sidebar__title">Face Manager</div>
