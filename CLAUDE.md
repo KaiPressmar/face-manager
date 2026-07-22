@@ -23,3 +23,7 @@ Do not modify released changelog sections or bump the application version during
 ordinary work. The release helper converts `Unreleased` into the dated version
 section. Validate with `python3 scripts/changelog.py check` and then
 `./scripts/check-all.sh`.
+
+Do not write a separate GitHub Release changelog or use an automatic commit
+list. The release workflow renders and synchronizes the release title and notes
+from the matching finalized section in `CHANGELOG.md`.

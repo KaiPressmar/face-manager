@@ -34,6 +34,9 @@ For every changelog item:
 - Never edit an already released section and never move `Unreleased` manually.
   `scripts/release-version.sh` finalizes it during release preparation.
 - Do not bump `VERSION` during ordinary implementation work.
+- Do not maintain GitHub Release notes separately or generate an automatic
+  commit list. The release workflow renders and synchronizes them from the
+  matching finalized `CHANGELOG.md` section.
 
 In the pull request template, check exactly one change classification. For a
 mixed pull request choose **User-visible change**, maintain the curated
