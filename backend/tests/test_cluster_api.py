@@ -23,15 +23,33 @@ class ClusterApiTest(unittest.TestCase):
         self.assertEqual(result[0]["cluster_id"], 7)
         self.assertEqual(result[0]["face_count"], 12)
 
+    @patch("backend.app.idle_recluster_scheduler")
+    @patch("backend.app.auto_cluster_queue")
     @patch("backend.app.schedule_full_recluster")
-    def test_manual_recluster_schedules_full_rebuild(self, schedule):
-        schedule.return_value = {"id": "task-1"}
+    def test_manual_recluster_schedules_full_rebuild(
+        self, schedule, auto_cluster_queue, idle_recluster_scheduler
+    ):
+        schedule.return_value = {"id": "task-1", "status": "running"}
 
         result = app.api_recluster_clusters()
 
         schedule.assert_called_once_with("manual_recluster")
         self.assertTrue(result["scheduled"])
+        self.assertEqual(result["status"], "running")
         self.assertEqual(result["task"]["id"], "task-1")
+
+    @patch("backend.app.idle_recluster_scheduler")
+    @patch("backend.app.auto_cluster_queue")
+    @patch("backend.app.schedule_full_recluster")
+    def test_manual_recluster_reports_queued_during_import(
+        self, schedule, auto_cluster_queue, idle_recluster_scheduler
+    ):
+        schedule.return_value = {"id": "task-2", "status": "queued"}
+
+        result = app.api_recluster_clusters()
+
+        self.assertTrue(result["scheduled"])
+        self.assertEqual(result["status"], "queued")
 
     @patch("backend.app.get_cluster_summary")
     def test_cluster_detail_returns_not_found_for_missing_cluster(self, get_cluster_summary):
@@ -261,6 +279,7 @@ class ClusterApiTest(unittest.TestCase):
             kind="full_recluster",
             count_callable=app.count_reclusterable_faces,
             repair_callable=app._apply_version_clustering_upgrade,
+            priority=app.PRIORITY_VERSION_UPGRADE,
         )
         self.assertFalse(app._version_clustering_pending)
 
@@ -313,7 +332,9 @@ class ClusterApiTest(unittest.TestCase):
         task = app.run_startup_repairs()
 
         self.assertEqual(task["id"], "autocluster-1")
-        auto_cluster_queue.start.assert_called_once_with("startup")
+        auto_cluster_queue.start.assert_called_once_with(
+            "startup", priority=app.PRIORITY_STARTUP_REPAIR
+        )
 
     @patch.object(app, "auto_cluster_queue")
     def test_run_startup_repairs_returns_none_when_no_cleanup_is_needed(
@@ -325,7 +346,9 @@ class ClusterApiTest(unittest.TestCase):
         task = app.run_startup_repairs()
 
         self.assertIsNone(task)
-        auto_cluster_queue.start.assert_called_once_with("startup")
+        auto_cluster_queue.start.assert_called_once_with(
+            "startup", priority=app.PRIORITY_STARTUP_REPAIR
+        )
 
     @patch.object(app, "auto_cluster_queue")
     def test_autocluster_tasks_returns_snapshot(self, auto_cluster_queue):

@@ -62,7 +62,7 @@ const Sidebar: React.FC<{
               <button
                 type="button"
                 className="sidebar__version"
-                title="Versionshinweise anzeigen"
+                title="Änderungsprotokoll anzeigen"
                 onClick={onShowReleaseNotes}
               >
                 v{__APP_VERSION__}
