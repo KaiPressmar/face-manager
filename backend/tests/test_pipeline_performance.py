@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -6,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import numpy as np
 from PIL import Image
 
 from backend.db import schema
@@ -147,6 +149,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
 
             self.assertEqual(processed_count, 3)
             self.assertEqual(model.detect_and_embed.call_count, 3)
+            self.assertEqual(resources.get_clusterer.call_count, 3)
             self.assertEqual(progress["processed_images"], 3)
             self.assertEqual(progress["stage"], "finalizing")
             self.assertEqual(progress["stage_current"], 3)
@@ -162,6 +165,132 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     "finalizing",
                 ],
             )
+
+    def test_stale_cluster_proposal_cannot_join_confirmed_person(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "database.sqlite"
+            image_path = root / "photo.jpg"
+            Image.new("RGB", (32, 32), color=(80, 40, 20)).save(image_path)
+
+            model = Mock()
+            embedding = np.zeros(512, dtype=np.float32)
+            model.detect_and_embed.return_value = [
+                {"bbox": (1, 2, 10, 12), "embedding": embedding},
+                {"bbox": (4, 5, 9, 11), "embedding": embedding},
+            ]
+            clusterer = Mock()
+            clusterer.add_and_assign.return_value = (
+                np.array([7]),
+                None,
+            )
+
+            with (
+                patch.object(schema, "DB_PATH", str(db_path)),
+                patch("backend.services.pipeline.create_face_thumbnails_for_image"),
+            ):
+                schema.init_db()
+                conn = schema.get_conn()
+                conn.execute("INSERT INTO person(id, name) VALUES (1, 'Anna')")
+                conn.execute(
+                    "INSERT INTO cluster(id, label, person_id) VALUES (7, 'Anna', 1)"
+                )
+                image_id = conn.execute(
+                    "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                    (str(image_path), str(root), image_path.name),
+                ).lastrowid
+                conn.commit()
+
+                ImportProcessor()._process_image(
+                    conn.cursor(),
+                    conn,
+                    image_id,
+                    str(image_path),
+                    np.zeros((32, 32, 3), dtype=np.uint8),
+                    model,
+                    clusterer,
+                    lambda _changes: None,
+                )
+
+                rows = conn.execute(
+                    """
+                    SELECT f.cluster_id, c.person_id
+                    FROM face f JOIN cluster c ON c.id = f.cluster_id
+                    ORDER BY f.id
+                    """
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row["cluster_id"] != 7 for row in rows))
+            self.assertEqual(rows[0]["cluster_id"], rows[1]["cluster_id"])
+            self.assertTrue(all(row["person_id"] is None for row in rows))
+
+    def test_face_detection_does_not_hold_sqlite_writer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "database.sqlite"
+            image_path = root / "photo.jpg"
+            Image.new("RGB", (16, 16), color=(20, 40, 80)).save(image_path)
+            detection_started = threading.Event()
+            allow_detection_to_finish = threading.Event()
+            failure = []
+
+            model = Mock()
+
+            def detect(_image):
+                detection_started.set()
+                allow_detection_to_finish.wait(2)
+                return []
+
+            model.detect_and_embed.side_effect = detect
+
+            with (
+                patch.object(schema, "DB_PATH", str(db_path)),
+                patch("backend.services.pipeline.create_face_thumbnails_for_image"),
+            ):
+                schema.init_db()
+                seed = schema.get_conn()
+                image_id = seed.execute(
+                    "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                    (str(image_path), str(root), image_path.name),
+                ).lastrowid
+                seed.commit()
+                seed.close()
+
+                def run_processing():
+                    connection = schema.get_conn()
+                    try:
+                        ImportProcessor()._process_image(
+                            connection.cursor(),
+                            connection,
+                            image_id,
+                            str(image_path),
+                            np.zeros((16, 16, 3), dtype=np.uint8),
+                            model,
+                            Mock(),
+                            lambda _changes: None,
+                        )
+                    except Exception as exc:  # pragma: no cover - asserted below
+                        failure.append(exc)
+                    finally:
+                        connection.close()
+
+                worker = threading.Thread(target=run_processing)
+                worker.start()
+                self.assertTrue(detection_started.wait(1))
+
+                interactive = sqlite3.connect(db_path, timeout=0.2)
+                try:
+                    interactive.execute("INSERT INTO person(name) VALUES ('Bob')")
+                    interactive.commit()
+                finally:
+                    interactive.close()
+                    allow_detection_to_finish.set()
+                worker.join(timeout=2)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failure, [])
 
     def test_cancellation_stops_before_the_next_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:

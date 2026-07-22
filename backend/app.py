@@ -149,6 +149,7 @@ init_db()
 
 _import_activity_lock = threading.Lock()
 _import_was_busy = False
+_last_import_progress: dict[str, tuple[int, int]] = {}
 _version_clustering_lock = threading.Lock()
 _version_clustering_pending = False
 _cluster_operation_lock = threading.RLock()
@@ -221,13 +222,28 @@ def safe_import_enqueue(function):
 
 def _publish_imports() -> None:
     """Push the current import-queue snapshot to subscribed clients."""
-    global _import_was_busy
+    global _import_was_busy, _last_import_progress
     snapshot = import_queue.snapshot()
     event_hub.publish("imports", snapshot)
     busy = bool(snapshot.get("running_count") or snapshot.get("queued_count"))
+    current_progress = {
+        str(job.get("id")): (
+            int(job.get("processed_images") or 0),
+            int(job.get("processed_faces") or 0),
+        )
+        for job in snapshot.get("jobs", [])
+        if isinstance(job, dict) and job.get("id") is not None
+    }
     with _import_activity_lock:
         became_idle = _import_was_busy and not busy
+        library_grew = any(
+            progress > _last_import_progress.get(job_id, (0, 0))
+            for job_id, progress in current_progress.items()
+        )
         _import_was_busy = busy
+        _last_import_progress = current_progress
+    if library_grew:
+        _publish_background_cluster_progress_throttled()
     if became_idle:
         app_cache.clear()
         notify_clusters_changed("import_completed")
@@ -274,11 +290,26 @@ def notify_clusters_changed(reason: str) -> None:
     event_hub.publish("clusters", {"reason": reason})
 
 
+def _publish_background_cluster_progress() -> None:
+    """Invalidate and broadcast a committed background-work checkpoint."""
+    app_cache.clear()
+    notify_clusters_changed("background_progress")
+
+
 # Background workers emit progress far faster than the UI needs it, and each
 # emission rebuilds a full snapshot. Coalesce those bursts to a few per second
 # (transitions and the final state are always delivered by the trailing run).
 _publish_imports_throttled = TrailingThrottle(_publish_imports, interval=0.2)
 _publish_autocluster_throttled = TrailingThrottle(_publish_autocluster, interval=0.2)
+_publish_background_cluster_progress_throttled = TrailingThrottle(
+    _publish_background_cluster_progress,
+    interval=0.75,
+)
+
+
+def _notify_recluster_commit(_processed_faces: int, _total_faces: int) -> None:
+    """Publish reclustering only after a group transaction is visible."""
+    _publish_background_cluster_progress_throttled()
 
 
 import_queue = ImportQueue(
@@ -379,9 +410,16 @@ def schedule_full_recluster(
             count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
         ),
         repair_callable=(
-            partial(recluster_all_active_faces, scoped=True)
+            partial(
+                recluster_all_active_faces,
+                scoped=True,
+                commit_callback=_notify_recluster_commit,
+            )
             if scoped
-            else recluster_all_active_faces
+            else partial(
+                recluster_all_active_faces,
+                commit_callback=_notify_recluster_commit,
+            )
         ),
         priority=priority,
     )
@@ -409,7 +447,10 @@ def _apply_version_clustering_upgrade(progress_callback=None) -> int:
         logger.exception(
             "Version-start clustering auto-tune failed; continuing with current profile"
         )
-    rebuilt_faces = recluster_all_active_faces(progress_callback=progress_callback)
+    rebuilt_faces = recluster_all_active_faces(
+        progress_callback=progress_callback,
+        commit_callback=_notify_recluster_commit,
+    )
     set_applied_clustering_version(APP_VERSION)
     logger.info(
         "Applied clustering algorithm for software version %s to %s faces",

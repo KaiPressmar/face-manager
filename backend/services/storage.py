@@ -3689,6 +3689,7 @@ def recluster_all_active_faces(
     progress_callback=None,
     cancel_token=None,
     scoped: bool = False,
+    commit_callback=None,
 ) -> int:
     """Rebuild person subclusters and the unassigned pool, one group at a time.
 
@@ -3709,6 +3710,8 @@ def recluster_all_active_faces(
             interactive write can take priority.
         scoped: Rebuild only the groups recorded in ``recluster_dirty_person``
             instead of the whole library.
+        commit_callback: Optional callback invoked after each completed group
+            transaction, when readers can safely observe the new state.
 
     Returns:
         Number of faces that were rebuilt.
@@ -3795,6 +3798,11 @@ def recluster_all_active_faces(
                 raise
 
             completed_faces += len(face_ids)
+            if commit_callback is not None:
+                try:
+                    commit_callback(completed_faces, total_faces)
+                except Exception:  # pragma: no cover - UI notification is optional
+                    logger.exception("Recluster commit notification failed")
 
         cur.execute("BEGIN IMMEDIATE")
         try:
