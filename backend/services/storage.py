@@ -1498,11 +1498,17 @@ def _descendant_filter(folders):
     conditions = []
     params = []
     for folder in dict.fromkeys(normalize_folder_path(path) for path in folders if path):
-        escaped = folder.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # Escape the complete literal prefix, including its trailing separator.
+        # On Windows a raw trailing ``\\`` would otherwise escape the SQL ``%``
+        # wildcard itself, so only an exact (usually deepest) directory matched.
+        separator = "\\" if "\\" in folder and "/" not in folder else os.sep
+        trimmed_folder = folder.rstrip("/\\")
+        prefix = f"{trimmed_folder}{separator}"
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conditions.append(
             "(location.directory = ? OR location.directory LIKE ? ESCAPE '\\')"
         )
-        params.extend((folder, f"{escaped}{os.sep}%"))
+        params.extend((folder, f"{escaped}%"))
     return conditions, params
 
 

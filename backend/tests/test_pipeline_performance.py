@@ -20,12 +20,12 @@ from backend.services.pipeline import (
 
 
 class ImportWorkerCountTest(unittest.TestCase):
-    def test_gpu_uses_up_to_four_workers(self):
-        self.assertEqual(get_import_worker_count("gpu", cpu_count=12), 4)
-        self.assertEqual(get_import_worker_count("gpu", cpu_count=6), 2)
+    def test_gpu_uses_up_to_eight_workers(self):
+        self.assertEqual(get_import_worker_count("gpu", cpu_count=12), 6)
+        self.assertEqual(get_import_worker_count("gpu", cpu_count=6), 3)
 
-    def test_cpu_uses_up_to_two_workers(self):
-        self.assertEqual(get_import_worker_count("cpu", cpu_count=12), 2)
+    def test_cpu_uses_up_to_four_workers(self):
+        self.assertEqual(get_import_worker_count("cpu", cpu_count=12), 4)
         self.assertEqual(get_import_worker_count("cpu", cpu_count=2), 1)
 
     @patch.dict(os.environ, {"FACE_MANAGER_IMPORT_WORKERS": "6"})
@@ -185,10 +185,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 None,
             )
 
-            with (
-                patch.object(schema, "DB_PATH", str(db_path)),
-                patch("backend.services.pipeline.create_face_thumbnails_for_image"),
-            ):
+            with patch.object(schema, "DB_PATH", str(db_path)):
                 schema.init_db()
                 conn = schema.get_conn()
                 conn.execute("INSERT INTO person(id, name) VALUES (1, 'Anna')")
@@ -205,7 +202,6 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     conn.cursor(),
                     conn,
                     image_id,
-                    str(image_path),
                     np.zeros((32, 32, 3), dtype=np.uint8),
                     model,
                     clusterer,
@@ -245,10 +241,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
 
             model.detect_and_embed.side_effect = detect
 
-            with (
-                patch.object(schema, "DB_PATH", str(db_path)),
-                patch("backend.services.pipeline.create_face_thumbnails_for_image"),
-            ):
+            with patch.object(schema, "DB_PATH", str(db_path)):
                 schema.init_db()
                 seed = schema.get_conn()
                 image_id = seed.execute(
@@ -265,7 +258,6 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                             connection.cursor(),
                             connection,
                             image_id,
-                            str(image_path),
                             np.zeros((16, 16, 3), dtype=np.uint8),
                             model,
                             Mock(),
@@ -437,7 +429,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(resumed_count, 2)
             self.assertEqual(resumed_model.detect_and_embed.call_count, 0)
 
-    def test_repeat_import_hashes_every_file_without_repeating_inference(self):
+    def test_repeat_import_skips_unchanged_hashing_and_inference(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             photo_dir = root / "photos"
@@ -482,7 +474,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
 
             self.assertEqual(first_inference_count, 3)
             self.assertEqual(model.detect_and_embed.call_count, 3)
-            self.assertEqual(hash_image.call_count, 6)
+            self.assertEqual(hash_image.call_count, 3)
 
     def test_duplicate_content_in_one_request_is_inferred_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:

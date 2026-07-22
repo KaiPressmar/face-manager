@@ -26,6 +26,8 @@ interface ImageGridProps {
   gridSize: ImageGridSize;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onLoadMore: () => void;
+  hasActiveFilters: boolean;
+  onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
 }
 
@@ -73,6 +75,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   gridSize,
   onNavigateToCluster,
   onLoadMore,
+  hasActiveFilters,
+  onResetFilters,
   onImageDeleted,
 }) => {
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
@@ -285,7 +289,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
         <h3>Keine Bilder in dieser Auswahl</h3>
-        <p>Wähle andere Ordner oder passe den Personenfilter an.</p>
+        <p>Für die gewählten Personen, Status oder Ordner gibt es keine Bilder.</p>
+        {hasActiveFilters && (
+          <button className="neon-card" type="button" onClick={onResetFilters}>
+            Alle Filter zurücksetzen
+          </button>
+        )}
       </div>
     );
   }

@@ -2540,6 +2540,16 @@ button:disabled {
   line-height: 1.5;
 }
 
+.settings-maintenance-status {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .settings-card--clustering {
   grid-column: 1 / -1;
 }
