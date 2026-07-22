@@ -13,6 +13,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.10.2] - 2026-07-22
+
+### Verbessert
+
+- Die Restzeit großer Bilderimporte wird ruhiger und verlässlicher angezeigt und springt bei einzelnen schnellen oder langsamen Bildern nicht mehr ständig hin und her.
+
+### Behoben
+
+- Die Neuordnung sehr großer Bildbestände bricht bei vielen noch nicht zugeordneten Gesichtern nicht mehr vorzeitig ab.
+- Sehr lange Windows-Pfade und leicht unvollständige Bilddateien werden beim Import zuverlässiger verarbeitet; Dateien, die tatsächlich keine Bilder sind, werden sicher übersprungen.
+
 ## [0.10.1] - 2026-07-22
 
 ### Behoben

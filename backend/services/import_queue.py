@@ -1,6 +1,7 @@
 """Adaptive import queue with request-level cancellation and staged ETA."""
 
 import logging
+import math
 import os
 import threading
 import time
@@ -138,9 +139,11 @@ class LiveStageTiming:
         if sample > 0:
             if self.samples:
                 baseline = median(self.samples)
-                sample = max(baseline * 0.25, min(sample, baseline * 4.0))
+                sample = max(baseline * 0.4, min(sample, baseline * 2.5))
             self.samples.append(sample)
-            del self.samples[:-9]
+            # A wider median window keeps a short burst of cached or unusually
+            # complex images from redefining the throughput of a large import.
+            del self.samples[:-25]
         self.last_progress = progress
         self.last_sample_at = observed_at
 
@@ -152,6 +155,39 @@ class LiveStageTiming:
     @property
     def seconds_per_unit(self) -> Optional[float]:
         return median(self.samples) if self.samples else None
+
+    def overdue_seconds(self, observed_at: float) -> float:
+        """Return time spent beyond the typical duration of the current unit."""
+        rate = self.seconds_per_unit
+        if rate is None:
+            return 0.0
+        return max(0.0, observed_at - self.last_sample_at - rate)
+
+
+@dataclass
+class StableEta:
+    """Ease a noisy raw ETA toward reality using elapsed wall-clock time."""
+
+    seconds: float
+    updated_at: float
+
+    def update(self, target_seconds: float, observed_at: float) -> float:
+        """Count down naturally and absorb corrections without visible jumps."""
+        elapsed = max(0.0, observed_at - self.updated_at)
+        countdown = max(0.0, self.seconds - elapsed)
+        difference = target_seconds - countdown
+        # Underestimates are corrected deliberately more slowly than genuine
+        # speed-ups. Both paths are time-based, so frequent API snapshots cannot
+        # accidentally amplify the adjustment rate.
+        time_constant = 75.0 if difference > 0 else 20.0
+        blend = 1.0 - math.exp(-elapsed / time_constant)
+        self.seconds = max(0.0, countdown + difference * blend)
+        self.updated_at = observed_at
+        return self.seconds
+
+    def rebase(self, observed_at: float) -> None:
+        """Exclude a user-requested pause from the visible countdown."""
+        self.updated_at = observed_at
 
 
 @dataclass
@@ -683,6 +719,7 @@ class ImportQueue:
             stage: StageTimingStats() for stage in self.STAGE_ORDER
         }
         self._live_stage_timing: dict[str, LiveStageTiming] = {}
+        self._stable_etas: dict[tuple[str, str], StableEta] = {}
         self._avg_images_per_completed_job: Optional[float] = None
         self._stopping = False
         jobs, pending_ids = self._repository.load()
@@ -978,6 +1015,9 @@ class ImportQueue:
     def _estimate_job_etas(self, active_ids: list[str]) -> dict[str, Optional[float]]:
         """Estimate request-level ETA in a bounded parallel scheduler."""
         if any(self._jobs[job_id].status == "paused" for job_id in active_ids):
+            observed_at = time.monotonic()
+            for state in self._stable_etas.values():
+                state.rebase(observed_at)
             return {
                 job_id: None
                 for job_id in [*active_ids, *self._pending]
@@ -987,9 +1027,20 @@ class ImportQueue:
 
         slot_times = [0.0 for _ in range(self._max_concurrent_jobs)]
         active_remaining = {
-            job_id: self._estimate_job_remaining_seconds(self._jobs[job_id], avg_images)
+            job_id: (
+                self._estimate_job_remaining_seconds(self._jobs[job_id], avg_images)
+                if self._has_reliable_job_eta(self._jobs[job_id])
+                else None
+            )
             for job_id in active_ids
         }
+        if any(eta is None for eta in active_remaining.values()):
+            # A queued completion time cannot be credible while the critical
+            # path is still discovering its size or calibrating throughput.
+            return {
+                job_id: None
+                for job_id in [*active_ids, *self._pending]
+            }
         for index, job_id in enumerate(active_ids):
             eta = active_remaining[job_id]
             job_etas[job_id] = eta
@@ -1002,7 +1053,11 @@ class ImportQueue:
             slot_index = min(range(len(slot_times)), key=lambda i: slot_times[i])
             slot_times[slot_index] += duration
             job_etas[job_id] = slot_times[slot_index]
-        return job_etas
+        observed_at = time.monotonic()
+        return {
+            job_id: self._stabilize_eta(job_id, "job", eta, observed_at)
+            for job_id, eta in job_etas.items()
+        }
 
     def _average_images_per_job(self) -> int:
         if self._avg_images_per_completed_job is not None:
@@ -1049,9 +1104,23 @@ class ImportQueue:
             for stage in self.STAGE_ORDER:
                 cumulative += self._estimate_stage_full_seconds(stage, image_count)
                 result[stage] = cumulative
-            return result
+            observed_at = time.monotonic()
+            return {
+                stage: self._stabilize_eta(
+                    job.id,
+                    f"station:{stage}",
+                    eta,
+                    observed_at,
+                )
+                for stage, eta in result.items()
+            }
 
         current_index = self.STAGE_ORDER.index(job.stage)
+        if not self._has_reliable_live_eta(job):
+            return {
+                stage: 0.0 if index < current_index else None
+                for index, stage in enumerate(self.STAGE_ORDER)
+            }
         result: dict[str, Optional[float]] = {}
         cumulative = self._estimate_stage_remaining_seconds(job, image_count)
         result[job.stage] = cumulative
@@ -1059,9 +1128,88 @@ class ImportQueue:
         for stage in self.STAGE_ORDER[current_index + 1 :]:
             trailing += self._estimate_stage_full_seconds(stage, image_count)
             result[stage] = trailing
+            future_range = self.STAGE_ORDER[
+                current_index + 1 : self.STAGE_ORDER.index(stage) + 1
+            ]
+            if any(
+                future_stage in self.STAGE_DEFAULT_UNIT_SECONDS
+                and self._stage_stats[future_stage].avg_seconds_per_unit is None
+                for future_stage in future_range
+            ):
+                result[stage] = None
         for stage in self.STAGE_ORDER[:current_index]:
             result[stage] = 0.0
-        return result
+        observed_at = time.monotonic()
+        return {
+            stage: (
+                0.0
+                if eta == 0.0
+                else self._stabilize_eta(
+                    job.id,
+                    f"station:{stage}",
+                    eta,
+                    observed_at,
+                )
+            )
+            for stage, eta in result.items()
+        }
+
+    def _stabilize_eta(
+        self,
+        job_id: str,
+        key: str,
+        raw_seconds: Optional[float],
+        observed_at: float,
+    ) -> Optional[float]:
+        """Return a stable ETA shared by every live view of the same target."""
+        if raw_seconds is None:
+            return None
+        target = max(0.0, raw_seconds)
+        state_key = (job_id, key)
+        state = self._stable_etas.get(state_key)
+        if state is None:
+            self._stable_etas[state_key] = StableEta(target, observed_at)
+            return target
+        return state.update(target, observed_at)
+
+    def _rebase_stable_etas(self, job_id: str, observed_at: float) -> None:
+        """Prevent a pause from consuming the displayed remaining time."""
+        for (eta_job_id, _key), state in self._stable_etas.items():
+            if eta_job_id == job_id:
+                state.rebase(observed_at)
+
+    def _drop_stable_etas(self, job_id: str) -> None:
+        """Discard smoothing state once an import is no longer live."""
+        for state_key in [key for key in self._stable_etas if key[0] == job_id]:
+            self._stable_etas.pop(state_key, None)
+
+    def _has_reliable_live_eta(self, job: ImportJob) -> bool:
+        """Hide guesses until size and live throughput are meaningful."""
+        if job.stage == "scanning":
+            return False
+        if job.stage not in self.STAGE_DEFAULT_UNIT_SECONDS:
+            return True
+        if self._stage_stats[job.stage].avg_seconds_per_unit is not None:
+            return True
+        tracker = self._live_stage_timing.get(job.id)
+        return bool(
+            tracker is not None
+            and tracker.stage == job.stage
+            and tracker.seconds_per_unit is not None
+        )
+
+    def _has_reliable_job_eta(self, job: ImportJob) -> bool:
+        """Require measured rates for every remaining variable-cost stage."""
+        if not self._has_reliable_live_eta(job):
+            return False
+        if job.stage not in self.STAGE_ORDER:
+            return False
+        current_index = self.STAGE_ORDER.index(job.stage)
+        return all(
+            stage not in self.STAGE_DEFAULT_UNIT_SECONDS
+            or self._stage_stats[stage].avg_seconds_per_unit is not None
+            for stage in self.STAGE_ORDER[current_index + 1 :]
+        )
 
     def _estimate_stage_full_seconds(self, stage: str, image_count: int) -> float:
         stats = self._stage_stats[stage]
@@ -1099,7 +1247,13 @@ class ImportQueue:
             elif elapsed is not None and current > 0:
                 live_rate = elapsed / current
                 rate = rate * 0.6 + live_rate * 0.4
-            return (total - current) * rate
+            remaining = (total - current) * rate
+            if tracker is not None and tracker.stage == stage:
+                # A currently slow image contributes only its overdue time. It
+                # must not instantly make every remaining image look equally
+                # slow, which was a major source of ETA spikes.
+                remaining += tracker.overdue_seconds(time.monotonic())
+            return remaining
 
         fixed = self._stage_stats[stage].avg_seconds_fixed or self.STAGE_DEFAULT_FIXED_SECONDS[stage]
         if elapsed is None:
@@ -1132,6 +1286,7 @@ class ImportQueue:
             self._repository.delete(job_id)
             del self._jobs[job_id]
             self._cancel_events.pop(job_id, None)
+            self._drop_stable_etas(job_id)
             self._notify_change()
             return {"id": job_id, "status": "removed"}
 
@@ -1164,12 +1319,14 @@ class ImportQueue:
             if job_id in self._active_job_ids:
                 control.resume()
                 job.status = "running"
+                resumed_at = time.monotonic()
                 tracker = self._live_stage_timing.get(job_id)
                 if tracker is not None and tracker.stage == job.stage:
                     tracker.rebase(
                         self._stage_progress(job),
-                        time.monotonic(),
+                        resumed_at,
                     )
+                self._rebase_stable_etas(job_id, resumed_at)
             else:
                 job.status = "queued"
                 ordered_ids = list(self._jobs)
@@ -1217,6 +1374,7 @@ class ImportQueue:
                 return None
             self._repository.delete(job_id)
             del self._jobs[job_id]
+            self._drop_stable_etas(job_id)
         self._notify_change()
         return {"id": job_id, "status": "removed"}
 
@@ -1226,6 +1384,7 @@ class ImportQueue:
             deleted_ids = self._repository.delete_terminal_history()
             for job_id in deleted_ids:
                 self._jobs.pop(job_id, None)
+                self._drop_stable_etas(job_id)
         if deleted_ids:
             self._notify_change()
         return len(deleted_ids)
@@ -1328,6 +1487,7 @@ class ImportQueue:
                 self._cancel_events.pop(job_id, None)
                 self._last_progress_persisted.pop(job_id, None)
                 self._live_stage_timing.pop(job_id, None)
+                self._drop_stable_etas(job_id)
                 self._futures.pop(job_id, None)
                 self._trim_history()
                 self._condition.notify_all()
@@ -1381,7 +1541,16 @@ class ImportQueue:
                 last_sample_at=observed_at,
             )
             return
+        was_calibrated = tracker.seconds_per_unit is not None
         tracker.observe(progress, observed_at)
+        if (
+            not was_calibrated
+            and tracker.seconds_per_unit is not None
+            and self._stage_stats[job.stage].avg_seconds_per_unit is None
+        ):
+            # Replace the placeholder queued estimate once with the first real
+            # rate, then smooth only subsequent corrections.
+            self._drop_stable_etas(job.id)
 
     def _progress_callback(self, job_id: str) -> Callable[[dict], None]:
         """Create a synchronized progress callback for one job.
@@ -1433,3 +1602,4 @@ class ImportQueue:
         deleted_ids = self._repository.trim_terminal_history(self._history_limit)
         for job_id in deleted_ids:
             self._jobs.pop(job_id, None)
+            self._drop_stable_etas(job_id)

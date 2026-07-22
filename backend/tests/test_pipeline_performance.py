@@ -15,6 +15,8 @@ from backend.services.pipeline import (
     ImagePreparer,
     ImportCancelled,
     ImportProcessor,
+    _filesystem_path,
+    _stored_filesystem_path,
     get_import_worker_count,
 )
 
@@ -31,6 +33,34 @@ class ImportWorkerCountTest(unittest.TestCase):
     @patch.dict(os.environ, {"FACE_MANAGER_IMPORT_WORKERS": "6"})
     def test_environment_override_is_honored(self):
         self.assertEqual(get_import_worker_count("gpu", cpu_count=2), 6)
+
+
+class WindowsFilesystemPathTest(unittest.TestCase):
+    @patch("backend.services.pipeline.os.name", "nt")
+    def test_drive_and_unc_paths_use_extended_length_form(self):
+        drive_path = r"C:\Users\Kai Prüfer\very long folder\photo 1.jpg"
+        unc_path = r"\\server\Fotos mit Leerzeichen\Urlaub\bild.jpg"
+
+        self.assertEqual(_filesystem_path(drive_path), rf"\\?\{drive_path}")
+        self.assertEqual(
+            _filesystem_path(unc_path),
+            r"\\?\UNC\server\Fotos mit Leerzeichen\Urlaub\bild.jpg",
+        )
+        self.assertEqual(_stored_filesystem_path(_filesystem_path(drive_path)), drive_path)
+        self.assertEqual(_stored_filesystem_path(_filesystem_path(unc_path)), unc_path)
+
+    def test_truncated_jpeg_is_decoded_best_effort(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "truncated.jpg"
+            Image.new("RGB", (64, 64), color=(100, 50, 25)).save(
+                image_path,
+                quality=90,
+            )
+            image_path.write_bytes(image_path.read_bytes()[:-8])
+
+            decoded = ImagePreparer.decode(image_path)
+
+            self.assertEqual(decoded.shape, (64, 64, 3))
 
 
 class HashedImageIteratorTest(unittest.TestCase):
@@ -103,6 +133,51 @@ class HashedImageIteratorTest(unittest.TestCase):
 
 
 class ParallelImportIntegrationTest(unittest.TestCase):
+    def test_file_with_image_extension_but_invalid_content_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo_dir = root / "photos"
+            photo_dir.mkdir()
+            Image.new("RGB", (16, 16), color=(20, 40, 60)).save(
+                photo_dir / "valid.jpg"
+            )
+            (photo_dir / "cache.jpg").write_text("not an image", encoding="utf-8")
+
+            model = Mock(compute_mode="cpu")
+            model.detect_and_embed.return_value = []
+            resources = Mock()
+            resources.get_model.return_value = model
+            resources.get_clusterer.return_value = Mock()
+            errors = []
+            db_path = root / "database.sqlite"
+
+            with (
+                patch.object(schema, "DB_PATH", str(db_path)),
+                patch(
+                    "backend.services.pipeline.get_import_worker_count",
+                    return_value=1,
+                ),
+            ):
+                schema.init_db()
+                ImportProcessor(resources).process(
+                    str(photo_dir),
+                    lambda changes: errors.append(changes["last_error"])
+                    if "last_error" in changes
+                    else None,
+                    threading.Event(),
+                )
+                conn = schema.get_conn()
+                stored_paths = [
+                    row["path"]
+                    for row in conn.execute("SELECT path FROM image").fetchall()
+                ]
+                conn.close()
+
+            self.assertEqual(model.detect_and_embed.call_count, 1)
+            self.assertEqual(stored_paths, [str(photo_dir / "valid.jpg")])
+            self.assertEqual(len(errors), 1)
+            self.assertIn("cache.jpg", errors[0])
+
     def test_parallel_preparation_imports_images_and_reports_progress(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
