@@ -17,9 +17,68 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Optional
+import threading
+import time
+from typing import AsyncIterator, Callable, Optional
 
 logger = logging.getLogger("face_manager.events")
+
+
+class TrailingThrottle:
+    """Rate-limit a zero-argument callback while guaranteeing a trailing run.
+
+    Background workers emit progress far faster than a UI needs it, and each
+    emission here rebuilds and broadcasts a full state snapshot. Coalescing
+    bursts into at most one run per ``interval`` keeps that cost bounded without
+    losing the final state: when calls arrive during the cool-down a single
+    trailing run is scheduled, and because the callback reads live state at
+    invocation time that trailing run always reflects the latest snapshot.
+    """
+
+    def __init__(self, callback: Callable[[], None], interval: float = 0.2) -> None:
+        self._callback = callback
+        self._interval = max(0.0, interval)
+        self._lock = threading.Lock()
+        self._last_run = 0.0
+        self._timer: Optional[threading.Timer] = None
+
+    def __call__(self) -> None:
+        run_now = False
+        with self._lock:
+            if self._timer is not None:
+                # A trailing run is already pending; it will pick up latest state.
+                return
+            now = time.monotonic()
+            if now - self._last_run >= self._interval:
+                self._last_run = now
+                run_now = True
+            else:
+                delay = self._interval - (now - self._last_run)
+                self._timer = threading.Timer(delay, self._fire)
+                self._timer.name = "sse-throttle"
+                self._timer.daemon = True
+                self._timer.start()
+        if run_now:
+            self._invoke()
+
+    def _fire(self) -> None:
+        with self._lock:
+            self._timer = None
+            self._last_run = time.monotonic()
+        self._invoke()
+
+    def _invoke(self) -> None:
+        try:
+            self._callback()
+        except Exception:  # pragma: no cover - a subscriber must never break work
+            logger.exception("Throttled notification failed")
+
+    def flush(self) -> None:
+        """Cancel any pending trailing run, e.g. during shutdown."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
 
 # Seconds of silence after which the stream emits a keepalive comment. Keeps
 # intermediaries and the browser from treating an idle connection as dead.

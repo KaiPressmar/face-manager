@@ -11,7 +11,8 @@ import UpdateAvailableModal from "./components/shared/UpdateAvailableModal";
 import {
   acknowledgeCurrentReleaseNotes,
   checkForUpdates,
-  fetchCurrentReleaseNotes,
+  fetchFullChangelog,
+  fetchUnseenReleaseNotes,
   type AvailableUpdate,
   type ReleaseNotes,
 } from "./utils/api";
@@ -65,8 +66,10 @@ const App: React.FC = () => {
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(
     () => initialEntry.settingsSection,
   );
-  const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes | null>(null);
+  const [unseenReleases, setUnseenReleases] = useState<ReleaseNotes[]>([]);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
+  const [fullChangelog, setFullChangelog] = useState<ReleaseNotes[] | null>(null);
+  const [showChangelog, setShowChangelog] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [showUpdate, setShowUpdate] = useState(false);
 
@@ -171,13 +174,14 @@ const App: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
-    fetchCurrentReleaseNotes()
-      .then((release) => {
-        if (cancelled || release.sections.every((section) => section.items.length === 0)) {
-          return;
-        }
-        setReleaseNotes(release);
-        if (!release.seen) {
+    fetchUnseenReleaseNotes()
+      .then((result) => {
+        if (cancelled) return;
+        const versions = result.versions.filter((release) =>
+          release.sections.some((section) => section.items.length > 0),
+        );
+        setUnseenReleases(versions);
+        if (!result.seen && versions.length > 0) {
           setShowReleaseNotes(true);
         }
       })
@@ -190,14 +194,22 @@ const App: React.FC = () => {
   }, []);
 
   const closeReleaseNotes = useCallback(() => {
-    if (releaseNotes) {
+    if (unseenReleases.length > 0) {
       void acknowledgeCurrentReleaseNotes().catch(() => {
         // If persistence fails, the notes reappear next time instead of being lost.
       });
-      setReleaseNotes({ ...releaseNotes, seen: true });
     }
     setShowReleaseNotes(false);
-  }, [releaseNotes]);
+  }, [unseenReleases.length]);
+
+  const openFullChangelog = useCallback(() => {
+    setShowChangelog(true);
+    if (fullChangelog === null) {
+      fetchFullChangelog()
+        .then((versions) => setFullChangelog(versions))
+        .catch(() => setFullChangelog([]));
+    }
+  }, [fullChangelog]);
 
   useEffect(() => {
     const restoreFromLocation = () => {
@@ -269,9 +281,7 @@ const App: React.FC = () => {
       <Layout
         page={page}
         onChangePage={handleChangePage}
-        onShowReleaseNotes={
-          releaseNotes ? () => setShowReleaseNotes(true) : undefined
-        }
+        onShowReleaseNotes={openFullChangelog}
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
@@ -287,10 +297,25 @@ const App: React.FC = () => {
           },
         )}
       </Layout>
-      {showReleaseNotes && releaseNotes && (
-        <WhatsNewModal release={releaseNotes} onClose={closeReleaseNotes} />
+      {showReleaseNotes && unseenReleases.length > 0 && (
+        <WhatsNewModal
+          releases={unseenReleases}
+          variant="whats-new"
+          onClose={closeReleaseNotes}
+          onShowFullChangelog={() => {
+            closeReleaseNotes();
+            openFullChangelog();
+          }}
+        />
       )}
-      {showUpdate && availableUpdate && !showReleaseNotes && (
+      {showChangelog && (
+        <WhatsNewModal
+          releases={fullChangelog ?? []}
+          variant="history"
+          onClose={() => setShowChangelog(false)}
+        />
+      )}
+      {showUpdate && availableUpdate && !showReleaseNotes && !showChangelog && (
         <UpdateAvailableModal
           update={availableUpdate}
           onClose={() => setShowUpdate(false)}

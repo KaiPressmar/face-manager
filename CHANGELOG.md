@@ -13,6 +13,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.7.0] - 2026-07-22
+
+### Verbessert
+
+- Nach einem Update zeigt Face Manager jetzt die Neuerungen aller übersprungenen Versionen an und nicht mehr nur der neuesten. Das vollständige Änderungsprotokoll lässt sich jederzeit über die Versionsnummer öffnen.
+- Während laufender Importe reagiert die Oberfläche flüssiger, und Gesichts-Vorschauen stehen nach Importen und Neu-Gruppierungen schneller bereit.
+
+### Behoben
+
+- Ein von Hand gestartetes Neu-Ordnen der Gesichtsgruppen wird jetzt auch während eines laufenden Bildimports zuverlässig übernommen und beginnt automatisch, sobald der Import abgeschlossen ist. Face Manager zeigt dabei an, dass die Aufgabe eingeplant ist.
+
 ## [0.6.1] - 2026-07-20
 
 ### Behoben

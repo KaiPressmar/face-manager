@@ -34,6 +34,9 @@ For every changelog item:
 - Never edit an already released section and never move `Unreleased` manually.
   `scripts/release-version.sh` finalizes it during release preparation.
 - Do not bump `VERSION` during ordinary implementation work.
+- Do not maintain GitHub Release notes separately or generate an automatic
+  commit list. The release workflow renders and synchronizes them from the
+  matching finalized `CHANGELOG.md` section.
 
 In the pull request template, check exactly one change classification. For a
 mixed pull request choose **User-visible change**, maintain the curated
@@ -44,3 +47,17 @@ Run `python3 scripts/changelog.py check` after editing the changelog and run
 
 The full development, changelog, and release process is documented in
 `CONTRIBUTING.md`.
+
+## Skills
+
+Two first-party skills encode the commit and release runbooks. Follow them
+instead of improvising the git, pull request, or release steps:
+
+- **release-commit** (`.agents/skills/release-commit/SKILL.md`) — commit and push
+  local changes: classify the diff, update the German `CHANGELOG.md` `Unreleased`
+  section, write a Conventional Commit, run `./scripts/check-all.sh`, and open
+  (auto-merge) a pull request into `develop`.
+- **release-cut** (`.agents/skills/release-cut/SKILL.md`) — cut the next version:
+  run `scripts/release-version.sh`, land the release-prep pull request into
+  `develop`, then the release pull request into `main`, and let CI tag and
+  publish. Never tag or create the GitHub release by hand.

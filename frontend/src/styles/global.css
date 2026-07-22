@@ -1755,7 +1755,36 @@ button:disabled {
   background: var(--surface-2);
 }
 
-.whats-new-section h3 {
+.whats-new-release {
+  display: grid;
+  gap: 12px;
+}
+
+.whats-new-release + .whats-new-release {
+  margin-top: 4px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.whats-new-release__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.whats-new-release__heading h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+}
+
+.whats-new-release__heading span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.whats-new-section h4 {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1764,7 +1793,7 @@ button:disabled {
   font-size: 15px;
 }
 
-.whats-new-section h3 span {
+.whats-new-section h4 span {
   width: 25px;
   height: 25px;
   display: inline-grid;
@@ -1791,6 +1820,28 @@ button:disabled {
 
 .whats-new-modal__footer p {
   max-width: 430px;
+}
+
+.whats-new-modal__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.whats-new-modal__link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.whats-new-modal__link:hover {
+  text-decoration: none;
 }
 
 /* Available update: download stays explicit and installation needs confirmation. */
