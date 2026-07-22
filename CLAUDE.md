@@ -23,3 +23,20 @@ Do not modify released changelog sections or bump the application version during
 ordinary work. The release helper converts `Unreleased` into the dated version
 section. Validate with `python3 scripts/changelog.py check` and then
 `./scripts/check-all.sh`.
+
+Do not write a separate GitHub Release changelog or use an automatic commit
+list. The release workflow renders and synchronizes the release title and notes
+from the matching finalized section in `CHANGELOG.md`.
+
+## Skills
+
+Two first-party skills encode the commit and release runbooks. Use them instead
+of improvising the git/PR/release steps:
+
+- **release-commit** (`.agents/skills/release-commit/SKILL.md`) — to commit and
+  push local changes: classify the diff, update the German `CHANGELOG.md`
+  `Unreleased` section, write a Conventional Commit, run `./scripts/check-all.sh`,
+  and open (auto-merge) a PR into `develop`.
+- **release-cut** (`.agents/skills/release-cut/SKILL.md`) — to cut the next
+  version: run `scripts/release-version.sh`, land the release-prep PR into
+  `develop`, then the release PR into `main`, and let CI tag and publish.
