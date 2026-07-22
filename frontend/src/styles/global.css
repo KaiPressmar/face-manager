@@ -138,7 +138,7 @@ button:disabled {
 
 /* Outcome-oriented home and review workflow */
 .sidebar__header { align-items: center; display: flex; gap: 11px; }
-.sidebar__brand-mark { align-items: center; background: linear-gradient(135deg, var(--accent), var(--neon-violet)); border-radius: 11px; color: var(--on-accent); display: flex; flex: 0 0 36px; font-size: 12px; font-weight: 900; height: 36px; justify-content: center; box-shadow: var(--shadow-card); }
+.sidebar__brand-mark { border-radius: 11px; display: block; flex: 0 0 36px; width: 36px; height: 36px; object-fit: contain; box-shadow: var(--shadow-card); }
 .sidebar__section-label { color: var(--text-faint); font-size: 10px; font-weight: 800; letter-spacing: .13em; margin: 14px 8px 4px; text-transform: uppercase; }
 .sidebar__nav .neon-card { align-items: center; display: grid; gap: 10px; grid-template-columns: 25px 1fr; text-align: left; }
 .sidebar__nav .neon-card > span:first-child { color: var(--text-muted); font-size: 16px; text-align: center; }
