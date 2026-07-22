@@ -59,7 +59,7 @@ from .services.autocluster_queue import (
     PRIORITY_STARTUP_REPAIR,
     PRIORITY_VERSION_UPGRADE,
 )
-from .services.events import event_hub
+from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.update_manager import (
@@ -233,8 +233,10 @@ def _publish_imports() -> None:
         notify_clusters_changed("import_completed")
         if not schedule_version_clustering_upgrade():
             mark_cluster_assignments_dirty("import_completed")
-        # Release any clustering task that was queued while the import ran.
+        # Release any clustering task that was queued while the import ran and
+        # let the thumbnail warmer start immediately instead of on its next poll.
         auto_cluster_queue.notify_ready()
+        face_thumbnail_warmup_queue.wake()
 
 
 def _publish_autocluster() -> None:
@@ -272,9 +274,16 @@ def notify_clusters_changed(reason: str) -> None:
     event_hub.publish("clusters", {"reason": reason})
 
 
+# Background workers emit progress far faster than the UI needs it, and each
+# emission rebuilds a full snapshot. Coalesce those bursts to a few per second
+# (transitions and the final state are always delivered by the trailing run).
+_publish_imports_throttled = TrailingThrottle(_publish_imports, interval=0.2)
+_publish_autocluster_throttled = TrailingThrottle(_publish_autocluster, interval=0.2)
+
+
 import_queue = ImportQueue(
     auto_start=False,
-    on_change=_publish_imports,
+    on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
 )
@@ -283,6 +292,8 @@ def _handle_autocluster_success(_repaired_faces: int) -> None:
     reset_import_resources()
     app_cache.clear()
     notify_clusters_changed("autocluster")
+    # Newly rebuilt clusters mean new faces to preview; warm them right away.
+    face_thumbnail_warmup_queue.wake()
     if _version_clustering_pending:
         schedule_version_clustering_upgrade()
 
@@ -304,7 +315,7 @@ def _reclustering_writer_available() -> bool:
 
 auto_cluster_queue = AutoClusterQueue(
     on_success=_handle_autocluster_success,
-    on_change=_publish_autocluster,
+    on_change=_publish_autocluster_throttled,
     ready_gate=_reclustering_writer_available,
 )
 
@@ -508,6 +519,8 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         idle_recluster_scheduler.stop()
+        _publish_imports_throttled.flush()
+        _publish_autocluster_throttled.flush()
         try:
             face_thumbnail_warmup_queue.stop()
         except Exception:

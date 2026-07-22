@@ -12,6 +12,7 @@ Requests, nicht in diese Versionshinweise.
 ### Verbessert
 
 - Nach einem Update zeigt Face Manager jetzt die Neuerungen aller übersprungenen Versionen an und nicht mehr nur der neuesten. Das vollständige Änderungsprotokoll lässt sich jederzeit über die Versionsnummer öffnen.
+- Während laufender Importe reagiert die Oberfläche flüssiger, und Gesichts-Vorschauen stehen nach Importen und Neu-Gruppierungen schneller bereit.
 
 ### Behoben
 
