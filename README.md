@@ -38,9 +38,9 @@ original files.
 
 | Area | What it does |
 | --- | --- |
-| Face analysis | Detects faces with InsightFace and creates 512-dimensional embeddings |
-| Clustering | Groups similar faces incrementally using cosine similarity and HNSW |
-| People | Assigns clusters to named people and supports manual cleanup |
+| Face analysis | Detects faces with InsightFace and creates normalized 512-dimensional embeddings |
+| Clustering | Groups similar faces incrementally using cosine distance and an HNSW neighbor index |
+| People | Assigns clusters to named people and uses those assignments as conservative matching guidance |
 | Photo browser | Displays a masonry gallery, face overlays, and full-screen navigation |
 | Folder filtering | Searches and selects multiple nested folders at any discovered level |
 | Import pipeline | Queues imports, resumes interrupted jobs, and skips already processed content |
@@ -136,8 +136,8 @@ original files rather than storing replacements.
 
 ## Import Queue and Recovery
 
-Imports are persisted in SQLite and processed by a single background worker so the
-shared model and clustering index remain serialized.
+Imports are persisted in SQLite and processed by a shared background worker so the
+face model and clustering index remain consistent.
 
 ```text
 POST   /api/imports             Queue a folder import
@@ -220,13 +220,9 @@ Vite proxies `/api` to the FastAPI backend on port `8000`.
 
 ## VS Code
 
-The repository includes recommended extensions, tasks, and debug configurations for:
-
-- Python, Pylance, debugpy, and Ruff
-- TypeScript and Prettier
-- GitHub Actions and pull requests
-- Backend and frontend development
-- Compound full-stack debugging
+The repository includes recommended extensions, tasks, and debug configurations for
+Python, TypeScript, formatting, GitHub Actions, backend/frontend development, and
+compound full-stack debugging.
 
 Press `F5` and select **Full Stack: Debug**, or use **Terminal > Run Task** for setup,
 servers, validation, GitHub configuration, and release helpers.
@@ -383,3 +379,157 @@ the new location.
 Face Manager is configured for trusted local environments. CORS is open and the API
 has no authentication. Do not expose the backend directly to an untrusted network
 without adding authentication, access controls, and a restricted CORS policy.
+
+## How Face Analysis and Clustering Work
+
+This section describes the current implementation rather than face recognition in the
+abstract. Face Manager does not infer a person's name from an image. It detects faces,
+calculates similarity vectors, groups likely matches, and lets the user attach names to
+those groups.
+
+### 1. Image preparation and duplicate detection
+
+Before model inference, the importer recursively discovers supported files and hashes
+their contents with SHA-256. An image whose content was already processed reuses the
+existing database record, even when it appears under another path. Only new or changed
+content is decoded into an RGB NumPy array and passed to the face model.
+
+### 2. Face detection
+
+Face Manager loads the InsightFace `buffalo_l` model pack with only its detection and
+recognition modules enabled. The detector is prepared with a `1024 × 1024` detection
+canvas. InsightFace returns a bounding box for every detected face:
+
+```text
+(x1, y1, x2, y2) → (x, y, width, height)
+```
+
+The bounding box is stored with the image record and is used for face overlays and
+thumbnails. Detection and embedding inference run through ONNX Runtime. CUDA is used
+when `CUDAExecutionProvider` is available; otherwise the same model runs on the CPU.
+
+### 3. Face embeddings
+
+For every detected face, the recognition model produces a 512-dimensional floating
+point embedding. The embedding is not a name or a human-readable description. It is a
+position in a learned feature space where images of visually similar faces tend to be
+closer together.
+
+Each vector is L2-normalized before it is stored or compared:
+
+```text
+normalized_embedding = embedding / ||embedding||₂
+```
+
+Normalization makes the vector length equal to one, so similarity can be compared with
+a dot product. Face Manager uses cosine distance:
+
+```text
+cosine_similarity = a · b
+cosine_distance   = 1 - (a · b)
+```
+
+A distance near `0` means that two embeddings point in almost the same direction and
+are therefore very similar. Larger distances indicate less similarity. The configured
+distance threshold is a decision boundary, not a probability or percentage.
+
+### 4. Fast neighbor search with HNSW
+
+All stored embeddings are added to an `hnswlib` index configured for cosine distance.
+HNSW, or Hierarchical Navigable Small World, is an approximate nearest-neighbor graph.
+It avoids comparing every new face with every stored face, which would become expensive
+for large libraries.
+
+When a new embedding arrives, Face Manager queries up to 64 nearby embeddings. HNSW
+returns candidate IDs and cosine distances; the application then applies additional
+checks before reusing a cluster. Approximate search is therefore used to find promising
+neighbors, not to make the final identity decision by itself.
+
+### 5. Matching an already named person
+
+Clusters assigned to a person provide supervised evidence for later imports. Face
+Manager keeps representative appearance prototypes for each named person and combines
+two signals:
+
+- the distance to that person's nearest prototype;
+- the average distance to the closest labeled neighbor embeddings.
+
+A person match is accepted only when the local neighborhood supports it:
+
+- at least two close neighbors vote for the same person;
+- that person receives at least 60% of the close-neighbor votes;
+- the combined prototype and neighbor score remains below the distance threshold;
+- the best candidate is separated from the runner-up by a safety margin.
+
+If those checks disagree or the result is ambiguous, the algorithm declines the person
+match instead of forcing an assignment.
+
+### 6. Matching an unnamed cluster
+
+When no confident named-person match exists, the embedding is compared with unassigned
+clusters. A cluster is eligible only when both of these checks pass:
+
+- the nearest member is within the distance threshold;
+- the embedding is also within the threshold of the cluster centroid.
+
+For clusters with at least three members, Face Manager additionally requires multiple
+supporting neighbors and at least 60% local agreement. If two candidate clusters score
+too similarly, neither is selected. A new cluster is created when no candidate passes
+all gates.
+
+This local-plus-global check prevents a single unusual photo from attaching a face to a
+cluster whose overall shape does not fit.
+
+### 7. Incremental behavior
+
+Clustering happens incrementally during import. Each accepted embedding is registered
+in memory and then added to the HNSW index, so later faces in the same import can use it
+as evidence. Existing embeddings, cluster IDs, and person assignments are loaded from
+SQLite when the shared clustering resource is initialized.
+
+Incremental clustering is intentionally conservative but can depend on import order. A
+face imported before better examples are available may initially remain in a small or
+standalone cluster.
+
+### 8. Cluster cleanup and rebuilding
+
+The clustering module includes post-processing for rebuilding and improving groups:
+
+- **Small-cluster consolidation:** clusters with one or two movable faces may be merged
+  into a larger cluster only when all members agree on the same target, multiple nearby
+  samples support it, and no close runner-up exists.
+- **Heterogeneous-cluster splitting:** broad clusters are measured against their
+  normalized centroid. The 95th-percentile radius is used so isolated bad crops are
+  tolerated while a sizeable second identity can still be detected.
+- **Recursive two-way split:** a broad cluster is tentatively separated from two distant
+  seeds using repeated cosine-based assignments. Both child groups must contain enough
+  samples and their centers must have meaningful separation before the split is kept.
+- **Stable similarity ordering:** faces inside a cluster can be ordered along a nearest-
+  neighbor path, beginning at a peripheral sample, to make visual review more coherent.
+
+These passes are deliberately stricter than a simple connected-components or
+single-linkage approach. Single-linkage can join two people through a chain of marginal
+matches; Face Manager instead checks centroids, local support, robust cluster radius,
+and candidate margins.
+
+### 9. Threshold calibration
+
+The distance threshold can be calibrated from faces that the user has already assigned
+to people. Positive examples come from the same person and, where available, the same
+appearance subcluster. Different people provide negative examples.
+
+The calibration mirrors the runtime cohesion checks by considering both nearby samples
+and group centroids. Each person contributes equally to the score so people with many
+photos do not dominate the result. When two thresholds perform equally, the lower and
+therefore safer threshold is preferred to reduce accidental merges.
+
+### 10. Practical limitations
+
+Embedding similarity can be affected by pose, age, lighting, blur, occlusion, camera
+quality, very small faces, and visually similar relatives. The system is designed to
+assist organization, not to make authoritative identity claims.
+
+Manual review remains part of the workflow: users can assign names, move incorrect
+faces, split mixed groups, or leave uncertain clusters unassigned. The conservative
+matching rules intentionally favor additional clusters over silently combining
+ different people.
