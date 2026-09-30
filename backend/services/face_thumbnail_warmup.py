@@ -37,6 +37,7 @@ class FaceThumbnailWarmupState:
     last_error: Optional[str] = None
     # True once a full sweep confirmed every face already has a thumbnail.
     cache_complete: bool = False
+    user_paused: bool = False
 
 
 class FaceThumbnailWarmupQueue:
@@ -65,6 +66,7 @@ class FaceThumbnailWarmupQueue:
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._state = FaceThumbnailWarmupState()
+        self._visible = True
         # Fingerprint of the library at the last completed full sweep. When the
         # sweep created nothing and the fingerprint is unchanged, the worker
         # knows the cache is fully warm and stops re-scanning until faces are
@@ -103,10 +105,66 @@ class FaceThumbnailWarmupQueue:
         """Wake the worker so it can re-check idle state soon."""
         self._wake_event.set()
 
+    def pause(self) -> dict:
+        """Pause thumbnail preparation after the current small batch."""
+        with self._lock:
+            self._visible = True
+            self._state.user_paused = True
+            self._state.status = "paused"
+            self._state.last_error = None
+            result = asdict(self._state)
+        self._wake_event.set()
+        self._notify_change()
+        return result
+
+    def resume(self) -> dict:
+        """Resume user-paused or cancelled thumbnail preparation."""
+        with self._lock:
+            self._visible = True
+            self._state.user_paused = False
+            self._state.status = "idle"
+            self._state.last_error = None
+            result = asdict(self._state)
+        self._wake_event.set()
+        self._notify_change()
+        return result
+
+    def cancel(self) -> dict:
+        """Stop the current warmup cycle until explicitly resumed."""
+        with self._lock:
+            self._visible = True
+            self._state.user_paused = True
+            self._state.status = "cancelled"
+            self._state.last_run_at = _utc_now()
+            self._state.eta_seconds = None
+            self._state.cache_complete = False
+            result = asdict(self._state)
+        self._wake_event.set()
+        self._notify_change()
+        return result
+
+    def dismiss_history(self) -> bool:
+        """Clear a terminal warmup result while preserving the cache fingerprint."""
+        with self._lock:
+            if not (
+                self._state.cache_complete
+                or self._state.status in {"failed", "cancelled"}
+            ):
+                return False
+            user_paused = self._state.user_paused
+            status = "cancelled" if user_paused else "idle"
+            self._state = FaceThumbnailWarmupState(
+                status=status,
+                user_paused=user_paused,
+            )
+            self._visible = False
+        self._notify_change()
+        return True
+
     def snapshot(self) -> dict:
         """Return current warmup state for diagnostics."""
         with self._lock:
-            return {"task": asdict(self._state)}
+            return {"task": asdict(self._state) if self._visible else None}
 
     def _notify_change(self) -> None:
         """Notify the change subscriber, isolating it from worker failures.
@@ -123,13 +181,17 @@ class FaceThumbnailWarmupQueue:
 
     def _set_status(self, status: str, last_error: Optional[str] = None) -> None:
         with self._lock:
+            if status in {"running", "failed"}:
+                self._visible = True
             self._state.status = status
             self._state.last_error = last_error
         self._notify_change()
 
     def _record_batch(self, result) -> None:
         with self._lock:
-            self._state.status = "running"
+            self._visible = True
+            if not self._state.user_paused:
+                self._state.status = "running"
             self._state.last_run_at = _utc_now()
             self._state.total_faces = result.total_faces
             if result.reached_end:
@@ -190,6 +252,11 @@ class FaceThumbnailWarmupQueue:
         cycle_created = 0
         while not self._stop_event.is_set():
             try:
+                with self._lock:
+                    user_paused = self._state.user_paused
+                if user_paused:
+                    self._wait(self._busy_poll_seconds)
+                    continue
                 if not self._is_idle():
                     self._set_status("paused")
                     self._wait(self._busy_poll_seconds)

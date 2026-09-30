@@ -78,6 +78,9 @@ interface FaceGalleryContext {
 
 /** How many stacked groups render before the "show more" step. */
 const SECTION_BATCH_SIZE = 25;
+const LIVE_REFRESH_BATCH_MS = 2500;
+const FINAL_REFRESH_DELAY_MS = 120;
+const USER_IDLE_DELAY_MS = 900;
 
 const DEFAULT_REVIEW_GROUPS: FaceReviewGroupSummary[] = [
   { group_key: "unknown_person", label: "Unbekannte Personen", face_count: 0, cluster_count: 0 },
@@ -184,6 +187,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
   const listRequestIdRef = useRef(0);
   const detailsRequestIdRef = useRef(0);
+  const appliedNavigationTokenRef = useRef<number | null>(null);
   const pendingNavigationClusterIdRef = useRef<number | null>(null);
   const pendingMainScrollClusterIdRef = useRef<number | null>(null);
   const selectionSourceRef = useRef<"explicit" | "navigation" | "scroll" | "system">("system");
@@ -196,6 +200,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const headerRef = useRef<HTMLDivElement | null>(null);
   const detailContentRef = useRef<HTMLDivElement | null>(null);
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
+  const liveRefreshTimerRef = useRef<number | null>(null);
+  const needsCatchUpRefreshRef = useRef(false);
 
   const selectedClusterId =
     selectedTarget?.type === "cluster" ? selectedTarget.clusterId : null;
@@ -361,7 +367,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   }, [scopeResetKey]);
 
   /** Scroll one stacked group into view. Returns false if it is not rendered. */
-  const scrollToSection = React.useCallback((sectionKey: string) => {
+  const scrollToSection = React.useCallback((
+    sectionKey: string,
+    behavior: ScrollBehavior = "smooth",
+  ) => {
     const node = sectionRefs.current[sectionKey];
     const scroller = detailContentRef.current;
     if (!node || !scroller) {
@@ -372,9 +381,49 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       node.getBoundingClientRect().top -
       scroller.getBoundingClientRect().top -
       8;
-    scroller.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
+    scroller.scrollTo({ top: Math.max(0, nextTop), behavior });
     return true;
   }, []);
+
+  const captureDetailAnchor = React.useCallback(() => {
+    const scroller = detailContentRef.current;
+    if (!scroller || pendingMainScrollClusterIdRef.current !== null) {
+      return null;
+    }
+    const scrollerTop = scroller.getBoundingClientRect().top;
+    const anchor = Object.entries(sectionRefs.current)
+      .map(([key, node]) => ({ key, node }))
+      .filter((entry): entry is { key: string; node: HTMLElement } => !!entry.node)
+      .sort(
+        (a, b) =>
+          a.node.getBoundingClientRect().top - b.node.getBoundingClientRect().top,
+      )
+      .find((entry) => entry.node.getBoundingClientRect().bottom > scrollerTop);
+    if (!anchor) return null;
+    return {
+      key: anchor.key,
+      offset: anchor.node.getBoundingClientRect().top - scrollerTop,
+    };
+  }, []);
+
+  const restoreDetailAnchor = React.useCallback(
+    (anchor: ReturnType<typeof captureDetailAnchor>) => {
+      if (!anchor || pendingMainScrollClusterIdRef.current !== null) return;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const scroller = detailContentRef.current;
+          const node = sectionRefs.current[anchor.key];
+          if (!scroller || !node || pendingMainScrollClusterIdRef.current !== null) {
+            return;
+          }
+          const nextOffset =
+            node.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+          scroller.scrollTop += nextOffset - anchor.offset;
+        });
+      });
+    },
+    [],
+  );
 
   // Compact shape for the sidebar, which lists the archive sub-groups the same
   // way "Neue Gesichter" and "Personen korrigieren" list their clusters.
@@ -643,6 +692,33 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       });
   }, [mergeClusterDetails, normalizeClusterDetails, updateLoadingClusterIds]);
 
+  const refreshTargetDetails = React.useCallback(
+    async (target: SelectionTarget | null) => {
+      if (!target) return;
+      const requestId = detailsRequestIdRef.current + 1;
+      detailsRequestIdRef.current = requestId;
+      try {
+        if (target.type === "cluster") {
+          const data = await fetchClusterFaces(target.clusterId);
+          if (detailsRequestIdRef.current !== requestId || !data) return;
+          const normalized = normalizeClusterDetails(data);
+          setClusterDetails(normalized);
+          mergeClusterDetails({ [target.clusterId]: normalized });
+          return;
+        }
+        const data = await fetchFaceReviewGroupFaces(target.groupKey);
+        if (detailsRequestIdRef.current !== requestId || !data) return;
+        setReviewGroupDetails({
+          ...data,
+          faces: Array.isArray(data.faces) ? data.faces : [],
+        });
+      } catch (error) {
+        console.error("Live-Aktualisierung der Gesichter fehlgeschlagen:", error);
+      }
+    },
+    [mergeClusterDetails, normalizeClusterDetails],
+  );
+
   // One-time bootstrap: fetch the summaries, review-group counts and the first
   // cluster's faces in a single round trip so the initial view paints without a
   // second request. Falls back to the split loaders if the overview fails.
@@ -705,36 +781,127 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     // Pause background polling while the cluster page is not the visible one so
     // we do not hit the backend from a kept-alive page in the background.
     if (!active) {
+      needsCatchUpRefreshRef.current = true;
       return;
     }
+    let isMounted = true;
+    let refreshInFlight = false;
+    let refreshPending = false;
+    let userBusyUntil = 0;
 
-    const maybeRefreshVisibleData = () => {
-      if (document.visibilityState !== "visible" || isMutating) {
+    const refreshVisibleData = async () => {
+      if (document.visibilityState !== "visible") {
+        needsCatchUpRefreshRef.current = true;
         return;
       }
+      if (isMutating) {
+        needsCatchUpRefreshRef.current = true;
+        return;
+      }
+      const idleIn = userBusyUntil - performance.now();
+      if (idleIn > 0) {
+        maybeRefreshVisibleData(idleIn + 50);
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
       // Reclustering is scoped now, so a change usually touches only some
       // groups. Dropping every cached group here would collapse all sections to
       // their reserved height and throw the user's scroll position and marking
       // away. Instead just refetch, and let the reconciliation effect below
       // discard exactly the groups that really changed.
-      void loadSidebarData(true).then(() => loadTargetDetails(selectedTarget));
+      try {
+        const anchor = captureDetailAnchor();
+        await loadSidebarData(true);
+        await refreshTargetDetails(selectedTarget);
+        restoreDetailAnchor(anchor);
+        needsCatchUpRefreshRef.current = false;
+      } finally {
+        refreshInFlight = false;
+        if (isMounted && refreshPending) {
+          refreshPending = false;
+          maybeRefreshVisibleData(LIVE_REFRESH_BATCH_MS);
+        }
+      }
     };
 
-    // Refresh the sidebar the moment the backend reports cluster/person/image
-    // data changed, instead of polling on a fixed interval.
-    const unsubscribeClusters = subscribeToTopic(
+    const maybeRefreshVisibleData = (
+      delay = LIVE_REFRESH_BATCH_MS,
+      replacePending = false,
+    ) => {
+      if (liveRefreshTimerRef.current !== null) {
+        if (!replacePending) return;
+        window.clearTimeout(liveRefreshTimerRef.current);
+      }
+      liveRefreshTimerRef.current = window.setTimeout(() => {
+        liveRefreshTimerRef.current = null;
+        void refreshVisibleData();
+      }, delay);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        needsCatchUpRefreshRef.current = true;
+        maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+      } else {
+        needsCatchUpRefreshRef.current = true;
+      }
+    };
+    const handleWindowFocus = () => {
+      needsCatchUpRefreshRef.current = true;
+      maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+    };
+    const noteUserActivity = () => {
+      userBusyUntil = performance.now() + USER_IDLE_DELAY_MS;
+    };
+
+    // Import checkpoints are applied in bounded batches. Final and explicit
+    // changes arrive quickly, but even those wait until scrolling/pointer work
+    // has been idle briefly so the page never moves underneath the user.
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
-      maybeRefreshVisibleData,
+      (update) => {
+        needsCatchUpRefreshRef.current = true;
+        const isBackgroundCheckpoint = update?.reason === "background_progress";
+        maybeRefreshVisibleData(
+          isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
+          !isBackgroundCheckpoint,
+        );
+      },
     );
-    document.addEventListener("visibilitychange", maybeRefreshVisibleData);
-    window.addEventListener("focus", maybeRefreshVisibleData);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("scroll", noteUserActivity, true);
+    document.addEventListener("pointerdown", noteUserActivity, true);
+    window.addEventListener("focus", handleWindowFocus);
+
+    if (needsCatchUpRefreshRef.current && !isMutating) {
+      maybeRefreshVisibleData(FINAL_REFRESH_DELAY_MS, true);
+    }
 
     return () => {
+      isMounted = false;
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+        liveRefreshTimerRef.current = null;
+      }
       unsubscribeClusters();
-      document.removeEventListener("visibilitychange", maybeRefreshVisibleData);
-      window.removeEventListener("focus", maybeRefreshVisibleData);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("scroll", noteUserActivity, true);
+      document.removeEventListener("pointerdown", noteUserActivity, true);
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, isMutating, loadSidebarData, loadTargetDetails, selectedTarget]);
+  }, [
+    active,
+    captureDetailAnchor,
+    isMutating,
+    loadSidebarData,
+    refreshTargetDetails,
+    restoreDetailAnchor,
+    selectedTarget,
+  ]);
 
   // Reconcile cached faces with a refreshed cluster list. A background rebuild
   // touches only some groups, so anything whose face count still matches is
@@ -866,6 +1033,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (!navigationTarget) {
       return;
     }
+    if (appliedNavigationTokenRef.current === navigationTarget.token) {
+      return;
+    }
+    appliedNavigationTokenRef.current = navigationTarget.token;
     if (navigationTarget.groupKey) {
       setWorkspaceView("archive");
       pendingNavigationClusterIdRef.current = null;
@@ -879,18 +1050,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       return;
     }
 
-    const destination = clusters.find(
-      (cluster) => cluster.cluster_id === navigationTarget.clusterId,
-    );
     // The caller usually knows the person already, so the work area can switch
     // before the cluster list has arrived. `null` is a real answer here ("no
-    // person"), so distinguish it from "no hint given".
-    const personName =
-      navigationTarget.personName !== undefined
-        ? navigationTarget.personName
-        : destination?.person_name;
-    if (personName !== undefined) {
-      setWorkspaceView(personName ? "people" : "open");
+    // person"), so distinguish it from "no hint given". If no hint exists, a
+    // separate effect resolves the destination from the loaded summaries.
+    if (navigationTarget.personName !== undefined) {
+      setWorkspaceView(navigationTarget.personName ? "people" : "open");
     }
 
     pendingNavigationClusterIdRef.current = navigationTarget.clusterId;
@@ -908,7 +1073,18 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [clusters, navigationTarget]);
+  }, [navigationTarget]);
+
+  useEffect(() => {
+    const pendingClusterId = pendingNavigationClusterIdRef.current;
+    if (pendingClusterId === null) return;
+    const destination = clusters.find(
+      (cluster) => cluster.cluster_id === pendingClusterId,
+    );
+    if (destination) {
+      setWorkspaceView(destination.person_name?.trim() ? "people" : "open");
+    }
+  }, [clusters]);
 
   /**
    * After a group was emptied by an assignment, continue with the one that
@@ -992,11 +1168,26 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (selectedTarget.clusterId !== pendingClusterId) {
       return;
     }
-    // Groups are stacked, so jump to the selected one instead of the top. Keep
-    // the request pending until its section is actually rendered.
-    if (scrollToSection(`cluster-${pendingClusterId}`)) {
-      pendingMainScrollClusterIdRef.current = null;
-    }
+    // Wait until the target's real face grid has replaced its placeholder, then
+    // wait two frames for masonry/layout measurements. Scrolling earlier can
+    // land on a neighbouring group when the first navigation causes the detail
+    // pane to mount and expand at the same time.
+    if (!clusterDetailsMap[pendingClusterId]) return;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (
+          pendingMainScrollClusterIdRef.current === pendingClusterId &&
+          scrollToSection(`cluster-${pendingClusterId}`, "auto")
+        ) {
+          pendingMainScrollClusterIdRef.current = null;
+        }
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
   }, [selectedTarget, clusterDetailsMap, scopedClusterIds, scrollToSection]);
 
   useEffect(() => {

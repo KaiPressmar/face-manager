@@ -152,53 +152,69 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
         </div>
 
         <div className="filter-bar__tools">
-          {orderedPersons.length > SEARCH_THRESHOLD && (
-            <input
-              className="filter-bar__search"
-              aria-label="Person suchen"
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Person suchen"
-              type="search"
-              value={search}
-            />
+          <div className="filter-bar__tool-group">
+            <span className="filter-bar__tool-label">Filtern</span>
+            <div className="filter-bar__tool-group-controls">
+              {orderedPersons.length > SEARCH_THRESHOLD && (
+                <input
+                  className="filter-bar__search"
+                  aria-label="Person suchen"
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Person suchen"
+                  type="search"
+                  value={search}
+                />
+              )}
+
+              <button
+                type="button"
+                className={`filter-bar__control${
+                  selectedFolderCount ? " filter-bar__control--active" : ""
+                }`}
+                onClick={onOpenFolderFilter}
+                title="Nach Ordnern filtern"
+              >
+                <span className="folder-icon" aria-hidden="true" />
+                Ordner
+                {selectedFolderCount > 0 && <b>{selectedFolderCount}</b>}
+              </button>
+            </div>
+          </div>
+
+          <div className="filter-bar__tool-group">
+            <span className="filter-bar__tool-label">Sortieren</span>
+            <div className="filter-bar__tool-group-controls">
+              <select
+                className="filter-bar__control filter-bar__select"
+                aria-label="Sortierung"
+                value={activeSortValue}
+                onChange={(event) => {
+                  const option = SORT_OPTIONS.find(
+                    (entry) => entry.value === event.target.value,
+                  );
+                  if (option) onSortChange(option.sortBy, option.direction);
+                }}
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {children && (
+            <div className="filter-bar__tool-group filter-bar__tool-group--view">
+              <span className="filter-bar__tool-label">Ansicht</span>
+              <div className="filter-bar__tool-group-controls">{children}</div>
+            </div>
           )}
-
-          <button
-            type="button"
-            className={`filter-bar__control${
-              selectedFolderCount ? " filter-bar__control--active" : ""
-            }`}
-            onClick={onOpenFolderFilter}
-            title="Nach Ordnern filtern"
-          >
-            <span className="folder-icon" aria-hidden="true" />
-            Ordner
-            {selectedFolderCount > 0 && <b>{selectedFolderCount}</b>}
-          </button>
-
-          <select
-            className="filter-bar__control filter-bar__select"
-            aria-label="Sortierung"
-            value={activeSortValue}
-            onChange={(event) => {
-              const option = SORT_OPTIONS.find(
-                (entry) => entry.value === event.target.value,
-              );
-              if (option) onSortChange(option.sortBy, option.direction);
-            }}
-          >
-            {SORT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-
-          {children}
         </div>
       </div>
 
       <div className="filter-bar__chips">
+        <span className="filter-bar__row-label">Personen</span>
         <button
           className={
             selectedPersons.length === 0
@@ -260,6 +276,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
       {/* Kept out of the person row: these are categories, not people. The
           divider alone sets them apart, so they can share the chip design. */}
       <div className="filter-bar__categories">
+        <span className="filter-bar__row-label">Status</span>
         <button
           className={`person-filter__chip${
             selectedSet.has(UNASSIGNED_FILTER_VALUE) ? " person-filter__chip--active" : ""

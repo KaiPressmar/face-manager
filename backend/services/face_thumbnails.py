@@ -15,6 +15,7 @@ from PIL import ExifTags, Image
 
 from ..config import get_data_root
 from ..db.schema import get_conn
+from .filesystem_paths import filesystem_path
 
 logger = logging.getLogger("face_manager.face_thumbnails")
 
@@ -168,7 +169,7 @@ def ensure_face_thumbnail(
     if thumbnail_path.is_file():
         return thumbnail_path
 
-    with Image.open(image_path) as image:
+    with Image.open(filesystem_path(image_path)) as image:
         orientation = _exif_orientation(image)
         oriented_image = _apply_orientation(image, orientation)
         return _render_face_thumbnail(oriented_image, orientation, face_id, bbox)
@@ -197,7 +198,7 @@ def create_face_thumbnails_for_image(
         return
 
     try:
-        with Image.open(image_path) as image:
+        with Image.open(filesystem_path(image_path)) as image:
             orientation = _exif_orientation(image)
             oriented_image = _apply_orientation(image, orientation)
             for face_id, bbox in pending:
@@ -337,7 +338,10 @@ def warm_missing_face_thumbnails(
         image_paths = [
             path for path in (row["image_paths"] or "").split("\n") if path
         ]
-        image_path = next((path for path in image_paths if os.path.isfile(path)), None)
+        image_path = next(
+            (path for path in image_paths if os.path.isfile(filesystem_path(path))),
+            None,
+        )
         if image_path is None:
             skipped_missing_source += 1
             continue

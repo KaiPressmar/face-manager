@@ -23,7 +23,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .changelog import ChangelogError, find_release, load_changelog
+from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
     APP_VERSION,
     DB_PATH,
@@ -50,12 +50,20 @@ from .services.desktop import (
     to_display_path,
 )
 from .services.face_thumbnails import ensure_face_thumbnail
+from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
-from .services.autocluster_queue import AutoClusterQueue
-from .services.events import event_hub
+from .services.autocluster_queue import (
+    AutoClusterQueue,
+    PRIORITY_IDLE_RECLUSTER,
+    PRIORITY_MANUAL_RECLUSTER,
+    PRIORITY_STARTUP_REPAIR,
+    PRIORITY_VERSION_UPGRADE,
+)
+from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
+from .services.image_path_cleanup import ImagePathCleanup
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -143,6 +151,7 @@ init_db()
 
 _import_activity_lock = threading.Lock()
 _import_was_busy = False
+_last_import_progress: dict[str, tuple[int, int]] = {}
 _version_clustering_lock = threading.Lock()
 _version_clustering_pending = False
 _cluster_operation_lock = threading.RLock()
@@ -158,7 +167,9 @@ def _describe_background_activity() -> str | None:
         )
     import_snapshot = import_queue.snapshot()
     if isinstance(import_snapshot, dict) and (
-        import_snapshot.get("running_count") or import_snapshot.get("queued_count")
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
     ):
         return (
             "Ein Bildimport läuft oder wartet. Diese Änderung ist vorübergehend "
@@ -171,7 +182,7 @@ def _describe_background_activity() -> str | None:
         if isinstance(auto_cluster_snapshot, dict)
         else None
     )
-    if task and task.get("status") in {"queued", "running"}:
+    if task and task.get("status") in {"queued", "running", "paused", "cancelling"}:
         return (
             "Die Gesichtscluster werden gerade im Hintergrund aktualisiert. "
             "Diese Änderung ist vorübergehend gesperrt. Die Ansicht wird nach "
@@ -215,18 +226,42 @@ def safe_import_enqueue(function):
 
 def _publish_imports() -> None:
     """Push the current import-queue snapshot to subscribed clients."""
-    global _import_was_busy
+    global _import_was_busy, _last_import_progress
     snapshot = import_queue.snapshot()
     event_hub.publish("imports", snapshot)
-    busy = bool(snapshot.get("running_count") or snapshot.get("queued_count"))
+    busy = bool(
+        snapshot.get("running_count")
+        or snapshot.get("queued_count")
+        or snapshot.get("paused_count")
+    )
+    current_progress = {
+        str(job.get("id")): (
+            int(job.get("processed_images") or 0),
+            int(job.get("processed_faces") or 0),
+        )
+        for job in snapshot.get("jobs", [])
+        if isinstance(job, dict) and job.get("id") is not None
+    }
     with _import_activity_lock:
         became_idle = _import_was_busy and not busy
+        library_grew = any(
+            progress > _last_import_progress.get(job_id, (0, 0))
+            for job_id, progress in current_progress.items()
+        )
         _import_was_busy = busy
+        _last_import_progress = current_progress
+    if library_grew:
+        _publish_background_cluster_progress_throttled()
     if became_idle:
         app_cache.clear()
         notify_clusters_changed("import_completed")
         if not schedule_version_clustering_upgrade():
             mark_cluster_assignments_dirty("import_completed")
+        # Release any clustering task that was queued while the import ran and
+        # let the thumbnail warmer start immediately instead of on its next poll.
+        auto_cluster_queue.notify_ready()
+        face_thumbnail_warmup_queue.wake()
+        image_path_cleanup.schedule("import_completed", delay_seconds=15.0)
 
 
 def _publish_autocluster() -> None:
@@ -251,6 +286,8 @@ def _end_import_finalization() -> None:
     global _imports_finalizing
     with _cluster_operation_lock:
         _imports_finalizing = max(0, _imports_finalizing - 1)
+    # Finalization no longer blocks the writer; start any deferred clustering.
+    auto_cluster_queue.notify_ready()
 
 
 def notify_clusters_changed(reason: str) -> None:
@@ -262,9 +299,34 @@ def notify_clusters_changed(reason: str) -> None:
     event_hub.publish("clusters", {"reason": reason})
 
 
+def _publish_background_cluster_progress() -> None:
+    """Invalidate and broadcast a committed background-work checkpoint."""
+    app_cache.clear()
+    notify_clusters_changed("background_progress")
+
+
+# Background workers emit progress far faster than the UI needs it, and each
+# emission rebuilds a full snapshot. Coalesce those bursts to a few per second
+# (transitions and the final state are always delivered by the trailing run).
+_publish_imports_throttled = TrailingThrottle(_publish_imports, interval=0.2)
+_publish_autocluster_throttled = TrailingThrottle(_publish_autocluster, interval=0.2)
+_publish_background_cluster_progress_throttled = TrailingThrottle(
+    _publish_background_cluster_progress,
+    # A checkpoint invalidates several potentially large query caches. Keep
+    # imports live, but batch adjacent images so the UI cannot turn a fast
+    # import into a continuous stream of expensive overview rebuilds.
+    interval=2.0,
+)
+
+
+def _notify_recluster_commit(_processed_faces: int, _total_faces: int) -> None:
+    """Publish reclustering only after a group transaction is visible."""
+    _publish_background_cluster_progress_throttled()
+
+
 import_queue = ImportQueue(
     auto_start=False,
-    on_change=_publish_imports,
+    on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
 )
@@ -273,13 +335,33 @@ def _handle_autocluster_success(_repaired_faces: int) -> None:
     reset_import_resources()
     app_cache.clear()
     notify_clusters_changed("autocluster")
+    # Newly rebuilt clusters mean new faces to preview; warm them right away.
+    face_thumbnail_warmup_queue.wake()
     if _version_clustering_pending:
         schedule_version_clustering_upgrade()
 
 
+def _reclustering_writer_available() -> bool:
+    """Return whether the single SQLite writer is free for a clustering pass.
+
+    Reclustering shares the writer with imports, so a queued clustering task
+    must wait while an import is running, queued, or finalizing. It does not
+    consult the auto-cluster queue itself, which serialises its own tasks.
+    """
+    if _imports_finalizing > 0:
+        return False
+    import_snapshot = import_queue.snapshot()
+    return not (
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
+    )
+
+
 auto_cluster_queue = AutoClusterQueue(
     on_success=_handle_autocluster_success,
-    on_change=_publish_autocluster,
+    on_change=_publish_autocluster_throttled,
+    ready_gate=_reclustering_writer_available,
 )
 
 
@@ -290,10 +372,12 @@ def is_backend_idle_for_thumbnail_warmup() -> bool:
         return False
     if import_snapshot.get("queued_count", 0) > 0:
         return False
+    if import_snapshot.get("paused_count", 0) > 0:
+        return False
 
     auto_cluster_snapshot = auto_cluster_queue.snapshot()
     task = auto_cluster_snapshot.get("task")
-    if task and task.get("status") in {"queued", "running"}:
+    if task and task.get("status") in {"queued", "running", "paused", "cancelling"}:
         return False
     return True
 
@@ -304,12 +388,35 @@ face_thumbnail_warmup_queue = FaceThumbnailWarmupQueue(
 )
 
 
+def is_backend_idle_for_path_cleanup() -> bool:
+    """Keep filesystem validation behind all user-facing background work."""
+    if not is_backend_idle_for_thumbnail_warmup():
+        return False
+    thumbnail_task = face_thumbnail_warmup_queue.snapshot()
+    return thumbnail_task.get("status") not in {"queued", "running"}
+
+
+def _publish_image_path_cleanup(snapshot: dict) -> None:
+    """Publish maintenance progress and refresh views after actual removals."""
+    event_hub.publish("image-path-cleanup", snapshot)
+    if snapshot.get("status") == "completed" and snapshot.get("removed_paths"):
+        reset_import_resources()
+        notify_clusters_changed("image_path_cleanup")
+
+
+image_path_cleanup = ImagePathCleanup(
+    is_idle=is_backend_idle_for_path_cleanup,
+    on_change=_publish_image_path_cleanup,
+)
+
+
 def run_startup_repairs(reason: str = "startup") -> dict | None:
-    """Schedule legacy inbox repair work without blocking app startup."""
-    with _cluster_operation_lock:
-        if _describe_background_activity():
-            return None
-        task = auto_cluster_queue.start(reason)
+    """Schedule legacy inbox repair work without blocking app startup.
+
+    The request is accepted even when an import is still resuming; the queue's
+    readiness gate holds it until the writer is free.
+    """
+    task = auto_cluster_queue.start(reason, priority=PRIORITY_STARTUP_REPAIR)
     if task is not None:
         logger.info(
             "Scheduled auto-clustering repair task %s for %s stale inbox faces",
@@ -325,29 +432,40 @@ def schedule_full_recluster(
 ) -> dict | None:
     """Schedule a rebuild of unassigned and per-person subclusters.
 
+    The request is always accepted. When an import currently holds the writer
+    the task is queued and starts automatically once the import finishes, so a
+    user-triggered reclustering is never silently dropped.
+
     Args:
         scoped: Rebuild only the groups recorded as dirty instead of the whole
             library. Used for idle-triggered runs after assignment changes.
     """
-    with _cluster_operation_lock:
-        if _describe_background_activity():
-            return None
-        task = auto_cluster_queue.start(
-            reason,
-            kind="full_recluster",
-            count_callable=(
-                count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
-            ),
-            repair_callable=(
-                partial(recluster_all_active_faces, scoped=True)
-                if scoped
-                else recluster_all_active_faces
-            ),
-        )
+    priority = PRIORITY_IDLE_RECLUSTER if scoped else PRIORITY_MANUAL_RECLUSTER
+    task = auto_cluster_queue.start(
+        reason,
+        kind="full_recluster",
+        count_callable=(
+            count_scoped_reclusterable_faces if scoped else count_reclusterable_faces
+        ),
+        repair_callable=(
+            partial(
+                recluster_all_active_faces,
+                scoped=True,
+                commit_callback=_notify_recluster_commit,
+            )
+            if scoped
+            else partial(
+                recluster_all_active_faces,
+                commit_callback=_notify_recluster_commit,
+            )
+        ),
+        priority=priority,
+    )
     if task is not None:
         logger.info(
-            "Scheduled full reclustering task %s for %s faces",
+            "Scheduled full reclustering task %s (%s) for %s faces",
             task["id"],
+            task["status"],
             task["total_faces"],
         )
     return task
@@ -367,7 +485,10 @@ def _apply_version_clustering_upgrade(progress_callback=None) -> int:
         logger.exception(
             "Version-start clustering auto-tune failed; continuing with current profile"
         )
-    rebuilt_faces = recluster_all_active_faces(progress_callback=progress_callback)
+    rebuilt_faces = recluster_all_active_faces(
+        progress_callback=progress_callback,
+        commit_callback=_notify_recluster_commit,
+    )
     set_applied_clustering_version(APP_VERSION)
     logger.info(
         "Applied clustering algorithm for software version %s to %s faces",
@@ -391,7 +512,11 @@ def schedule_version_clustering_upgrade() -> bool:
             return False
 
         import_snapshot = import_queue.snapshot()
-        if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+        if (
+            import_snapshot.get("running_count")
+            or import_snapshot.get("queued_count")
+            or import_snapshot.get("paused_count")
+        ):
             _version_clustering_pending = True
             logger.info(
                 "Deferred clustering upgrade for version %s until imports are idle",
@@ -415,6 +540,7 @@ def schedule_version_clustering_upgrade() -> bool:
             kind="full_recluster",
             count_callable=count_reclusterable_faces,
             repair_callable=_apply_version_clustering_upgrade,
+            priority=PRIORITY_VERSION_UPGRADE,
         )
         if task and task.get("reason") == reason:
             _version_clustering_pending = False
@@ -430,10 +556,17 @@ def schedule_version_clustering_upgrade() -> bool:
 def is_backend_idle_for_reclustering() -> bool:
     """Return whether low-priority assignment-triggered clustering may start."""
     import_snapshot = import_queue.snapshot()
-    if import_snapshot.get("running_count") or import_snapshot.get("queued_count"):
+    if (
+        import_snapshot.get("running_count")
+        or import_snapshot.get("queued_count")
+        or import_snapshot.get("paused_count")
+    ):
         return False
     task = auto_cluster_queue.snapshot().get("task")
-    return not (task and task.get("status") in {"queued", "running"})
+    return not (
+        task
+        and task.get("status") in {"queued", "running", "paused", "cancelling"}
+    )
 
 
 # A review session is full of short pauses, so the quiet period must be long
@@ -469,6 +602,8 @@ async def lifespan(_app: FastAPI):
         if not schedule_version_clustering_upgrade():
             run_startup_repairs()
         face_thumbnail_warmup_queue.start()
+        image_path_cleanup.resume()
+        image_path_cleanup.schedule("startup", delay_seconds=60.0)
     except Exception:
         logger.exception("Could not start import queue during application startup")
         raise
@@ -476,6 +611,9 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         idle_recluster_scheduler.stop()
+        image_path_cleanup.stop()
+        _publish_imports_throttled.flush()
+        _publish_autocluster_throttled.flush()
         try:
             face_thumbnail_warmup_queue.stop()
         except Exception:
@@ -536,15 +674,67 @@ def api_version():
 
 @app.get("/api/changelog/current")
 def api_current_changelog():
-    """Return high-level notes for the running application version."""
+    """Return unseen release notes up to the running version.
+
+    After an update that skipped several releases the user must see every
+    intermediate version's notes, not only the newest. On a fresh install
+    (no recorded last-seen version) only the running version is offered so the
+    first launch does not dump the entire history.
+    """
+    last_seen = get_last_seen_changelog_version()
     try:
-        release = find_release(load_changelog(get_changelog_path()), APP_VERSION)
+        document = load_changelog(get_changelog_path())
     except (ChangelogError, OSError):
         logger.exception("Could not load release notes for version %s", APP_VERSION)
-        release = None
-    response = release or {"version": APP_VERSION, "date": None, "sections": []}
-    response["seen"] = get_last_seen_changelog_version() == APP_VERSION
-    return response
+        document = None
+
+    versions: list[dict] = []
+    if document is not None:
+        try:
+            current_version = parse_semver(APP_VERSION)
+        except ValueError:
+            current_version = None
+        try:
+            seen_version = parse_semver(last_seen) if last_seen else None
+        except ValueError:
+            seen_version = None
+
+        for release in released_versions(document):
+            try:
+                release_version = parse_semver(release["version"])
+            except ValueError:
+                continue
+            if current_version is not None and release_version > current_version:
+                continue
+            if seen_version is None:
+                # Without a recorded history only surface the running version.
+                if current_version is not None and release_version != current_version:
+                    continue
+            elif release_version <= seen_version:
+                continue
+            versions.append(release)
+
+    if not versions:
+        # Preserve a stable shape so the UI can distinguish "nothing new" from
+        # a changelog that failed to load.
+        current = find_release(document, APP_VERSION) if document is not None else None
+        versions = [current] if current else []
+
+    return {
+        "versions": versions,
+        "seen": last_seen == APP_VERSION,
+    }
+
+
+@app.get("/api/changelog")
+def api_full_changelog():
+    """Return the complete released changelog history, newest first."""
+    try:
+        document = load_changelog(get_changelog_path())
+    except (ChangelogError, OSError):
+        logger.exception("Could not load full changelog")
+        return {"versions": []}
+    return {"versions": released_versions(document)}
 
 
 @app.post("/api/changelog/current/acknowledge")
@@ -730,7 +920,7 @@ def serialize_import_snapshot(snapshot, display_platform: str):
 def ensure_database_is_idle() -> None:
     """Reject database mutation while imports are queued or running."""
     snapshot = import_queue.snapshot()
-    if snapshot["running_count"] or snapshot["queued_count"]:
+    if snapshot["running_count"] or snapshot["queued_count"] or snapshot.get("paused_count"):
         raise HTTPException(
             status_code=409,
             detail="Eine Datensicherung ist erst möglich, wenn alle Bilder hinzugefügt wurden.",
@@ -1147,6 +1337,59 @@ def api_thumbnail_warmup():
     return face_thumbnail_warmup_queue.snapshot()
 
 
+@app.post("/api/thumbnail-warmup/pause")
+def api_pause_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.pause()}
+
+
+@app.post("/api/thumbnail-warmup/resume")
+def api_resume_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.resume()}
+
+
+@app.post("/api/thumbnail-warmup/cancel")
+def api_cancel_thumbnail_warmup():
+    return {"task": face_thumbnail_warmup_queue.cancel()}
+
+
+@app.delete("/api/thumbnail-warmup/history")
+def api_delete_thumbnail_warmup_history():
+    if not face_thumbnail_warmup_queue.dismiss_history():
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return {"status": "removed"}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/pause")
+def api_pause_autocluster_task(task_id: str):
+    task = auto_cluster_queue.pause(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht pausiert werden.")
+    return {"task": task}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/resume")
+def api_resume_autocluster_task(task_id: str):
+    task = auto_cluster_queue.resume(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht fortgesetzt werden.")
+    return {"task": task}
+
+
+@app.post("/api/autocluster-tasks/{task_id}/cancel")
+def api_cancel_autocluster_task(task_id: str):
+    task = auto_cluster_queue.cancel(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht abgebrochen werden.")
+    return {"task": task}
+
+
+@app.delete("/api/autocluster-tasks/{task_id}")
+def api_delete_autocluster_task(task_id: str):
+    if not auto_cluster_queue.dismiss(task_id):
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return {"status": "removed"}
+
+
 @app.get("/api/events")
 async def api_events():
     """Stream live backend state to subscribed clients via Server-Sent Events.
@@ -1165,6 +1408,43 @@ async def api_events():
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.delete("/api/imports/history")
+def api_delete_import_history():
+    return {"removed_count": import_queue.clear_history()}
+
+
+@app.post("/api/imports/{job_id}/pause")
+def api_pause_import(job_id: str):
+    result = import_queue.pause(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht pausiert werden.")
+    return result
+
+
+@app.post("/api/imports/{job_id}/resume")
+def api_resume_import(job_id: str):
+    result = import_queue.resume(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht fortgesetzt werden.")
+    return result
+
+
+@app.post("/api/imports/{job_id}/cancel")
+def api_cancel_import(job_id: str):
+    result = import_queue.cancel(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht abgebrochen werden.")
+    return result
+
+
+@app.delete("/api/imports/{job_id}/history")
+def api_delete_import_history_entry(job_id: str):
+    result = import_queue.delete_terminal(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="Die Aufgabe ist noch nicht beendet.")
+    return result
 
 
 @app.delete("/api/imports/{job_id}")
@@ -1287,10 +1567,15 @@ def api_dismiss_review_suggestion(cluster_id: int):
 @app.post("/api/clusters/recluster")
 @safe_cluster_mutation
 def api_recluster_clusters():
-    """Schedule a full rebuild including each person's internal subclusters."""
+    """Schedule a full rebuild including each person's internal subclusters.
+
+    The request is always accepted: if an import currently holds the writer the
+    task is queued and starts on its own once the import finishes.
+    """
     idle_recluster_scheduler.clear()
     task = schedule_full_recluster("manual_recluster")
-    return {"scheduled": task is not None, "task": task}
+    status = task.get("status") if task else "noop"
+    return {"scheduled": task is not None, "status": status, "task": task}
 
 
 @app.get("/api/face-review-groups")
@@ -1527,7 +1812,7 @@ def get_image(image_id: int):
     path = get_available_image_path(image_id)
     if not path:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    return FileResponse(path)
+    return FileResponse(filesystem_path(path))
 
 
 @app.delete("/api/images/{image_id}")
@@ -1601,7 +1886,7 @@ def get_image_orientation(path):
         Orientation value, width, and height.
     """
     try:
-        with Image.open(path) as img:
+        with Image.open(filesystem_path(path)) as img:
             exif = img.getexif()
             orientation = exif.get(274, 1)
             return orientation, img.width, img.height
@@ -1663,6 +1948,18 @@ def get_folders(request: Request):
         serialize_folder_tree(root, display_platform) for root in tree["roots"]
     ]
     return tree
+
+
+@app.get("/api/maintenance/image-paths")
+def api_get_image_path_cleanup():
+    """Return the current or most recent image path validation state."""
+    return image_path_cleanup.snapshot()
+
+
+@app.post("/api/maintenance/image-paths")
+def api_start_image_path_cleanup():
+    """Queue a low-priority validation of every stored image location."""
+    return image_path_cleanup.start("manual")
 
 
 def _group_image_rows(rows, display_platform: str) -> list[dict]:

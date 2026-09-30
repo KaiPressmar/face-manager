@@ -1,8 +1,63 @@
 import asyncio
 import json
+import time
 import unittest
 
-from backend.services.events import EventHub, format_sse
+from backend.services.events import EventHub, TrailingThrottle, format_sse
+
+
+class TrailingThrottleTest(unittest.TestCase):
+    def test_first_call_runs_immediately(self):
+        calls = []
+        throttle = TrailingThrottle(lambda: calls.append(time.monotonic()), interval=0.05)
+
+        throttle()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_burst_coalesces_into_one_trailing_run(self):
+        calls: list[int] = []
+        counter = {"value": 0}
+
+        def record() -> None:
+            # Reads live state at invocation time, like the real snapshot publish.
+            calls.append(counter["value"])
+
+        throttle = TrailingThrottle(record, interval=0.05)
+
+        throttle()  # runs now (state 0)
+        for value in range(1, 6):
+            counter["value"] = value
+            throttle()  # all within the cool-down: coalesced
+
+        # Wait past the interval so the single trailing run fires.
+        deadline = time.monotonic() + 1.0
+        while len(calls) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(len(calls), 2, "one immediate run plus one trailing run")
+        self.assertEqual(calls[0], 0)
+        self.assertEqual(calls[1], 5, "the trailing run reflects the latest state")
+
+    def test_flush_cancels_pending_trailing_run(self):
+        calls = []
+        throttle = TrailingThrottle(lambda: calls.append(1), interval=0.2)
+
+        throttle()  # immediate
+        throttle()  # schedules a trailing run
+        throttle.flush()
+        time.sleep(0.3)
+
+        self.assertEqual(len(calls), 1, "flushed trailing run must not fire")
+
+    def test_callback_error_does_not_propagate(self):
+        def boom() -> None:
+            raise RuntimeError("subscriber failed")
+
+        throttle = TrailingThrottle(boom, interval=0.01)
+
+        # Must not raise despite the callback throwing.
+        throttle()
 
 
 class FormatSseTest(unittest.TestCase):

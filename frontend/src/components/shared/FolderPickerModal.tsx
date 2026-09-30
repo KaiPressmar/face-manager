@@ -1,29 +1,39 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+
 import { processFolder, selectImportFolder } from "../../utils/api";
 
 interface FolderPickerModalProps {
   onClose: (started?: boolean) => void;
 }
 
+const IS_DEVELOPMENT = import.meta.env.DEV;
+
 const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
   const [folderPath, setFolderPath] = useState("");
   const [isBrowsing, setIsBrowsing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const busy = isBrowsing || isStarting;
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose]);
 
   const browse = async () => {
     setIsBrowsing(true);
     setError(null);
     try {
       const selectedPath = await selectImportFolder();
-      if (selectedPath) {
-        setFolderPath(selectedPath);
-      }
+      if (selectedPath) setFolderPath(selectedPath);
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Der Ordnerdialog konnte nicht geöffnet werden."
+          : "Der Ordnerdialog konnte nicht geöffnet werden.",
       );
     } finally {
       setIsBrowsing(false);
@@ -31,18 +41,19 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
   };
 
   const submit = async () => {
-    if (!folderPath.trim()) return;
+    const normalizedPath = folderPath.trim();
+    if (!normalizedPath) return;
 
     setIsStarting(true);
     setError(null);
     try {
-      await processFolder(folderPath);
+      await processFolder(normalizedPath);
       onClose(true);
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Der Ordner konnte nicht hinzugefügt werden."
+          : "Der Ordner konnte nicht hinzugefügt werden.",
       );
       setIsStarting(false);
     }
@@ -50,140 +61,128 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
 
   return (
     <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 9999,
+      className="modal-backdrop folder-picker-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose(false);
       }}
     >
-      <div
-        style={{
-          background: "var(--surface-1)",
-          color: "var(--text)",
-          padding: 24,
-          borderRadius: 6,
-          width: 520,
-          border: "1px solid var(--border-strong)",
-        }}
+      <section
+        className={`folder-picker-modal ${IS_DEVELOPMENT ? "folder-picker-modal--dev" : "folder-picker-modal--prod"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="folder-picker-title"
       >
-        <h3 style={{ marginTop: 0 }}>Bilderordner hinzufügen</h3>
-
-        <p style={{ opacity: 0.75, lineHeight: 1.5 }}>
-          Wähle den Ordner aus, in dem deine Bilder liegen. Falls sich der
-          Ordnerdialog nicht öffnet, kannst du den Speicherort darunter
-          manuell einfügen.
-        </p>
-
-        <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-          <button
-            onClick={browse}
-            disabled={isBrowsing || isStarting}
-            style={{
-              padding: "10px 14px",
-              background: "var(--neon-cyan)",
-              color: "var(--on-accent)",
-              border: "none",
-              fontWeight: "bold",
-              cursor: isBrowsing || isStarting ? "default" : "pointer",
-              opacity: isBrowsing || isStarting ? 0.65 : 1,
-            }}
-          >
-            {isBrowsing ? "Ordnerauswahl wird geöffnet…" : "Ordner auswählen"}
-          </button>
-          <div
-            style={{
-              flex: 1,
-              padding: 12,
-              background: "var(--surface-raise)",
-              border: "1px solid var(--border-solid)",
-              color: folderPath ? "var(--accent-text)" : "var(--text-faint)",
-              borderRadius: 4,
-              fontFamily: "monospace",
-              fontSize: 13,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-            title={folderPath}
-          >
-            {folderPath || "Noch kein Ordner ausgewählt"}
+        <header className="folder-picker-modal__header">
+          <div>
+            <span className="folder-picker-modal__eyebrow">
+              {IS_DEVELOPMENT ? "Entwicklungsserver · WSL" : "Bildersammlung"}
+            </span>
+            <h2 id="folder-picker-title">Bilderordner hinzufügen</h2>
+            <p>
+              {IS_DEVELOPMENT
+                ? "Der Entwicklungsserver greift direkt auf das WSL-Dateisystem zu."
+                : "Wähle den Ordner aus, dessen Bilder Face Manager erkennen soll."}
+            </p>
           </div>
-        </div>
+          <button
+            type="button"
+            className="modal-close-button"
+            onClick={() => onClose(false)}
+            disabled={busy}
+            aria-label="Ordnerauswahl schließen"
+          >
+            ×
+          </button>
+        </header>
 
-        <label
-          style={{
-            display: "block",
-            marginBottom: 8,
-            opacity: 0.75,
+        <form
+          className="folder-picker-modal__form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void submit();
           }}
         >
-          Speicherort manuell einfügen
-        </label>
-        <input
-          type="text"
-          value={folderPath}
-          onChange={(event) => setFolderPath(event.target.value)}
-          placeholder="C:\\Users\\Name\\Pictures oder /home/name/photos"
-          disabled={isStarting}
-          style={{
-            width: "100%",
-            padding: 12,
-            background: "var(--panel-solid)",
-            border: "1px solid var(--border-solid)",
-            color: "var(--text)",
-            marginBottom: 16,
-          }}
-        />
+          <div className="folder-picker-modal__content">
+            {IS_DEVELOPMENT ? (
+              <div className="folder-picker-modal__dev-input">
+                <label htmlFor="development-import-path">Pfad zum Bilderordner</label>
+                <input
+                  id="development-import-path"
+                  type="text"
+                  value={folderPath}
+                  onChange={(event) => setFolderPath(event.target.value)}
+                  placeholder="C:\\Users\\Name\\Pictures oder /mnt/c/Users/Name/Pictures"
+                  disabled={isStarting}
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p>
+                  Windows-Pfade werden für WSL automatisch übersetzt. Alternativ kannst du
+                  direkt einen Linux- oder <code>/mnt/…</code>-Pfad einfügen.
+                </p>
+              </div>
+            ) : (
+              <div className="folder-picker-modal__native-picker">
+                <button
+                  type="button"
+                  className="folder-picker-modal__browse"
+                  onClick={() => void browse()}
+                  disabled={busy}
+                >
+                  <span className="folder-icon" aria-hidden="true" />
+                  <span>
+                    <strong>
+                      {isBrowsing
+                        ? "Windows-Ordnerauswahl wird geöffnet…"
+                        : folderPath
+                          ? "Anderen Ordner auswählen"
+                          : "Ordner auswählen"}
+                    </strong>
+                    <small>Öffnet den sicheren Systemdialog</small>
+                  </span>
+                </button>
 
-        {isStarting && (
-          <div style={{ color: "var(--accent-text)", marginBottom: 12 }}>
-            Ordner wird hinzugefügt…
+                {folderPath && (
+                  <div className="folder-picker-modal__selected" title={folderPath}>
+                    <span>Ausgewählt</span>
+                    <strong>{folderPath}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {isStarting && (
+              <div className="folder-picker-modal__status" role="status">
+                Der Bilderordner wird zur Import-Warteschlange hinzugefügt…
+              </div>
+            )}
+            {error && (
+              <div className="folder-picker-modal__error" role="alert">
+                {error}
+              </div>
+            )}
           </div>
-        )}
 
-        {error && (
-          <div style={{ color: "var(--danger)", marginBottom: 12 }}>{error}</div>
-        )}
-
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
-          <button
-            onClick={() => onClose(false)}
-            disabled={isStarting || isBrowsing}
-            style={{
-              padding: "6px 12px",
-              background: "var(--surface-raise)",
-              color: "var(--text)",
-              border: "1px solid var(--border-solid)",
-              opacity: isStarting || isBrowsing ? 0.5 : 1,
-            }}
-          >
-            Abbrechen
-          </button>
-
-          <button
-            onClick={submit}
-            disabled={!folderPath.trim() || isStarting || isBrowsing}
-            style={{
-              padding: "6px 12px",
-              background: folderPath.trim() ? "var(--neon-cyan)" : "var(--surface-raise)",
-              color: folderPath.trim() ? "var(--on-accent)" : "var(--text-faint)",
-              border: "none",
-              fontWeight: "bold",
-              cursor:
-                folderPath.trim() && !isStarting && !isBrowsing
-                  ? "pointer"
-                  : "not-allowed",
-              opacity: isStarting || isBrowsing ? 0.5 : 1,
-            }}
-          >
-            {isStarting ? "Wird hinzugefügt…" : "Bilder hinzufügen"}
-          </button>
-        </div>
-      </div>
+          <footer className="folder-picker-modal__footer">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => onClose(false)}
+              disabled={busy}
+            >
+              Abbrechen
+            </button>
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={!folderPath.trim() || busy}
+            >
+              {isStarting ? "Wird hinzugefügt…" : "Bilder hinzufügen"}
+            </button>
+          </footer>
+        </form>
+      </section>
     </div>
   );
 };

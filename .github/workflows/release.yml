@@ -90,11 +90,16 @@ jobs:
             --notes-file "${RELEASE_NOTES_PATH}" \
             --target "${RELEASE_SHA}"
 
-      - name: Report existing release
+      - name: Sync existing GitHub Release notes
         if: steps.version.outputs.release_exists == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: echo "v${VERSION} already exists; no release was created."
+          RELEASE_NOTES_PATH: ${{ runner.temp }}/face-manager-release-notes.md
+        run: |
+          gh release edit "v${VERSION}" \
+            --title "Face Manager v${VERSION}" \
+            --notes-file "${RELEASE_NOTES_PATH}"
 
   windows-installer:
     name: Build Windows installer (${{ matrix.variant }})
@@ -137,6 +142,7 @@ jobs:
           cache-dependency-path: |
             backend/requirements.txt
             backend/requirements-desktop.txt
+            backend/requirements-desktop-gpu.txt
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
