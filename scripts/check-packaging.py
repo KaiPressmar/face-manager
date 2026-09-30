@@ -72,6 +72,16 @@ def main() -> None:
         raise RuntimeError("Windows release builds do not emit the updater variant")
     if "$env:FACE_MANAGER_BUILD_VARIANT = $Variant" not in build_script:
         raise RuntimeError("Windows release builds do not pass the updater variant")
+    if (
+        "$installerProductVersion = $installerVersionInfo.ProductVersion.Trim()"
+        not in build_script
+        or "if ($installerProductVersion -ne $version)" not in build_script
+    ):
+        raise RuntimeError(
+            "Windows installer validation does not normalize version metadata"
+        )
+    if "function Invoke-PipInstallWithRetry" not in build_script:
+        raise RuntimeError("Windows release dependency downloads are not retried")
 
     installer = (PROJECT_ROOT / "packaging/windows/FaceManager.iss").read_text(
         encoding="utf-8"
@@ -86,6 +96,21 @@ def main() -> None:
     missing = [entry for entry in required_installer_metadata if entry not in installer]
     if missing:
         raise RuntimeError(f"Installer metadata is incomplete: {', '.join(missing)}")
+    versioned_icon = 'IconFilename: "{app}\\FaceManager-{#AppVersion}.ico"'
+    if installer.count(versioned_icon) != 2:
+        raise RuntimeError(
+            "Windows shortcuts must use the versioned icon path to avoid stale icons"
+        )
+    if 'DestName: "FaceManager-{#AppVersion}.ico"' not in installer:
+        raise RuntimeError("Windows installer does not install the versioned shortcut icon")
+    if "ChangesAssociations=yes" not in installer:
+        raise RuntimeError("Windows installer does not notify the Shell about icon updates")
+
+    release_workflow = (PROJECT_ROOT / ".github/workflows/release.yml").read_text(
+        encoding="utf-8"
+    )
+    if "backend/requirements-desktop-gpu.txt" not in release_workflow:
+        raise RuntimeError("Windows GPU dependencies are missing from the pip cache key")
 
     print("Packaging metadata and dependency inventory checks passed.")
 

@@ -138,7 +138,7 @@ button:disabled {
 
 /* Outcome-oriented home and review workflow */
 .sidebar__header { align-items: center; display: flex; gap: 11px; }
-.sidebar__brand-mark { align-items: center; background: linear-gradient(135deg, var(--accent), var(--neon-violet)); border-radius: 11px; color: var(--on-accent); display: flex; flex: 0 0 36px; font-size: 12px; font-weight: 900; height: 36px; justify-content: center; box-shadow: var(--shadow-card); }
+.sidebar__brand-mark { border-radius: 11px; display: block; flex: 0 0 36px; width: 36px; height: 36px; object-fit: contain; box-shadow: var(--shadow-card); }
 .sidebar__section-label { color: var(--text-faint); font-size: 10px; font-weight: 800; letter-spacing: .13em; margin: 14px 8px 4px; text-transform: uppercase; }
 .sidebar__nav .neon-card { align-items: center; display: grid; gap: 10px; grid-template-columns: 25px 1fr; text-align: left; }
 .sidebar__nav .neon-card > span:first-child { color: var(--text-muted); font-size: 16px; text-align: center; }
@@ -164,10 +164,9 @@ button:disabled {
 }
 
 .filter-bar__controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: end;
   gap: 8px 14px;
 }
 
@@ -192,8 +191,32 @@ button:disabled {
 .filter-bar__tools {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.filter-bar__tool-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.filter-bar__tool-label,
+.filter-bar__row-label {
+  color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.filter-bar__tool-group-controls {
+  display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -247,6 +270,113 @@ button:disabled {
   appearance: auto;
 }
 
+.filter-bar__grid-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 258px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
+}
+
+.filter-bar__grid-size:hover,
+.filter-bar__grid-size:focus-within {
+  border-color: var(--accent-border);
+}
+
+.filter-bar__grid-size:focus-within {
+  box-shadow: var(--focus-ring);
+}
+
+.filter-bar__grid-size-label,
+.filter-bar__grid-size output {
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.filter-bar__grid-size output {
+  min-width: 52px;
+  color: var(--accent-text);
+  text-align: right;
+}
+
+.filter-bar__grid-size-icon {
+  color: var(--text-faint);
+  line-height: 1;
+  user-select: none;
+}
+
+.filter-bar__grid-size-icon--small {
+  font-size: 11px;
+}
+
+.filter-bar__grid-size-icon--large {
+  font-size: 17px;
+}
+
+.filter-bar__grid-size input[type="range"] {
+  --grid-size-position: 50%;
+  flex: 1 1 72px;
+  min-width: 72px;
+  height: 16px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+.filter-bar__grid-size input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0 var(--grid-size-position),
+    var(--border-strong) var(--grid-size-position) 100%
+  );
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.filter-bar__grid-size input[type="range"]::-webkit-slider-thumb {
+  width: 15px;
+  height: 15px;
+  margin-top: -5.5px;
+  border: 2px solid var(--surface-1);
+  border-radius: 50%;
+  appearance: none;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.filter-bar__grid-size input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--surface-1);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
 .filter-bar__search {
   width: 160px;
   height: 34px;
@@ -273,6 +403,11 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 
+.filter-bar__row-label {
+  flex: 0 0 auto;
+  margin-right: 2px;
+}
+
 /* Categories share the person chip design; the divider is what separates
    them, so they stay findable without a heading shouting at the user. */
 .filter-bar__categories {
@@ -290,17 +425,34 @@ button:disabled {
   line-height: 1.45;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 1180px) {
   .filter-bar__controls {
-    align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .filter-bar__tools {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}
+
+@media (max-width: 720px) {
+  .filter-bar__tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .filter-bar__tool-group,
+  .filter-bar__tool-group--view {
     width: 100%;
   }
 
+  .filter-bar__tool-group-controls {
+    flex-wrap: wrap;
+  }
+
   /* Let the controls share the row evenly instead of each claiming its own. */
-  .filter-bar__tools > * {
+  .filter-bar__tool-group-controls > * {
     flex: 1 1 130px;
     justify-content: center;
   }
@@ -308,6 +460,10 @@ button:disabled {
   .filter-bar__search {
     width: auto;
     flex-basis: 100%;
+  }
+
+  .filter-bar__grid-size {
+    min-width: min(258px, 100%);
   }
 }
 
@@ -1755,7 +1911,36 @@ button:disabled {
   background: var(--surface-2);
 }
 
-.whats-new-section h3 {
+.whats-new-release {
+  display: grid;
+  gap: 12px;
+}
+
+.whats-new-release + .whats-new-release {
+  margin-top: 4px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.whats-new-release__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.whats-new-release__heading h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+}
+
+.whats-new-release__heading span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.whats-new-section h4 {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1764,7 +1949,7 @@ button:disabled {
   font-size: 15px;
 }
 
-.whats-new-section h3 span {
+.whats-new-section h4 span {
   width: 25px;
   height: 25px;
   display: inline-grid;
@@ -1791,6 +1976,28 @@ button:disabled {
 
 .whats-new-modal__footer p {
   max-width: 430px;
+}
+
+.whats-new-modal__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.whats-new-modal__link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.whats-new-modal__link:hover {
+  text-decoration: none;
 }
 
 /* Available update: download stays explicit and installation needs confirmation. */
@@ -2331,6 +2538,16 @@ button:disabled {
   margin: 0;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.settings-maintenance-status {
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .settings-card--clustering {

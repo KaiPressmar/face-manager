@@ -15,12 +15,16 @@ import { subscribeToTopic } from "../../utils/events";
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
 const SKELETON_ROW_COUNT = 6;
+const LIVE_REFRESH_BATCH_MS = 2500;
+const FINAL_REFRESH_DELAY_MS = 120;
+const USER_IDLE_DELAY_MS = 900;
 type ImageGroupingMode = "date" | "folder";
 type SortDirection = "desc" | "asc";
 
-const ImageRenamePage: React.FC<{ onOpenFilenameSettings: () => void }> = ({
-  onOpenFilenameSettings,
-}) => {
+const ImageRenamePage: React.FC<{
+  active: boolean;
+  onOpenFilenameSettings: () => void;
+}> = ({ active, onOpenFilenameSettings }) => {
   const [items, setItems] = useState<ImageRenameCandidate[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -47,6 +51,7 @@ const ImageRenamePage: React.FC<{ onOpenFilenameSettings: () => void }> = ({
   const activeRequestRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
+  const hasActivatedLiveRefreshRef = useRef(false);
 
   const loadTotalCount = async () => {
     const controller = new AbortController();
@@ -204,33 +209,107 @@ const ImageRenamePage: React.FC<{ onOpenFilenameSettings: () => void }> = ({
     setExcludedPaths(new Set());
   };
 
-  // Unfiltered candidate count, kept independent of the active filter so the
-  // bar can always say how much the filter narrowed things down.
   useEffect(() => {
+    if (!active) return;
     let isMounted = true;
-    const refreshLibraryTotal = () => {
-      void fetchImageRenameCandidates({ limit: 1, offset: 0 })
-        .then((page) => {
-          if (isMounted && page.total !== null) setLibraryTotal(page.total);
-        })
-        .catch(() => undefined);
+    let refreshInFlight = false;
+    let refreshPending = false;
+    let refreshTimer: number | null = null;
+    let userBusyUntil = 0;
+
+    // Unfiltered candidate count, kept independent of the active filter so the
+    // bar can always say how much the filter narrowed things down.
+    const refreshLibraryTotal = async () => {
+      try {
+        const page = await fetchImageRenameCandidates({ limit: 1, offset: 0 });
+        if (isMounted && page.total !== null) setLibraryTotal(page.total);
+      } catch {
+        // Keep the existing total and retry at the next live checkpoint.
+      }
     };
-    refreshLibraryTotal();
-    const unsubscribe = subscribeToTopic("clusters", refreshLibraryTotal);
+
+    const refreshVisibleData = async () => {
+      if (document.visibilityState !== "visible") return;
+      const idleIn = userBusyUntil - performance.now();
+      if (idleIn > 0) {
+        scheduleRefresh(idleIn + 50);
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await Promise.all([
+          loadData(offset),
+          loadTotalCount(),
+          refreshLibraryTotal(),
+        ]);
+      } finally {
+        refreshInFlight = false;
+        if (isMounted && refreshPending) {
+          refreshPending = false;
+          scheduleRefresh(LIVE_REFRESH_BATCH_MS);
+        }
+      }
+    };
+
+    const scheduleRefresh = (
+      delay = LIVE_REFRESH_BATCH_MS,
+      replacePending = false,
+    ) => {
+      if (refreshTimer !== null) {
+        if (!replacePending) return;
+        window.clearTimeout(refreshTimer);
+      }
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void refreshVisibleData();
+      }, delay);
+    };
+
+    const noteUserActivity = () => {
+      userBusyUntil = performance.now() + USER_IDLE_DELAY_MS;
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        scheduleRefresh(FINAL_REFRESH_DELAY_MS, true);
+      }
+    };
+    const handleWindowFocus = () =>
+      scheduleRefresh(FINAL_REFRESH_DELAY_MS, true);
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
+      "clusters",
+      (update) => {
+        const isBackgroundCheckpoint = update?.reason === "background_progress";
+        scheduleRefresh(
+          isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
+          !isBackgroundCheckpoint,
+        );
+      },
+    );
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("scroll", noteUserActivity, true);
+    document.addEventListener("pointerdown", noteUserActivity, true);
+    window.addEventListener("focus", handleWindowFocus);
+    if (hasActivatedLiveRefreshRef.current) {
+      scheduleRefresh(FINAL_REFRESH_DELAY_MS, true);
+    } else {
+      hasActivatedLiveRefreshRef.current = true;
+      void refreshLibraryTotal();
+    }
+
     return () => {
       isMounted = false;
-      unsubscribe();
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      unsubscribeClusters();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("scroll", noteUserActivity, true);
+      document.removeEventListener("pointerdown", noteUserActivity, true);
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, []);
-
-  useEffect(() => {
-    const unsubscribeClusters = subscribeToTopic("clusters", () => {
-      handleClearSelection();
-      void loadData(offset);
-      void loadTotalCount();
-    });
-    return unsubscribeClusters;
-  }, [groupingMode, offset, pageSize, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, groupingMode, offset, pageSize, selectedFolders, selectedPersons, sortDirection]);
 
   const handleSubmit = async () => {
     if (selectedCount === 0) {

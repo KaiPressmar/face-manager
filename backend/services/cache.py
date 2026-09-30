@@ -230,9 +230,7 @@ class AppCache:
 
     @staticmethod
     def _eviction_score(entry: CacheEntry) -> tuple[float, int, float]:
-        stale_for = time.monotonic() - entry.last_accessed_at
-        age = time.monotonic() - entry.created_at
-        return (stale_for, entry.size_bytes, age)
+        return (-entry.last_accessed_at, entry.size_bytes, -entry.created_at)
 
     def _delete_key(self, key: Hashable, entry: CacheEntry, reason: str) -> None:
         self._entries.pop(key, None)

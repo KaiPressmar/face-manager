@@ -279,12 +279,13 @@ def _split_image_path(image_path: str):
     return image_path, os.path.dirname(normalized), os.path.basename(normalized)
 
 
-def get_file_created_at(path: str) -> str | None:
+def get_file_created_at(path: str, stat_result=None) -> str | None:
     """Return the best available filesystem creation timestamp for one path."""
-    try:
-        stat_result = os.stat(path)
-    except OSError:
-        return None
+    if stat_result is None:
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            return None
 
     created_timestamp = getattr(stat_result, "st_birthtime", None)
     if created_timestamp is None:
@@ -331,6 +332,8 @@ def _create_image_location_table(cur):
             directory TEXT NOT NULL,
             filename TEXT NOT NULL,
             created_at TEXT,
+            file_size INTEGER,
+            modified_at_ns INTEGER,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
         )
         """
@@ -380,6 +383,10 @@ def _migrate_image_locations(conn):
     }
     if "created_at" not in location_columns:
         cur.execute("ALTER TABLE image_location ADD COLUMN created_at TEXT")
+    if "file_size" not in location_columns:
+        cur.execute("ALTER TABLE image_location ADD COLUMN file_size INTEGER")
+    if "modified_at_ns" not in location_columns:
+        cur.execute("ALTER TABLE image_location ADD COLUMN modified_at_ns INTEGER")
     cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     cur.execute(
         """

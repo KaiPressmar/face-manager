@@ -112,6 +112,10 @@ export interface ReleaseNotes {
   version: string;
   date: string | null;
   sections: ReleaseNotesSection[];
+}
+
+export interface UnseenReleaseNotes {
+  versions: ReleaseNotes[];
   seen: boolean;
 }
 
@@ -161,6 +165,17 @@ export interface AppSettings {
   automatic_update_checks_default: boolean;
   database_path: string;
   error_log_path: string;
+}
+
+export interface ImagePathCleanupStatus {
+  status: "idle" | "queued" | "running" | "completed" | "failed";
+  reason: string | null;
+  scanned_paths: number;
+  removed_paths: number;
+  removed_images: number;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
 }
 
 export interface UpdateSettingsPayload {
@@ -309,6 +324,7 @@ export interface FetchImagesParams {
 export type ImportJobStatus =
   | "queued"
   | "running"
+  | "paused"
   | "cancelling"
   | "completed"
   | "failed"
@@ -364,6 +380,7 @@ export interface ImportQueueState {
   active_job_ids?: string[];
   running_count?: number;
   queued_count: number;
+  paused_count?: number;
   max_concurrent_jobs?: number;
   overall_eta_seconds: number | null;
 }
@@ -372,7 +389,7 @@ export interface AutoClusterTask {
   id: string;
   kind: "auto_cluster_repair" | "unassigned_recluster" | "full_recluster";
   reason: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "paused" | "cancelling" | "completed" | "failed" | "cancelled";
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -389,7 +406,7 @@ export interface AutoClusterTaskState {
 }
 
 export interface ThumbnailWarmupTask {
-  status: "stopped" | "idle" | "paused" | "running" | "failed";
+  status: "stopped" | "idle" | "paused" | "running" | "failed" | "cancelled";
   started_at: string | null;
   last_run_at: string | null;
   next_face_id: number;
@@ -403,6 +420,7 @@ export interface ThumbnailWarmupTask {
   eta_seconds: number | null;
   last_error: string | null;
   cache_complete: boolean;
+  user_paused?: boolean;
 }
 
 export interface ThumbnailWarmupState {
@@ -417,12 +435,21 @@ export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
   return await res.json();
 }
 
-export async function fetchCurrentReleaseNotes(): Promise<ReleaseNotes> {
+export async function fetchUnseenReleaseNotes(): Promise<UnseenReleaseNotes> {
   const res = await apiFetch(`${API_BASE}/changelog/current`);
   if (!res.ok) {
     throw new Error("Die Versionshinweise sind nicht verfügbar.");
   }
   return await res.json();
+}
+
+export async function fetchFullChangelog(): Promise<ReleaseNotes[]> {
+  const res = await apiFetch(`${API_BASE}/changelog`);
+  if (!res.ok) {
+    throw new Error("Das Änderungsprotokoll ist nicht verfügbar.");
+  }
+  const payload = await res.json();
+  return Array.isArray(payload?.versions) ? payload.versions : [];
 }
 
 export async function acknowledgeCurrentReleaseNotes(): Promise<void> {
@@ -517,6 +544,24 @@ export async function updateSettings(
   return await res.json();
 }
 
+export async function fetchImagePathCleanup(): Promise<ImagePathCleanupStatus> {
+  const res = await apiFetch(`${API_BASE}/maintenance/image-paths`);
+  if (!res.ok) {
+    throw new Error("Die Pfadprüfung ist nicht verfügbar.");
+  }
+  return await res.json();
+}
+
+export async function startImagePathCleanup(): Promise<ImagePathCleanupStatus> {
+  const res = await apiFetch(`${API_BASE}/maintenance/image-paths`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Die Pfadprüfung konnte nicht gestartet werden."));
+  }
+  return await res.json();
+}
+
 export async function autoTuneClusterThreshold(): Promise<ThresholdAutoTuneResult> {
   const res = await apiFetch(`${API_BASE}/settings/cluster-threshold/auto-tune`, {
     method: "POST",
@@ -529,7 +574,12 @@ export async function autoTuneClusterThreshold(): Promise<ThresholdAutoTuneResul
   return await res.json();
 }
 
-export async function reclusterAllFaces(): Promise<boolean> {
+export interface ReclusterResult {
+  scheduled: boolean;
+  status: "queued" | "running" | "noop" | string;
+}
+
+export async function reclusterAllFaces(): Promise<ReclusterResult> {
   const res = await apiFetch(`${API_BASE}/clusters/recluster`, {
     method: "POST",
   });
@@ -539,7 +589,10 @@ export async function reclusterAllFaces(): Promise<boolean> {
     );
   }
   const payload = await res.json();
-  return Boolean(payload?.scheduled);
+  return {
+    scheduled: Boolean(payload?.scheduled),
+    status: typeof payload?.status === "string" ? payload.status : "noop",
+  };
 }
 
 export async function exportDatabase(): Promise<Blob> {
@@ -1074,6 +1127,43 @@ export async function removeImportJob(jobId: string) {
   }
   return await res.json();
 }
+
+async function runBackgroundTaskAction(url: string, method: "POST" | "DELETE" = "POST") {
+  const res = await apiFetch(`${API_BASE}${url}`, { method });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Die Aufgabe konnte nicht geändert werden."));
+  }
+  return await res.json();
+}
+
+export const pauseImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/pause`);
+export const resumeImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/resume`);
+export const cancelImportJob = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/cancel`);
+export const deleteImportHistoryEntry = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${jobId}/history`, "DELETE");
+export const clearImportHistory = () =>
+  runBackgroundTaskAction("/imports/history", "DELETE");
+
+export const pauseAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/pause`);
+export const resumeAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/resume`);
+export const cancelAutoClusterTask = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}/cancel`);
+export const deleteAutoClusterHistoryEntry = (taskId: string) =>
+  runBackgroundTaskAction(`/autocluster-tasks/${taskId}`, "DELETE");
+
+export const pauseThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/pause");
+export const resumeThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/resume");
+export const cancelThumbnailWarmup = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/cancel");
+export const deleteThumbnailWarmupHistory = () =>
+  runBackgroundTaskAction("/thumbnail-warmup/history", "DELETE");
 
 export async function openImageLocation(imageId: number, imagePath: string) {
   const res = await apiFetch(`${API_BASE}/images/${imageId}/open-location`, {

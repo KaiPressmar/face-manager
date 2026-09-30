@@ -282,7 +282,8 @@ The publication then performs these steps:
 1. Check out the exact successful `main` commit and validate its version.
 2. Extract the curated `vX.Y.Z` section from `CHANGELOG.md`.
 3. Create and push the annotated `vX.Y.Z` tag if it does not exist.
-4. Create the matching GitHub Release from those curated notes if it does not exist.
+4. Create the matching GitHub Release from those curated notes, or synchronize
+   an already existing release page with them during a safe retry.
 5. Build CPU and GPU Windows installers independently on Windows runners.
 6. Verify the embedded product name and version and create SHA-256 files.
 7. Create GitHub build-provenance attestations when the repository is public.
@@ -291,6 +292,11 @@ The publication then performs these steps:
 The release page is created before the Windows matrix finishes. Do not announce
 a release until both Windows jobs are successful and all expected files are
 visible.
+
+GitHub Release notes are never maintained as a separate changelog. The workflow
+always renders them from the matching released section in `CHANGELOG.md`. On a
+retry for the same unchanged release commit, it synchronizes the title and notes
+again before continuing with the artifacts.
 
 ### Published artifacts
 

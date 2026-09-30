@@ -1,20 +1,23 @@
 """Adaptive import queue with request-level cancellation and staged ETA."""
 
 import logging
+import math
 import os
 import threading
 import time
 import uuid
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from statistics import median
 from typing import Callable, Optional, Protocol
 
 from ..models.face_model import get_compute_mode
 from ..db.schema import get_conn
 from ..error_logging import configure_error_logging
 from .pipeline import ImportCancelled, ImportProcessor, configure_processing_slots
+from .task_control import BackgroundTaskControl
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.import_queue")
@@ -108,6 +111,83 @@ class StageTimingStats:
             self.avg_seconds_fixed = (
                 self.avg_seconds_fixed * (1 - alpha) + duration_seconds * alpha
             )
+
+
+@dataclass
+class LiveStageTiming:
+    """Track recent unit throughput without letting one outlier dominate ETA."""
+
+    stage: str
+    last_progress: int
+    last_sample_at: float
+    samples: list[float] = field(default_factory=list)
+
+    def observe(self, progress: int, observed_at: float) -> None:
+        """Record elapsed time per newly completed unit."""
+        if progress < self.last_progress:
+            self.last_progress = progress
+            self.last_sample_at = observed_at
+            self.samples.clear()
+            return
+
+        completed = progress - self.last_progress
+        elapsed = max(0.0, observed_at - self.last_sample_at)
+        if completed <= 0:
+            return
+
+        sample = elapsed / completed
+        if sample > 0:
+            if self.samples:
+                baseline = median(self.samples)
+                sample = max(baseline * 0.4, min(sample, baseline * 2.5))
+            self.samples.append(sample)
+            # A wider median window keeps a short burst of cached or unusually
+            # complex images from redefining the throughput of a large import.
+            del self.samples[:-25]
+        self.last_progress = progress
+        self.last_sample_at = observed_at
+
+    def rebase(self, progress: int, observed_at: float) -> None:
+        """Exclude a pause from the next throughput interval."""
+        self.last_progress = progress
+        self.last_sample_at = observed_at
+
+    @property
+    def seconds_per_unit(self) -> Optional[float]:
+        return median(self.samples) if self.samples else None
+
+    def overdue_seconds(self, observed_at: float) -> float:
+        """Return time spent beyond the typical duration of the current unit."""
+        rate = self.seconds_per_unit
+        if rate is None:
+            return 0.0
+        return max(0.0, observed_at - self.last_sample_at - rate)
+
+
+@dataclass
+class StableEta:
+    """Ease a noisy raw ETA toward reality using elapsed wall-clock time."""
+
+    seconds: float
+    updated_at: float
+
+    def update(self, target_seconds: float, observed_at: float) -> float:
+        """Count down naturally and absorb corrections without visible jumps."""
+        elapsed = max(0.0, observed_at - self.updated_at)
+        countdown = max(0.0, self.seconds - elapsed)
+        difference = target_seconds - countdown
+        # Underestimates are corrected deliberately more slowly than genuine
+        # speed-ups. Both paths are time-based, so frequent API snapshots cannot
+        # accidentally amplify the adjustment rate.
+        time_constant = 75.0 if difference > 0 else 20.0
+        blend = 1.0 - math.exp(-elapsed / time_constant)
+        self.seconds = max(0.0, countdown + difference * blend)
+        self.updated_at = observed_at
+        return self.seconds
+
+    def rebase(self, observed_at: float) -> None:
+        """Exclude a user-requested pause from the visible countdown."""
+        self.updated_at = observed_at
 
 
 @dataclass
@@ -376,6 +456,29 @@ class ImportJobRepository:
         finally:
             connection.close()
 
+    def delete_terminal_history(self) -> set[str]:
+        """Delete every completed, failed, or cancelled job permanently."""
+        connection = self._connection_factory()
+        try:
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM import_job
+                WHERE status IN ('completed', 'failed', 'cancelled')
+                """
+            ).fetchall()
+            deleted_ids = {row["id"] for row in rows}
+            if deleted_ids:
+                placeholders = ",".join("?" for _ in deleted_ids)
+                connection.execute(
+                    f"DELETE FROM import_job WHERE id IN ({placeholders})",
+                    tuple(deleted_ids),
+                )
+                connection.commit()
+            return deleted_ids
+        finally:
+            connection.close()
+
     def _ensure_schema(self) -> None:
         """Create the import job table for standalone queue construction."""
         connection = self._connection_factory()
@@ -607,7 +710,7 @@ class ImportQueue:
         self._pending = deque()
         self._condition = threading.Condition()
         self._active_job_ids: set[str] = set()
-        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events: dict[str, BackgroundTaskControl] = {}
         self._last_progress_persisted: dict[str, float] = {}
         self._worker: Optional[threading.Thread] = None
         self._executor: Optional[ThreadPoolExecutor] = None
@@ -615,13 +718,16 @@ class ImportQueue:
         self._stage_stats: dict[str, StageTimingStats] = {
             stage: StageTimingStats() for stage in self.STAGE_ORDER
         }
+        self._live_stage_timing: dict[str, LiveStageTiming] = {}
+        self._stable_etas: dict[tuple[str, str], StableEta] = {}
         self._avg_images_per_completed_job: Optional[float] = None
         self._stopping = False
         jobs, pending_ids = self._repository.load()
         self._jobs.update((job.id, job) for job in jobs)
         self._pending.extend(pending_ids)
-        for job_id in pending_ids:
-            self._cancel_events[job_id] = threading.Event()
+        for job in jobs:
+            if job.status not in self.TERMINAL_STATUSES:
+                self._cancel_events[job.id] = BackgroundTaskControl()
         if auto_start:
             self.start()
 
@@ -650,6 +756,8 @@ class ImportQueue:
         """
         with self._condition:
             self._stopping = True
+            for job_id in self._active_job_ids:
+                self._cancel_events[job_id].set()
             self._condition.notify_all()
             worker = self._worker
         if worker:
@@ -690,7 +798,7 @@ class ImportQueue:
             self._repository.insert(job)
             self._jobs[job.id] = job
             self._pending.append(job.id)
-            self._cancel_events[job.id] = threading.Event()
+            self._cancel_events[job.id] = BackgroundTaskControl()
             position = len(self._pending)
             self._condition.notify()
         self._notify_change()
@@ -720,13 +828,17 @@ class ImportQueue:
                 )
                 for job in self._jobs.values()
             ]
-            overall_eta = max(job_etas.values()) if job_etas else None
+            known_etas = [eta for eta in job_etas.values() if eta is not None]
+            overall_eta = max(known_etas) if known_etas else None
             return {
                 "jobs": jobs,
                 "active_job_id": active_ids[0] if active_ids else None,
                 "active_job_ids": active_ids,
                 "running_count": len(active_ids),
                 "queued_count": len(self._pending),
+                "paused_count": sum(
+                    1 for job in self._jobs.values() if job.status == "paused"
+                ),
                 "max_concurrent_jobs": self._max_concurrent_jobs,
                 "overall_eta_seconds": (
                     round(overall_eta) if overall_eta is not None else None
@@ -902,14 +1014,33 @@ class ImportQueue:
 
     def _estimate_job_etas(self, active_ids: list[str]) -> dict[str, Optional[float]]:
         """Estimate request-level ETA in a bounded parallel scheduler."""
+        if any(self._jobs[job_id].status == "paused" for job_id in active_ids):
+            observed_at = time.monotonic()
+            for state in self._stable_etas.values():
+                state.rebase(observed_at)
+            return {
+                job_id: None
+                for job_id in [*active_ids, *self._pending]
+            }
         avg_images = self._average_images_per_job()
         job_etas: dict[str, Optional[float]] = {}
 
         slot_times = [0.0 for _ in range(self._max_concurrent_jobs)]
         active_remaining = {
-            job_id: self._estimate_job_remaining_seconds(self._jobs[job_id], avg_images)
+            job_id: (
+                self._estimate_job_remaining_seconds(self._jobs[job_id], avg_images)
+                if self._has_reliable_job_eta(self._jobs[job_id])
+                else None
+            )
             for job_id in active_ids
         }
+        if any(eta is None for eta in active_remaining.values()):
+            # A queued completion time cannot be credible while the critical
+            # path is still discovering its size or calibrating throughput.
+            return {
+                job_id: None
+                for job_id in [*active_ids, *self._pending]
+            }
         for index, job_id in enumerate(active_ids):
             eta = active_remaining[job_id]
             job_etas[job_id] = eta
@@ -922,7 +1053,11 @@ class ImportQueue:
             slot_index = min(range(len(slot_times)), key=lambda i: slot_times[i])
             slot_times[slot_index] += duration
             job_etas[job_id] = slot_times[slot_index]
-        return job_etas
+        observed_at = time.monotonic()
+        return {
+            job_id: self._stabilize_eta(job_id, "job", eta, observed_at)
+            for job_id, eta in job_etas.items()
+        }
 
     def _average_images_per_job(self) -> int:
         if self._avg_images_per_completed_job is not None:
@@ -969,9 +1104,23 @@ class ImportQueue:
             for stage in self.STAGE_ORDER:
                 cumulative += self._estimate_stage_full_seconds(stage, image_count)
                 result[stage] = cumulative
-            return result
+            observed_at = time.monotonic()
+            return {
+                stage: self._stabilize_eta(
+                    job.id,
+                    f"station:{stage}",
+                    eta,
+                    observed_at,
+                )
+                for stage, eta in result.items()
+            }
 
         current_index = self.STAGE_ORDER.index(job.stage)
+        if not self._has_reliable_live_eta(job):
+            return {
+                stage: 0.0 if index < current_index else None
+                for index, stage in enumerate(self.STAGE_ORDER)
+            }
         result: dict[str, Optional[float]] = {}
         cumulative = self._estimate_stage_remaining_seconds(job, image_count)
         result[job.stage] = cumulative
@@ -979,9 +1128,88 @@ class ImportQueue:
         for stage in self.STAGE_ORDER[current_index + 1 :]:
             trailing += self._estimate_stage_full_seconds(stage, image_count)
             result[stage] = trailing
+            future_range = self.STAGE_ORDER[
+                current_index + 1 : self.STAGE_ORDER.index(stage) + 1
+            ]
+            if any(
+                future_stage in self.STAGE_DEFAULT_UNIT_SECONDS
+                and self._stage_stats[future_stage].avg_seconds_per_unit is None
+                for future_stage in future_range
+            ):
+                result[stage] = None
         for stage in self.STAGE_ORDER[:current_index]:
             result[stage] = 0.0
-        return result
+        observed_at = time.monotonic()
+        return {
+            stage: (
+                0.0
+                if eta == 0.0
+                else self._stabilize_eta(
+                    job.id,
+                    f"station:{stage}",
+                    eta,
+                    observed_at,
+                )
+            )
+            for stage, eta in result.items()
+        }
+
+    def _stabilize_eta(
+        self,
+        job_id: str,
+        key: str,
+        raw_seconds: Optional[float],
+        observed_at: float,
+    ) -> Optional[float]:
+        """Return a stable ETA shared by every live view of the same target."""
+        if raw_seconds is None:
+            return None
+        target = max(0.0, raw_seconds)
+        state_key = (job_id, key)
+        state = self._stable_etas.get(state_key)
+        if state is None:
+            self._stable_etas[state_key] = StableEta(target, observed_at)
+            return target
+        return state.update(target, observed_at)
+
+    def _rebase_stable_etas(self, job_id: str, observed_at: float) -> None:
+        """Prevent a pause from consuming the displayed remaining time."""
+        for (eta_job_id, _key), state in self._stable_etas.items():
+            if eta_job_id == job_id:
+                state.rebase(observed_at)
+
+    def _drop_stable_etas(self, job_id: str) -> None:
+        """Discard smoothing state once an import is no longer live."""
+        for state_key in [key for key in self._stable_etas if key[0] == job_id]:
+            self._stable_etas.pop(state_key, None)
+
+    def _has_reliable_live_eta(self, job: ImportJob) -> bool:
+        """Hide guesses until size and live throughput are meaningful."""
+        if job.stage == "scanning":
+            return False
+        if job.stage not in self.STAGE_DEFAULT_UNIT_SECONDS:
+            return True
+        if self._stage_stats[job.stage].avg_seconds_per_unit is not None:
+            return True
+        tracker = self._live_stage_timing.get(job.id)
+        return bool(
+            tracker is not None
+            and tracker.stage == job.stage
+            and tracker.seconds_per_unit is not None
+        )
+
+    def _has_reliable_job_eta(self, job: ImportJob) -> bool:
+        """Require measured rates for every remaining variable-cost stage."""
+        if not self._has_reliable_live_eta(job):
+            return False
+        if job.stage not in self.STAGE_ORDER:
+            return False
+        current_index = self.STAGE_ORDER.index(job.stage)
+        return all(
+            stage not in self.STAGE_DEFAULT_UNIT_SECONDS
+            or self._stage_stats[stage].avg_seconds_per_unit is not None
+            for stage in self.STAGE_ORDER[current_index + 1 :]
+        )
 
     def _estimate_stage_full_seconds(self, stage: str, image_count: int) -> float:
         stats = self._stage_stats[stage]
@@ -1011,10 +1239,21 @@ class ImportQueue:
             if total <= current:
                 return 0.0
 
-            if elapsed is not None and current > 0:
+            tracker = self._live_stage_timing.get(job.id)
+            if tracker is not None and tracker.stage == stage:
+                live_rate = tracker.seconds_per_unit
+                if live_rate is not None:
+                    rate = live_rate
+            elif elapsed is not None and current > 0:
                 live_rate = elapsed / current
                 rate = rate * 0.6 + live_rate * 0.4
-            return (total - current) * rate
+            remaining = (total - current) * rate
+            if tracker is not None and tracker.stage == stage:
+                # A currently slow image contributes only its overdue time. It
+                # must not instantly make every remaining image look equally
+                # slow, which was a major source of ETA spikes.
+                remaining += tracker.overdue_seconds(time.monotonic())
+            return remaining
 
         fixed = self._stage_stats[stage].avg_seconds_fixed or self.STAGE_DEFAULT_FIXED_SECONDS[stage]
         if elapsed is None:
@@ -1047,8 +1286,108 @@ class ImportQueue:
             self._repository.delete(job_id)
             del self._jobs[job_id]
             self._cancel_events.pop(job_id, None)
+            self._drop_stable_etas(job_id)
             self._notify_change()
             return {"id": job_id, "status": "removed"}
+
+    def pause(self, job_id: str) -> Optional[dict]:
+        """Pause a queued or running import at its next safe checkpoint."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in self.TERMINAL_STATUSES or job.status == "cancelling":
+                return None
+            if job.status == "paused":
+                return {"id": job_id, "status": "paused"}
+            control = self._cancel_events[job_id]
+            if job_id in self._active_job_ids:
+                control.pause()
+            elif job_id in self._pending:
+                self._pending.remove(job_id)
+            job.status = "paused"
+            self._repository.update(job)
+            self._condition.notify_all()
+        self._notify_change()
+        return {"id": job_id, "status": "paused"}
+
+    def resume(self, job_id: str) -> Optional[dict]:
+        """Resume a paused import without discarding committed progress."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status != "paused":
+                return None
+            control = self._cancel_events.setdefault(job_id, BackgroundTaskControl())
+            if job_id in self._active_job_ids:
+                control.resume()
+                job.status = "running"
+                resumed_at = time.monotonic()
+                tracker = self._live_stage_timing.get(job_id)
+                if tracker is not None and tracker.stage == job.stage:
+                    tracker.rebase(
+                        self._stage_progress(job),
+                        resumed_at,
+                    )
+                self._rebase_stable_etas(job_id, resumed_at)
+            else:
+                job.status = "queued"
+                ordered_ids = list(self._jobs)
+                insert_at = len(self._pending)
+                for index, pending_id in enumerate(self._pending):
+                    if ordered_ids.index(job_id) < ordered_ids.index(pending_id):
+                        insert_at = index
+                        break
+                self._pending.insert(insert_at, job_id)
+            self._repository.update(job)
+            self._condition.notify_all()
+        self._notify_change()
+        return {"id": job_id, "status": job.status}
+
+    def cancel(self, job_id: str) -> Optional[dict]:
+        """Cancel an import while retaining a terminal history entry."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status in self.TERMINAL_STATUSES:
+                return None
+            if job_id in self._active_job_ids:
+                job.status = "cancelling"
+                self._repository.update(job)
+                self._cancel_events[job_id].set()
+                result = {"id": job_id, "status": "cancelling"}
+            else:
+                if job_id in self._pending:
+                    self._pending.remove(job_id)
+                job.status = "cancelled"
+                job.finished_at = _utc_now()
+                job.current_file = None
+                self._repository.update(job)
+                self._cancel_events.pop(job_id, None)
+                self._trim_history()
+                result = {"id": job_id, "status": "cancelled"}
+            self._condition.notify_all()
+        self._notify_change()
+        return result
+
+    def delete_terminal(self, job_id: str) -> Optional[dict]:
+        """Permanently delete one terminal import history entry."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or job.status not in self.TERMINAL_STATUSES:
+                return None
+            self._repository.delete(job_id)
+            del self._jobs[job_id]
+            self._drop_stable_etas(job_id)
+        self._notify_change()
+        return {"id": job_id, "status": "removed"}
+
+    def clear_history(self) -> int:
+        """Permanently delete every terminal import history entry."""
+        with self._condition:
+            deleted_ids = self._repository.delete_terminal_history()
+            for job_id in deleted_ids:
+                self._jobs.pop(job_id, None)
+                self._drop_stable_etas(job_id)
+        if deleted_ids:
+            self._notify_change()
+        return len(deleted_ids)
 
     def _worker_loop(self) -> None:
         """Dispatch queued jobs while respecting concurrency limits."""
@@ -1147,6 +1486,8 @@ class ImportQueue:
                 self._active_job_ids.discard(job_id)
                 self._cancel_events.pop(job_id, None)
                 self._last_progress_persisted.pop(job_id, None)
+                self._live_stage_timing.pop(job_id, None)
+                self._drop_stable_etas(job_id)
                 self._futures.pop(job_id, None)
                 self._trim_history()
                 self._condition.notify_all()
@@ -1163,17 +1504,53 @@ class ImportQueue:
         if elapsed is None:
             return
         units = self._stage_unit_count(job.stage, job)
+        if job.stage in self.STAGE_DEFAULT_UNIT_SECONDS and not units:
+            return
         self._stage_stats[job.stage].update(elapsed, units)
 
     @staticmethod
     def _stage_unit_count(stage: str, job: ImportJob) -> Optional[int]:
         if stage == "scanning":
-            return max(1, job.total_images)
+            return max(0, job.stage_current)
         if stage == "hashing":
-            return max(1, job.stage_total or job.total_images)
+            return max(0, job.hashed_images)
         if stage == "processing":
-            return max(1, job.total_images)
+            return max(0, job.processed_images)
         return None
+
+    @staticmethod
+    def _stage_progress(job: ImportJob) -> int:
+        if job.stage == "processing":
+            return max(0, job.processed_images)
+        if job.stage == "hashing":
+            return max(0, job.hashed_images)
+        return max(0, job.stage_current)
+
+    def _observe_live_stage_timing(self, job: ImportJob, observed_at: float) -> None:
+        """Update the recent-throughput window for a unit-based stage."""
+        if job.stage not in self.STAGE_DEFAULT_UNIT_SECONDS:
+            self._live_stage_timing.pop(job.id, None)
+            return
+
+        progress = self._stage_progress(job)
+        tracker = self._live_stage_timing.get(job.id)
+        if tracker is None or tracker.stage != job.stage:
+            self._live_stage_timing[job.id] = LiveStageTiming(
+                stage=job.stage,
+                last_progress=progress,
+                last_sample_at=observed_at,
+            )
+            return
+        was_calibrated = tracker.seconds_per_unit is not None
+        tracker.observe(progress, observed_at)
+        if (
+            not was_calibrated
+            and tracker.seconds_per_unit is not None
+            and self._stage_stats[job.stage].avg_seconds_per_unit is None
+        ):
+            # Replace the placeholder queued estimate once with the first real
+            # rate, then smooth only subsequent corrections.
+            self._drop_stable_etas(job.id)
 
     def _progress_callback(self, job_id: str) -> Callable[[dict], None]:
         """Create a synchronized progress callback for one job.
@@ -1208,6 +1585,7 @@ class ImportQueue:
                     if hasattr(job, key):
                         setattr(job, key, value)
                 now = time.monotonic()
+                self._observe_live_stage_timing(job, now)
                 last_persisted = self._last_progress_persisted.get(job_id, 0.0)
                 import_finished = (
                     job.total_images > 0 and job.processed_images >= job.total_images
@@ -1224,3 +1602,4 @@ class ImportQueue:
         deleted_ids = self._repository.trim_terminal_history(self._history_limit)
         for job_id in deleted_ids:
             self._jobs.pop(job_id, None)
+            self._drop_stable_etas(job_id)

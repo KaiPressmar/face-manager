@@ -2,7 +2,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
-import ImageGrid, { type FaceOverlayMode } from "./ImageGrid";
+import ImageGrid, {
+  type FaceOverlayMode,
+  type ImageGridSize,
+} from "./ImageGrid";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import FolderPickerModal from "../shared/FolderPickerModal";
 import { subscribeToTopic } from "../../utils/events";
@@ -12,6 +15,44 @@ export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
 const PREFETCH_IMAGE_COUNT = PAGE_SIZE;
+const LIVE_REFRESH_BATCH_MS = 2500;
+const FINAL_REFRESH_DELAY_MS = 120;
+const USER_IDLE_DELAY_MS = 900;
+const IMAGE_GRID_SIZE_STORAGE_KEY = "face-manager:image-grid-size";
+const IMAGE_GRID_SIZE_OPTIONS: Array<{
+  value: ImageGridSize;
+  label: string;
+}> = [
+  { value: "xsmall", label: "Sehr klein" },
+  { value: "small", label: "Klein" },
+  { value: "medium", label: "Mittel" },
+  { value: "large", label: "Groß" },
+];
+
+function readImageGridSize(): ImageGridSize {
+  try {
+    const stored = window.localStorage.getItem(IMAGE_GRID_SIZE_STORAGE_KEY);
+    if (
+      stored === "xsmall" ||
+      stored === "small" ||
+      stored === "medium" ||
+      stored === "large"
+    ) {
+      return stored;
+    }
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+  return "medium";
+}
+
+function persistImageGridSize(size: ImageGridSize) {
+  try {
+    window.localStorage.setItem(IMAGE_GRID_SIZE_STORAGE_KEY, size);
+  } catch {
+    // The in-memory choice still works for the current session.
+  }
+}
 
 function preloadPageImages(page: ImagePage) {
   page.items.slice(0, PREFETCH_IMAGE_COUNT).forEach((image) => {
@@ -21,10 +62,11 @@ function preloadPageImages(page: ImagePage) {
 }
 
 interface PeoplePageProps {
+  active: boolean;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -34,6 +76,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   // Archived faces are hidden unless explicitly filtered for.
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
+  const [imageGridSize, setImageGridSize] = useState<ImageGridSize>(readImageGridSize);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -48,6 +91,9 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   const prefetchedOffsetRef = useRef<number | null>(null);
   const prefetchPromiseRef = useRef<Promise<void> | null>(null);
   const queryKeyRef = useRef("");
+  const pageHeaderRef = useRef<HTMLElement | null>(null);
+  const liveRefreshTimerRef = useRef<number | null>(null);
+  const hasActivatedLiveRefreshRef = useRef(false);
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
@@ -165,23 +211,85 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
   }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
     let isMounted = true;
-    const refreshVisibleImages = () => {
+    let refreshInFlight = false;
+    let refreshPending = false;
+    let userBusyUntil = 0;
+    const captureViewportAnchor = () => {
+      const scroller = pageHeaderRef.current?.closest(".page-content");
+      if (!(scroller instanceof HTMLElement) || scroller.scrollTop < 80) {
+        return null;
+      }
+      const scrollerTop = scroller.getBoundingClientRect().top;
+      const cards = Array.from(
+        scroller.querySelectorAll<HTMLElement>("[data-image-id]"),
+      );
+      const anchor = cards.find((card) => card.getBoundingClientRect().bottom > scrollerTop);
+      if (!anchor) return null;
+      return {
+        scroller,
+        imageId: anchor.dataset.imageId ?? "",
+        offset: anchor.getBoundingClientRect().top - scrollerTop,
+      };
+    };
+
+    const restoreViewportAnchor = (
+      anchor: ReturnType<typeof captureViewportAnchor>,
+    ) => {
+      if (!anchor) return;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const node = anchor.scroller.querySelector<HTMLElement>(
+            `[data-image-id="${anchor.imageId}"]`,
+          );
+          if (!node) return;
+          const nextOffset =
+            node.getBoundingClientRect().top -
+            anchor.scroller.getBoundingClientRect().top;
+          anchor.scroller.scrollTop += nextOffset - anchor.offset;
+        });
+      });
+    };
+
+    const refreshVisibleImages = async (preserveViewport = true) => {
       const requestId = latestQueryRef.current;
-      void fetchImages({
-        folders: selectedFolders,
-        persons: selectedPersons,
-        faceStatuses,
-        sortBy: groupingMode,
-        sortDirection,
-        limit: loadedCountRef.current,
-        offset: 0,
-      }).then((page) => {
+      const anchor = preserveViewport ? captureViewportAnchor() : null;
+      try {
+        const page = await fetchImages({
+          folders: selectedFolders,
+          persons: selectedPersons,
+          faceStatuses,
+          sortBy: groupingMode,
+          sortDirection,
+          limit: loadedCountRef.current,
+          offset: 0,
+        });
         if (!isMounted || latestQueryRef.current !== requestId) return;
-        setImages(page.items);
+        // Keep existing cards at their current array index while the user is
+        // below the top. New imports are appended to this live snapshot instead
+        // of redistributing the masonry columns underneath the user's pointer.
+        if (anchor) {
+          setImages((current) => {
+            const freshById = new Map(page.items.map((image) => [image.id, image]));
+            const stable = current
+              .map((image) => freshById.get(image.id))
+              .filter((image): image is FaceImage => image !== undefined);
+            const knownIds = new Set(stable.map((image) => image.id));
+            return [
+              ...stable,
+              ...page.items.filter((image) => !knownIds.has(image.id)),
+            ];
+          });
+        } else {
+          setImages(page.items);
+        }
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
+        restoreViewportAnchor(anchor);
         prefetchedPageRef.current = null;
         prefetchedOffsetRef.current = null;
         prefetchPromiseRef.current = null;
@@ -193,44 +301,110 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
             queryKeyRef.current,
           );
         }
-      });
+      } catch (error) {
+        console.error("Live-Aktualisierung der Bilder fehlgeschlagen:", error);
+      }
+    };
+
+    const refreshLibraryTotal = async () => {
+      try {
+        const page = await fetchImages({ limit: 1, offset: 0 });
+        if (isMounted) setLibraryTotal(page.total);
+      } catch {
+        // A later checkpoint or focus event retries without disturbing the UI.
+      }
+    };
+
+    const runRefresh = async (preserveViewport = true) => {
+      if (document.visibilityState !== "visible" || isLoadingMore) return;
+      const idleIn = userBusyUntil - performance.now();
+      if (idleIn > 0) {
+        scheduleRefresh(preserveViewport, idleIn + 50);
+        return;
+      }
+      if (refreshInFlight) {
+        refreshPending = true;
+        return;
+      }
+      refreshInFlight = true;
+      try {
+        await Promise.all([
+          refreshVisibleImages(preserveViewport),
+          refreshLibraryTotal(),
+        ]);
+      } finally {
+        refreshInFlight = false;
+        if (isMounted && refreshPending) {
+          refreshPending = false;
+          scheduleRefresh(true, LIVE_REFRESH_BATCH_MS);
+        }
+      }
+    };
+
+    const scheduleRefresh = (
+      preserveViewport = true,
+      delay = LIVE_REFRESH_BATCH_MS,
+      replacePending = false,
+    ) => {
+      if (liveRefreshTimerRef.current !== null) {
+        if (!replacePending) return;
+        window.clearTimeout(liveRefreshTimerRef.current);
+      }
+      // Coalesce rapid import/reclustering checkpoints. Existing cards stay
+      // visually anchored while new results are folded into the live list.
+      liveRefreshTimerRef.current = window.setTimeout(() => {
+        liveRefreshTimerRef.current = null;
+        void runRefresh(preserveViewport);
+      }, delay);
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible" && !isLoadingMore) {
-        refreshVisibleImages();
+      if (document.visibilityState === "visible") {
+        scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
       }
     };
-
-    const handleWindowFocus = () => {
-      if (!isLoadingMore) {
-        refreshVisibleImages();
-      }
+    const handleWindowFocus = () =>
+      scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
+    const noteUserActivity = () => {
+      userBusyUntil = performance.now() + USER_IDLE_DELAY_MS;
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("scroll", noteUserActivity, true);
+    document.addEventListener("pointerdown", noteUserActivity, true);
     window.addEventListener("focus", handleWindowFocus);
-    const refreshLibraryTotal = () => {
-      void fetchImages({ limit: 1, offset: 0 })
-        .then((page) => {
-          if (isMounted) setLibraryTotal(page.total);
-        })
-        .catch(() => undefined);
-    };
-    refreshLibraryTotal();
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
+      "clusters",
+      (update) => {
+        const isBackgroundCheckpoint = update?.reason === "background_progress";
+        scheduleRefresh(
+          true,
+          isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
+          !isBackgroundCheckpoint,
+        );
+      },
+    );
 
-    const unsubscribeClusters = subscribeToTopic("clusters", () => {
-      refreshVisibleImages();
-      refreshLibraryTotal();
-    });
+    if (hasActivatedLiveRefreshRef.current) {
+      scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
+    } else {
+      hasActivatedLiveRefreshRef.current = true;
+      void refreshLibraryTotal();
+    }
 
     return () => {
       isMounted = false;
+      if (liveRefreshTimerRef.current !== null) {
+        window.clearTimeout(liveRefreshTimerRef.current);
+        liveRefreshTimerRef.current = null;
+      }
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("scroll", noteUserActivity, true);
+      document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
     if (isLoading || isLoadingMore || !hasMore) return;
@@ -284,16 +458,24 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
     }
   };
 
-  // An entirely empty library is a setup problem, not an empty filter result —
-  // so point at the setup area instead of suggesting a different filter.
+  const hasActiveFilters =
+    selectedPersons.length > 0 ||
+    selectedFolders.length > 0 ||
+    faceStatuses.length > 0;
+  // Only the unfiltered total can decide whether setup is still required.
+  // The current result may legitimately be empty for a status/person/folder.
+  const knownLibraryTotal =
+    libraryTotal ?? (!hasActiveFilters ? totalImages : null);
   const libraryIsEmpty =
     !isLoading &&
-    totalImages === 0 &&
-    selectedPersons.length === 0 &&
-    selectedFolders.length === 0;
+    knownLibraryTotal === 0;
+  const imageGridSizeIndex = Math.max(
+    0,
+    IMAGE_GRID_SIZE_OPTIONS.findIndex((option) => option.value === imageGridSize),
+  );
 
   const pageHeader = (
-    <header className="people-page-heading">
+    <header ref={pageHeaderRef} className="people-page-heading">
       <div>
         <span>Bibliothek</span>
         <h1>Bilder</h1>
@@ -345,6 +527,47 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         faceStatuses={faceStatuses}
         onFaceStatusesChange={setFaceStatuses}
       >
+        <label
+          className="filter-bar__grid-size"
+          title={`Bildgröße im Raster: ${IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}`}
+        >
+          <span className="filter-bar__grid-size-label">Bildgröße</span>
+          <span
+            className="filter-bar__grid-size-icon filter-bar__grid-size-icon--small"
+            aria-hidden="true"
+          >
+            ▦
+          </span>
+          <input
+            type="range"
+            min="0"
+            max={IMAGE_GRID_SIZE_OPTIONS.length - 1}
+            step="1"
+            value={imageGridSizeIndex}
+            aria-label="Bildgröße im Raster"
+            aria-valuetext={IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}
+            style={
+              {
+                "--grid-size-position": `${
+                  (imageGridSizeIndex / (IMAGE_GRID_SIZE_OPTIONS.length - 1)) * 100
+                }%`,
+              } as React.CSSProperties
+            }
+            onChange={(event) => {
+              const option = IMAGE_GRID_SIZE_OPTIONS[Number(event.target.value)];
+              if (!option) return;
+              setImageGridSize(option.value);
+              persistImageGridSize(option.value);
+            }}
+          />
+          <span
+            className="filter-bar__grid-size-icon filter-bar__grid-size-icon--large"
+            aria-hidden="true"
+          >
+            ▦
+          </span>
+          <output>{IMAGE_GRID_SIZE_OPTIONS[imageGridSizeIndex].label}</output>
+        </label>
         <select
           className="filter-bar__control filter-bar__select"
           aria-label="Gesichtsmarkierungen"
@@ -389,11 +612,21 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ onNavigateToCluster }) => {
         hasMore={hasMore}
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
+        gridSize={imageGridSize}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
+        hasActiveFilters={hasActiveFilters}
+        onResetFilters={() => {
+          setSelectedPersons([]);
+          setSelectedFolders([]);
+          setFaceStatuses([]);
+        }}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
           setTotalImages((current) => Math.max(0, current - 1));
+          setLibraryTotal((current) =>
+            current === null ? current : Math.max(0, current - 1),
+          );
         }}
       />
 

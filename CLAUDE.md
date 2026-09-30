@@ -1,25 +1,16 @@
 # Claude Repository Instructions
 
-Follow `CONTRIBUTING.md` and the repository-wide instructions in `AGENTS.md`.
+Read and follow `AGENTS.md`; its orchestration, changelog, validation, and
+release rules apply to Claude too. Read the relevant workflow in
+`CONTRIBUTING.md` before implementation or release work.
 
-For every implementation task, inspect the complete local diff before finishing
-and classify it as user-visible, internal-only, or mixed. `CHANGELOG.md` is shown
-inside the application: add only behavior, features, fixes, performance, or
-reliability improvements that users of the released application can actually
-notice. Write those outcomes in concise, high-level German for non-technical
-users and consolidate related changes.
-
-Do not add changelog entries for refactors, tests, CI, developer tooling,
-comments, internal logging, dependency maintenance, or release mechanics unless
-they materially change the delivered user experience. Put those details in the
-pull request's **Developer notes**. For mixed work, keep only the user-facing
-outcome in the changelog and keep code symbols, files, endpoints, migrations,
-libraries, safeguards, and tests in the PR.
-
-Check exactly one classification in the PR template. A mixed PR is classified
-as **User-visible change** because it requires a curated changelog item.
-
-Do not modify released changelog sections or bump the application version during
-ordinary work. The release helper converts `Unreleased` into the dated version
-section. Validate with `python3 scripts/changelog.py check` and then
-`./scripts/check-all.sh`.
+For Claude subagents, select an available model explicitly for each task or
+supported preset: `haiku` for routine lookup or mechanical edits, `sonnet` for
+scoped implementation or review, and `opus` for difficult reasoning. Use only
+aliases installed in the active runtime. Do not assume a built-in agent such
+as Explore is cheap; it may inherit the parent model. Use medium effort for
+ordinary Sonnet work and high effort for complex work only when the runtime
+exposes those controls. Inspect the effective model and effort in `/tasks` when
+available. If selection is unsupported, report that limit rather than imply
+an override. Recheck capability changes at
+[Claude subagent documentation](https://code.claude.com/docs/en/sub-agents).

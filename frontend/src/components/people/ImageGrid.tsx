@@ -14,6 +14,8 @@ import { copyTextToClipboard } from "../../utils/clipboard";
 
 /** Which face markers to draw on a picture. */
 export type FaceOverlayMode = "all" | "assigned" | "none";
+/** Visual density of the responsive masonry grid. */
+export type ImageGridSize = "xsmall" | "small" | "medium" | "large";
 
 interface ImageGridProps {
   images: FaceImage[];
@@ -21,16 +23,44 @@ interface ImageGridProps {
   hasMore: boolean;
   isLoadingMore: boolean;
   faceOverlayMode: FaceOverlayMode;
+  gridSize: ImageGridSize;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onLoadMore: () => void;
+  hasActiveFilters: boolean;
+  onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
 }
 
-const breakpointCols = {
-  default: 4,
-  1400: 3,
-  900: 2,
-  600: 1,
+const BREAKPOINT_COLUMNS: Record<ImageGridSize, Record<string, number>> = {
+  xsmall: {
+    default: 8,
+    1900: 7,
+    1650: 6,
+    1400: 5,
+    1100: 4,
+    850: 3,
+    620: 2,
+    440: 1,
+  },
+  small: {
+    default: 6,
+    1800: 5,
+    1400: 4,
+    1000: 3,
+    700: 2,
+    480: 1,
+  },
+  medium: {
+    default: 4,
+    1400: 3,
+    900: 2,
+    600: 1,
+  },
+  large: {
+    default: 3,
+    1400: 2,
+    800: 1,
+  },
 };
 
 const COLUMN_PRELOAD_VIEWPORTS = 1.5;
@@ -42,8 +72,11 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   hasMore,
   isLoadingMore,
   faceOverlayMode,
+  gridSize,
   onNavigateToCluster,
   onLoadMore,
+  hasActiveFilters,
+  onResetFilters,
   onImageDeleted,
 }) => {
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
@@ -54,6 +87,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   >({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
+  const breakpointCols = BREAKPOINT_COLUMNS[gridSize];
 
   useEffect(
     () => () => {
@@ -130,7 +164,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         rafIdRef.current = null;
       }
     };
-  }, [hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
+  }, [gridSize, hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -255,7 +289,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
         <h3>Keine Bilder in dieser Auswahl</h3>
-        <p>Wähle andere Ordner oder passe den Personenfilter an.</p>
+        <p>Für die gewählten Personen, Status oder Ordner gibt es keine Bilder.</p>
+        {hasActiveFilters && (
+          <button className="neon-card" type="button" onClick={onResetFilters}>
+            Alle Filter zurücksetzen
+          </button>
+        )}
       </div>
     );
   }
@@ -275,6 +314,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
             return (
               <div
                 key={img.id}
+                data-image-id={img.id}
                 className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
                 role="button"
                 tabIndex={0}

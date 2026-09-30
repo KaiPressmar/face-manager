@@ -9,6 +9,106 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+- Beim wiederholten Öffnen von Ansichten werden kürzlich geladene Inhalte seltener unnötig neu geladen.
+
+## [0.10.2] - 2026-07-22
+
+### Verbessert
+
+- Die Restzeit großer Bilderimporte wird ruhiger und verlässlicher angezeigt und springt bei einzelnen schnellen oder langsamen Bildern nicht mehr ständig hin und her.
+
+### Behoben
+
+- Die Neuordnung sehr großer Bildbestände bricht bei vielen noch nicht zugeordneten Gesichtern nicht mehr vorzeitig ab.
+- Sehr lange Windows-Pfade und leicht unvollständige Bilddateien werden beim Import zuverlässiger verarbeitet; Dateien, die tatsächlich keine Bilder sind, werden sicher übersprungen.
+
+## [0.10.1] - 2026-07-22
+
+### Behoben
+
+- Nach einem Update zeigen Desktop und Startmenü zuverlässig das aktuelle einheitliche Anwendungssymbol statt einer alten zwischengespeicherten Version.
+
+## [0.10.0] - 2026-07-22
+
+### Neu
+
+- Nicht mehr vorhandene Bilddateien werden im Leerlauf bereinigt; zusätzlich lässt sich die Prüfung unter „Daten und Wartung“ jederzeit manuell starten.
+
+### Verbessert
+
+- Große Bilderordner werden schneller importiert; bereits bekannte Dateien werden zügiger übersprungen und Vorschaubilder bremsen den Import nicht mehr aus.
+
+### Behoben
+
+- Die Ordnerfilterung berücksichtigt unter Windows wieder zuverlässig alle Unterordner, auch bei Leerzeichen und Sonderzeichen im Pfad.
+- Liefert ein Bilderfilter keine Treffer, bleibt die Bibliothek mit einer Möglichkeit zum Zurücksetzen sichtbar, statt fälschlich zum ersten Import aufzufordern.
+- Bilddateien lassen sich aus Face Manager zuverlässig im Windows-Explorer öffnen und markieren, auch bei Netzwerkpfaden, Leerzeichen und Sonderzeichen.
+
+## [0.9.1] - 2026-07-22
+
+### Verbessert
+
+- Die Steuerung laufender Aktivitäten ist mit kompakten, klar erkennbaren Symbolen übersichtlicher und platzsparender.
+- Die geschätzte Restzeit großer Importe passt sich stabiler an und wird durch einzelne langsame Bilder oder Pausen weniger verzerrt.
+- Beim Hinzufügen von Bilderordnern zeigt die installierte Anwendung nur noch die passende Windows-Ordnerauswahl; die manuelle Pfadeingabe bleibt gezielt der Entwicklungsumgebung vorbehalten.
+
+## [0.9.0] - 2026-07-22
+
+### Neu
+
+- Laufende Importe, Neuordnungen und Vorschauarbeiten lassen sich pausieren, fortsetzen oder abbrechen; beendete Aufgaben können einzeln oder vollständig aus der Historie gelöscht werden.
+
+### Behoben
+
+- Während laufender Importe bleiben alle Ansichten reaktionsfähig; neue Inhalte werden ruhig gebündelt und unterbrechen weder Scrollposition noch Auswahl.
+
+## [0.8.0] - 2026-07-22
+
+### Neu
+
+- Bilder und Gesichtsgruppen aktualisieren sich während laufender Importe und Neu-Gruppierungen automatisch, ohne die aktuelle Arbeitsposition zu verändern.
+- In der Bilderansicht lässt sich die Größe der Bilder im Raster jetzt zwischen sehr klein, klein, mittel und groß wählen; die Auswahl bleibt für den nächsten Start erhalten.
+
+### Verbessert
+
+- Zuordnungen lassen sich während eines Bildimports sicher weiterbearbeiten; manuelle Änderungen behalten Vorrang und neue Gesichter werden zuverlässig einsortiert.
+- Filter, Sortierung und Darstellungsoptionen sind in den Bilder- und Dateiansichten übersichtlicher angeordnet und bleiben auch auf schmalen Fenstern gut bedienbar.
+
+### Behoben
+
+- Der Sprung von einem Bild zu einer Gesichtsgruppe zeigt jetzt bereits beim ersten Versuch zuverlässig die ausgewählte Gruppe und ihre Gesichter.
+
+## [0.7.1] - 2026-07-22
+
+### Verbessert
+
+- Face Manager hat ein neues, klareres App-Icon, das im Programmfenster, im Browser-Tab und in der Seitenleiste einheitlich erscheint.
+
+## [0.7.0] - 2026-07-22
+
+### Verbessert
+
+- Nach einem Update zeigt Face Manager jetzt die Neuerungen aller übersprungenen Versionen an und nicht mehr nur der neuesten. Das vollständige Änderungsprotokoll lässt sich jederzeit über die Versionsnummer öffnen.
+- Während laufender Importe reagiert die Oberfläche flüssiger, und Gesichts-Vorschauen stehen nach Importen und Neu-Gruppierungen schneller bereit.
+
+### Behoben
+
+- Ein von Hand gestartetes Neu-Ordnen der Gesichtsgruppen wird jetzt auch während eines laufenden Bildimports zuverlässig übernommen und beginnt automatisch, sobald der Import abgeschlossen ist. Face Manager zeigt dabei an, dass die Aufgabe eingeplant ist.
+
+## [0.6.1] - 2026-07-20
+
+### Behoben
+
+- Windows-Installationsdateien werden für neue Versionen wieder vollständig zum Download bereitgestellt.
+
+## [0.6.0] - 2026-07-20
+
+### Neu
+
 - Eine neue Prüfansicht bündelt unsichere Gesichter, mögliche Fehl-Erkennungen und Vorschläge für bereits bekannte Personen an einem Ort.
 - Bilder und Umbenennungen lassen sich jetzt flexibel nach mehreren Personen, Ordnern und Sortierungen filtern.
 - Die Oberfläche unterstützt helle, dunkle und automatisch vom Betriebssystem übernommene Darstellung.
