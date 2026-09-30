@@ -13,6 +13,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+- Beim wiederholten Öffnen von Ansichten werden kürzlich geladene Inhalte seltener unnötig neu geladen.
+
 ## [0.10.2] - 2026-07-22
 
 ### Verbessert
