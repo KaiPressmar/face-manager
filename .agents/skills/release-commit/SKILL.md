@@ -142,10 +142,25 @@ Fill the template:
 - **Validation** — tick the boxes that hold (`check-all.sh` passed, changelog
   updated for user-visible outcomes, `VERSION` unchanged, etc.).
 
-### 7. Auto-merge
+### 7. Verify CI, then auto-merge
+
+`--auto` can merge immediately when branch protection does not require pending
+checks. Before invoking it, capture the PR head and wait for CI on that commit:
 
 ```bash
-gh pr merge <pr-number> --squash --auto
+pr_head=$(gh pr view <pr-number> --json headRefOid --jq .headRefOid)
+gh pr checks <pr-number> --watch --fail-fast
+```
+
+Proceed only after `Metadata and scripts`, `Backend`, and `Frontend` are all
+present and successful for that head, and no other applicable check failed or
+remains pending. Missing, skipped, cancelled, or failed expected checks are not
+success. If checks have not appeared yet, wait for their registration; do not
+merge on an empty check list. After any push or head change, repeat verification.
+Do not use `--required` alone: repository protection may omit expected checks.
+
+```bash
+gh pr merge <pr-number> --squash --auto --match-head-commit "$pr_head"
 ```
 
 Report the PR URL and its merge state. PRs into `develop` are squash-merged.
@@ -158,7 +173,6 @@ Once the PR actually merges, bring the local repo up to date so the next task
 starts clean:
 
 ```bash
-gh pr checks <pr-number> --watch
 gh pr view <pr-number> --json state,mergedAt,mergeCommit,url
 git switch develop
 git pull --ff-only origin develop
