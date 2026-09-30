@@ -1,26 +1,66 @@
 import React, { useEffect, useRef, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
+import { assignLabelLanes } from "../../utils/faceLabels";
 import FullscreenImageGallery from "./FullscreenImageGallery";
-import { deleteImage, FaceImage, imageFileUrl } from "../../utils/api";
+import {
+  deleteImage,
+  FaceImage,
+  imageFileUrl,
+  openImageLocation,
+} from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
+import { copyTextToClipboard } from "../../utils/clipboard";
+
+/** Which face markers to draw on a picture. */
+export type FaceOverlayMode = "all" | "assigned" | "none";
+/** Visual density of the responsive masonry grid. */
+export type ImageGridSize = "xsmall" | "small" | "medium" | "large";
 
 interface ImageGridProps {
   images: FaceImage[];
   isLoading: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
-  showFaceOverlays: boolean;
-  onNavigateToCluster: (clusterId: number) => void;
+  faceOverlayMode: FaceOverlayMode;
+  gridSize: ImageGridSize;
+  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onLoadMore: () => void;
+  hasActiveFilters: boolean;
+  onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
 }
 
-const breakpointCols = {
-  default: 4,
-  1400: 3,
-  900: 2,
-  600: 1,
+const BREAKPOINT_COLUMNS: Record<ImageGridSize, Record<string, number>> = {
+  xsmall: {
+    default: 8,
+    1900: 7,
+    1650: 6,
+    1400: 5,
+    1100: 4,
+    850: 3,
+    620: 2,
+    440: 1,
+  },
+  small: {
+    default: 6,
+    1800: 5,
+    1400: 4,
+    1000: 3,
+    700: 2,
+    480: 1,
+  },
+  medium: {
+    default: 4,
+    1400: 3,
+    900: 2,
+    600: 1,
+  },
+  large: {
+    default: 3,
+    1400: 2,
+    800: 1,
+  },
 };
 
 const COLUMN_PRELOAD_VIEWPORTS = 1.5;
@@ -31,20 +71,35 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   isLoading,
   hasMore,
   isLoadingMore,
-  showFaceOverlays,
+  faceOverlayMode,
+  gridSize,
   onNavigateToCluster,
   onLoadMore,
+  hasActiveFilters,
+  onResetFilters,
   onImageDeleted,
 }) => {
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
+  const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
+  const fileActionTimerRef = useRef<number | null>(null);
   const [imageDimensions, setImageDimensions] = useState<
     Record<string, { w: number; h: number }>
   >({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
+  const breakpointCols = BREAKPOINT_COLUMNS[gridSize];
+
+  useEffect(
+    () => () => {
+      if (fileActionTimerRef.current !== null) {
+        window.clearTimeout(fileActionTimerRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    const scrollContainer = document.querySelector(".page-content");
+    const scrollContainer = gridRef.current?.closest(".page-content");
     if (!(scrollContainer instanceof HTMLElement)) return;
 
     const scheduleCheck = () => {
@@ -109,7 +164,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         rafIdRef.current = null;
       }
     };
-  }, [hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
+  }, [gridSize, hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -140,7 +195,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
     const confirmed = window.confirm(
-      `"${filename}" aus der Face-Manager-Datenbank entfernen?\n\nDie Originaldatei wird nicht gelöscht.`,
+      `„${filename}“ aus Face Manager entfernen?\n\nDie Originaldatei bleibt auf deinem Gerät erhalten.`,
     );
     if (!confirmed) return false;
 
@@ -160,6 +215,49 @@ const ImageGrid: React.FC<ImageGridProps> = ({
           : "Das Bild konnte nicht entfernt werden.",
       );
       return false;
+    }
+  };
+
+  const showFileActionMessage = (message: string) => {
+    setFileActionMessage(message);
+    if (fileActionTimerRef.current !== null) {
+      window.clearTimeout(fileActionTimerRef.current);
+    }
+    fileActionTimerRef.current = window.setTimeout(
+      () => setFileActionMessage(null),
+      2400,
+    );
+  };
+
+  const copyImagePath = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    image: FaceImage,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await copyTextToClipboard(image.image_path);
+      showFileActionMessage("Dateipfad kopiert");
+    } catch (error) {
+      showFileActionMessage(
+        error instanceof Error ? error.message : "Dateipfad konnte nicht kopiert werden",
+      );
+    }
+  };
+
+  const revealImage = async (
+    event: React.MouseEvent<HTMLButtonElement>,
+    image: FaceImage,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await openImageLocation(image.id, image.image_path);
+      showFileActionMessage("Dateispeicherort geöffnet");
+    } catch (error) {
+      showFileActionMessage(
+        error instanceof Error ? error.message : "Dateispeicherort konnte nicht geöffnet werden",
+      );
     }
   };
 
@@ -191,7 +289,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
         <h3>Keine Bilder in dieser Auswahl</h3>
-        <p>Wähle andere Ordner oder passe den Personenfilter an.</p>
+        <p>Für die gewählten Personen, Status oder Ordner gibt es keine Bilder.</p>
+        {hasActiveFilters && (
+          <button className="neon-card" type="button" onClick={onResetFilters}>
+            Alle Filter zurücksetzen
+          </button>
+        )}
       </div>
     );
   }
@@ -211,6 +314,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
             return (
               <div
                 key={img.id}
+                data-image-id={img.id}
                 className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
                 role="button"
                 tabIndex={0}
@@ -227,8 +331,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   width: "100%",
                   overflow: "hidden",
                   borderRadius: 6,
-                  background: "#101014",
-                  border: "1px solid #222",
+                  background: "var(--surface-1)",
+                  border: "1px solid var(--border)",
                   aspectRatio,
                   marginBottom: "16px",
                   transition: "aspect-ratio 0.2s ease",
@@ -248,11 +352,32 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   alt=""
                 />
 
+                <div className="image-file-actions">
+                  <button
+                    type="button"
+                    title="Vollständigen Dateipfad kopieren"
+                    aria-label={`Dateipfad von ${img.filename || "Bild"} kopieren`}
+                    onClick={(event) => void copyImagePath(event, img)}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    Pfad
+                  </button>
+                  <button
+                    type="button"
+                    title="Datei im Explorer oder Dateimanager anzeigen"
+                    aria-label={`Speicherort von ${img.filename || "Bild"} öffnen`}
+                    onClick={(event) => void revealImage(event, img)}
+                    onKeyDown={(event) => event.stopPropagation()}
+                  >
+                    Ordner
+                  </button>
+                </div>
+
                 <button
                   type="button"
                   className="image-delete-button"
-                  title="Bild aus der Datenbank entfernen"
-                  aria-label={`${img.filename || "Bild"} aus der Datenbank entfernen`}
+                  title="Bild aus Face Manager entfernen"
+                  aria-label={`${img.filename || "Bild"} aus Face Manager entfernen`}
                   onClick={(event) => {
                     event.stopPropagation();
                     void removeImage(img);
@@ -277,22 +402,36 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   <span>Vollbild öffnen</span>
                 </span>
 
-                {showFaceOverlays &&
+                {faceOverlayMode !== "none" &&
                   dims &&
-                  img.faces.map((face) => (
-                    <FaceOverlay
-                      key={face.id}
-                      face={face}
-                      naturalWidth={dims.w}
-                      naturalHeight={dims.h}
-                      onNavigateToCluster={onNavigateToCluster}
-                    />
-                  ))}
+                  (() => {
+                    const visibleFaces = img.faces.filter(
+                      (face) =>
+                        faceOverlayMode === "all" || Boolean(face.person_name),
+                    );
+                    const lanes = assignLabelLanes(visibleFaces, dims.w);
+                    return visibleFaces.map((face) => (
+                      <FaceOverlay
+                        key={face.id}
+                        face={face}
+                        naturalWidth={dims.w}
+                        naturalHeight={dims.h}
+                        stackIndex={lanes.get(face.id) ?? 0}
+                        onNavigateToCluster={onNavigateToCluster}
+                      />
+                    ));
+                  })()}
               </div>
             );
           })}
         </Masonry>
       </div>
+
+      {fileActionMessage && (
+        <div className="image-grid-file-toast" role="status">
+          {fileActionMessage}
+        </div>
+      )}
 
       {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
 

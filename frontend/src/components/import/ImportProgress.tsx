@@ -1,18 +1,20 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
-  fetchImportQueue,
   ImportJob,
   ImportStation,
   ImportQueueState,
-  removeImportJob,
+  cancelImportJob,
+  deleteImportHistoryEntry,
+  pauseImportJob,
+  resumeImportJob,
 } from "../../utils/api";
-
-const IDLE_POLL_INTERVAL_MS = 5000;
-const ACTIVE_POLL_INTERVAL_MS = 1000;
+import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
+import TaskActionIcon from "./TaskActionIcon";
 
 const statusLabels: Record<ImportJob["status"], string> = {
   queued: "Wartet",
   running: "Läuft",
+  paused: "Pausiert",
   cancelling: "Wird abgebrochen",
   completed: "Fertig",
   failed: "Fehlgeschlagen",
@@ -22,11 +24,11 @@ const statusLabels: Record<ImportJob["status"], string> = {
 const stageLabels: Record<NonNullable<ImportJob["stage"]>, string> = {
   scanning: "Ordner wird durchsucht",
   hashing: "Dateien werden geprüft",
-  loading_model: "Gesichtsmodell wird geladen",
-  loading_index: "Gesichtsindex wird geladen",
+  loading_model: "Bilderkennung wird vorbereitet",
+  loading_index: "Bekannte Gesichter werden abgeglichen",
   processing: "Gesichter werden erkannt",
-  finalizing: "Import wird abgeschlossen",
-  completed: "Import abgeschlossen",
+  finalizing: "Ergebnisse werden gespeichert",
+  completed: "Bilder wurden hinzugefügt",
 };
 
 const stationStateLabels: Record<ImportStation["state"], string> = {
@@ -73,6 +75,17 @@ function formatDuration(seconds: number | null) {
   return `${hours} Std. ${remainingMinutes} Min.`;
 }
 
+function formatEtaDuration(seconds: number | null) {
+  if (seconds === null || !Number.isFinite(seconds)) return null;
+  const rounded = Math.max(0, Math.round(seconds));
+  if (rounded < 45) return "weniger als 1 Min.";
+  if (rounded < 3600) return `${Math.max(1, Math.ceil(rounded / 60))} Min.`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.ceil((rounded % 3600) / 300) * 5;
+  if (minutes >= 60) return `${hours + 1} Std.`;
+  return minutes > 0 ? `${hours} Std. ${minutes} Min.` : `${hours} Std.`;
+}
+
 function currentItemName(path: string) {
   const normalized = path.replace(/\\/g, "/");
   return normalized.split("/").filter(Boolean).at(-1) ?? path;
@@ -84,10 +97,10 @@ function stationKeyLabel(station: ImportStation) {
 
 function stationEtaLabel(station: ImportStation) {
   if (station.eta_seconds == null) return null;
-  const formatted = formatDuration(station.eta_seconds);
+  const formatted = formatEtaDuration(station.eta_seconds);
   if (!formatted) return null;
-  if (station.state === "queued") return `Start+${formatted}`;
-  if (station.state === "active") return `ETA ${formatted}`;
+  if (station.state === "queued") return `Start in ca. ${formatted}`;
+  if (station.state === "active") return `Noch ca. ${formatted}`;
   return formatted;
 }
 
@@ -133,20 +146,20 @@ const ImportStationRail: React.FC<{ stations: ImportStation[] }> = ({
 
 const ImportJobCard: React.FC<{
   job: ImportJob;
-  onRemove: (jobId: string) => Promise<void>;
+  onAction: (job: ImportJob, action: "pause" | "resume" | "cancel" | "delete") => Promise<void>;
   collapsed: boolean;
   onToggleCollapse: () => void;
-}> = ({ job, onRemove, collapsed, onToggleCollapse }) => {
-  const isActive = job.status === "running" || job.status === "cancelling";
-  const actionLabel = isActive ? "Abbrechen" : "Entfernen";
+}> = ({ job, onAction, collapsed, onToggleCollapse }) => {
+  const isActive = job.status === "running" || job.status === "paused" || job.status === "cancelling";
+  const isTerminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
   const stageLabel = job.stage ? stageLabels[job.stage] : null;
-  const eta = formatDuration(job.eta_seconds);
+  const eta = formatEtaDuration(job.eta_seconds);
   const elapsed = formatDuration(job.elapsed_seconds);
   const stations = job.stations ?? [];
   const activeStation = stations.find((station) => station.state === "active");
   const activeStations = stations.filter((station) => station.state === "active");
   const stationEta = activeStation
-    ? formatDuration(activeStation.eta_seconds)
+    ? formatEtaDuration(activeStation.eta_seconds)
     : null;
   const parallelTasksLabel =
     activeStations.length > 1
@@ -184,7 +197,7 @@ const ImportJobCard: React.FC<{
           <span>{collapsedSummary}</span>
           <div>
             {elapsed && <span>Vergangen: {elapsed}</span>}
-            {eta && <span>ETA: {eta}</span>}
+            {eta && <span>Noch ca. {eta}</span>}
           </div>
         </div>
       )}
@@ -209,9 +222,9 @@ const ImportJobCard: React.FC<{
           {isActive && (
             <>
               <div className="import-job__stage">
-                <span>{stageLabel ?? "Import wird vorbereitet"}</span>
+                <span>{stageLabel ?? "Bilder werden vorbereitet"}</span>
                 {stationEta ? (
-                  <b>Station ETA {stationEta}</b>
+                  <b>{stationEta}</b>
                 ) : (
                   <b>{Math.round(progressPercent(job))}%</b>
                 )}
@@ -257,7 +270,7 @@ const ImportJobCard: React.FC<{
           {!isActive && elapsed && (
             <div className="import-job__timing">
               <span>Laufzeit: {elapsed}</span>
-              {eta && <span>ETA: {eta}</span>}
+              {eta && <span>Geschätzte Restzeit: {eta}</span>}
             </div>
           )}
         </>
@@ -269,14 +282,52 @@ const ImportJobCard: React.FC<{
         </div>
       )}
 
-      <button
-        type="button"
-        className="import-job__action"
-        disabled={job.status === "cancelling"}
-        onClick={() => void onRemove(job.id)}
-      >
-        {actionLabel}
-      </button>
+      <div className="import-job__actions">
+        {job.status === "paused" ? (
+          <button
+            type="button"
+            className="import-job__action task-icon-button"
+            onClick={() => void onAction(job, "resume")}
+            aria-label={`${folderName(job.folder_path)} fortsetzen`}
+            title="Fortsetzen"
+          >
+            <TaskActionIcon name="resume" />
+          </button>
+        ) : !isTerminal && job.status !== "cancelling" ? (
+          <button
+            type="button"
+            className="import-job__action task-icon-button"
+            onClick={() => void onAction(job, "pause")}
+            aria-label={`${folderName(job.folder_path)} pausieren`}
+            title="Pausieren"
+          >
+            <TaskActionIcon name="pause" />
+          </button>
+        ) : null}
+        {!isTerminal && (
+          <button
+            type="button"
+            className="import-job__action task-icon-button task-icon-button--danger"
+            disabled={job.status === "cancelling"}
+            onClick={() => void onAction(job, "cancel")}
+            aria-label={`${folderName(job.folder_path)} abbrechen`}
+            title="Abbrechen"
+          >
+            <TaskActionIcon name="cancel" />
+          </button>
+        )}
+        {isTerminal && (
+          <button
+            type="button"
+            className="import-job__action task-icon-button task-icon-button--danger"
+            onClick={() => void onAction(job, "delete")}
+            aria-label={`${folderName(job.folder_path)} aus der Historie löschen`}
+            title="Aus Historie löschen"
+          >
+            <TaskActionIcon name="delete" />
+          </button>
+        )}
+      </div>
     </article>
   );
 };
@@ -288,46 +339,22 @@ const ImportProgress = () => {
     {},
   );
 
-  const poll = useCallback(async () => {
-    const nextQueue = await fetchImportQueue();
-    setQueue(nextQueue);
-    setError(null);
-    return nextQueue;
-  }, []);
-
   useEffect(() => {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-
-    const schedule = async () => {
-      try {
-        const nextQueue = await poll();
-        if (cancelled) return;
-        const isActive =
-          nextQueue.active_job_id !== null || nextQueue.queued_count > 0;
-        timeoutId = setTimeout(
-          schedule,
-          isActive ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS,
-        );
-      } catch {
-        if (cancelled) return;
-        setError("Import-Warteschlange nicht erreichbar");
-        timeoutId = setTimeout(schedule, IDLE_POLL_INTERVAL_MS);
-      }
-    };
-
-    const refresh = () => {
-      void poll();
-    };
-
-    window.addEventListener("face-manager:imports-changed", refresh);
-    void schedule();
+    const unsubscribeQueue = subscribeToTopic<ImportQueueState>(
+      "imports",
+      (next) => {
+        setQueue(next);
+        setError(null);
+      },
+    );
+    const unsubscribeStatus = subscribeToConnectionStatus((status) => {
+      setError(status === "closed" ? "Status der Bildimporte nicht erreichbar" : null);
+    });
     return () => {
-      cancelled = true;
-      window.removeEventListener("face-manager:imports-changed", refresh);
-      if (timeoutId) clearTimeout(timeoutId);
+      unsubscribeQueue();
+      unsubscribeStatus();
     };
-  }, [poll]);
+  }, []);
 
   const visibleJobs = useMemo(() => {
     if (!queue) return [];
@@ -344,15 +371,23 @@ const ImportProgress = () => {
     });
   }, [queue]);
 
-  const handleRemove = async (jobId: string) => {
+  const handleAction = async (
+    job: ImportJob,
+    action: "pause" | "resume" | "cancel" | "delete",
+  ) => {
     try {
-      await removeImportJob(jobId);
-      await poll();
+      if (action === "pause") await pauseImportJob(job.id);
+      if (action === "resume") await resumeImportJob(job.id);
+      if (action === "cancel") await cancelImportJob(job.id);
+      if (action === "delete") {
+        if (!window.confirm("Diesen Import dauerhaft aus der Historie löschen?")) return;
+        await deleteImportHistoryEntry(job.id);
+      }
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Importauftrag konnte nicht geändert werden",
+          : "Die Aufgabe konnte nicht geändert werden",
       );
     }
   };
@@ -361,7 +396,7 @@ const ImportProgress = () => {
 
   const isCollapsed = (job: ImportJob) => {
     if (job.id in collapsedByJob) return collapsedByJob[job.id];
-    return !(job.status === "running" || job.status === "cancelling");
+    return !(job.status === "running" || job.status === "paused" || job.status === "cancelling");
   };
 
   const toggleCollapsed = (job: ImportJob) => {
@@ -369,7 +404,7 @@ const ImportProgress = () => {
       const currentValue =
         job.id in current
           ? current[job.id]
-          : !(job.status === "running" || job.status === "cancelling");
+          : !(job.status === "running" || job.status === "paused" || job.status === "cancelling");
       return { ...current, [job.id]: !currentValue };
     });
   };
@@ -380,20 +415,20 @@ const ImportProgress = () => {
   return (
     <section className="import-queue">
       <div className="import-queue__title">
-        <span>Importe</span>
+        <span>Bilder hinzufügen</span>
         <div>
           {queue?.overall_eta_seconds != null && (
-            <span>Gesamt: ca. {formatDuration(queue.overall_eta_seconds)}</span>
+            <span>Gesamt: ca. {formatEtaDuration(queue.overall_eta_seconds)}</span>
           )}
           {queue && queue.queued_count > 0 && <b>{queue.queued_count}</b>}
         </div>
       </div>
       {queue && (
         <div className="import-queue__summary">
-          <span>Laufend: {runningCount}</span>
-          <span>Slots: {slotCount}</span>
-          <span>Queued: {queue.queued_count}</span>
-          <span>Requests: {queue.jobs.length}</span>
+          <span>Aktiv: {runningCount}</span>
+          <span>Gleichzeitig möglich: {slotCount}</span>
+          <span>Wartend: {queue.queued_count}</span>
+          <span>Aufgaben insgesamt: {queue.jobs.length}</span>
         </div>
       )}
       {error && <div className="import-queue__error">{error}</div>}
@@ -402,7 +437,7 @@ const ImportProgress = () => {
           <ImportJobCard
             key={job.id}
             job={job}
-            onRemove={handleRemove}
+            onAction={handleAction}
             collapsed={isCollapsed(job)}
             onToggleCollapse={() => toggleCollapsed(job)}
           />

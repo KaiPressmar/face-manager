@@ -7,6 +7,8 @@ import React, {
 import { imageFileUrl, openImageLocation } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
+import { assignLabelLanes } from "../../utils/faceLabels";
+import { copyTextToClipboard } from "../../utils/clipboard";
 
 interface GalleryFace {
   id: number;
@@ -16,6 +18,7 @@ interface GalleryFace {
   bbox_h: number;
   cluster_id: number | null;
   person_name: string | null;
+  review_status: "active" | "unknown_person" | "not_face";
 }
 
 interface GalleryLocation {
@@ -37,10 +40,22 @@ export interface GalleryImage {
 interface FullscreenImageGalleryProps {
   images: GalleryImage[];
   activeIndex: number;
-  onNavigateToCluster: (clusterId: number) => void;
+  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onChange: (index: number) => void;
   onClose: () => void;
-  onDelete: (image: GalleryImage) => Promise<boolean>;
+  onDelete?: (image: GalleryImage) => Promise<boolean>;
+  /** Optional external sequence, e.g. all face crops in one group. */
+  sequence?: {
+    activeIndex: number;
+    length: number;
+    onChange: (index: number) => void;
+    highlightedFaceId?: number;
+    itemLabel?: string;
+    contextLabel?: string;
+    groupLabel?: string;
+    loading?: boolean;
+    error?: string | null;
+  };
 }
 
 async function imageBlobAsPng(source: Blob) {
@@ -74,6 +89,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   onChange,
   onClose,
   onDelete,
+  sequence,
 }) => {
   const [message, setMessage] = useState("");
   const [showFaces, setShowFaces] = useState(true);
@@ -82,14 +98,22 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const [isDeleting, setIsDeleting] = useState(false);
   const stageRef = useRef<HTMLElement>(null);
   const image = images[activeIndex];
+  const navigationIndex = sequence?.activeIndex ?? activeIndex;
+  const navigationLength = sequence?.length ?? images.length;
 
   const move = useCallback(
     (direction: number) => {
-      if (images.length < 2) return;
-      onChange((activeIndex + direction + images.length) % images.length);
+      if (navigationLength < 2 || sequence?.loading) return;
+      const nextIndex =
+        (navigationIndex + direction + navigationLength) % navigationLength;
+      if (sequence) {
+        sequence.onChange(nextIndex);
+      } else {
+        onChange(nextIndex);
+      }
       setMessage("");
     },
-    [activeIndex, images.length, onChange]
+    [navigationIndex, navigationLength, onChange, sequence]
   );
 
   useEffect(() => {
@@ -181,7 +205,19 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
     }
   };
 
+  const copyImagePath = async (path = image.image_path) => {
+    try {
+      await copyTextToClipboard(path);
+      setMessage("Dateipfad kopiert");
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Dateipfad konnte nicht kopiert werden",
+      );
+    }
+  };
+
   const removeCurrentImage = async () => {
+    if (!onDelete) return;
     setIsDeleting(true);
     await onDelete(image);
     setIsDeleting(false);
@@ -202,8 +238,16 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       <header className="gallery-header">
         <div className="gallery-title">
           <strong>{image.filename || pathBasename(image.image_path)}</strong>
+          {sequence?.contextLabel && sequence?.groupLabel && (
+            <div className="gallery-sequence-context">
+              <b>{sequence.contextLabel}</b>
+              <span>Gesichtsgruppe: {sequence.groupLabel}</span>
+            </div>
+          )}
           <span>
-            {activeIndex + 1} / {images.length}
+            {sequence
+              ? `${sequence.itemLabel || "Eintrag"} ${navigationIndex + 1} von ${navigationLength}`
+              : `${navigationIndex + 1} / ${navigationLength}`}
             {image.location_count > 1 && ` · ${image.location_count} Speicherorte`}
           </span>
         </div>
@@ -215,31 +259,37 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             aria-pressed={showFaces}
             title={
               showFaces
-                ? "Gesichtserkennung ausblenden"
-                : "Gesichtserkennung anzeigen"
+                ? "Gesichtsmarkierungen ausblenden"
+                : "Gesichtsmarkierungen anzeigen"
             }
           >
             <span aria-hidden="true">⌗</span>
             Gesichter
           </button>
-          <button type="button" onClick={copyImage} title="Bild in die Zwischenablage kopieren">
+          <button type="button" onClick={copyImage} title="Bildinhalt in die Zwischenablage kopieren">
             <span aria-hidden="true">⧉</span>
-            Kopieren
+            Bild kopieren
           </button>
-          <button type="button" onClick={revealImage} title="Datei im System anzeigen">
+          <button type="button" onClick={() => void copyImagePath()} title="Vollständigen Dateipfad kopieren">
+            <span aria-hidden="true">⌘</span>
+            Pfad kopieren
+          </button>
+          <button type="button" onClick={revealImage} title="Datei im Explorer oder Dateimanager anzeigen">
             <span aria-hidden="true">↗</span>
-            Speicherort
+            Speicherort öffnen
           </button>
-          <button
-            type="button"
-            className="gallery-delete-action"
-            onClick={removeCurrentImage}
-            disabled={isDeleting}
-            title="Bild aus der Datenbank entfernen"
-          >
-            <span aria-hidden="true">×</span>
-            {isDeleting ? "Entferne..." : "Entfernen"}
-          </button>
+          {onDelete && !sequence && (
+            <button
+              type="button"
+              className="gallery-delete-action"
+              onClick={removeCurrentImage}
+              disabled={isDeleting}
+              title="Bild aus Face Manager entfernen"
+            >
+              <span aria-hidden="true">×</span>
+              {isDeleting ? "Wird entfernt…" : "Entfernen"}
+            </button>
+          )}
           <button
             type="button"
             className="gallery-close"
@@ -259,12 +309,13 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           if (event.target === event.currentTarget) onClose();
         }}
       >
-        {images.length > 1 && (
+        {navigationLength > 1 && (
           <button
             type="button"
             className="gallery-nav gallery-nav--previous"
             onClick={() => move(-1)}
-            aria-label="Vorheriges Bild"
+            disabled={sequence?.loading}
+            aria-label={sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
           >
             ‹
           </button>
@@ -293,22 +344,38 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           />
           {showFaces &&
             naturalSize.width > 0 &&
-            image.faces.map((face) => (
-              <FaceOverlay
-                key={face.id}
-                face={face}
-                naturalWidth={naturalSize.width}
-                naturalHeight={naturalSize.height}
-                onNavigateToCluster={onNavigateToCluster}
-              />
-            ))}
+            (() => {
+              const visibleFaces = sequence?.highlightedFaceId
+                ? image.faces.filter(
+                    (face) => face.id === sequence.highlightedFaceId,
+                  )
+                : image.faces;
+              const lanes = assignLabelLanes(visibleFaces, naturalSize.width);
+              return visibleFaces.map((face) => (
+                <FaceOverlay
+                  key={face.id}
+                  face={face}
+                  naturalWidth={naturalSize.width}
+                  naturalHeight={naturalSize.height}
+                  stackIndex={lanes.get(face.id) ?? 0}
+                  highlighted={face.id === sequence?.highlightedFaceId}
+                  onNavigateToCluster={onNavigateToCluster}
+                />
+              ));
+            })()}
         </div>
-        {images.length > 1 && (
+        {sequence?.loading && (
+          <div className="gallery-sequence-loading" role="status">
+            Nächstes Bild wird geladen…
+          </div>
+        )}
+        {navigationLength > 1 && (
           <button
             type="button"
             className="gallery-nav gallery-nav--next"
             onClick={() => move(1)}
-            aria-label="Nächstes Bild"
+            disabled={sequence?.loading}
+            aria-label={sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
           >
             ›
           </button>
@@ -318,32 +385,49 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       <footer className="gallery-footer">
         <div className="gallery-locations">
           {image.locations.map((location) => (
-            <button
-              key={location.path}
-              type="button"
-              title={location.path}
-              onClick={async () => {
-                try {
-                  await openImageLocation(image.id, location.path);
-                  setMessage("Dateispeicherort geöffnet");
-                } catch (error) {
-                  setMessage(
-                    error instanceof Error ? error.message : "Öffnen fehlgeschlagen"
-                  );
-                }
-              }}
-            >
-              <span>{location.path}</span>
-              <b>↗</b>
-            </button>
+            <div className="gallery-location-row" key={location.path}>
+              <code title={location.path}>{location.path}</code>
+              <div>
+                <button
+                  type="button"
+                  title="Diesen Dateipfad kopieren"
+                  onClick={() => void copyImagePath(location.path)}
+                >
+                  Pfad kopieren
+                </button>
+                <button
+                  type="button"
+                  title="Diese Datei im Explorer oder Dateimanager anzeigen"
+                  onClick={async () => {
+                    try {
+                      await openImageLocation(image.id, location.path);
+                      setMessage("Dateispeicherort geöffnet");
+                    } catch (error) {
+                      setMessage(
+                        error instanceof Error ? error.message : "Öffnen fehlgeschlagen",
+                      );
+                    }
+                  }}
+                >
+                  Speicherort öffnen
+                </button>
+              </div>
+            </div>
           ))}
         </div>
-        <small>← → navigieren · Esc schließen</small>
+        <small>
+          ← → {sequence ? "durch die Gruppe navigieren" : "navigieren"} · Esc schließen
+        </small>
       </footer>
 
       {message && (
         <div className="gallery-toast" role="status">
           {message}
+        </div>
+      )}
+      {sequence?.error && (
+        <div className="gallery-toast gallery-toast--error" role="alert">
+          {sequence.error}
         </div>
       )}
     </div>

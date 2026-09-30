@@ -42,3 +42,17 @@ class DataPathTest(unittest.TestCase):
                 config.get_error_log_path(),
                 Path("/tmp/face-manager-test/logs/error.log"),
             )
+
+    def test_changelog_lives_in_project_root(self):
+        self.assertEqual(
+            config.get_changelog_path(),
+            config.get_project_root() / "CHANGELOG.md",
+        )
+
+    def test_build_variant_can_be_overridden_for_development(self):
+        with patch.dict(os.environ, {"FACE_MANAGER_BUILD_VARIANT": "gpu"}):
+            self.assertEqual(config.get_build_variant(), "gpu")
+
+    def test_unknown_build_variant_falls_back_to_cpu(self):
+        with patch.dict(os.environ, {"FACE_MANAGER_BUILD_VARIANT": "unknown"}):
+            self.assertEqual(config.get_build_variant(), "cpu")

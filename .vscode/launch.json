@@ -8,6 +8,17 @@
       "module": "uvicorn",
       "args": [
         "backend.app:app",
+        "--reload",
+        "--reload-dir",
+        "${workspaceFolder}/backend",
+        "--reload-include",
+        "*.py",
+        "--reload-exclude",
+        "${workspaceFolder}/backend/.venv",
+        "--reload-exclude",
+        "${workspaceFolder}/backend/tests",
+        "--reload-exclude",
+        "${workspaceFolder}/backend/.pytest_cache",
         "--host",
         "0.0.0.0",
         "--port",
@@ -16,6 +27,7 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": true,
+      "subProcess": true,
       "python": "${workspaceFolder}/backend/.venv/bin/python",
       "env": {
         "PYTHONPATH": "${workspaceFolder}"

@@ -105,6 +105,86 @@ class ImportApiTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 404)
 
+    @patch.object(app, "import_queue")
+    def test_import_control_endpoints_delegate_to_queue(self, import_queue):
+        import_queue.pause.return_value = {"id": "job-1", "status": "paused"}
+        import_queue.resume.return_value = {"id": "job-1", "status": "running"}
+        import_queue.cancel.return_value = {"id": "job-1", "status": "cancelling"}
+        import_queue.delete_terminal.return_value = {"id": "job-1", "status": "removed"}
+        import_queue.clear_history.return_value = 3
+
+        self.assertEqual(app.api_pause_import("job-1")["status"], "paused")
+        self.assertEqual(app.api_resume_import("job-1")["status"], "running")
+        self.assertEqual(app.api_cancel_import("job-1")["status"], "cancelling")
+        self.assertEqual(app.api_delete_import_history_entry("job-1")["status"], "removed")
+        self.assertEqual(app.api_delete_import_history(), {"removed_count": 3})
+
+    @patch.object(app, "event_hub")
+    @patch.object(app, "_publish_background_cluster_progress_throttled")
+    @patch.object(app, "import_queue")
+    def test_committed_import_progress_publishes_library_update(
+        self,
+        import_queue,
+        publish_library_progress,
+        _event_hub,
+    ):
+        previous_progress = app._last_import_progress
+        previous_busy = app._import_was_busy
+        try:
+            app._last_import_progress = {"job-1": (1, 0)}
+            app._import_was_busy = True
+            import_queue.snapshot.return_value = {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "processed_images": 2,
+                        "processed_faces": 3,
+                    }
+                ],
+                "running_count": 1,
+                "queued_count": 0,
+            }
+
+            app._publish_imports()
+
+            publish_library_progress.assert_called_once_with()
+        finally:
+            app._last_import_progress = previous_progress
+            app._import_was_busy = previous_busy
+
+    @patch.object(app, "event_hub")
+    @patch.object(app, "_publish_background_cluster_progress_throttled")
+    @patch.object(app, "import_queue")
+    def test_unchanged_import_progress_does_not_refresh_library(
+        self,
+        import_queue,
+        publish_library_progress,
+        _event_hub,
+    ):
+        previous_progress = app._last_import_progress
+        previous_busy = app._import_was_busy
+        try:
+            app._last_import_progress = {"job-1": (2, 3)}
+            app._import_was_busy = True
+            import_queue.snapshot.return_value = {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "processed_images": 2,
+                        "processed_faces": 3,
+                    }
+                ],
+                "running_count": 1,
+                "queued_count": 0,
+            }
+
+            app._publish_imports()
+
+            publish_library_progress.assert_not_called()
+        finally:
+            app._last_import_progress = previous_progress
+            app._import_was_busy = previous_busy
+
     @patch("backend.app.list_available_image_persons", return_value=["Alice", "Unbekannt"])
     @patch("backend.app.list_image_locations", return_value={1: []})
     @patch("backend.app.list_images_page")
@@ -152,6 +232,7 @@ class ImportApiTest(unittest.TestCase):
         list_images_page.assert_called_once_with(
             folders=["/photos"],
             persons=["Alice"],
+            face_statuses=[],
             sort_by="date",
             sort_direction="desc",
             limit=40,

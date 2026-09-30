@@ -556,8 +556,7 @@ print_next_steps() {
 Development environment ready (${ACCELERATOR^^}).
 
 Start the backend:
-  source backend/.venv/bin/activate
-  python -m uvicorn backend.app:app --reload --host 0.0.0.0 --port 8000
+  ./scripts/dev-backend.sh
 
 Start the frontend in a second terminal:
   cd frontend

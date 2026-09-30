@@ -119,3 +119,79 @@ class SchemaRecoveryTest(unittest.TestCase):
                 [(row["id"], row["person_id"]) for row in cluster_rows],
                 [(2, None), (7, None)],
             )
+
+    def test_repair_reassigns_dangling_zero_cluster_id(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE cluster(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, person_id INTEGER
+            );
+            CREATE TABLE face(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id INTEGER,
+                review_status TEXT DEFAULT 'active'
+            );
+            INSERT INTO cluster(id, label) VALUES (3, 'Cluster 3');
+            INSERT INTO face(cluster_id) VALUES (0), (0), (3);
+            """
+        )
+        cur = conn.cursor()
+        schema._repair_cluster_integrity(cur)
+        conn.commit()
+
+        # No face should still point at the falsy id 0.
+        self.assertEqual(
+            cur.execute("SELECT COUNT(*) FROM face WHERE cluster_id = 0").fetchone()[0],
+            0,
+        )
+        # The migrated faces now share a single positive cluster that exists.
+        migrated = cur.execute(
+            "SELECT DISTINCT cluster_id FROM face WHERE cluster_id != 3"
+        ).fetchall()
+        self.assertEqual(len(migrated), 1)
+        migrated_cluster_id = migrated[0]["cluster_id"]
+        self.assertGreater(migrated_cluster_id, 0)
+        self.assertIsNotNone(
+            cur.execute(
+                "SELECT 1 FROM cluster WHERE id = ?", (migrated_cluster_id,)
+            ).fetchone()
+        )
+        conn.close()
+
+    def test_repair_preserves_zero_cluster_person_and_label(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);
+            CREATE TABLE cluster(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT, person_id INTEGER
+            );
+            CREATE TABLE face(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id INTEGER,
+                review_status TEXT DEFAULT 'active'
+            );
+            INSERT INTO person(id, name) VALUES (1, 'Anna');
+            INSERT INTO cluster(id, label, person_id) VALUES (0, 'Zero', 1);
+            INSERT INTO face(cluster_id) VALUES (0), (0);
+            """
+        )
+        cur = conn.cursor()
+        schema._repair_cluster_integrity(cur)
+        conn.commit()
+
+        self.assertIsNone(
+            cur.execute("SELECT 1 FROM cluster WHERE id = 0").fetchone()
+        )
+        rows = cur.execute(
+            "SELECT id, label, person_id FROM cluster"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertGreater(rows[0]["id"], 0)
+        self.assertEqual(rows[0]["label"], "Zero")
+        self.assertEqual(rows[0]["person_id"], 1)
+        conn.close()

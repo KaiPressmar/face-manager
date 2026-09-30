@@ -10,7 +10,7 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/release-version.sh <major|minor|patch|X.Y.Z>
 
-Updates the canonical VERSION file and the frontend package metadata.
+Updates the canonical VERSION file, frontend package metadata, and changelog.
 It does not create a commit or Git tag.
 EOF
 }
@@ -49,10 +49,25 @@ esac
   exit 1
 }
 
+IFS=. read -r next_major next_minor next_patch <<< "${next_version}"
+if ((
+  next_major < major ||
+  (next_major == major && next_minor < minor) ||
+  (next_major == major && next_minor == minor && next_patch <= patch)
+)); then
+  printf 'Next version must be greater than current version %s.\n' "${current_version}" >&2
+  exit 1
+fi
+
+python3 "${PROJECT_ROOT}/scripts/changelog.py" check \
+  --require-unreleased \
+  --next-version "${next_version}"
+
 printf '%s\n' "${next_version}" > "${VERSION_FILE}"
 npm --prefix "${PROJECT_ROOT}/frontend" version \
   "${next_version}" \
   --no-git-tag-version \
   --allow-same-version >/dev/null
+python3 "${PROJECT_ROOT}/scripts/changelog.py" release --version "${next_version}"
 
 printf 'Version updated: %s -> %s\n' "${current_version}" "${next_version}"

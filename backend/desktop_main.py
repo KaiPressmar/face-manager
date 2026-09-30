@@ -11,6 +11,7 @@ import webview
 from backend.app import app as face_manager_app
 from backend.config import APP_VERSION, get_error_log_path
 from backend.error_logging import configure_error_logging, install_global_exception_hooks
+from backend.services.update_manager import register_shutdown_callback
 
 configure_error_logging()
 install_global_exception_hooks()
@@ -145,6 +146,7 @@ def main() -> None:
         url=f"http://{host}:{port}",
         min_size=(1200, 780),
     )
+    register_shutdown_callback(window.destroy)
     try:
         webview.start(debug=False)
     except Exception:

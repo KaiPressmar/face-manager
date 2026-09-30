@@ -27,11 +27,12 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
     >
       <div
         style={{
-          background: "#141418",
+          background: "var(--surface-1)",
+          color: "var(--text)",
           padding: 24,
           borderRadius: 6,
           width: 360,
-          border: "1px solid #2a2a30",
+          border: "1px solid var(--border-strong)",
         }}
       >
         <h3 style={{ marginTop: 0 }}>Person zuweisen</h3>
@@ -45,7 +46,7 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
             style={{
               width: "100%",
               padding: 8,
-              border: "1px solid #333",
+              border: "1px solid var(--border-solid)",
             }}
           >
             <option value="">– auswählen –</option>
@@ -66,9 +67,9 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
             style={{
               width: "100%",
               padding: 8,
-              background: "#1f1f22",
-              color: "white",
-              border: "1px solid #333",
+              background: "var(--panel-solid)",
+              color: "var(--text)",
+              border: "1px solid var(--border-solid)",
             }}
           />
         </div>
@@ -78,9 +79,9 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
             onClick={() => onClose(false)}
             style={{
               padding: "6px 12px",
-              background: "#333",
-              color: "white",
-              border: "none",
+              background: "var(--surface-raise)",
+              color: "var(--text)",
+              border: "1px solid var(--border-solid)",
             }}
           >
             Abbrechen
@@ -90,8 +91,8 @@ const AssignPersonModal = ({ clusterId, persons, onClose }) => {
             onClick={submit}
             style={{
               padding: "6px 12px",
-              background: "#00e5ff",
-              color: "#000",
+              background: "var(--neon-cyan)",
+              color: "var(--on-accent)",
               border: "none",
               fontWeight: "bold",
             }}
