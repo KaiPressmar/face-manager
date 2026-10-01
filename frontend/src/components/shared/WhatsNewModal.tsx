@@ -1,4 +1,5 @@
-import React, { useEffect } from "react";
+import React, { useRef } from "react";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import type { ReleaseNotes } from "../../utils/api";
 
 type Variant = "whats-new" | "history";
@@ -29,13 +30,8 @@ const WhatsNewModal: React.FC<Props> = ({
   onClose,
   onShowFullChangelog,
 }) => {
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(dialogRef, onClose);
 
   const isHistory = variant === "history";
   const multiple = releases.length > 1;
@@ -67,6 +63,8 @@ const WhatsNewModal: React.FC<Props> = ({
       }}
     >
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className="whats-new-modal"
         role="dialog"
         aria-modal="true"

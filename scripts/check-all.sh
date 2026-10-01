@@ -9,6 +9,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 python3 "${SCRIPT_DIR}/changelog.py" check
 python3 "${SCRIPT_DIR}/check-packaging.py"
 "${SCRIPT_DIR}/check-backend.sh"
+node --test "${PROJECT_ROOT}"/frontend/tests/*.test.cjs
 npm --prefix "${PROJECT_ROOT}/frontend" run check
 
 printf 'All checks passed.\n'

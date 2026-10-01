@@ -1,0 +1,43 @@
+/* Keep navigation usable when the desktop window is narrowed or zoomed. */
+@media (max-width: 760px) {
+  .app-shell {
+    flex-direction: column;
+    height: 100dvh;
+  }
+
+  .sidebar {
+    width: 100%;
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 10px 12px 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar__header { gap: 8px; }
+  .sidebar__brand-mark { width: 28px; height: 28px; flex-basis: 28px; }
+  .sidebar__title { font-size: 16px; }
+  .sidebar__brand-meta, .sidebar__section-label { display: none; }
+  .sidebar__nav {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 3px 2px;
+    scrollbar-width: thin;
+  }
+  .sidebar__nav .neon-card {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 6px;
+    width: auto;
+    min-height: 40px;
+    padding: 9px 11px;
+    margin: 0;
+  }
+  .sidebar__nav .neon-card strong { font-size: 12px; }
+  .sidebar__nav .neon-card small { display: none; }
+  .app-main { min-height: 0; }
+  .topbar { flex: 0 0 52px; min-height: 52px; height: 52px; }
+  .topbar__actions { width: 100%; }
+}

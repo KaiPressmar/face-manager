@@ -37,7 +37,11 @@ fi
   "${PROJECT_ROOT}/backend/services/storage.py" \
   "${PROJECT_ROOT}/backend/services/update_manager.py"
 
-"${PYTHON}" -m unittest discover \
+# Importing backend.app initializes a database; never use the developer's
+# library for validation, including when a development server is running.
+TEST_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/face-manager-tests.XXXXXXXX")"
+trap 'rm -rf -- "${TEST_DATA_DIR}"' EXIT
+FACE_MANAGER_DATA_DIR="${TEST_DATA_DIR}" "${PYTHON}" -m unittest discover \
   -s "${PROJECT_ROOT}/backend/tests" \
   -t "${PROJECT_ROOT}"
 

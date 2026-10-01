@@ -4,6 +4,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import { imageFileUrl, openImageLocation } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
@@ -97,6 +98,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
   const stageRef = useRef<HTMLElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalFocus(dialogRef, onClose, !isDeleting);
   const image = images[activeIndex];
   const navigationIndex = sequence?.activeIndex ?? activeIndex;
   const navigationLength = sequence?.length ?? images.length;
@@ -121,7 +124,6 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
     document.body.style.overflow = "hidden";
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
       if (event.key === "ArrowLeft") move(-1);
       if (event.key === "ArrowRight") move(1);
     };
@@ -225,6 +227,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
       className="fullscreen-gallery"
       role="dialog"
       aria-modal="true"
@@ -315,7 +319,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             className="gallery-nav gallery-nav--previous"
             onClick={() => move(-1)}
             disabled={sequence?.loading}
-            aria-label={sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
+            aria-label={sequence?.itemLabel === "Foto" ? "Vorheriges Bild" : sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
           >
             ‹
           </button>
@@ -375,7 +379,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             className="gallery-nav gallery-nav--next"
             onClick={() => move(1)}
             disabled={sequence?.loading}
-            aria-label={sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
+            aria-label={sequence?.itemLabel === "Foto" ? "Nächstes Bild" : sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
           >
             ›
           </button>

@@ -7,6 +7,7 @@ import { applyTheme, readCachedTheme } from "./utils/theme";
 import "./styles/global.css";
 import "./styles/neon.css";
 import "./styles/hologram.css";
+import "./styles/responsive.css";
 
 // Apply any explicitly pinned theme before the first paint so a Light/Dark
 // choice never flashes the wrong theme. "system" resolves via CSS media query.

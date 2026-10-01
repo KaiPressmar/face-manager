@@ -1,0 +1,62 @@
+.gps-page{max-width:1720px;margin:0 auto;padding:24px 28px 55px;color:var(--text)}
+.gps-page__header{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:22px}.gps-page__eyebrow{color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.14em}.gps-page__header h1{font-size:clamp(27px,3vw,38px);line-height:1.1;letter-spacing:-.04em;margin:8px 0 7px}.gps-page__header p{color:var(--text-muted);font-size:13px;margin:0}.gps-page__stat{display:flex;flex-direction:column;align-items:end;border-left:1px solid var(--border);padding-left:24px}.gps-page__stat strong{font-size:28px;color:var(--text-strong);line-height:1}.gps-page__stat span{font-size:11px;color:var(--text-faint);margin-top:5px}
+.gps-page__toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:9px;padding:13px;border:1px solid var(--border);border-radius:16px;background:var(--surface-1)}.gps-page__field{display:flex;flex-direction:column;gap:5px;min-width:125px}.gps-page__field--region{min-width:165px}.gps-page__field span{font-size:10px;font-weight:700;color:var(--text-faint)}.gps-page__field select,.gps-page__field input{min-height:37px;width:100%;border:1px solid var(--border-strong);border-radius:9px;padding:0 10px;color:var(--text);background:var(--surface-2);font:inherit;font-size:12px}.gps-page__field input:focus-visible,.gps-page__field select:focus-visible{border-color:var(--accent)}.gps-page__reset,.gps-page__map-actions button,.gps-page__more,.gps-page__empty button{border:1px solid var(--border-strong);border-radius:9px;min-height:37px;background:var(--surface-2);color:var(--text);padding:0 13px;font-size:12px;font-weight:700}.gps-page__reset{margin-left:auto}.gps-page__reset:hover,.gps-page__map-actions button:hover,.gps-page__more:hover,.gps-page__empty button:hover{border-color:var(--accent-border);background:var(--accent-soft)}.gps-page__hint{font-size:11px;color:var(--text-faint);margin:9px 3px 16px}.gps-page__layout{display:grid;grid-template-columns:minmax(0,1fr) 235px;gap:14px}.gps-page__map-card,.gps-page__insight,.gps-page__results{border:1px solid var(--border);background:var(--surface-1);border-radius:17px;overflow:hidden}.gps-page__map-head,.gps-page__map-foot{display:flex;align-items:center;justify-content:space-between;gap:15px;padding:13px 17px}.gps-page__map-head>div:first-child{display:flex;flex-direction:column;gap:3px}.gps-page__map-head strong{font-size:13px}.gps-page__map-head span,.gps-page__map-foot{font-size:10px;color:var(--text-faint)}.gps-page__map-actions{display:flex;gap:7px}.gps-page__map-actions button{min-height:30px;font-size:10px}.gps-page__map-actions .gps-page__tool--active{color:var(--accent);border-color:var(--accent-border);background:var(--accent-soft)}.gps-page__map-foot{min-height:37px}.gps-page__map-foot span:last-child{color:var(--accent)}
+.gps-map__viewport{position:relative;overflow:hidden;background:#15283a}.gps-map__canvas{aspect-ratio:2/1;position:relative}.gps-map__svg{display:block;width:100%;height:100%;touch-action:none;cursor:grab}.gps-map__svg:active{cursor:grabbing}.gps-map__svg--select,.gps-map__svg--select:active{cursor:crosshair}.gps-map__sea{fill:#142739}.gps-map__graticule{stroke:#648196;stroke-opacity:.16;stroke-width:.6}.gps-map__land{fill:#45685f;stroke:#80a78f;stroke-width:.5;vector-effect:non-scaling-stroke}.gps-map__selection{fill:rgba(29,224,228,.18);stroke:#49f0ed;stroke-width:1.5;vector-effect:non-scaling-stroke}.gps-map__selection--drag{stroke-dasharray:5 4}.gps-map__marker{cursor:pointer}.gps-map__marker-halo{fill:rgba(13,215,220,.3)}.gps-map__marker-core{fill:#00b8c9;stroke:#dcffff;stroke-width:1.4;vector-effect:non-scaling-stroke}.gps-map__marker:hover .gps-map__marker-core,.gps-map__marker:focus-visible .gps-map__marker-core{fill:#22ebf0}.gps-map__marker text{fill:#fff;font-weight:800;font-family:Inter,system-ui,sans-serif;pointer-events:none}.gps-map__controls{position:absolute;right:13px;top:13px;display:grid;grid-template-columns:repeat(2,31px);gap:3px;padding:5px;background:rgba(12,26,39,.88);border:1px solid rgba(255,255,255,.2);border-radius:11px;backdrop-filter:blur(8px)}.gps-map__controls button{height:29px;border:0;border-radius:6px;background:rgba(255,255,255,.09);color:#fff;font-size:17px;font-weight:700}.gps-map__controls button:hover{background:rgba(50,220,225,.25)}.gps-map__credit{position:absolute;left:11px;bottom:8px;color:#d4e5e5;font-size:9px;text-decoration:none;background:rgba(9,25,34,.6);padding:3px 5px;border-radius:4px}.gps-map__credit:hover{text-decoration:underline}
+.gps-page__results{margin-top:15px;padding:18px}.gps-page__results-head{display:flex;align-items:end;justify-content:space-between;gap:10px;margin-bottom:16px}.gps-page__results-head h2{font-size:18px;margin:4px 0 0}.gps-page__results-head>span{font-size:12px;color:var(--text-muted)}.gps-page__grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px}.gps-page__photo{position:relative;display:block;padding:0;aspect-ratio:1.25;overflow:hidden;border:1px solid var(--border);border-radius:10px;background:var(--surface-2);color:#fff}.gps-page__photo img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .22s ease}.gps-page__photo:hover img{transform:scale(1.05)}.gps-page__photo span{position:absolute;bottom:0;left:0;right:0;padding:20px 7px 6px;background:linear-gradient(transparent,rgba(0,0,0,.8));font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}.gps-page__more{display:block;margin:18px auto 0}.gps-page__empty{text-align:center;padding:35px;color:var(--text-muted)}.gps-page__empty strong{color:var(--text-strong)}.gps-page__empty p{font-size:12px}.gps-page__error{padding:12px;border:1px solid #db7474;border-radius:10px;color:#e49494;background:rgba(190,60,60,.1);font-size:12px;margin:10px 0}.gps-page__error button{border:0;background:none;color:inherit;text-decoration:underline}.gps-page__gallery-wait{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;gap:15px;color:#fff}.gps-page__gallery-wait button{padding:8px;border-radius:7px}
+/* Keep the map and its photos in one visual workspace. */
+.gps-page__layout{grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:start}
+.gps-page__results{margin-top:0;height:0;min-height:100%;max-height:none;overflow:auto;scrollbar-gutter:stable}
+.gps-page__results-head{align-items:start;margin-bottom:6px}
+.gps-page__results-head h2{font-size:16px;line-height:1.35}
+.gps-page__results-head>span{white-space:nowrap;padding-top:5px}
+.gps-page__results-hint{font-size:11px;line-height:1.5;color:var(--text-faint);margin:0 0 15px}
+.gps-page__grid,.gps-page__skeletons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+.gps-page__results--loading .gps-page__grid{opacity:.45;pointer-events:none}
+.gps-page__photo:disabled{cursor:wait}
+.gps-page__skeletons>div{aspect-ratio:1.25;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);animation:gps-loading 1.4s ease-in-out infinite alternate}
+@keyframes gps-loading{to{opacity:.35}}
+.gps-page__filters{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:-3px 0 14px;font-size:11px;color:var(--text-muted)}
+.gps-page__filters button{display:flex;align-items:center;gap:10px;min-height:32px;padding:5px 10px;border:1px solid var(--accent-border);border-radius:20px;color:var(--accent);background:var(--accent-soft);font:inherit}
+.gps-page__filters button:hover{border-color:var(--accent)}
+.gps-page__filters button span{font-size:17px;line-height:1}
+.gps-page__collection{display:flex;flex-wrap:wrap;align-items:center;gap:10px 22px;padding:15px 3px;color:var(--text-faint);font-size:11px;line-height:1.5}
+.gps-page__collection strong{color:var(--text-muted);font-weight:700}
+.gps-page__privacy{margin-left:auto;max-width:360px}
+.gps-page__pending{color:var(--accent)}
+.gps-page__empty{padding:30px 6px;line-height:1.6}
+.gps-page__empty p{margin:10px 0 16px}
+.gps-map__svg:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.gps-map__marker:focus-visible{outline:none}
+.gps-map__marker:focus-visible .gps-map__marker-core{stroke:#fff;stroke-width:3}
+.gps-map__marker[aria-pressed="true"] .gps-map__marker-core{fill:#007783;stroke:#fff;stroke-width:2.5}
+.gps-map__controls button:disabled{opacity:.35;cursor:default}
+.gps-map__controls button:disabled:hover{background:rgba(255,255,255,.09)}
+.gps-page button:focus-visible,.gps-map__credit:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.gps-page__map-actions button{min-height:34px}
+@media(max-width:1200px){
+  .gps-page__layout{grid-template-columns:1fr}
+  .gps-page__results{height:auto;min-height:0;max-height:none;overflow:visible}
+  .gps-page__grid,.gps-page__skeletons{grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}
+  .gps-page__privacy{margin-left:0;max-width:none}
+}
+@media(max-width:960px){.gps-page__stat{display:none}}
+@media(max-width:620px){
+  .gps-page{padding:17px 12px 35px}
+  .gps-page__toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:12px}
+  .gps-page__field,.gps-page__field--region{min-width:0}
+  .gps-page__field select,.gps-page__field input{min-height:42px;min-width:0}
+  .gps-page__reset{margin:0;grid-column:1/-1;min-height:40px}
+  .gps-page__map-head{align-items:start;flex-direction:column;gap:10px;padding:13px}
+  .gps-page__map-actions{width:100%}
+  .gps-page__map-actions button{min-height:40px;flex:1;font-size:11px}
+  .gps-page__map-foot{padding:11px 13px;line-height:1.5}
+  .gps-page__map-foot span:last-child{display:none}
+  .gps-map__viewport{height:auto}
+  .gps-map__controls{position:static;display:flex;flex-wrap:wrap;justify-content:center;gap:4px;padding:6px;border-width:1px 0 0;border-radius:0}
+  .gps-map__controls button{height:44px;min-width:44px;flex:1 0 44px}
+  .gps-page__grid,.gps-page__skeletons{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .gps-page__results{padding:14px}
+  .gps-page__collection{gap:8px 17px}
+  .gps-page__privacy{flex-basis:100%}
+}
+@media(prefers-reduced-motion:reduce){.gps-page__skeletons>div{animation:none}.gps-page__photo img{transition:none}}
