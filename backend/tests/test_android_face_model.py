@@ -13,13 +13,23 @@ import numpy as np
 from backend.models.android_face_model import AndroidFaceModel
 
 
+class _JavaList:
+    """Model Chaquopy's Java List: toArray works, Python iteration does not."""
+
+    def __init__(self, values):
+        self._values = values
+
+    def toArray(self):
+        return self._values
+
+
 class AndroidFaceModelTest(unittest.TestCase):
     def test_bridge_preserves_rgb_bytes_and_desktop_result_contract(self):
         engine = Mock()
-        engine.detectRgb.return_value = [SimpleNamespace(
+        engine.detectRgb.return_value = _JavaList([SimpleNamespace(
             bounds=SimpleNamespace(left=1.9, top=2.8, right=8.1, bottom=10.2),
             embedding=[1.0] + [0.0] * 511,
-        )]
+        )])
         java = SimpleNamespace(
             jclass=Mock(return_value=SimpleNamespace(getInstance=lambda: engine)),
             jarray=lambda _: bytes,

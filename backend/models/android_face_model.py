@@ -21,7 +21,9 @@ class AndroidFaceModel:
         pixels = np.ascontiguousarray(values).tobytes()
         detections = self._engine.detectRgb(jarray(jbyte)(pixels), width, height)
         result = []
-        for detection in detections:
+        # Chaquopy implements Python iteration for Java arrays, not java.util.List.
+        # FaceEngine returns a Java List, so cross that boundary explicitly.
+        for detection in detections.toArray():
             box = detection.bounds
             x1, y1, x2, y2 = map(int, (box.left, box.top, box.right, box.bottom))
             result.append({
