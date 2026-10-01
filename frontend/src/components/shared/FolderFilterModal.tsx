@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import {
   fetchFolders,
   FolderNode,
@@ -77,6 +78,7 @@ const FolderRow: React.FC<{
           type="button"
           className="folder-select-button"
           onClick={() => onToggleFolder(node.path)}
+          aria-pressed={isSelected}
         >
           <span className="folder-icon" aria-hidden="true" />
           <span className="folder-row-label">
@@ -115,29 +117,42 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
   onApply,
   onClose,
 }) => {
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(dialogRef, onClose);
   const [tree, setTree] = useState<FolderTree | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [retryLoad, setRetryLoad] = useState(0);
   const [draft, setDraft] = useState(() => new Set(selected));
   const [expanded, setExpanded] = useState(() => new Set<string>());
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    fetchFolders().then((data) => {
-      setTree(data);
-      setExpanded((current) => {
-        const next = new Set(current);
-        data.roots.forEach((root) => expandCommonPath(root, next));
-        return next;
+    let isMounted = true;
+    setIsLoading(true);
+    setLoadError(false);
+    void fetchFolders()
+      .then((data) => {
+        if (!isMounted) return;
+        setTree(data);
+        setExpanded((current) => {
+          const next = new Set(current);
+          data.roots.forEach((root) => expandCommonPath(root, next));
+          return next;
+        });
+      })
+      .catch((error) => {
+        if (!isMounted) return;
+        console.error("Ordner konnten nicht geladen werden:", error);
+        setLoadError(true);
+      })
+      .finally(() => {
+        if (isMounted) setIsLoading(false);
       });
-    });
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+    return () => {
+      isMounted = false;
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [retryLoad]);
 
   const visiblePaths = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -171,6 +186,7 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
     <div className="modal-backdrop" onMouseDown={onClose}>
       <section
         className="folder-browser"
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="folder-browser-title"
@@ -194,6 +210,7 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
             <span aria-hidden="true">⌕</span>
             <input
               autoFocus
+              data-initial-focus
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Ordner oder Pfad suchen"
@@ -216,7 +233,14 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
         )}
 
         <div className="folder-tree">
-          {!tree ? (
+          {loadError && !tree ? (
+            <div className="folder-browser-state" role="alert">
+              Ordner konnten nicht geladen werden. {" "}
+              <button type="button" onClick={() => setRetryLoad((value) => value + 1)}>
+                Erneut versuchen
+              </button>
+            </div>
+          ) : !tree ? (
             <div className="folder-browser-state">Ordner werden geladen…</div>
           ) : tree.roots.length === 0 ? (
             <div className="folder-browser-state">Noch keine Ordner entdeckt.</div>
@@ -238,6 +262,17 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
           )}
         </div>
 
+        {isLoading && tree && (
+          <div className="folder-browser-state" role="status">Ordnerliste wird aktualisiert…</div>
+        )}
+        {loadError && tree && (
+          <div className="folder-browser-state" role="alert">
+            Die Ordnerliste konnte nicht aktualisiert werden. {" "}
+            <button type="button" onClick={() => setRetryLoad((value) => value + 1)}>
+              Erneut versuchen
+            </button>
+          </div>
+        )}
         <footer className="folder-browser-footer">
           <div>
             <strong>{draft.size || "Alle"}</strong>
@@ -250,6 +285,7 @@ const FolderFilterModal: React.FC<FolderFilterModalProps> = ({
           <button
             className="primary-button"
             onClick={() => onApply(Array.from(draft))}
+            disabled={!tree}
           >
             Filter anwenden
           </button>

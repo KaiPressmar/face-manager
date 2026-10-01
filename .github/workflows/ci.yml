@@ -97,5 +97,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm --prefix frontend ci
 
+      - name: Test frontend behavior
+        run: node --test frontend/tests/*.test.cjs
+
       - name: Check frontend
         run: npm --prefix frontend run check

@@ -1611,9 +1611,9 @@ def get_image_detail_rows(image_id: int):
             )
             SELECT
                 i.id AS image_id,
-                location.path AS image_path,
-                location.directory AS directory,
-                location.filename AS filename,
+                COALESCE(location.path, i.path) AS image_path,
+                COALESCE(location.directory, i.directory) AS directory,
+                COALESCE(location.filename, i.filename) AS filename,
                 location.created_at AS created_at,
                 i.content_hash,
                 (
@@ -1630,15 +1630,16 @@ def get_image_detail_rows(image_id: int):
                 p.name AS person_name,
                 f.review_status
             FROM image i
-            JOIN ranked_locations location
+            LEFT JOIN ranked_locations location
               ON location.image_id = i.id AND location.location_rank = 1
-            JOIN face f ON f.image_id = i.id
+            LEFT JOIN face f ON f.image_id = i.id
+              AND f.review_status = ?
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
-            WHERE i.id = ? AND f.review_status = ?
+            WHERE i.id = ?
             ORDER BY f.id
             """,
-            (int(image_id), int(image_id), FACE_REVIEW_STATUS_ACTIVE),
+            (int(image_id), FACE_REVIEW_STATUS_ACTIVE, int(image_id)),
         ).fetchall()
     finally:
         conn.close()

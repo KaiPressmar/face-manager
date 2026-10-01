@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import Layout from "./components/layout/Layout";
 import PeoplePage from "./components/people/PeoplePage";
 import ClusterPage from "./components/clusters/ClusterPage";
@@ -35,7 +35,9 @@ export interface ClusterNavigationTarget {
   token: number;
 }
 
-const PAGE_ORDER: AppPage[] = ["people", "renaming", "review", "settings"];
+const MapPage = lazy(() => import("./components/map/MapPage"));
+
+const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
@@ -259,6 +261,14 @@ const App: React.FC = () => {
             active={active}
             onNavigateToCluster={handleNavigateToCluster}
           />
+        );
+      case "map":
+        return (
+          <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
+            <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
+              <MapPage active={active} onNavigateToCluster={handleNavigateToCluster} />
+            </Suspense>
+          </ErrorBoundary>
         );
       case "review":
         return (

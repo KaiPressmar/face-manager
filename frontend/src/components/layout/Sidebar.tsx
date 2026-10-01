@@ -18,6 +18,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
     label: "Bibliothek",
     items: [
       { page: "people", icon: "▦", label: "Bilder", hint: "Fotos durchsuchen und filtern" },
+      { page: "map", icon: "◎", label: "Weltkarte", hint: "Fotos nach Ort und Zeitraum entdecken" },
       {
         page: "renaming",
         icon: "Aa",

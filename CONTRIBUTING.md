@@ -91,7 +91,10 @@ That command runs, in order:
 2. Changelog format checks.
 3. Packaging metadata and dependency-inventory checks.
 4. Python dependency validation, compilation, and the backend unit tests.
-5. Frontend TypeScript checking and a production Vite build.
+5. Frontend behavior tests, TypeScript checking, and a production Vite build.
+
+Backend tests use an isolated temporary data directory, so validation does not
+initialize or lock the library used by a running development server.
 
 Also test user-visible behavior manually where applicable. Update documentation
 in the same pull request when commands, configuration, UI behavior, or release

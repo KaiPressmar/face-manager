@@ -9,9 +9,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Die neue Weltkarte zeigt Fotos an ihren Aufnahmeorten und hilft, Bilder nach Regionen und Aufnahmezeitraum zu finden.
+
 ### Verbessert
 
+- Auch in schmalen Fenstern bleiben die Navigation und die Bedienelemente aller Ansichten erreichbar.
+- Dialoge und die Gesichtsauswahl lassen sich leichter mit der Tastatur bedienen; häufige Aktionen benötigen weniger Klicks.
+
 ### Behoben
+
+- Bei Ladeproblemen zeigen Bilder und Ordner eine verständliche Fehlermeldung und lassen sich erneut laden, ohne die Auswahl zu verlieren.
+- Fehlgeschlagene Änderungen an Personen oder Gruppen bleiben zur Korrektur geöffnet und zeigen den Grund an.
 
 - Beim wiederholten Öffnen von Ansichten werden kürzlich geladene Inhalte seltener unnötig neu geladen.
 

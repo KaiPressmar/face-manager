@@ -78,6 +78,10 @@ export function imageFileUrl(imageId: number) {
   return `${API_BASE}/images/${imageId}/file`;
 }
 
+export function imageThumbnailUrl(imageId: number) {
+  return `${API_BASE}/images/${imageId}/thumbnail`;
+}
+
 export function faceCropUrl(faceId: number) {
   return `${API_BASE}/faces/${faceId}/crop`;
 }
@@ -659,14 +663,7 @@ export async function fetchImages({
   const query = params.toString();
   const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
   if (!res.ok) {
-    return {
-      items: [],
-      total: 0,
-      offset,
-      limit,
-      has_more: false,
-      available_persons: [],
-    };
+    throw new Error(await readApiError(res, "Die Bilder konnten nicht geladen werden."));
   }
   return await res.json();
 }
@@ -674,7 +671,7 @@ export async function fetchImages({
 export async function fetchFolders(): Promise<FolderTree> {
   const res = await apiFetch(`${API_BASE}/folders`);
   if (!res.ok) {
-    return { roots: [], image_count: 0, folder_count: 0 };
+    throw new Error(await readApiError(res, "Die Ordner konnten nicht geladen werden."));
   }
   return await res.json();
 }
@@ -1301,4 +1298,80 @@ export async function applyImageRenames(
     );
   }
   return await res.json();
+}
+
+/** Capture metadata stays local; only bounded map aggregates cross the API. */
+export interface MapFilters {
+  west?: number;
+  east?: number;
+  south?: number;
+  north?: number;
+  from_date?: string;
+  to_date?: string;
+}
+
+export interface MapPoint {
+  latitude: number;
+  longitude: number;
+  count: number;
+  west: number;
+  east: number;
+  south: number;
+  north: number;
+}
+
+export interface MapImage {
+  id: number;
+  image_path: string;
+  filename: string;
+  latitude: number;
+  longitude: number;
+  captured_at: string | null;
+  created_at: string | null;
+}
+
+export interface MapPointsResponse {
+  points: MapPoint[];
+  total: number;
+  library_total: number;
+  located_total: number;
+  pending_total: number;
+  indexing: boolean;
+}
+
+export interface MapImagesResponse {
+  items: MapImage[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+async function fetchMapData<T>(
+  endpoint: string,
+  filters: MapFilters & { zoom?: number; limit?: number; offset?: number },
+  signal?: AbortSignal,
+): Promise<T> {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  const response = await apiFetch(`${API_BASE}/map/${endpoint}?${params}`, { signal });
+  if (!response.ok) {
+    throw new Error(await readApiError(response, "Die Kartendaten konnten nicht geladen werden."));
+  }
+  return response.json();
+}
+
+export function fetchMapPoints(
+  filters: MapFilters & { zoom?: number } = {},
+  signal?: AbortSignal,
+): Promise<MapPointsResponse> {
+  return fetchMapData("points", filters, signal);
+}
+
+export function fetchMapImages(
+  filters: MapFilters & { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<MapImagesResponse> {
+  return fetchMapData("images", filters, signal);
 }

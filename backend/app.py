@@ -8,6 +8,7 @@ import tempfile
 import threading
 from functools import partial, wraps
 from contextlib import asynccontextmanager
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import List
@@ -21,7 +22,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
@@ -50,6 +51,7 @@ from .services.desktop import (
     to_display_path,
 )
 from .services.face_thumbnails import ensure_face_thumbnail
+from .services.image_thumbnails import ensure_image_thumbnail
 from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
@@ -64,6 +66,7 @@ from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.image_path_cleanup import ImagePathCleanup
+from .services.geo import geo_backfill, list_map_images, list_map_points
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -602,6 +605,7 @@ async def lifespan(_app: FastAPI):
         if not schedule_version_clustering_upgrade():
             run_startup_repairs()
         face_thumbnail_warmup_queue.start()
+        geo_backfill.start()
         image_path_cleanup.resume()
         image_path_cleanup.schedule("startup", delay_seconds=60.0)
     except Exception:
@@ -611,6 +615,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         idle_recluster_scheduler.stop()
+        geo_backfill.stop()
         image_path_cleanup.stop()
         _publish_imports_throttled.flush()
         _publish_autocluster_throttled.flush()
@@ -1202,6 +1207,9 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
     temp_path.write_bytes(payload)
     backup_path = current_db_path.with_name(f"{current_db_path.stem}.pre-import-backup.sqlite")
 
+    # The indexer owns short-lived SQLite connections. Drain it before replacing
+    # the database and its WAL sidecars; restart against the restored or new DB.
+    geo_backfill.stop()
     try:
         if current_db_path.exists():
             shutil.copy2(DB_PATH, backup_path)
@@ -1250,6 +1258,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             backup_path.unlink()
         if temp_path.exists():
             temp_path.unlink()
+        try:
+            geo_backfill.start()
+        except Exception:
+            logger.exception("Could not restart photo metadata indexing after database import")
 
     return {"status": "imported"}
 
@@ -1815,6 +1827,21 @@ def get_image(image_id: int):
     return FileResponse(filesystem_path(path))
 
 
+@app.get("/api/images/{image_id}/thumbnail")
+def get_image_thumbnail(image_id: int):
+    """Serve a cached, upright, size-limited image thumbnail."""
+    path = get_available_image_path(image_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    try:
+        thumbnail_path = ensure_image_thumbnail(image_id, path)
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise HTTPException(
+            status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden."
+        ) from exc
+    return FileResponse(thumbnail_path, media_type="image/jpeg")
+
+
 @app.delete("/api/images/{image_id}")
 @safe_cluster_mutation
 def remove_image(image_id: int):
@@ -1992,6 +2019,11 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
                 "faces": [],
             }
 
+        # A detail lookup can return a canonical image with no active faces.
+        # Keep the image and its locations while leaving faces empty.
+        if r["face_id"] is None:
+            continue
+
         bbox_x, bbox_y, bbox_w, bbox_h = correct_bbox_for_orientation(
             path,
             _safe_float(r["bbox_x"]),
@@ -2039,6 +2071,44 @@ def api_image_detail(request: Request, image_id: int):
         image["locations"] = serialize_image_locations(locations, display_platform)
         image["location_count"] = len(locations)
     return items[0]
+
+
+def _validate_map_bounds(west, east, south, north, from_date, to_date):
+    if south > north:
+        raise HTTPException(status_code=422, detail="south must not exceed north")
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=422, detail="from_date must not exceed to_date")
+
+
+@app.get("/api/map/points")
+def get_map_points(
+    west: float = Query(default=-180, ge=-180, le=180),
+    east: float = Query(default=180, ge=-180, le=180),
+    south: float = Query(default=-90, ge=-90, le=90),
+    north: float = Query(default=90, ge=-90, le=90),
+    from_date: date | None = None,
+    to_date: date | None = None,
+    zoom: int = Query(default=2, ge=0, le=20),
+):
+    """Return bounded photo aggregates for a map viewport."""
+    _validate_map_bounds(west, east, south, north, from_date, to_date)
+    return list_map_points(west, east, south, north, from_date, to_date, zoom)
+
+
+@app.get("/api/map/images")
+def get_map_images(
+    west: float = Query(default=-180, ge=-180, le=180),
+    east: float = Query(default=180, ge=-180, le=180),
+    south: float = Query(default=-90, ge=-90, le=90),
+    north: float = Query(default=90, ge=-90, le=90),
+    from_date: date | None = None,
+    to_date: date | None = None,
+    limit: int = Query(default=40, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Return a stable page of geotagged photos in a viewport."""
+    _validate_map_bounds(west, east, south, north, from_date, to_date)
+    return list_map_images(west, east, south, north, from_date, to_date, limit, offset)
 
 
 @app.get("/api/images")

@@ -125,6 +125,23 @@ Supported image types:
 The importer scans recursively. Selecting a folder in **Ordnerfilter** includes images
 from all descendants.
 
+### Explore photos on the world map
+
+Open **Weltkarte** in the library sidebar to explore photos by their GPS capture
+location. Map and matching photos appear side by side on larger screens. Zoom
+and pan to explore clusters, select a rectangular region, and combine it with
+an inclusive capture-date range or a date shortcut. Remove individual filter
+chips to broaden the results. Open any photo, including photos without detected
+faces, in the full-screen viewer. Map controls also work with the keyboard.
+
+The map works offline and never sends image coordinates to a map provider.
+Existing photos are indexed in the background when the application starts;
+new imports are indexed automatically. Photos without valid GPS coordinates
+remain available in **Bilder** but cannot appear on the map. Date filters use
+the capture date stored in the photo, not its import or file-modification date;
+photos without a capture date appear only when no date filter is applied.
+Original files must remain accessible for metadata indexing.
+
 ### How duplicate images are handled
 
 Images are identified by a SHA-256 hash of their contents. Importing the same image
@@ -264,6 +281,22 @@ frontend, and creates a production build.
 
 For the complete contribution, branch, CI, and release workflow, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Browser workflow checks
+
+The optional browser suite creates its own temporary photo library and local
+servers. It checks map filtering and request races, existing library workflows,
+and narrow-window layouts without touching your library. Install Playwright
+outside the repository, then run:
+
+```bash
+npm install --prefix /tmp/face-manager-ui-tools playwright
+PLAYWRIGHT_BROWSERS_PATH=/tmp/face-manager-ui-browsers /tmp/face-manager-ui-tools/node_modules/.bin/playwright install chromium
+NODE_PATH=/tmp/face-manager-ui-tools/node_modules PLAYWRIGHT_BROWSERS_PATH=/tmp/face-manager-ui-browsers ./scripts/check-ui.sh
+```
+
+Optional: set `UI_SMOKE_SCREENSHOT_DIR` to retain screenshots, or override
+`UI_SMOKE_API_PORT` / `UI_SMOKE_WEB_PORT` if the default ports 8194 / 5194 are in use.
 
 ## Windows Desktop Releases
 
