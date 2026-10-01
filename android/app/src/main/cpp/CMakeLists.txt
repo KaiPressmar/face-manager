@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(face_hnsw LANGUAGES CXX)
+add_library(face_hnsw SHARED hnsw_jni.cpp)
+target_compile_features(face_hnsw PRIVATE cxx_std_17)
+target_include_directories(face_hnsw PRIVATE vendor)
+target_compile_options(face_hnsw PRIVATE -O3 -Wall -Wextra)

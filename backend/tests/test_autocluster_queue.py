@@ -48,6 +48,62 @@ class AutoClusterQueueTest(unittest.TestCase):
         task = queue.snapshot()["task"]
         return task["status"] if task else None
 
+    def test_shutdown_cancels_active_and_discards_pending(self):
+        entered = threading.Event()
+        exited = threading.Event()
+        calls = []
+
+        def repair(progress_callback=None, cancel_token=None):
+            calls.append("active")
+            entered.set()
+            while not cancel_token.is_set():
+                cancel_token.wait_if_paused()
+                time.sleep(0.01)
+            exited.set()
+            return 0
+
+        queue = self._new_queue(count_callable=lambda: 1, repair_callable=repair)
+        queue.start("active")
+        self.assertTrue(entered.wait(2))
+        queue.start("pending", repair_callable=lambda progress_callback=None: calls.append("pending") or 1)
+        queue.stop(timeout=2)
+        self.assertTrue(exited.is_set())
+        self.assertEqual(calls, ["active"])
+        self.assertEqual(self._status(queue), "cancelled")
+        self.assertIsNone(queue.start("late"))
+        queue.resume_after_shutdown()
+        self.assertIsNotNone(queue.start("restarted", repair_callable=lambda progress_callback=None: 1))
+
+    def test_shutdown_cancels_deferred_task(self):
+        queue = self._new_queue(count_callable=lambda: 1, ready_gate=lambda: False)
+        queue.start("deferred")
+        queue.stop(timeout=1)
+        queue.notify_ready()
+        self.assertEqual(self._status(queue), "cancelled")
+
+    def test_noncooperative_worker_blocks_restart_after_shutdown_timeout(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def repair(progress_callback=None, cancel_token=None):
+            entered.set()
+            release.wait(2)
+            return 0
+
+        queue = self._new_queue(count_callable=lambda: 1, repair_callable=repair)
+        queue.start("active")
+        self.assertTrue(entered.wait(2))
+        try:
+            with self.assertRaisesRegex(TimeoutError, "did not stop"):
+                queue.stop(timeout=0.01)
+            with self.assertRaisesRegex(RuntimeError, "still running"):
+                queue.resume_after_shutdown()
+            self.assertIsNone(queue.start("late"))
+        finally:
+            release.set()
+        queue.stop(timeout=2)
+        queue.resume_after_shutdown()
+
     def test_request_runs_immediately_when_gate_open(self):
         ran = threading.Event()
         queue = self._new_queue(

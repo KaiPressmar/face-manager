@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import os
 import shutil
@@ -599,22 +600,29 @@ async def lifespan(_app: FastAPI):
         Control while the application is accepting requests.
     """
     try:
-        event_hub.bind_loop(asyncio.get_running_loop())
-        idle_recluster_scheduler.start()
-        import_queue.start()
-        if not schedule_version_clustering_upgrade():
-            run_startup_repairs()
-        face_thumbnail_warmup_queue.start()
-        geo_backfill.start()
-        image_path_cleanup.resume()
-        image_path_cleanup.schedule("startup", delay_seconds=60.0)
-    except Exception:
-        logger.exception("Could not start import queue during application startup")
-        raise
-    try:
+        try:
+            event_hub.bind_loop(asyncio.get_running_loop())
+            auto_cluster_queue.resume_after_shutdown()
+            idle_recluster_scheduler.start()
+            import_queue.start()
+            if not schedule_version_clustering_upgrade():
+                run_startup_repairs()
+            face_thumbnail_warmup_queue.start()
+            geo_backfill.start()
+            image_path_cleanup.resume()
+            image_path_cleanup.schedule("startup", delay_seconds=60.0)
+        except Exception:
+            logger.exception("Could not start import queue during application startup")
+            raise
         yield
     finally:
         idle_recluster_scheduler.stop()
+        clustering_shutdown_error = None
+        try:
+            auto_cluster_queue.stop()
+        except Exception as exc:
+            logger.exception("Could not stop clustering cleanly during shutdown")
+            clustering_shutdown_error = exc
         geo_backfill.stop()
         image_path_cleanup.stop()
         _publish_imports_throttled.flush()
@@ -627,16 +635,29 @@ async def lifespan(_app: FastAPI):
             import_queue.stop()
         except Exception:
             logger.exception("Could not stop import queue cleanly during shutdown")
+        if clustering_shutdown_error is not None:
+            raise clustering_shutdown_error
 
 
 app = FastAPI(title="Face Manager API", version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[] if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_android_session(request: Request, call_next):
+    """Keep the embedded loopback server private to its WebView session."""
+    if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+        expected = os.environ.get("FACE_MANAGER_ANDROID_SESSION_TOKEN", "")
+        supplied = request.cookies.get("fm_session", "")
+        if not expected or not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"detail": "Unauthorized local session"}, status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -832,7 +853,8 @@ def api_install_update(data: dict = Body(...)):
         update_manager.launch_downloaded_installer(version)
     except (OSError, UpdateError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    schedule_process_exit()
+    if os.environ.get("FACE_MANAGER_PLATFORM") != "android":
+        schedule_process_exit()
     return {"installing": True, "version": version}
 
 
@@ -847,8 +869,8 @@ def api_runtime():
     return {
         "compute_mode": get_compute_mode(execution_provider),
         "execution_provider": execution_provider,
-        "host_platform": "windows" if is_windows_host() else "linux",
-        "display_platform": "windows" if is_windows_host() else "linux",
+        "host_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
+        "display_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
     }
 
 

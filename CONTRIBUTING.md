@@ -309,6 +309,17 @@ again before continuing with the artifacts.
 | `FaceManager-Setup-X.Y.Z.exe.sha256` | CPU installer checksum |
 | `FaceManager-Setup-GPU-X.Y.Z.exe` | NVIDIA-capable Windows installer |
 | `FaceManager-Setup-GPU-X.Y.Z.exe.sha256` | GPU installer checksum |
+| `FaceManager-Android-X.Y.Z.apk` | Signed standalone Android app (ARM64 and x86-64) |
+| `FaceManager-Android-X.Y.Z.apk.sha256` | Android APK checksum |
+
+Android implementation changes also require `./scripts/check-android.sh` and both
+`Android (API 31)` and `Android (API 35)` CI jobs. Do not merge when either device
+job is pending or failed. Android packaging follows the tested release commit;
+see [Android signing and verification](android/README.md). When Actions signing
+secrets are absent, sign the CI-produced unsigned artifact with the retained
+private release key and attach it to the CI-created release. A release containing
+Android changes is complete only once the signed APK and checksum are present;
+an unsigned workflow artifact is not an installable deliverable.
 
 For public repositories, provenance can also be verified with GitHub CLI:
 

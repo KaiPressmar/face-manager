@@ -1,0 +1,18 @@
+These files are unmodified upstream licence/notice texts, bundled as Android
+assets so recipients of the APK receive them without network access.
+
+HNSWLIB-LICENSE.txt
+https://github.com/nmslib/hnswlib/blob/v0.8.0/LICENSE
+Copied from the matching vendored source at src/main/cpp/vendor/HNSWLIB-LICENSE.
+
+OPENCV-LICENSE.txt
+https://github.com/opencv/opencv/blob/4.12.0/LICENSE
+
+ONNX-RUNTIME-LICENSE.txt
+https://github.com/microsoft/onnxruntime/blob/v1.22.0/LICENSE
+
+ONNX-RUNTIME-THIRD-PARTY-NOTICES.txt
+https://github.com/microsoft/onnxruntime/blob/v1.22.0/ThirdPartyNotices.txt
+
+YuNet's complete MIT licence and the InsightFace pretrained model-use notice
+are in the parent NOTICE.txt asset.

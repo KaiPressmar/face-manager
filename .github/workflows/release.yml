@@ -166,3 +166,77 @@ jobs:
             "dist/FaceManager-Setup$env:INSTALLER_SUFFIX-$env:VERSION.exe" `
             "dist/FaceManager-Setup$env:INSTALLER_SUFFIX-$env:VERSION.exe.sha256" `
             --clobber
+
+  android-apk:
+    name: Build Android APK
+    if: github.event.workflow_run.conclusion == 'success'
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm --prefix frontend ci
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android build tools
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Load release signing identity when configured
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -n "${KEYSTORE_BASE64}" ]]; then
+            umask 077
+            printf '%s' "${KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/android-release.jks"
+            echo "ANDROID_KEYSTORE_PATH=${RUNNER_TEMP}/android-release.jks" >> "${GITHUB_ENV}"
+            echo 'configured=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'configured=false' >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Build Android release from tested commit
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./scripts/package-android.sh
+      - name: Retain unsigned APK for offline signing
+        if: steps.signing.outputs.configured != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unsigned-${{ env.VERSION }}
+          path: dist/*-unsigned.apk
+          retention-days: 14
+      - name: Attest signed Android APK
+        if: steps.signing.outputs.configured == 'true' && github.event.repository.visibility == 'public'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/FaceManager-Android-${{ env.VERSION }}.apk
+      - name: Publish signed Android APK and checksum
+        if: steps.signing.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "v${VERSION}" "dist/FaceManager-Android-${VERSION}.apk" "dist/FaceManager-Android-${VERSION}.apk.sha256" --clobber
+      - name: Remove signing material
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/android-release.jks"

@@ -1,0 +1,106 @@
+plugins {
+    id 'com.android.application'
+    id 'com.chaquo.python'
+}
+
+def appVersion = file('../../VERSION').text.trim()
+def versionParts = appVersion.tokenize('.').collect { it.toInteger() }
+def signingPath = System.getenv('ANDROID_KEYSTORE_PATH')
+
+android {
+    namespace 'de.face_manager.app'
+    compileSdk 35
+    ndkVersion '27.0.12077973'
+
+    defaultConfig {
+        applicationId 'de.face_manager.app'
+        minSdk 30
+        targetSdk 35
+        versionCode versionParts[0] * 1000000 + versionParts[1] * 1000 + versionParts[2]
+        versionName appVersion
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        testInstrumentationRunnerArguments clearPackageData: 'true'
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        externalNativeBuild { cmake { cppFlags '-std=c++17' } }
+    }
+    signingConfigs {
+        if (signingPath) {
+            release {
+                storeFile file(signingPath)
+                storePassword System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingPath) signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    androidResources { noCompress += 'onnx' }
+    lint { abortOnError true; warningsAsErrors false }
+    testOptions {
+        animationsDisabled true
+        execution 'ANDROIDX_TEST_ORCHESTRATOR'
+    }
+    externalNativeBuild {
+        cmake { path file('src/main/cpp/CMakeLists.txt'); version '3.22.1' }
+    }
+    sourceSets { main { assets.srcDir file('build/generated/runtimeAssets') } }
+}
+
+chaquopy {
+    defaultConfig {
+        version '3.11'
+        if (System.getenv('ANDROID_BUILD_PYTHON')) buildPython System.getenv('ANDROID_BUILD_PYTHON')
+        pip {
+            install 'numpy==1.26.2'
+            install 'Pillow==11.0.0'
+            install 'fastapi==0.115.12'
+            install 'pydantic==1.10.22'
+            install 'uvicorn==0.34.2'
+            install 'h11==0.16.0'
+        }
+    }
+    sourceSets {
+        main { srcDir file('build/generated/python') }
+        debug { srcDir file('build/generated/testPython') }
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'androidx.work:work-runtime:2.10.1'
+    implementation 'androidx.exifinterface:exifinterface:1.3.7'
+    implementation 'org.opencv:opencv:4.12.0'
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.22.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:core:1.6.1'
+    androidTestImplementation 'androidx.test:rules:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+    androidTestImplementation 'androidx.work:work-testing:2.10.1'
+    androidTestUtil 'androidx.test:orchestrator:1.5.1'
+}
+
+def stageDesktopRuntime = tasks.register('stageDesktopRuntime', Exec) {
+    workingDir file('../..')
+    commandLine System.getenv('ANDROID_BUILD_PYTHON') ?: 'python3', 'scripts/prepare-android-runtime.py'
+    inputs.files(fileTree('../../backend') { include '**/*.py'; exclude '.venv/**', '**/__pycache__/**' })
+    inputs.files(fileTree('../../frontend') { exclude 'node_modules/**', 'dist/**' })
+    inputs.files('../../VERSION', '../../CHANGELOG.md', '../../scripts/prepare-android-runtime.py')
+    outputs.dirs('build/generated/python', 'build/generated/runtimeAssets', 'build/generated/testPython')
+}
+tasks.configureEach {
+    if (name == 'preBuild' || name.matches('merge.*PythonSources') || name.matches('merge.*Assets')) {
+        dependsOn(stageDesktopRuntime)
+    }
+}
