@@ -6,7 +6,7 @@ world map, images and folder filters, face review and suggestions, people,
 filename previews/renaming, background tasks, settings, and database backup and
 restore. No running PC or hosted photo service is required.
 
-## Install on a Samsung Galaxy S22
+## Install on a Samsung Galaxy S22 (Android 16 / One UI 8.0)
 
 1. Download `FaceManager-Android-X.Y.Z.apk` from the GitHub Release onto the phone.
 2. Open it and allow your browser or file manager to install this app when Android
@@ -23,8 +23,9 @@ restore. No running PC or hosted photo service is required.
 6. Review faces, name people and use the same sidebar views as on the PC.
 
 Android 11/API 30 or newer is required. The universal APK supports ARM64 (both S22
-processor variants) and x86-64. CI runs device tests on Android 12/API 31 and Android
-15/API 35. Emulator tests do not constitute a physical Galaxy S22 test.
+processor variants) and x86-64. CI runs device tests on Android 12/API 31, Android
+15/API 35 and Android 16/API 36. These emulator checks do not constitute a physical
+Galaxy S22 or Samsung One UI test.
 
 Recognition models and the offline world map are bundled. Photos and face vectors
 are processed locally. Internet permission supports the private loopback interface
@@ -39,9 +40,11 @@ photos. A backup restored on a different device still needs its referenced photo
 at accessible paths. File renaming acts on the selected original files, just as on
 PC. Android cloud/device-transfer backup of private app data is disabled.
 
-Long-running work is visible in a foreground notification. Android can interrupt
-background processing; persisted imports recover on the next start. Android 15
-also limits background data-sync service time. Keep the application open for very
+Allow notifications when asked to see background status and the **Beenden** action.
+Photo management also works when notifications are denied. Android can interrupt
+background processing; persisted imports recover on the next start. Android 15 and newer
+limit background data-sync service time to six hours per 24 hours; bringing the app
+to the foreground resets this budget. Keep the application open for very
 large imports. **Beenden** in the notification stops the local backend gracefully.
 Android's own package installer handles update confirmation; Windows installers
 and CUDA acceleration naturally use the corresponding Android package and CPU.
@@ -72,7 +75,7 @@ The detector uses mobile-native YuNet. Pretrained InsightFace weights retain the
 upstream non-commercial research model policy; see `assets/NOTICE.txt`. The code
 licences do not replace the upstream model usage terms.
 
-CI runs JVM tests, Android lint, builds, and isolated instrumentation on API 31/35.
+CI runs JVM tests, Android lint, builds, and isolated instrumentation on API 31/35/36.
 Android Test Orchestrator clears each test's application data. Debug builds alone
 include the shared backend regression tests and test helpers. The real-person
 fixtures and sources are documented under `app/src/androidTest/assets/README.md`;

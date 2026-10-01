@@ -110,7 +110,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [31, 35]
+        api: [31, 35, 36]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

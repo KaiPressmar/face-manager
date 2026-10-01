@@ -32,6 +32,9 @@ public final class BackendService extends Service {
     public static final String ACTION_STOP = "de.face_manager.app.STOP_BACKEND";
     private static final String CHANNEL_ID = "face_manager_library";
     private static final int NOTIFICATION_ID = 104;
+    private static final String PAUSE_PREFS = "backend_state";
+    private static final String PAUSE_KEY = "timeout_message";
+    private static final String TIMEOUT_MESSAGE = "Android hat die Hintergrundverarbeitung zeitlich begrenzt. Öffne Face Manager, um fortzufahren.";
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final Object STATE_LOCK = new Object();
     private static final CopyOnWriteArrayList<Listener> LISTENERS = new CopyOnWriteArrayList<>();
@@ -54,6 +57,14 @@ public final class BackendService extends Service {
     public static int getPort() { return port(); }
     public static String getToken() { return token(); }
     public static boolean isReady() { return ready(); }
+
+    public static String consumePauseReason(Context context) {
+        String message = context.getSharedPreferences(PAUSE_PREFS, MODE_PRIVATE)
+                .getString(PAUSE_KEY, null);
+        if (message != null) context.getSharedPreferences(PAUSE_PREFS, MODE_PRIVATE)
+                .edit().remove(PAUSE_KEY).apply();
+        return message;
+    }
 
     public static void addListener(Listener listener) {
         LISTENERS.addIfAbsent(listener);
@@ -174,7 +185,13 @@ public final class BackendService extends Service {
     }
 
     @Override public void onTimeout(int startId, int fgsType) {
-        stopSelf(startId);
+        getSharedPreferences(PAUSE_PREFS, MODE_PRIVATE).edit()
+                .putString(PAUSE_KEY, TIMEOUT_MESSAGE).commit();
+        synchronized (STATE_LOCK) {
+            if (generation == myGeneration) error = TIMEOUT_MESSAGE;
+        }
+        publish();
+        stopSelf();
     }
 
     @Override public void onDestroy() {

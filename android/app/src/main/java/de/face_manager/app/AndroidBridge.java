@@ -7,6 +7,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.DocumentsContract;
+import android.widget.Toast;
 import android.webkit.MimeTypeMap;
 
 import androidx.core.content.FileProvider;
@@ -98,7 +99,19 @@ public final class AndroidBridge {
     }
 
     public boolean installApk(String path) {
-        return openFile(path, "application/vnd.android.package-archive");
+        // The system package installer handles the per-source permission prompt. A successful
+        // ACTION_VIEW only means its UI opened; the user still decides whether to install.
+        if (openFile(path, "application/vnd.android.package-archive")) return true;
+        MAIN.post(() -> {
+            MainActivity current = activity.get();
+            if (current != null && !current.isFinishing() && !current.isDestroyed()) {
+                current.showApkInstallHelp();
+            } else {
+                Toast.makeText(context, "Installer konnte nicht geöffnet werden. Prüfe die Berechtigung für unbekannte Apps in Android-Einstellungen.",
+                        Toast.LENGTH_LONG).show();
+            }
+        });
+        return false;
     }
 
     boolean openFileDirect(String path) {
