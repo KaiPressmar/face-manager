@@ -90,7 +90,7 @@ def _geotag(source, destination):
         photo.convert("RGB").save(destination, "JPEG", quality=95, exif=exif)
 
 
-def _smoke(port, token, fixture_dir, grace, astronaut):
+def _smoke(port, token, photo_dir, grace, astronaut):
     from urllib.error import HTTPError
 
     try:
@@ -107,8 +107,8 @@ def _smoke(port, token, fixture_dir, grace, astronaut):
     settings = _ok(port, token, "GET", "/api/settings")
     assert "cluster_distance_threshold" in settings, settings
 
-    photos = fixture_dir / "photos"
-    photos.mkdir(parents=True)
+    photos = photo_dir
+    assert photos.is_dir() and not any(photos.iterdir()), photos
     _geotag(grace, photos / "grace_gps.jpg")
     shutil.copyfile(astronaut, photos / "astronaut.png")
     assert sorted(path.name for path in photos.iterdir()) == ["astronaut.png", "grace_gps.jpg"]
@@ -212,8 +212,8 @@ def _shared():
     return f"{result.testsRun} shared backend tests passed"
 
 
-def run(context, bridge, data_root, grace, astronaut):
-    """Called once by AndroidJUnitRunner, with private paths and bundled image assets."""
+def run(context, bridge, data_root, grace, astronaut, photo_dir):
+    """Use private metadata and a unique public Pictures folder for originals."""
     root = Path(data_root)
     root.mkdir(parents=True, exist_ok=True)
     os.environ["FACE_MANAGER_DATA_DIR"] = str(root)
@@ -225,7 +225,7 @@ def run(context, bridge, data_root, grace, astronaut):
     try:
         address = android_runtime.start(context, bridge, str(root))
         running = True
-        reports.append(_smoke(int(address["port"]), str(address["token"]), root,
+        reports.append(_smoke(int(address["port"]), str(address["token"]), Path(photo_dir),
                               Path(grace), Path(astronaut)))
     except Exception:
         failures.append("HTTP smoke/startup:\n" + traceback.format_exc()
