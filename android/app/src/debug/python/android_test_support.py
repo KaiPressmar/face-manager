@@ -66,6 +66,15 @@ def _wait_for(predicate, label, seconds=150):
     raise AssertionError(f"Timed out waiting for {label}; last value: {last!r}")
 
 
+def _error_log_tail():
+    path = Path(os.environ["FACE_MANAGER_DATA_DIR"]) / "logs" / "error.log"
+    if not path.is_file():
+        return f"No backend error log at {path}"
+    with path.open("rb") as log:
+        log.seek(max(0, path.stat().st_size - 8192))
+        return log.read().decode("utf-8", errors="replace")
+
+
 def _geotag(source, destination):
     from PIL import Image, TiffImagePlugin
 
@@ -99,6 +108,7 @@ def _smoke(port, token, fixture_dir, grace, astronaut):
     photos.mkdir(parents=True)
     _geotag(grace, photos / "grace_gps.jpg")
     shutil.copyfile(astronaut, photos / "astronaut.png")
+    assert sorted(path.name for path in photos.iterdir()) == ["astronaut.png", "grace_gps.jpg"]
     queued = _ok(port, token, "POST", "/api/imports", {"folder_path": str(photos)})
     assert queued.get("id"), queued
     imports = _wait_for(
@@ -107,9 +117,16 @@ def _smoke(port, token, fixture_dir, grace, astronaut):
                 else None), "import job completion")
     job = next((item for item in imports["jobs"] if item["id"] == queued["id"]), None)
     assert job and job.get("status") in ("completed", "done"), job
-    library = _wait_for(
-        lambda: (data if (data := _ok(port, token, "GET", "/api/images")).get("total", 0) >= 2
-                 else None), "two imported images")
+    if (job["total_images"] != 2 or job["processed_images"] != 2
+            or job.get("last_error")):
+        raise AssertionError(f"Import job: {job!r}\nBackend log tail:\n{_error_log_tail()}")
+    try:
+        library = _wait_for(
+            lambda: (data if (data := _ok(port, token, "GET", "/api/images"))
+                    .get("total", 0) >= 2 else None), "two imported images")
+    except AssertionError as error:
+        raise AssertionError(f"{error}; import job: {job!r}\n"
+                             f"Backend log tail:\n{_error_log_tail()}") from error
     assert library["total"] == 2, library
     for image in library["items"]:
         image_id = image["id"]

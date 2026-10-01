@@ -27,18 +27,22 @@ import java.util.concurrent.atomic.AtomicReference;
 @RunWith(AndroidJUnit4.class)
 public final class MainActivityTest {
     @Test public void coldLaunchExplainsLocalLibraryAccess() throws Exception {
-        appOp("deny");
-        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            AtomicReference<String> text = new AtomicReference<>("");
-            scenario.onActivity(activity -> text.set(allText(
-                    activity.findViewById(android.R.id.content))));
-            assertTrue(text.get().contains("unabhängig von Face Manager auf deinem PC"));
-            assertTrue(text.get().contains("Dateizugriff erlauben"));
+        MainActivity.fileAccessOverrideForTest = false;
+        try {
+            try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+                AtomicReference<String> text = new AtomicReference<>("");
+                scenario.onActivity(activity -> text.set(allText(
+                        activity.findViewById(android.R.id.content))));
+                assertTrue(text.get().contains("unabhängig von Face Manager auf deinem PC"));
+                assertTrue(text.get().contains("Dateizugriff erlauben"));
+            }
+        } finally {
+            MainActivity.fileAccessOverrideForTest = null;
         }
     }
 
     @Test public void grantedAccessOpensAllReactPagesAndZoomsMap() throws Exception {
-        appOp("allow");
+        grantAllFilesAccess();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             String url = waitForWebUrl(scenario);
             assertTrue(url.startsWith("http://127.0.0.1:"));
@@ -61,7 +65,7 @@ public final class MainActivityTest {
     }
 
     @Test public void backendCanStopAndRestartWithFreshSession() throws Exception {
-        appOp("allow");
+        grantAllFilesAccess();
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             waitForWebUrl(scenario);
             String oldToken = BackendService.getToken();
@@ -167,9 +171,9 @@ public final class MainActivityTest {
         return text.toString();
     }
 
-    private static void appOp(String mode) throws IOException {
+    private static void grantAllFilesAccess() throws IOException {
         ParcelFileDescriptor output = InstrumentationRegistry.getInstrumentation().getUiAutomation()
-                .executeShellCommand("appops set de.face_manager.app MANAGE_EXTERNAL_STORAGE " + mode);
+                .executeShellCommand("appops set de.face_manager.app MANAGE_EXTERNAL_STORAGE allow");
         try (FileInputStream input = new FileInputStream(output.getFileDescriptor())) {
             byte[] buffer = new byte[256];
             while (input.read(buffer) != -1) { /* wait until the command finishes */ }

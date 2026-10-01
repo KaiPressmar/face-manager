@@ -64,6 +64,8 @@ public final class MainActivity extends ComponentActivity {
     private static final int REQUEST_READ_FILES = 301;
     private static final int REQUEST_MEDIA_LOCATION = 302;
     private static final String KEY_EXPORT = "pendingExport";
+    // Instrumentation cannot revoke MANAGE_EXTERNAL_STORAGE in its own UID: Android kills it.
+    static volatile Boolean fileAccessOverrideForTest;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -153,6 +155,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private boolean hasFileAccess() {
+        if (BuildConfig.DEBUG && fileAccessOverrideForTest != null) {
+            return fileAccessOverrideForTest;
+        }
         if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
         return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
                 == PackageManager.PERMISSION_GRANTED;
