@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+import traceback
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -19,6 +20,7 @@ SHARED_MODULES = (
     "backend.tests.test_clustering_threshold",
     "backend.tests.test_task_control",
     "backend.tests.test_schema_recovery",
+    "backend.tests.test_database_restore",
     "backend.tests.test_deduplication",
     "backend.tests.test_filename_rename_preview",
     "backend.tests.test_settings_api",
@@ -43,7 +45,8 @@ def _request(port, token, method, route, payload=None, content_type="application
             return response.status, json.loads(body) if "json" in content else body
     except HTTPError as error:
         raise AssertionError(f"{method} {route}: HTTP {error.code}: "
-                             f"{error.read()[:500]!r}") from error
+                             f"{error.read()[:500]!r}\n"
+                             f"Backend log tail:\n{_error_log_tail()}") from error
 
 
 def _ok(port, token, method, route, payload=None, content_type="application/json"):
@@ -217,12 +220,28 @@ def run(context, bridge, data_root, grace, astronaut):
     import android_runtime
 
     running = False
+    failures = []
+    reports = []
     try:
         address = android_runtime.start(context, bridge, str(root))
         running = True
-        summary = _smoke(int(address["port"]), str(address["token"]), root,
-                         Path(grace), Path(astronaut))
+        reports.append(_smoke(int(address["port"]), str(address["token"]), root,
+                              Path(grace), Path(astronaut)))
+    except Exception:
+        failures.append("HTTP smoke/startup:\n" + traceback.format_exc()
+                        + "\nBackend log tail:\n" + _error_log_tail())
     finally:
         if running:
-            android_runtime.stop()
-    return summary + "; " + _shared()
+            try:
+                android_runtime.stop()
+            except Exception:
+                failures.append("Backend shutdown:\n" + traceback.format_exc()
+                                + "\nBackend log tail:\n" + _error_log_tail())
+    try:
+        reports.append(_shared())
+    except Exception:
+        failures.append("Shared backend regressions:\n" + traceback.format_exc()
+                        + "\nBackend log tail:\n" + _error_log_tail())
+    if failures:
+        raise AssertionError("\n".join(reports + failures))
+    return "; ".join(reports)

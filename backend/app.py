@@ -2,7 +2,6 @@ import asyncio
 import hmac
 import logging
 import os
-import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -1002,6 +1001,26 @@ def validate_database_file(path: Path) -> None:
         )
 
 
+def snapshot_database_backup(target_path: Path) -> None:
+    """Save the live SQLite state, including WAL, without copying OS metadata."""
+    source = get_conn()
+    target = None
+    try:
+        target = sqlite3.connect(target_path)
+        source.backup(target)
+        target.commit()
+    finally:
+        if target is not None:
+            target.close()
+        source.close()
+
+
+def remove_database_sidecars(database_path: Path) -> None:
+    """Discard WAL state belonging to the database file being replaced."""
+    for suffix in ("-wal", "-shm"):
+        database_path.with_name(database_path.name + suffix).unlink(missing_ok=True)
+
+
 @app.post("/api/system/select-folder")
 def api_select_folder(request: Request):
     """Open a native folder picker on the backend host."""
@@ -1234,14 +1253,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
     geo_backfill.stop()
     try:
         if current_db_path.exists():
-            shutil.copy2(DB_PATH, backup_path)
+            snapshot_database_backup(backup_path)
         validate_database_file(temp_path)
-        shutil.move(str(temp_path), DB_PATH)
-        wal_path = current_db_path.with_name(f"{current_db_path.name}-wal")
-        shm_path = current_db_path.with_name(f"{current_db_path.name}-shm")
-        for sidecar_path in (wal_path, shm_path):
-            if sidecar_path.exists():
-                sidecar_path.unlink()
+        os.replace(temp_path, current_db_path)
+        remove_database_sidecars(current_db_path)
         init_db()
         if not schedule_version_clustering_upgrade():
             run_startup_repairs("database_import")
@@ -1253,7 +1268,8 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         logger.exception("Database import failed; attempting recovery")
         try:
             if backup_path.exists():
-                shutil.move(str(backup_path), DB_PATH)
+                os.replace(backup_path, current_db_path)
+                remove_database_sidecars(current_db_path)
                 init_db()
                 if not schedule_version_clustering_upgrade():
                     run_startup_repairs("database_import_recovery")
@@ -1261,6 +1277,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 app_cache.clear()
             elif current_db_path.exists():
                 current_db_path.unlink()
+                remove_database_sidecars(current_db_path)
                 init_db()
                 if not schedule_version_clustering_upgrade():
                     run_startup_repairs("database_import_recovery")
