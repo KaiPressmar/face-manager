@@ -63,7 +63,9 @@ public final class MainActivity extends ComponentActivity {
     private static final int PAPER = Color.rgb(248, 248, 244);
     private static final int REQUEST_READ_FILES = 301;
     private static final int REQUEST_MEDIA_LOCATION = 302;
+    private static final int REQUEST_NOTIFICATIONS = 303;
     private static final String KEY_EXPORT = "pendingExport";
+    private static final String KEY_PERMISSION_IN_FLIGHT = "optionalPermissionInFlight";
     // Instrumentation cannot revoke MANAGE_EXTERNAL_STORAGE in its own UID: Android kills it.
     static volatile Boolean fileAccessOverrideForTest;
 
@@ -76,6 +78,7 @@ public final class MainActivity extends ComponentActivity {
     private String origin;
     private String pendingExport;
     private boolean pageErrorShown;
+    private boolean optionalPermissionInFlight;
     private CompletableFuture<String> folderChoice;
     private WebChromeClient.FileChooserParams chooserParams;
     private android.webkit.ValueCallback<Uri[]> fileCallback;
@@ -85,7 +88,10 @@ public final class MainActivity extends ComponentActivity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         bridge = new AndroidBridge(this);
-        if (state != null) pendingExport = state.getString(KEY_EXPORT);
+        if (state != null) {
+            pendingExport = state.getString(KEY_EXPORT);
+            optionalPermissionInFlight = state.getBoolean(KEY_PERMISSION_IN_FLIGHT);
+        }
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         getWindow().setNavigationBarColor(Color.TRANSPARENT);
@@ -126,11 +132,14 @@ public final class MainActivity extends ComponentActivity {
 
     @Override protected void onResume() {
         super.onResume();
+        String pauseReason = BackendService.consumePauseReason(this);
+        if (pauseReason != null) Toast.makeText(this, pauseReason, Toast.LENGTH_LONG).show();
         checkAccessAndStart();
     }
 
     @Override protected void onSaveInstanceState(Bundle out) {
         out.putString(KEY_EXPORT, pendingExport);
+        out.putBoolean(KEY_PERMISSION_IN_FLIGHT, optionalPermissionInFlight);
         super.onSaveInstanceState(out);
     }
 
@@ -170,13 +179,6 @@ public final class MainActivity extends ComponentActivity {
             showIntro();
             return;
         }
-        if (Build.VERSION.SDK_INT >= 29
-                && checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION)
-                != PackageManager.PERMISSION_GRANTED
-                && !getPreferences(0).getBoolean("asked_media_location", false)) {
-            getPreferences(0).edit().putBoolean("asked_media_location", true).apply();
-            requestPermissions(new String[]{Manifest.permission.ACCESS_MEDIA_LOCATION}, REQUEST_MEDIA_LOCATION);
-        }
         try {
             ContextCompat.startForegroundService(this, new Intent(this, BackendService.class));
         } catch (Exception ex) {
@@ -184,6 +186,28 @@ public final class MainActivity extends ComponentActivity {
                     Toast.LENGTH_LONG).show();
         }
         showCurrentState();
+        requestOptionalPermissions();
+    }
+
+    private void requestOptionalPermissions() {
+        if (optionalPermissionInFlight || !hasFileAccess() || isFinishing() || isDestroyed()) return;
+        if (Build.VERSION.SDK_INT >= 29
+                && checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION)
+                != PackageManager.PERMISSION_GRANTED
+                && !getPreferences(0).getBoolean("asked_media_location", false)) {
+            getPreferences(0).edit().putBoolean("asked_media_location", true).apply();
+            optionalPermissionInFlight = true;
+            requestPermissions(new String[]{Manifest.permission.ACCESS_MEDIA_LOCATION}, REQUEST_MEDIA_LOCATION);
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+                && !getPreferences(0).getBoolean("asked_notifications", false)) {
+            getPreferences(0).edit().putBoolean("asked_notifications", true).apply();
+            optionalPermissionInFlight = true;
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+        }
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions,
@@ -194,6 +218,10 @@ public final class MainActivity extends ComponentActivity {
                 && grantResults[0] != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Standortdaten in Fotos können eingeschränkt sein.",
                     Toast.LENGTH_LONG).show();
+        }
+        if (requestCode == REQUEST_MEDIA_LOCATION || requestCode == REQUEST_NOTIFICATIONS) {
+            optionalPermissionInFlight = false;
+            main.post(this::requestOptionalPermissions);
         }
     }
 
@@ -211,11 +239,42 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    void showApkInstallHelp() {
+        boolean needsSourcePermission = Build.VERSION.SDK_INT >= 26
+                && !getPackageManager().canRequestPackageInstalls();
+        String explanation = needsSourcePermission
+                ? "Android konnte das Update nicht öffnen. Erlaube Face Manager in den Einstellungen, unbekannte Apps zu installieren. Kehre danach zurück und tippe erneut auf Installieren."
+                : "Android konnte das Update nicht öffnen. Prüfe die APK-Datei und versuche die Installation erneut.";
+        new AlertDialog.Builder(this)
+                .setTitle("Update nicht geöffnet")
+                .setMessage(explanation)
+                .setNegativeButton("Schließen", null)
+                .setPositiveButton(needsSourcePermission ? "Einstellungen öffnen" : "OK",
+                        (dialog, which) -> {
+                            if (!needsSourcePermission) return;
+                            Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:" + getPackageName()));
+                            try { startActivity(settings); }
+                            catch (Exception ex) {
+                                try {
+                                    startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                            Uri.parse("package:" + getPackageName())));
+                                } catch (Exception ignored) {
+                                    Toast.makeText(this, "Öffne die App-Einstellungen von Face Manager manuell.",
+                                            Toast.LENGTH_LONG).show();
+                                }
+                            }
+                        })
+                .show();
+    }
+
     private void showIntro() {
         if (isFinishing() || isDestroyed()) return;
         root.removeAllViews();
         root.setBackgroundColor(PAPER);
-        new WindowInsetsControllerCompat(getWindow(), root).setAppearanceLightStatusBars(true);
+        WindowInsetsControllerCompat bars = new WindowInsetsControllerCompat(getWindow(), root);
+        bars.setAppearanceLightStatusBars(true);
+        bars.setAppearanceLightNavigationBars(true);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setGravity(Gravity.CENTER);
@@ -245,7 +304,9 @@ public final class MainActivity extends ComponentActivity {
         if (web != null) closeWeb();
         root.removeAllViews();
         root.setBackgroundColor(PAPER);
-        new WindowInsetsControllerCompat(getWindow(), root).setAppearanceLightStatusBars(true);
+        WindowInsetsControllerCompat bars = new WindowInsetsControllerCompat(getWindow(), root);
+        bars.setAppearanceLightStatusBars(true);
+        bars.setAppearanceLightNavigationBars(true);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setGravity(Gravity.CENTER);

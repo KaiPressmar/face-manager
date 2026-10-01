@@ -3,6 +3,8 @@ package de.face_manager.app;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import android.Manifest;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 import android.content.Intent;
 import android.webkit.WebView;
@@ -35,6 +37,9 @@ public final class MainActivityTest {
                         activity.findViewById(android.R.id.content))));
                 assertTrue(text.get().contains("unabhängig von Face Manager auf deinem PC"));
                 assertTrue(text.get().contains("Dateizugriff erlauben"));
+                scenario.onActivity(activity -> assertTrue("Light onboarding needs dark navigation icons",
+                        (activity.getWindow().getDecorView().getSystemUiVisibility()
+                                & View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR) != 0));
             }
         } finally {
             MainActivity.fileAccessOverrideForTest = null;
@@ -172,6 +177,10 @@ public final class MainActivityTest {
     }
 
     private static void grantAllFilesAccess() throws IOException {
+        if (Build.VERSION.SDK_INT >= 33) {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                    .grantRuntimePermission("de.face_manager.app", Manifest.permission.POST_NOTIFICATIONS);
+        }
         ParcelFileDescriptor output = InstrumentationRegistry.getInstrumentation().getUiAutomation()
                 .executeShellCommand("appops set de.face_manager.app MANAGE_EXTERNAL_STORAGE allow");
         try (FileInputStream input = new FileInputStream(output.getFileDescriptor())) {
