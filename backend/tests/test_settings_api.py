@@ -302,7 +302,7 @@ class SettingsApiTest(unittest.TestCase):
     @patch("backend.app.validate_database_file")
     @patch("backend.app.reset_import_resources")
     @patch("backend.app.init_db")
-    @patch("backend.app.shutil.move")
+    @patch("backend.app.os.replace")
     @patch("backend.app.import_queue")
     @patch("backend.app.os.close")
     @patch("backend.app.tempfile.mkstemp")
@@ -311,7 +311,7 @@ class SettingsApiTest(unittest.TestCase):
         mkstemp,
         _,
         import_queue,
-        move,
+        replace,
         init_db,
         reset_import_resources,
         validate_database_file,
@@ -327,7 +327,7 @@ class SettingsApiTest(unittest.TestCase):
 
         write_bytes.assert_called_once_with(b"sqlite")
         validate_database_file.assert_called_once()
-        move.assert_called_once_with("/tmp/import.sqlite", app.DB_PATH)
+        replace.assert_called_once_with(app.Path("/tmp/import.sqlite"), app.Path(app.DB_PATH))
         init_db.assert_called_once_with()
         schedule_version_clustering_upgrade.assert_called_once_with()
         reset_import_resources.assert_called_once_with()

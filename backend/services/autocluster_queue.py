@@ -130,6 +130,34 @@ class AutoClusterQueue:
         self._active_request: Optional[ReclusterRequest] = None
         # Single coalesced request to run once the active task finishes.
         self._pending_request: Optional[ReclusterRequest] = None
+        self._stopping = False
+
+    def resume_after_shutdown(self) -> None:
+        """Allow a new app lifespan only after the previous worker has exited."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("Previous clustering worker is still running")
+            self._stopping = False
+
+    def stop(self, timeout: float = 20.0) -> None:
+        """Cancel pending and active work and wait for the active pass to leave SQLite."""
+        with self._lock:
+            self._stopping = True
+            self._pending_request = None
+            if self._task is not None and self._task.status == "queued":
+                self._task.status = "cancelled"
+                self._task.finished_at = _utc_now()
+                self._task.stage = "cancelled"
+                self._active_request = None
+            elif self._task is not None and self._task.status in {"running", "paused", "cancelling"}:
+                self._task.status = "cancelling"
+                self._cancel_event.set()
+            thread = self._thread
+        self._notify_change()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                raise TimeoutError("Clustering worker did not stop")
 
     def start(
         self,
@@ -153,6 +181,8 @@ class AutoClusterQueue:
             repair_callable=repair_callable or self._repair_callable,
         )
         with self._lock:
+            if self._stopping:
+                return None
             active = self._task is not None and self._task.status in {
                 "queued", "running", "paused", "cancelling"
             }
@@ -191,6 +221,8 @@ class AutoClusterQueue:
         """Re-check the readiness gate after surrounding activity changed."""
         launched = False
         with self._lock:
+            if self._stopping:
+                return
             if (
                 self._task is not None
                 and self._task.status == "queued"
@@ -210,6 +242,8 @@ class AutoClusterQueue:
 
     def _maybe_launch_locked(self) -> bool:
         """Start the queued task if the writer is free. Caller holds the lock."""
+        if self._stopping:
+            return False
         if self._task is None or self._task.status != "queued":
             return False
         if self._active_request is None:
@@ -423,6 +457,10 @@ class AutoClusterQueue:
         """Start the coalesced pending request once the worker is free."""
         launched = False
         with self._lock:
+            if self._stopping:
+                self._pending_request = None
+                self._active_request = None
+                return
             if self._task is None or self._task.id != finished_task_id:
                 return
             if self._task.status not in {"completed", "failed", "cancelled"}:

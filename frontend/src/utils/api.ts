@@ -3,6 +3,7 @@ import type { ThemeMode } from "./theme";
 declare global {
   interface Window {
     FACE_MANAGER_API_BASE?: string;
+    AndroidExport?: { requestDatabaseExport(): void };
   }
 }
 
@@ -103,8 +104,8 @@ export interface FolderTree {
 export interface RuntimeInfo {
   compute_mode: "gpu" | "cpu";
   execution_provider: string;
-  host_platform: "windows" | "linux";
-  display_platform?: "windows" | "linux";
+  host_platform: "windows" | "linux" | "android";
+  display_platform?: "windows" | "linux" | "android";
 }
 
 export interface ReleaseNotesSection {
@@ -132,7 +133,7 @@ export interface AvailableUpdate {
   release_url?: string;
   published_at?: string | null;
   sections?: ReleaseNotesSection[];
-  build_variant?: "cpu" | "gpu";
+  build_variant?: "cpu" | "gpu" | "android";
   installer_name?: string | null;
   skipped?: boolean;
   can_install?: boolean;
