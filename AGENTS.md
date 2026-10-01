@@ -1,4 +1,60 @@
-# Repository Instructions for Codex Agents
+# Repository Instructions for Codex and Claude Agents
+
+## Agent orchestration (Claude and Codex)
+
+The main agent owns requirements, decisions, integration, and the complete final
+diff. Keep a compact task ledger with each worker's owner, scope, model/effort,
+status, evidence, and blockers, plus key decisions and dependencies; update it
+as assignments finish or change. Default to delegating substantive
+investigation, implementation, testing, and review; keep the main session focused
+on orchestration. Do trivial work inline when delegation costs more than it saves,
+or work locally when delegation is unavailable. Respect
+the active runtime's tools, limits, and instructions.
+
+- Assign one writer per file. Start with one or two workers; add independent,
+  useful parallel work only within runtime limits. Workers must not delegate
+  again without a specific assignment from the main agent.
+- Workers must not mutate git state (commit, branch, merge, push, or PR). Avoid
+  duplicate investigation and full test runs. Workers may run focused checks
+  for their own changes and report blockers promptly. The main agent integrates
+  work, checks worker evidence against the code, reviews the complete diff, and
+  owns the required final validation and handoff; it may assign one worker to
+  run validation, then assess that worker's evidence before handoff.
+- Give each worker a self-contained, minimal task: objective, relevant paths,
+  applicable repository and skill constraints, acceptance checks, and an output
+  budget (about 200 words by default). Do not rely on a fresh worker inheriting
+  these instructions. Fork only the context needed. Request concise evidence
+  with paths, checks, risks, and unresolved uncertainty; do not ask workers to
+  hide doubt.
+- Search with `rg` and read relevant slices; avoid whole-repository dumps. Batch
+  independent reads, retain long logs outside the main context, and return only
+  decisive evidence. Load skills on demand; do not repeatedly reread instructions.
+- Reuse a worker for a related task at the same model tier; otherwise create a
+  fresh, scoped handoff. Use skill-provided presets only when available. Cost
+  routing is a heuristic, not a guarantee of optimality or savings:
+
+  | Work | Model tier | Reasoning |
+  | --- | --- | --- |
+  | Routine lookup or mechanical edit | Lightweight | Low |
+  | Scoped implementation, debugging, or review | Balanced | Medium |
+  | Ambiguous architecture, concurrency, or security | Frontier | High |
+
+Escalate the approach or model when concrete failure or uncertainty justifies
+it; do not repeat cheap guesses. Continue until the task is done or a concrete
+blocker remains. Use maximum or ultra reasoning only for a specific hard problem.
+Before selecting a model, inspect the models and controls exposed by the live
+tool. If a model or effort override is unsupported, report the limit rather
+than claiming it was applied.
+
+For Codex, current-session examples are `gpt-6-luna` at low/medium for routine
+work, `gpt-6-sol` at medium for normal scoped work, and `gpt-6-astra` at high
+for difficult work. These are illustrative, not pricing guarantees or a fixed
+model catalog. Choose a task-appropriate model and effort explicitly when
+supported. When `fork_turns` is exposed, prefer `"none"` or the smallest
+relevant integer for a self-contained assignment. Full-history forks inherit the
+parent's settings and may not accept overrides; follow the live tool contract.
+Recheck capabilities when they change:
+[Codex subagent documentation](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
 ## Separate release notes from developer notes
 

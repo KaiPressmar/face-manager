@@ -18,6 +18,7 @@ from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
 from .face_thumbnails import delete_face_thumbnail
+from .geo import record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
     stored_path as _stored_filesystem_path,
@@ -855,6 +856,7 @@ class ImportProcessor:
             image_id: Canonical image identifier.
             hashed: Hashed path metadata to attach.
         """
+        record_image_metadata(cursor, image_id, hashed.normalized_path)
         existing = cursor.execute(
             "SELECT image_id FROM image_location WHERE path = ?",
             (hashed.normalized_path,),

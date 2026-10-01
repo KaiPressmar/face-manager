@@ -65,6 +65,7 @@ const Topbar: React.FC = () => {
           <button
             type="button"
             className="topbar-import-button"
+            aria-label="Bilder hinzufügen"
             onClick={() => setShowImport(true)}
             title="Einen Ordner mit Bildern zur Erkennung hinzufügen"
           >

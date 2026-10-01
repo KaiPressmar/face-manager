@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchUpdateDownloadState,
   installDownloadedUpdate,
@@ -8,6 +8,8 @@ import {
   type AvailableUpdate,
   type UpdateDownloadState,
 } from "../../utils/api";
+
+import { useModalFocus } from "../../hooks/useModalFocus";
 
 interface Props {
   update: AvailableUpdate;
@@ -44,13 +46,8 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
     return () => window.clearInterval(timer);
   }, [download.status]);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [download.status, onClose]);
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(dialogRef, onClose, !busy);
 
   const progress = useMemo(() => {
     if (!download.total_bytes || !download.downloaded_bytes) return null;
@@ -106,7 +103,7 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
     <div className="modal-backdrop update-modal-backdrop" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section className="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title">
+      <section ref={dialogRef} tabIndex={-1} className="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-title">
         <header className="update-modal__header">
           <div>
             <span className="update-modal__eyebrow">Neue Version verfügbar</span>

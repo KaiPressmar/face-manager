@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useRef, useState } from "react";
+import { useModalFocus } from "../../hooks/useModalFocus";
 
 import { processFolder, selectImportFolder } from "../../utils/api";
 
@@ -14,16 +15,11 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = isBrowsing || isStarting;
-
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [busy, onClose]);
+  const dialogRef = useRef<HTMLElement>(null);
+  useModalFocus(dialogRef, () => onClose(false), !busy);
 
   const browse = async () => {
+    if (busy) return;
     setIsBrowsing(true);
     setError(null);
     try {
@@ -42,7 +38,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
 
   const submit = async () => {
     const normalizedPath = folderPath.trim();
-    if (!normalizedPath) return;
+    if (!normalizedPath || busy) return;
 
     setIsStarting(true);
     setError(null);
@@ -69,6 +65,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
       <section
         className={`folder-picker-modal ${IS_DEVELOPMENT ? "folder-picker-modal--dev" : "folder-picker-modal--prod"}`}
         role="dialog"
+        ref={dialogRef}
         aria-modal="true"
         aria-labelledby="folder-picker-title"
       >
@@ -114,6 +111,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
                   placeholder="C:\\Users\\Name\\Pictures oder /mnt/c/Users/Name/Pictures"
                   disabled={isStarting}
                   autoFocus
+                  data-initial-focus
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -127,6 +125,8 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
                 <button
                   type="button"
                   className="folder-picker-modal__browse"
+                  autoFocus
+                  data-initial-focus
                   onClick={() => void browse()}
                   disabled={busy}
                 >

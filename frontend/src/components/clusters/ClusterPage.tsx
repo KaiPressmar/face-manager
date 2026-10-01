@@ -35,6 +35,7 @@ import ClusterFacesGrid from "./ClusterFacesGrid";
 import FaceGroupGallery from "./FaceGroupGallery";
 import ClusterList from "./ClusterList";
 import ReviewInbox from "./ReviewInbox";
+import { useModalFocus } from "../../hooks/useModalFocus";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
 
@@ -179,9 +180,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   >("unassigned");
   const [selectedFaceIds, setSelectedFaceIds] = useState<number[]>([]);
   const [detailModal, setDetailModal] = useState<DetailModalState>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
   const [isListLoading, setIsListLoading] = useState(true);
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
+  const detailModalRef = useRef<HTMLElement>(null);
+  useModalFocus(detailModalRef, () => setDetailModal(null), !isMutating, detailModal !== null);
   const [highlightedClusterId, setHighlightedClusterId] = useState<number | null>(null);
   const [clusterDetailsMap, setClusterDetailsMap] = useState<Record<number, ClusterDetails>>({});
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
@@ -202,6 +206,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const liveRefreshTimerRef = useRef<number | null>(null);
   const needsCatchUpRefreshRef = useRef(false);
+
+  useEffect(() => {
+    setModalError(null);
+  }, [detailModal?.type]);
 
   const selectedClusterId =
     selectedTarget?.type === "cluster" ? selectedTarget.clusterId : null;
@@ -1121,8 +1129,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         selectedTarget?.type === "cluster" &&
         openClusters.some((cluster) => cluster.cluster_id === selectedTarget.clusterId);
       if (!selectedIsOpen) {
-        const next = pickContinuation(openClusters);
-        setSelectedTarget(next ? { type: "cluster", clusterId: next } : null);
+        const next = pickContinuation(openClusters) ?? openClusters[0]?.cluster_id ?? null;
+        setSelectedTarget(next !== null ? { type: "cluster", clusterId: next } : null);
       } else {
         // Selection survived, so the continuation hint is stale.
         workflowFallbackRef.current = [];
@@ -1137,7 +1145,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       // the first cluster as shown in the sidebar — grouped by person, sorted
       // alphabetically — instead of the raw data order. Once inside the view a
       // deliberate pick is preserved.
-      if (!selectedIsAssigned || enteringWorkspaceView) {
+      if (!selectedIsAssigned) {
         const continuation = enteringWorkspaceView ? null : pickContinuation(assignedClusters);
         const first = firstAssignedClusterInSidebarOrder(assignedClusters);
         const nextClusterId = continuation ?? (first ? first.cluster_id : null);
@@ -1153,7 +1161,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       }
       return;
     }
-    if (selectedTarget?.type !== "group") {
+    const selectedIsArchive = selectedTarget?.type === "group" &&
+      reviewGroups.some((group) => group.group_key === selectedTarget.groupKey);
+    if (!selectedIsArchive) {
       const preferred = reviewGroups.find((group) => group.group_key === "unknown_person")
         ?? reviewGroups.find((group) => group.group_key === "not_face");
       setSelectedTarget(preferred ? { type: "group", groupKey: preferred.group_key } : null);
@@ -1447,18 +1457,22 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
   const handleRenameCluster = async () => {
     if (selectedTarget?.type !== "cluster" || isMutating) {
-      return;
+      return false;
     }
     const nextLabel = clusterLabelInput.trim();
     if (!nextLabel) {
-      return;
+      return false;
     }
+    setModalError(null);
     setIsMutating(true);
     try {
       await renameCluster(selectedTarget.clusterId, nextLabel);
       await refreshAllData();
+      return true;
     } catch (error) {
       console.error("Fehler beim Umbenennen des Clusters:", error);
+      setModalError(error instanceof Error ? error.message : "Die Gruppe konnte nicht umbenannt werden.");
+      return false;
     } finally {
       setIsMutating(false);
     }
@@ -1471,20 +1485,24 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
   const handleRenamePerson = async () => {
     if (!selectedPersonId || isMutating) {
-      return;
+      return false;
     }
     const nextName = personNameInput.trim();
     if (!nextName) {
-      return;
+      return false;
     }
+    setModalError(null);
     setIsMutating(true);
     try {
       await renamePerson(selectedPersonId, nextName);
       const nextPersons = await listPersons();
       setPersons(nextPersons);
       await refreshAllData();
+      return true;
     } catch (error) {
       console.error("Fehler beim Umbenennen der Person:", error);
+      setModalError(error instanceof Error ? error.message : "Die Person konnte nicht umbenannt werden.");
+      return false;
     } finally {
       setIsMutating(false);
     }
@@ -1492,7 +1510,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
   const handleDeletePerson = async () => {
     if (!selectedPersonId || !selectedSummary?.person_name || isMutating) {
-      return;
+      return false;
     }
     const confirmed = window.confirm(
       `Person "${selectedSummary.person_name}" löschen und zugeordnete Gesichter als ${
@@ -1504,16 +1522,20 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       } einordnen?`,
     );
     if (!confirmed) {
-      return;
+      return false;
     }
+    setModalError(null);
     setIsMutating(true);
     try {
       await deletePerson(selectedPersonId, personDeleteTarget);
       const nextPersons = await listPersons();
       setPersons(nextPersons);
       await refreshAllData();
+      return true;
     } catch (error) {
       console.error("Fehler beim Löschen der Person:", error);
+      setModalError(error instanceof Error ? error.message : "Die Person konnte nicht gelöscht werden.");
+      return false;
     } finally {
       setIsMutating(false);
     }
@@ -1958,9 +1980,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       )}
 
       {detailModal?.type === "rename_cluster" && selectedTarget?.type === "cluster" && (
-        <div className="modal-backdrop" onMouseDown={() => setDetailModal(null)}>
+        <div className="modal-backdrop" onMouseDown={() => { if (!isMutating) setDetailModal(null); }}>
           <section
             className="cluster-action-modal cluster-action-modal--narrow"
+            ref={detailModalRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="cluster-rename-title"
@@ -1975,6 +1998,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
               <button
                 className="modal-close-button"
                 onClick={() => setDetailModal(null)}
+                disabled={isMutating}
                 aria-label="Schließen"
                 type="button"
               >
@@ -1987,18 +2011,27 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                 value={clusterLabelInput}
                 onChange={(event) => setClusterLabelInput(event.target.value)}
                 className="cluster-assignment-form__input"
+                autoFocus
+                data-initial-focus
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing && !isMutating && clusterLabelInput.trim()) {
+                    event.preventDefault();
+                    void handleRenameCluster().then((success) => { if (success) setDetailModal(null); });
+                  }
+                }}
                 placeholder={`Gruppe ${selectedTarget.clusterId}`}
                 disabled={isMutating}
               />
             </div>
+            {modalError && <p className="settings-feedback settings-feedback--error" role="alert">{modalError}</p>}
             <footer className="cluster-action-modal__footer">
-              <button className="secondary-button" onClick={() => setDetailModal(null)} type="button">
+              <button className="secondary-button" onClick={() => setDetailModal(null)} disabled={isMutating} type="button">
                 Abbrechen
               </button>
               <button
                 className="primary-button"
                 disabled={isMutating || !clusterLabelInput.trim()}
-                onClick={() => void handleRenameCluster().then(() => setDetailModal(null))}
+                onClick={() => void handleRenameCluster().then((success) => { if (success) setDetailModal(null); })}
                 type="button"
               >
                 Speichern
@@ -2009,9 +2042,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       )}
 
       {detailModal?.type === "manage_person" && selectedTarget?.type === "cluster" && selectedPersonId && (
-        <div className="modal-backdrop" onMouseDown={() => setDetailModal(null)}>
+        <div className="modal-backdrop" onMouseDown={() => { if (!isMutating) setDetailModal(null); }}>
           <section
             className="cluster-action-modal cluster-action-modal--narrow"
+            ref={detailModalRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="person-manage-title"
@@ -2026,6 +2060,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
               <button
                 className="modal-close-button"
                 onClick={() => setDetailModal(null)}
+                disabled={isMutating}
                 aria-label="Schließen"
                 type="button"
               >
@@ -2039,19 +2074,28 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                   value={personNameInput}
                   onChange={(event) => setPersonNameInput(event.target.value)}
                   className="cluster-assignment-form__input"
+                  autoFocus
+                  data-initial-focus
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.nativeEvent.isComposing && !isMutating && personNameInput.trim()) {
+                      event.preventDefault();
+                      void handleRenamePerson().then((success) => { if (success) setDetailModal(null); });
+                    }
+                  }}
                   placeholder="Personenname"
                   disabled={isMutating}
                 />
                 <button
                   className="primary-button"
                   disabled={isMutating || !personNameInput.trim()}
-                  onClick={() => void handleRenamePerson().then(() => setDetailModal(null))}
+                  onClick={() => void handleRenamePerson().then((success) => { if (success) setDetailModal(null); })}
                   type="button"
                 >
                   Person umbenennen
                 </button>
               </div>
 
+              {modalError && <p className="settings-feedback settings-feedback--error" role="alert">{modalError}</p>}
               <div className="cluster-danger-zone">
                 <strong>Person löschen</strong>
                 <p>Wähle, wohin die bisher zugeordneten Gesichter beim Löschen einsortiert werden.</p>
@@ -2072,7 +2116,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                 <button
                   className="neon-card cluster-danger-zone__button"
                   disabled={isMutating}
-                  onClick={() => void handleDeletePerson().then(() => setDetailModal(null))}
+                  onClick={() => void handleDeletePerson().then((success) => { if (success) setDetailModal(null); })}
                   type="button"
                 >
                   Person löschen

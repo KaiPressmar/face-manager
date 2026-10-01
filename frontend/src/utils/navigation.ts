@@ -1,6 +1,6 @@
 import type { FaceReviewGroupKey } from "./api";
 
-export type AppPage = "people" | "renaming" | "review" | "settings";
+export type AppPage = "people" | "map" | "renaming" | "review" | "settings";
 export type SettingsSection =
   | "erkennung"
   | "dateinamen"
@@ -18,6 +18,7 @@ export interface NavigationEntry {
 
 const PAGE_SEGMENTS: Record<AppPage, string> = {
   people: "bilder",
+  map: "weltkarte",
   renaming: "dateinamen",
   review: "gesichter-pruefen",
   settings: "einstellungen",
@@ -63,7 +64,8 @@ export function parseNavigationHash(hash: string): NavigationEntry {
   if (!page) return { page: "people" };
 
   if (page === "review" && segments[1] === "gruppe") {
-    const clusterId = Number.parseInt(segments[2] ?? "", 10);
+    const rawId = segments[2] ?? "";
+    const clusterId = /^\d+$/.test(rawId) ? Number(rawId) : NaN;
     if (Number.isSafeInteger(clusterId) && clusterId > 0) {
       return { page, clusterId };
     }

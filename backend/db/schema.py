@@ -685,6 +685,15 @@ def _initialize_schema(conn):
         """
     )
     _create_image_table(cur)
+    image_columns = {row["name"] for row in cur.execute("PRAGMA table_info(image)")}
+    for name, column_type in (
+        ("latitude", "REAL"),
+        ("longitude", "REAL"),
+        ("captured_at", "TEXT"),
+        ("metadata_scanned_at", "TEXT"),
+    ):
+        if name not in image_columns:
+            cur.execute(f"ALTER TABLE image ADD COLUMN {name} {column_type}")
 
     face_exists = cur.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'face'"
@@ -708,6 +717,15 @@ def _initialize_schema(conn):
         """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_image_directory ON image(directory)")
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_geo_date "
+        "ON image(latitude, longitude, captured_at) "
+        "WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_metadata_pending "
+        "ON image(id) WHERE metadata_scanned_at IS NULL"
+    )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_location_image_id "
         "ON image_location(image_id)"

@@ -255,7 +255,16 @@ const ClusterList: React.FC<ClusterListProps> = ({
           overflow: "visible",
           textAlign: "left",
         }}
+        role="button"
+        tabIndex={0}
+        aria-pressed={isSelected}
         onClick={() => onSelect(cluster.cluster_id)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(cluster.cluster_id);
+          }
+        }}
       >
         <div style={{ fontSize: 13, fontWeight: 700, color: isSelected ? "var(--text-strong)" : "var(--text)" }}>
           {displayLabel}

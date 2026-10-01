@@ -491,13 +491,17 @@ const SettingsPage: React.FC<{
     setMessage(null);
     try {
       await importDatabase(file);
-      const next = await fetchSettings();
-      setSettings(next);
-      setStrictnessInput(next.clustering_strictness.toFixed(2));
-      setFilenameBlockSeparatorInput(next.filename_person_block_separator);
-      setPersonJoinerInput(next.filename_person_joiner);
-      setFileLogLevelInput(next.file_log_level);
-      setMessage("Die Sicherung wurde wiederhergestellt.");
+      try {
+        const next = await fetchSettings();
+        setSettings(next);
+        setStrictnessInput(next.clustering_strictness.toFixed(2));
+        setFilenameBlockSeparatorInput(next.filename_person_block_separator);
+        setPersonJoinerInput(next.filename_person_joiner);
+        setFileLogLevelInput(next.file_log_level);
+        setMessage("Die Sicherung wurde wiederhergestellt.");
+      } catch {
+        setMessage("Die Sicherung wurde wiederhergestellt. Lade die Seite neu, um die Einstellungen anzuzeigen.");
+      }
     } catch (importError) {
       setError(
         importError instanceof Error
@@ -729,6 +733,7 @@ const SettingsPage: React.FC<{
                             : "settings-format-preset"
                         }
                         type="button"
+                        aria-pressed={filenameBlockSeparatorInput === preset.value}
                         onClick={() => setFilenameBlockSeparatorInput(preset.value)}
                       >
                         <strong>{preset.label}</strong>
@@ -743,6 +748,12 @@ const SettingsPage: React.FC<{
                       type="text"
                       value={filenameBlockSeparatorInput}
                       onChange={(event) => setFilenameBlockSeparatorInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.nativeEvent.isComposing && !isSaving) {
+                          event.preventDefault();
+                          void handleSaveSuffixFormat();
+                        }
+                      }}
                       placeholder="z. B.  - "
                     />
                   </label>
@@ -773,6 +784,7 @@ const SettingsPage: React.FC<{
                             : "settings-format-preset"
                         }
                         type="button"
+                        aria-pressed={personJoinerInput === preset.value}
                         onClick={() => setPersonJoinerInput(preset.value)}
                       >
                         <strong>{preset.label}</strong>
@@ -787,6 +799,12 @@ const SettingsPage: React.FC<{
                       type="text"
                       value={personJoinerInput}
                       onChange={(event) => setPersonJoinerInput(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.nativeEvent.isComposing && !isSaving) {
+                          event.preventDefault();
+                          void handleSaveSuffixFormat();
+                        }
+                      }}
                       placeholder="z. B. ,  oder  / "
                     />
                     <small>Nur die Namen: {joinerPreviewText}</small>

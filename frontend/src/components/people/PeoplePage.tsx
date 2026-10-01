@@ -79,6 +79,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   const [imageGridSize, setImageGridSize] = useState<ImageGridSize>(readImageGridSize);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState(false);
+  const [refreshError, setRefreshError] = useState(false);
+  const [retryLoad, setRetryLoad] = useState(0);
+  const [retryRefresh, setRetryRefresh] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [totalImages, setTotalImages] = useState(0);
   // Unfiltered library size, so the bar can say "162 von 3.000".
@@ -86,6 +91,9 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const latestQueryRef = useRef(0);
+  const loadMoreRequestRef = useRef(0);
+  const isFetchingFirstPageRef = useRef(true);
+  const isMountedRef = useRef(true);
   const loadedCountRef = useRef(PAGE_SIZE);
   const prefetchedPageRef = useRef<ImagePage | null>(null);
   const prefetchedOffsetRef = useRef<number | null>(null);
@@ -94,6 +102,15 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   const pageHeaderRef = useRef<HTMLElement | null>(null);
   const liveRefreshTimerRef = useRef<number | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      latestQueryRef.current += 1;
+      loadMoreRequestRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
@@ -127,6 +144,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         offset,
       });
       if (
+        !isMountedRef.current ||
         latestQueryRef.current !== requestId ||
         queryKeyRef.current !== expectedQueryKey ||
         page.offset !== offset
@@ -144,6 +162,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     prefetchPromiseRef.current = prefetchPromise;
     try {
       await prefetchPromise;
+    } catch {
+      // Load more can make a normal request when the speculative fetch fails.
     } finally {
       if (prefetchPromiseRef.current === prefetchPromise) {
         prefetchPromiseRef.current = null;
@@ -166,8 +186,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     prefetchedPageRef.current = null;
     prefetchedOffsetRef.current = null;
     prefetchPromiseRef.current = null;
-    setIsLoading(true);
-    setHasMore(false);
+    loadMoreRequestRef.current += 1;
+    isFetchingFirstPageRef.current = true;
+    setIsLoading(images.length === 0);
+    setIsLoadingMore(false);
+    setLoadError(false);
+    setLoadMoreError(false);
+    setRefreshError(false);
 
     const loadImages = async (limit: number) => {
       try {
@@ -186,6 +211,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
+        setLoadError(false);
         setSelectedPersons((current) => {
           const next = current.filter((person) =>
             page.available_persons.includes(person),
@@ -196,8 +222,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         if (page.has_more) {
           void scheduleNextPagePrefetch(requestId, loadedCountRef.current, queryKey);
         }
+      } catch (error) {
+        if (!isMounted || latestQueryRef.current !== requestId) return;
+        console.error("Bilder konnten nicht geladen werden:", error);
+        setLoadError(true);
       } finally {
         if (isMounted && latestQueryRef.current === requestId) {
+          isFetchingFirstPageRef.current = false;
           setIsLoading(false);
         }
       }
@@ -208,7 +239,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     return () => {
       isMounted = false;
     };
-  }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
     if (!active) {
@@ -267,7 +298,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
           limit: loadedCountRef.current,
           offset: 0,
         });
-        if (!isMounted || latestQueryRef.current !== requestId) return;
+        if (!isMounted || latestQueryRef.current !== requestId) return false;
         // Keep existing cards at their current array index while the user is
         // below the top. New imports are appended to this live snapshot instead
         // of redistributing the masonry columns underneath the user's pointer.
@@ -289,6 +320,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
+        setLoadError(false);
         restoreViewportAnchor(anchor);
         prefetchedPageRef.current = null;
         prefetchedOffsetRef.current = null;
@@ -301,8 +333,12 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
             queryKeyRef.current,
           );
         }
+        return true;
       } catch (error) {
-        console.error("Live-Aktualisierung der Bilder fehlgeschlagen:", error);
+        if (isMounted && latestQueryRef.current === requestId) {
+          console.error("Live-Aktualisierung der Bilder fehlgeschlagen:", error);
+        }
+        return false;
       }
     };
 
@@ -310,13 +346,15 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
       try {
         const page = await fetchImages({ limit: 1, offset: 0 });
         if (isMounted) setLibraryTotal(page.total);
-      } catch {
-        // A later checkpoint or focus event retries without disturbing the UI.
+        return true;
+      } catch (error) {
+        if (isMounted) console.error("Bibliotheksgröße konnte nicht geladen werden:", error);
+        return false;
       }
     };
 
     const runRefresh = async (preserveViewport = true) => {
-      if (document.visibilityState !== "visible" || isLoadingMore) return;
+      if (document.visibilityState !== "visible" || isLoadingMore || isFetchingFirstPageRef.current) return;
       const idleIn = userBusyUntil - performance.now();
       if (idleIn > 0) {
         scheduleRefresh(preserveViewport, idleIn + 50);
@@ -328,10 +366,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
       }
       refreshInFlight = true;
       try {
-        await Promise.all([
+        const [imagesUpdated, totalUpdated] = await Promise.all([
           refreshVisibleImages(preserveViewport),
           refreshLibraryTotal(),
         ]);
+        if (isMounted) setRefreshError(!imagesUpdated || !totalUpdated);
       } finally {
         refreshInFlight = false;
         if (isMounted && refreshPending) {
@@ -389,7 +428,9 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
       scheduleRefresh(false, FINAL_REFRESH_DELAY_MS, true);
     } else {
       hasActivatedLiveRefreshRef.current = true;
-      void refreshLibraryTotal();
+      void refreshLibraryTotal().then((updated) => {
+        if (isMounted && !updated) setRefreshError(true);
+      });
     }
 
     return () => {
@@ -404,10 +445,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, faceStatuses, groupingMode, isLoadingMore, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, faceStatuses, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
-    if (isLoading || isLoadingMore || !hasMore) return;
+    if (!isMountedRef.current || isLoading || isLoadingMore || isFetchingFirstPageRef.current || loadError || !hasMore) return;
+    const loadMoreRequest = ++loadMoreRequestRef.current;
     const requestId = latestQueryRef.current;
     const offset = loadedCountRef.current;
     const cachedPage =
@@ -424,6 +466,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
       setAvailablePersons(page.available_persons);
       setTotalImages(page.total);
       setHasMore(page.has_more);
+      setLoadMoreError(false);
       if (page.has_more) {
         void scheduleNextPagePrefetch(
           requestId,
@@ -441,6 +484,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     }
 
     setIsLoadingMore(true);
+    setLoadMoreError(false);
     try {
       const page = await fetchImages({
         folders: selectedFolders,
@@ -451,10 +495,14 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         limit: PAGE_SIZE,
         offset,
       });
-      if (latestQueryRef.current !== requestId) return;
+      if (!isMountedRef.current || latestQueryRef.current !== requestId || loadMoreRequestRef.current !== loadMoreRequest) return;
       appendPage(page);
+    } catch (error) {
+      if (!isMountedRef.current || latestQueryRef.current !== requestId || loadMoreRequestRef.current !== loadMoreRequest) return;
+      console.error("Weitere Bilder konnten nicht geladen werden:", error);
+      setLoadMoreError(true);
     } finally {
-      setIsLoadingMore(false);
+      if (isMountedRef.current && loadMoreRequestRef.current === loadMoreRequest) setIsLoadingMore(false);
     }
   };
 
@@ -468,6 +516,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     libraryTotal ?? (!hasActiveFilters ? totalImages : null);
   const libraryIsEmpty =
     !isLoading &&
+    !loadError &&
     knownLibraryTotal === 0;
   const imageGridSizeIndex = Math.max(
     0,
@@ -606,10 +655,36 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         </div>
       )}
 
-      <ImageGrid
+      {loadError && (
+        <div className="image-grid-status" role="alert">
+          Bilder konnten nicht geladen werden. {images.length > 0 && "Bereits angezeigte Bilder bleiben erhalten. "}
+          <button type="button" onClick={() => setRetryLoad((value) => value + 1)}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+      {refreshError && !loadError && (
+        <div className="image-grid-status" role="alert">
+          Die Bibliothek konnte nicht aktualisiert werden.{" "}
+          <button type="button" onClick={() => setRetryRefresh((value) => value + 1)}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+      {loadMoreError && !loadError && (
+        <div className="image-grid-status" role="alert">
+          Weitere Bilder konnten nicht geladen werden.{" "}
+          <button type="button" onClick={() => void loadMoreImages()}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+
+      {(!loadError || images.length > 0) && (
+        <ImageGrid
         images={images}
         isLoading={isLoading}
-        hasMore={hasMore}
+        hasMore={hasMore && !loadMoreError && !loadError}
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
         gridSize={imageGridSize}
@@ -628,7 +703,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
             current === null ? current : Math.max(0, current - 1),
           );
         }}
-      />
+        />
+      )}
 
       {showFolderFilter && (
         <FolderFilterModal

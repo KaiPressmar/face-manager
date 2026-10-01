@@ -46,9 +46,11 @@ const ImageRenamePage: React.FC<{
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [pageJumpInput, setPageJumpInput] = useState("1");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const activeRequestRef = useRef(0);
+  const pendingOffsetRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
@@ -82,6 +84,7 @@ const ImageRenamePage: React.FC<{
   };
 
   const loadData = async (nextOffset = 0) => {
+    pendingOffsetRef.current = nextOffset;
     const requestId = activeRequestRef.current + 1;
     activeRequestRef.current = requestId;
     activeAbortRef.current?.abort();
@@ -90,6 +93,7 @@ const ImageRenamePage: React.FC<{
 
     setIsLoading(true);
     setError(null);
+    setLoadError(false);
     try {
       const renameData = await fetchImageRenameCandidates({
         folders: selectedFolders,
@@ -117,10 +121,12 @@ const ImageRenamePage: React.FC<{
       setOffset(renameData.offset);
       setHasMore(renameData.has_more);
       setHasLoadedOnce(true);
+      setLoadError(false);
     } catch (loadError) {
       if (controller.signal.aborted) {
         return;
       }
+      setLoadError(true);
       setError(
         loadError instanceof Error
           ? loadError.message
@@ -497,7 +503,10 @@ const ImageRenamePage: React.FC<{
               onChange={(event) => setPageJumpInput(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
+                  event.preventDefault();
                   handleJumpToPage();
+                } else if (event.key === "Escape") {
+                  setPageJumpInput(String(currentPage));
                 }
               }}
               disabled={isLoading || pageCount === null}
@@ -594,6 +603,17 @@ const ImageRenamePage: React.FC<{
         </div>
       )}
 
+      {(error || loadError) && (
+        <div className="rename-empty-state" role="alert">
+          {error || "Die Dateinamen konnten nicht geladen werden."}{" "}
+          {loadError && (
+            <button type="button" onClick={() => void loadData(pendingOffsetRef.current)}>
+              Erneut versuchen
+            </button>
+          )}
+        </div>
+      )}
+
       <section className="settings-card rename-toolbar">
         <div className="rename-toolbar__heading">
           <strong>Dateien auswählen und aktualisieren</strong>
@@ -642,6 +662,8 @@ const ImageRenamePage: React.FC<{
 
         {showSkeletonRows ? (
           renderSkeletonRows()
+        ) : items.length === 0 && loadError ? (
+          <div className="rename-empty-state">Vorschläge sind momentan nicht verfügbar.</div>
         ) : items.length === 0 ? (
           <div className="rename-empty-state">
             Alle Dateinamen entsprechen bereits deinem Benennungsschema.
