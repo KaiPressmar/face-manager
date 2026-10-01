@@ -24,7 +24,7 @@ restore. No running PC or hosted photo service is required.
 
 Android 11/API 30 or newer is required. The universal APK supports ARM64 (both S22
 processor variants) and x86-64. CI runs device tests on Android 12/API 31 and Android
-15/API 35. Emulator tests do not constitute a physical Galaxy S22 test.
+15/API 35 and Android 16/API 36. Emulator tests do not constitute a physical Galaxy S22 test.
 
 Recognition models and the offline world map are bundled. Photos and face vectors
 are processed locally. Internet permission supports the private loopback interface
@@ -72,7 +72,7 @@ The detector uses mobile-native YuNet. Pretrained InsightFace weights retain the
 upstream non-commercial research model policy; see `assets/NOTICE.txt`. The code
 licences do not replace the upstream model usage terms.
 
-CI runs JVM tests, Android lint, builds, and isolated instrumentation on API 31/35.
+CI runs JVM tests, Android lint, builds, and isolated instrumentation on API 31/35/36.
 Android Test Orchestrator clears each test's application data. Debug builds alone
 include the shared backend regression tests and test helpers. The real-person
 fixtures and sources are documented under `app/src/androidTest/assets/README.md`;

@@ -312,8 +312,8 @@ again before continuing with the artifacts.
 | `FaceManager-Android-X.Y.Z.apk` | Signed standalone Android app (ARM64 and x86-64) |
 | `FaceManager-Android-X.Y.Z.apk.sha256` | Android APK checksum |
 
-Android implementation changes also require `./scripts/check-android.sh` and both
-`Android (API 31)` and `Android (API 35)` CI jobs. Do not merge when either device
+Android implementation changes also require `./scripts/check-android.sh` and all three
+`Android (API 31)`, `Android (API 35)` and `Android (API 36)` CI jobs. Do not merge when any device
 job is pending or failed. Android packaging follows the tested release commit;
 see [Android signing and verification](android/README.md). When Actions signing
 secrets are absent, sign the CI-produced unsigned artifact with the retained
