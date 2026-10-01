@@ -60,6 +60,8 @@ def _release_sections(body: str) -> list[dict[str, object]]:
 
 
 def _asset_name(version: str, variant: str) -> str:
+    if variant == "android":
+        return f"FaceManager-Android-{version}.apk"
     suffix = "-GPU" if variant == "gpu" else ""
     return f"FaceManager-Setup{suffix}-{version}.exe"
 
@@ -306,7 +308,7 @@ class UpdateManager:
 
     @staticmethod
     def can_install() -> bool:
-        return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+        return os.environ.get("FACE_MANAGER_PLATFORM") == "android" or (sys.platform == "win32" and bool(getattr(sys, "frozen", False)))
 
     def launch_downloaded_installer(self, version: str) -> None:
         if not self.can_install():
@@ -327,11 +329,21 @@ class UpdateManager:
         actual_checksum = digest.hexdigest()
         if actual_checksum != state.get("sha256"):
             raise UpdateError("Der Installer wurde nach dem Download verändert.")
-        subprocess.Popen([str(installer_path), "/CLOSEAPPLICATIONS"])
+        if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+            from android_runtime import get_bridge
+            if not get_bridge().installApk(str(installer_path)):
+                raise UpdateError("Der Android-Installer konnte nicht geöffnet werden.")
+        else:
+            subprocess.Popen([str(installer_path), "/CLOSEAPPLICATIONS"])
 
     def open_release_page(self, version: str) -> None:
         release = self.get_cached_release(version)
-        if not webbrowser.open(str(release["release_url"]), new=2):
+        if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+            from android_runtime import get_bridge
+            opened = get_bridge().openExternalUrl(str(release["release_url"]))
+        else:
+            opened = webbrowser.open(str(release["release_url"]), new=2)
+        if not opened:
             raise UpdateError("Die GitHub-Release-Seite konnte nicht geöffnet werden.")
 
 

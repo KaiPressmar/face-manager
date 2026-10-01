@@ -1,0 +1,52 @@
+Face Manager für Android
+
+Fotos und Gesichtsmerkmale werden lokal auf diesem Gerät verarbeitet. Die Anwendung verwendet dieselbe Oberfläche und Anwendungslogik wie Face Manager für den PC.
+
+OpenCV 4.12.0 — Apache License 2.0
+https://github.com/opencv/opencv
+
+OpenCV Zoo models, revision 47534e27c9851bb1128ccc0102f1145e27f23f98
+https://github.com/opencv/opencv_zoo
+
+
+face_detection_yunet
+MIT License
+
+Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+InsightFace buffalo_l / w600k_r50.onnx pretrained ArcFace model
+https://github.com/deepinsight/insightface
+https://github.com/deepinsight/insightface/tree/master/model_zoo
+The pretrained models are available for non-commercial research purposes only under the upstream model policy; the code licence does not grant unrestricted model use. The PC application uses the same pretrained model.
+
+ONNX Runtime — MIT License
+https://github.com/microsoft/onnxruntime
+
+HNSWlib v0.8.0 — Apache License 2.0
+https://github.com/nmslib/hnswlib
+
+Bundled licence texts (included in the APK assets/licenses directory):
+- HNSWLIB-LICENSE.txt — complete Apache License 2.0 text from hnswlib v0.8.0.
+- OPENCV-LICENSE.txt — complete licence from OpenCV 4.12.0.
+- ONNX-RUNTIME-LICENSE.txt — complete MIT licence from ONNX Runtime v1.22.0.
+- ONNX-RUNTIME-THIRD-PARTY-NOTICES.txt — upstream third-party notices for ONNX Runtime v1.22.0.
+The YuNet MIT licence is reproduced above. These code licences do not replace
+the separate restrictions on the pretrained InsightFace model described above.

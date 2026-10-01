@@ -1,4 +1,12 @@
 frontend/node_modules
+android/.gradle/
+android/.gradle-worker/
+.cxx/
+android/local.properties
+android/app/src/main/assets/models/*.onnx
+android/app/src/main/assets/models/*.download
+*.jks
+*.keystore
 frontend/dist
 build
 dist

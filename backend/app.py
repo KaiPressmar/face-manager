@@ -1,7 +1,7 @@
 import asyncio
+import hmac
 import logging
 import os
-import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -599,22 +599,29 @@ async def lifespan(_app: FastAPI):
         Control while the application is accepting requests.
     """
     try:
-        event_hub.bind_loop(asyncio.get_running_loop())
-        idle_recluster_scheduler.start()
-        import_queue.start()
-        if not schedule_version_clustering_upgrade():
-            run_startup_repairs()
-        face_thumbnail_warmup_queue.start()
-        geo_backfill.start()
-        image_path_cleanup.resume()
-        image_path_cleanup.schedule("startup", delay_seconds=60.0)
-    except Exception:
-        logger.exception("Could not start import queue during application startup")
-        raise
-    try:
+        try:
+            event_hub.bind_loop(asyncio.get_running_loop())
+            auto_cluster_queue.resume_after_shutdown()
+            idle_recluster_scheduler.start()
+            import_queue.start()
+            if not schedule_version_clustering_upgrade():
+                run_startup_repairs()
+            face_thumbnail_warmup_queue.start()
+            geo_backfill.start()
+            image_path_cleanup.resume()
+            image_path_cleanup.schedule("startup", delay_seconds=60.0)
+        except Exception:
+            logger.exception("Could not start import queue during application startup")
+            raise
         yield
     finally:
         idle_recluster_scheduler.stop()
+        clustering_shutdown_error = None
+        try:
+            auto_cluster_queue.stop()
+        except Exception as exc:
+            logger.exception("Could not stop clustering cleanly during shutdown")
+            clustering_shutdown_error = exc
         geo_backfill.stop()
         image_path_cleanup.stop()
         _publish_imports_throttled.flush()
@@ -627,16 +634,29 @@ async def lifespan(_app: FastAPI):
             import_queue.stop()
         except Exception:
             logger.exception("Could not stop import queue cleanly during shutdown")
+        if clustering_shutdown_error is not None:
+            raise clustering_shutdown_error
 
 
 app = FastAPI(title="Face Manager API", version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[] if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def require_android_session(request: Request, call_next):
+    """Keep the embedded loopback server private to its WebView session."""
+    if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+        expected = os.environ.get("FACE_MANAGER_ANDROID_SESSION_TOKEN", "")
+        supplied = request.cookies.get("fm_session", "")
+        if not expected or not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"detail": "Unauthorized local session"}, status_code=403)
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -832,7 +852,8 @@ def api_install_update(data: dict = Body(...)):
         update_manager.launch_downloaded_installer(version)
     except (OSError, UpdateError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    schedule_process_exit()
+    if os.environ.get("FACE_MANAGER_PLATFORM") != "android":
+        schedule_process_exit()
     return {"installing": True, "version": version}
 
 
@@ -847,8 +868,8 @@ def api_runtime():
     return {
         "compute_mode": get_compute_mode(execution_provider),
         "execution_provider": execution_provider,
-        "host_platform": "windows" if is_windows_host() else "linux",
-        "display_platform": "windows" if is_windows_host() else "linux",
+        "host_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
+        "display_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
     }
 
 
@@ -978,6 +999,26 @@ def validate_database_file(path: Path) -> None:
             status_code=400,
             detail="In der ausgewählten Datei fehlen benötigte Face-Manager-Daten.",
         )
+
+
+def snapshot_database_backup(target_path: Path) -> None:
+    """Save the live SQLite state, including WAL, without copying OS metadata."""
+    source = get_conn()
+    target = None
+    try:
+        target = sqlite3.connect(target_path)
+        source.backup(target)
+        target.commit()
+    finally:
+        if target is not None:
+            target.close()
+        source.close()
+
+
+def remove_database_sidecars(database_path: Path) -> None:
+    """Discard WAL state belonging to the database file being replaced."""
+    for suffix in ("-wal", "-shm"):
+        database_path.with_name(database_path.name + suffix).unlink(missing_ok=True)
 
 
 @app.post("/api/system/select-folder")
@@ -1212,14 +1253,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
     geo_backfill.stop()
     try:
         if current_db_path.exists():
-            shutil.copy2(DB_PATH, backup_path)
+            snapshot_database_backup(backup_path)
         validate_database_file(temp_path)
-        shutil.move(str(temp_path), DB_PATH)
-        wal_path = current_db_path.with_name(f"{current_db_path.name}-wal")
-        shm_path = current_db_path.with_name(f"{current_db_path.name}-shm")
-        for sidecar_path in (wal_path, shm_path):
-            if sidecar_path.exists():
-                sidecar_path.unlink()
+        os.replace(temp_path, current_db_path)
+        remove_database_sidecars(current_db_path)
         init_db()
         if not schedule_version_clustering_upgrade():
             run_startup_repairs("database_import")
@@ -1231,7 +1268,8 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         logger.exception("Database import failed; attempting recovery")
         try:
             if backup_path.exists():
-                shutil.move(str(backup_path), DB_PATH)
+                os.replace(backup_path, current_db_path)
+                remove_database_sidecars(current_db_path)
                 init_db()
                 if not schedule_version_clustering_upgrade():
                     run_startup_repairs("database_import_recovery")
@@ -1239,6 +1277,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 app_cache.clear()
             elif current_db_path.exists():
                 current_db_path.unlink()
+                remove_database_sidecars(current_db_path)
                 init_db()
                 if not schedule_version_clustering_upgrade():
                     run_startup_repairs("database_import_recovery")

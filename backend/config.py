@@ -26,6 +26,9 @@ EMBEDDING_DIM = 512
 
 def get_project_root() -> Path:
     """Return the source tree root or the PyInstaller bundle root."""
+    override = os.environ.get("FACE_MANAGER_PROJECT_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
     if getattr(sys, "frozen", False):
         return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     return Path(__file__).resolve().parent.parent
@@ -64,7 +67,7 @@ def get_changelog_path() -> Path:
 def get_build_variant() -> str:
     """Return the installer flavor embedded by the Windows release build."""
     override = os.environ.get("FACE_MANAGER_BUILD_VARIANT", "").strip().lower()
-    if override in {"cpu", "gpu"}:
+    if override in {"cpu", "gpu", "android"}:
         return override
     variant_path = get_project_root() / "BUILD_VARIANT"
     if variant_path.is_file():

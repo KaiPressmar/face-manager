@@ -298,6 +298,13 @@ NODE_PATH=/tmp/face-manager-ui-tools/node_modules PLAYWRIGHT_BROWSERS_PATH=/tmp/
 Optional: set `UI_SMOKE_SCREENSHOT_DIR` to retain screenshots, or override
 `UI_SMOKE_API_PORT` / `UI_SMOKE_WEB_PORT` if the default ports 8194 / 5194 are in use.
 
+## Android Releases
+
+An independent Android edition is available as `FaceManager-Android-X.Y.Z.apk`.
+It processes selected photos locally on the phone and includes its offline face
+models. See [Android installation, features and validation](android/README.md)
+for Samsung Galaxy S22 installation and the Android build/signing process.
+
 ## Windows Desktop Releases
 
 A tested release on `main` produces CPU and GPU installer variants:

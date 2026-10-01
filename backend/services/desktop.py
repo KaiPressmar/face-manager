@@ -1,13 +1,10 @@
 import base64
-import ctypes
 import ntpath
 import os
 import re
 import subprocess
 import sys
-import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
 
 
 WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
@@ -139,6 +136,9 @@ def to_display_path(path: str) -> str:
 
 def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
     """Open a native folder chooser and return the selected folder path."""
+    if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+        from android_runtime import get_bridge
+        return get_bridge().chooseFolder("")
     if is_wsl_host() and prefer_windows_dialog:
         result = subprocess.run(
             [
@@ -161,6 +161,9 @@ def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
         selected = result.stdout.strip()
         return selected or None
 
+    import tkinter as tk
+    from tkinter import filedialog
+
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
@@ -173,6 +176,7 @@ def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
 
 def _reveal_with_windows_shell(path: str) -> None:
     """Select a filesystem item through the Unicode-aware Windows Shell API."""
+    import ctypes
     from ctypes import wintypes
 
     ole32 = ctypes.WinDLL("ole32", use_last_error=True)
@@ -276,6 +280,12 @@ def open_file_location(path: str):
     normalized_path = str(path or "").strip()
     if not normalized_path:
         raise OSError("Missing file path")
+
+    if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+        from android_runtime import get_bridge
+        if not get_bridge().openFileLocation(normalized_path):
+            raise OSError("Android could not open the file location")
+        return
 
     if _is_wsl():
         result = subprocess.run(

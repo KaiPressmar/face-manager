@@ -456,6 +456,11 @@ const SettingsPage: React.FC<{
     setError(null);
     setMessage(null);
     try {
+      if (window.AndroidExport) {
+        window.AndroidExport.requestDatabaseExport();
+        setMessage("Wähle auf deinem Gerät den Speicherort für die Sicherung.");
+        return;
+      }
       const blob = await exportDatabase();
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");

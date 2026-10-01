@@ -13,6 +13,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.12.0] - 2026-10-01
+
+### Neu
+
+- Face Manager ist jetzt auch als eigenständige Android-App verfügbar: Fotos und Gesichter direkt auf dem Handy verwalten, die Weltkarte nutzen und dieselben Ansichten und Werkzeuge wie am PC öffnen. Hinweise helfen beim Freigeben von Fotos, Benachrichtigungen und App-Updates.
+
 ## [0.11.0] - 2026-10-01
 
 ### Neu

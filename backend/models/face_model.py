@@ -1,8 +1,13 @@
 import logging
+import os
 
 import numpy as np
-import onnxruntime as ort
-from insightface.app import FaceAnalysis
+_ANDROID = os.environ.get("FACE_MANAGER_PLATFORM") == "android"
+if not _ANDROID:
+    import onnxruntime as ort
+    from insightface.app import FaceAnalysis
+else:
+    ort = None
 
 from ..error_logging import configure_error_logging
 
@@ -28,6 +33,8 @@ def get_execution_provider(available_providers=None):
     Returns:
         CUDA when available, otherwise the CPU provider.
     """
+    if _ANDROID:
+        return "CPUExecutionProvider"
     if available_providers is None:
         preload_gpu_runtime_dlls()
         try:
@@ -119,3 +126,7 @@ class FaceModel:
             results.append({"bbox": (x1, y1, w, h), "embedding": emb})
 
         return results
+
+
+if _ANDROID:
+    from .android_face_model import AndroidFaceModel as FaceModel
