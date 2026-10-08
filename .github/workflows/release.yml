@@ -224,7 +224,7 @@ jobs:
         run: ./scripts/package-android.sh
       - name: Retain unsigned APK for offline signing
         if: steps.signing.outputs.configured != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: android-unsigned-${{ env.VERSION }}
           path: dist/*-unsigned.apk
