@@ -13,6 +13,10 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.12.2] - 2026-11-24
+
+### Behoben
+
 - Eine fehlgeschlagene Wiederherstellung schützt die bisherige Fotobibliothek und behält bei Bedarf eine Kopie zur Wiederherstellung.
 - Wenn ein Fotolaufwerk vorübergehend fehlt, bleiben Bilder und Personenzuordnungen in der Bibliothek erhalten.
 - Beim Zusammenführen identischer Fotos aus älteren Bibliotheken bleiben vorhandene Gesichtszuordnungen erhalten.
