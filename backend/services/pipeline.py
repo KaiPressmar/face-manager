@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -12,13 +13,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
-from PIL import Image, ImageFile, UnidentifiedImageError
+from PIL import Image, ImageFile
 
-from ..db.schema import calculate_file_hash, get_conn, get_file_created_at
+from ..db.schema import HASH_CHUNK_SIZE, calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
 from .face_thumbnails import delete_face_thumbnail
-from .geo import record_image_metadata
+from .geo import extract_image_metadata, record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
     stored_path as _stored_filesystem_path,
@@ -43,12 +44,31 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[dict], None]
 
 _PROCESSING_SLOT_LOCK = threading.Lock()
+_IMPORT_INDEX_LOCK = threading.Lock()
 _PROCESSING_SLOT_COUNT = 1
 _PROCESSING_SLOT_SEMAPHORE: threading.BoundedSemaphore = threading.BoundedSemaphore(1)
 
 
 class ImportCancelled(Exception):
     """Signal that an import job was cancelled by the user."""
+
+
+class ImportFailed(RuntimeError):
+    """Signal that a whole import could not complete."""
+
+
+class SourceChangedError(OSError):
+    """Signal that a file no longer matches the version selected for import."""
+
+
+def _file_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        source_stat.st_dev,
+        source_stat.st_ino,
+        source_stat.st_size,
+        source_stat.st_mtime_ns,
+        source_stat.st_ctime_ns,
+    )
 
 
 def _control_cancelled(control) -> bool:
@@ -93,6 +113,13 @@ class HashedImage:
     created_at: str | None
     file_size: int
     modified_at_ns: int
+    identity: tuple[int, int, int, int, int]
+    metadata: tuple[float | None, float | None, str | None]
+
+    def verify_current(self) -> None:
+        source = _filesystem_path(self.normalized_path)
+        if _file_identity(os.stat(source)) != self.identity:
+            raise SourceChangedError("Die Datei wurde während des Imports geändert.")
 
 
 class ImagePreparer:
@@ -122,20 +149,33 @@ class ImagePreparer:
         """
         normalized_path = os.path.normpath(str(path))
         filesystem_path = _filesystem_path(normalized_path)
-        stat_result = os.stat(filesystem_path)
-        content_hash = calculate_file_hash(filesystem_path)
-        created_at = get_file_created_at(filesystem_path, stat_result)
-        return HashedImage(
+        digest = hashlib.sha256()
+        with open(filesystem_path, "rb") as source:
+            stat_result = os.fstat(source.fileno())
+            identity = _file_identity(stat_result)
+            while chunk := source.read(HASH_CHUNK_SIZE):
+                digest.update(chunk)
+            source.seek(0)
+            metadata = extract_image_metadata(source)
+            if _file_identity(os.fstat(source.fileno())) != identity:
+                raise SourceChangedError("Die Datei wurde während des Imports geändert.")
+        result = HashedImage(
             path,
             normalized_path,
-            content_hash,
-            created_at,
-            int(stat_result.st_size),
-            int(stat_result.st_mtime_ns),
+            digest.hexdigest(),
+            get_file_created_at(filesystem_path, stat_result),
+            stat_result.st_size,
+            stat_result.st_mtime_ns,
+            identity,
+            metadata,
         )
+        result.verify_current()
+        return result
 
     @staticmethod
-    def decode(path: Path) -> np.ndarray:
+    def decode(
+        path: Path, expected: HashedImage | None = None
+    ) -> np.ndarray:
         """Decode one image into RGB pixels.
 
         Args:
@@ -144,8 +184,16 @@ class ImagePreparer:
         Returns:
             RGB image represented as a NumPy array.
         """
-        with Image.open(_filesystem_path(path)) as image:
-            return np.asarray(image.convert("RGB"))
+        with open(_filesystem_path(path), "rb") as source:
+            if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
+                raise SourceChangedError("Die Datei wurde während des Imports geändert.")
+            with Image.open(source) as image:
+                pixels = np.asarray(image.convert("RGB"))
+            if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
+                raise SourceChangedError("Die Datei wurde während des Imports geändert.")
+        if expected is not None:
+            expected.verify_current()
+        return pixels
 
     def iter_hashed(
         self,
@@ -286,11 +334,12 @@ class ImportResources:
                 self._clusterer_loaded = True
             return self._clusterer
 
-    def reset_clusterer(self) -> None:
-        """Drop the cached clustering index so it reloads from the database."""
+    def reset_clusterer(self, expected: FaceClustering | None = None) -> None:
+        """Reload from the database on next use, optionally only for one index."""
         with self._lock:
-            self._clusterer = None
-            self._clusterer_loaded = False
+            if expected is None or self._clusterer is expected:
+                self._clusterer = None
+                self._clusterer_loaded = False
 
 
 class ImportProcessor:
@@ -361,7 +410,7 @@ class ImportProcessor:
             worker_count = get_import_worker_count(get_compute_mode())
             preparer = ImagePreparer(worker_count)
             resources_loaded = False
-            content_groups: dict[str, list[HashedImage]] = {}
+            content_groups: dict[str, set[str]] = {}
             paths_to_hash, unchanged_paths = self._partition_unchanged_paths(
                 cursor,
                 image_paths,
@@ -370,6 +419,8 @@ class ImportProcessor:
             completed_images = len(unchanged_paths)
             hashed_images = len(unchanged_paths)
             processing_started = False
+            successful_images = len(unchanged_paths)
+            last_error = None
             if unchanged_paths:
                 progress_callback(
                     {
@@ -386,76 +437,31 @@ class ImportProcessor:
                 self._raise_if_cancelled(cancel_event)
                 try:
                     hashed = future.result()
-                    content_groups.setdefault(hashed.content_hash, []).append(hashed)
-                    matching_content = cursor.execute(
-                        """
-                        SELECT id, processed_at
-                        FROM image
-                        WHERE content_hash = ?
-                        """,
-                        (hashed.content_hash,),
-                    ).fetchone()
-
-                    if matching_content and matching_content["processed_at"]:
-                        self._attach_location(
-                            cursor,
-                            conn,
-                            matching_content["id"],
-                            hashed,
-                        )
-                        completed_images += 1
-                        progress_callback(
-                            {
-                                "processed_images": completed_images,
-                                "stage_current": completed_images,
-                                "current_file": str(hashed.path),
-                            }
-                        )
-                    else:
-                        primary = hashed
-                        try:
-                            try:
-                                image_np = preparer.decode(primary.path)
-                            except (UnidentifiedImageError, OSError) as exc:
-                                logger.warning(
-                                    "Skipping unreadable image %s: %s",
-                                    primary.path,
-                                    exc,
-                                )
-                                progress_callback(
-                                    {"last_error": f"{primary.path}: {exc}"}
-                                )
-                                continue
-
-                            if not processing_started:
-                                self._acquire_processing_slot(cancel_event)
-                                processing_slot_acquired = True
-                                progress_callback(
-                                    {
-                                        "stage": "processing",
-                                        "stage_current": completed_images,
-                                        "stage_total": len(image_paths),
-                                        "current_file": None,
-                                    }
-                                )
-                                processing_started = True
-
-                            image_id = (
-                                matching_content["id"]
-                                if matching_content
-                                else self._create_image(cursor, primary)
+                    if not self._attach_processed_content(cursor, conn, hashed):
+                        image_np = preparer.decode(hashed.path, hashed)
+                        if not processing_started:
+                            self._acquire_processing_slot(cancel_event)
+                            processing_slot_acquired = True
+                            progress_callback(
+                                {
+                                    "stage": "processing",
+                                    "stage_current": completed_images,
+                                    "stage_total": len(image_paths),
+                                    "current_file": None,
+                                }
                             )
-                            self._attach_location(cursor, conn, image_id, primary)
-                            self._raise_if_cancelled(cancel_event)
-                            if not resources_loaded:
-                                progress_callback(
-                                    {
-                                        "stage": "loading_model",
-                                        "current_file": None,
-                                    }
-                                )
+                            processing_started = True
+
+                        if not resources_loaded:
+                            progress_callback({"stage": "loading_model", "current_file": None})
+                            try:
                                 model = self.resources.get_model()
-                                progress_callback({"stage": "loading_index"})
+                            except Exception as exc:
+                                raise ImportFailed(f"Die Gesichtserkennung konnte nicht vorbereitet werden. {exc}") from exc
+
+                        def report_index_ready():
+                            nonlocal resources_loaded
+                            if not resources_loaded:
                                 resources_loaded = True
                                 progress_callback(
                                     {
@@ -464,86 +470,61 @@ class ImportProcessor:
                                         "stage_total": len(image_paths),
                                     }
                                 )
-                            # Interactive assignments reset the shared resource
-                            # between images. Resolve the clusterer for every
-                            # image so a running import observes that reset
-                            # instead of keeping a stale person/cluster map for
-                            # the remainder of the job.
-                            clusterer = self.resources.get_clusterer()
-                            progress_callback({"current_file": str(primary.path)})
-                            self._process_image(
-                                cursor,
-                                conn,
-                                image_id,
-                                image_np,
-                                model,
-                                clusterer,
-                                progress_callback,
-                            )
-                        except ImportCancelled:
-                            raise
-                        except Exception as exc:
-                            conn.rollback()
-                            logger.exception(
-                                "Import processing failed for %s",
-                                primary.path,
-                            )
-                            progress_callback({"last_error": f"{primary.path}: {exc}"})
-                        finally:
-                            completed_images += 1
-                            progress_callback(
-                                {
-                                    "processed_images": completed_images,
-                                    "stage_current": completed_images,
-                                }
-                            )
-                except ImportCancelled:
-                    raise
-                except (FileNotFoundError, PermissionError) as exc:
-                    logger.warning(
-                        "Skipping inaccessible image %s: %s",
-                        image_path,
-                        exc,
-                    )
-                    progress_callback({"last_error": f"{image_path}: {exc}"})
-                    completed_images += 1
-                    progress_callback({"processed_images": completed_images})
-                except Exception as exc:
-                    logger.exception("Import hashing/planning failed for %s", image_path)
-                    progress_callback({"last_error": f"{image_path}: {exc}"})
-                    completed_images += 1
-                    progress_callback({"processed_images": completed_images})
-                finally:
-                    hashed_images += 1
-                    progress_update: dict[str, object] = {
-                        "current_file": str(image_path),
-                        "hashed_images": hashed_images,
-                    }
-                    if not processing_started:
-                        progress_update["stage_current"] = hashed_images
-                    progress_callback(progress_update)
 
-            for content_hash, locations in content_groups.items():
-                matching_content = cursor.execute(
-                    """
-                    SELECT id, processed_at
-                    FROM image
-                    WHERE content_hash = ?
-                    """,
-                    (content_hash,),
-                ).fetchone()
-                if not matching_content or not matching_content["processed_at"]:
-                    continue
-                discovered_paths = {hashed.normalized_path for hashed in locations}
-                self._prune_stale_locations(
-                    cursor,
-                    conn,
-                    matching_content["id"],
-                    content_hash,
-                    discovered_paths,
-                )
+                        if not resources_loaded:
+                            progress_callback({"stage": "loading_index"})
+                        # Keep filesystem reads and model inference ahead of SQLite writes.
+                        self._raise_if_cancelled(cancel_event)
+                        progress_callback({"current_file": str(hashed.path)})
+                        self._process_image(
+                            cursor,
+                            conn,
+                            None,
+                            image_np,
+                            model,
+                            None,
+                            progress_callback,
+                            pending_source=hashed,
+                            on_index_ready=report_index_ready,
+                        )
+                    content_groups.setdefault(hashed.content_hash, set()).add(hashed.normalized_path)
+                    successful_images += 1
+                except (ImportCancelled, ImportFailed):
+                    raise
+                except OSError as exc:
+                    conn.rollback()
+                    logger.warning("Skipping unavailable or unreadable image %s: %s", image_path, exc)
+                    last_error = f"{image_path}: {exc}"
+                    progress_callback({"last_error": last_error})
+                except Exception as exc:
+                    conn.rollback()
+                    logger.exception("Import processing failed for %s", image_path)
+                    last_error = f"{image_path}: {exc}"
+                    progress_callback({"last_error": last_error})
+                finally:
+                    completed_images += 1
+                    hashed_images += 1
+                    progress_callback(
+                        {
+                            "current_file": str(image_path),
+                            "hashed_images": hashed_images,
+                            "processed_images": completed_images,
+                            "stage_current": completed_images if processing_started else hashed_images,
+                        }
+                    )
 
             self._raise_if_cancelled(cancel_event)
+            if image_paths and successful_images == 0:
+                raise ImportFailed(f"Kein Bild konnte hinzugefügt werden. {last_error or ''}".strip())
+
+            for content_hash, discovered_paths in content_groups.items():
+                self._raise_if_cancelled(cancel_event)
+                matching_content = self._find_content(cursor, content_hash)
+                if matching_content and matching_content["processed_at"]:
+                    self._prune_stale_locations(
+                        cursor, conn, matching_content["id"], content_hash, discovered_paths
+                    )
+
             progress_callback(
                 {
                     "stage": "finalizing",
@@ -679,95 +660,123 @@ class ImportProcessor:
         self,
         cursor,
         connection,
-        image_id: int,
+        image_id: int | None,
         image_np: np.ndarray,
         model: FaceModel,
-        clusterer: FaceClustering,
+        clusterer: FaceClustering | None,
         progress_callback: ProgressCallback,
+        *,
+        pending_source: HashedImage | None = None,
+        on_index_ready: Callable[[], None] | None = None,
     ) -> None:
-        """Persist and analyze one prepared image.
-
-        Args:
-            cursor: SQLite cursor used for reads and writes.
-            connection: SQLite connection controlling transactions.
-            image_id: Canonical image identifier.
-            image_np: Decoded RGB image pixels.
-            model: Face detection and recognition model.
-            clusterer: Incremental face clustering index.
-            progress_callback: Callback receiving face progress updates.
-        """
-        # Detection and in-memory clustering are the expensive part. Do them
-        # before the first database write so SQLite's single WAL writer remains
-        # available to interactive assignments while inference is running.
+        """Run inference, then serialize index and database changes together."""
         faces = model.detect_and_embed(image_np)
         distance_threshold = get_cluster_distance_threshold()
-        proposed_faces: list[tuple[dict, int]] = []
-        for face in faces:
-            cluster_ids, _ = clusterer.add_and_assign(
-                np.expand_dims(face["embedding"], axis=0),
-                distance_threshold=distance_threshold,
-                # Confirmed person clusters are reference data, not an
-                # authorization to silently attach newly imported faces.
-                # Person matches are generated as reviewable suggestions by
-                # the post-import/reclustering workflow instead.
-                allow_person_matches=False,
-            )
-            proposed_faces.append((face, int(cluster_ids[0])))
-
-        existing_face_ids = [
-            int(row["id"])
-            for row in cursor.execute(
-                "SELECT id FROM face WHERE image_id = ?",
-                (image_id,),
-            ).fetchall()
-        ]
-        cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
-        fallback_cluster_ids: dict[int, int] = {}
-        for face, proposed_cluster_id in proposed_faces:
-            x1, y1, width, height = face["bbox"]
-            embedding = face["embedding"]
-            cluster_id = self._resolve_import_cluster_id(
-                cursor,
-                proposed_cluster_id,
-                fallback_cluster_ids,
-            )
-            cursor.execute(
-                """
-                INSERT INTO face(
-                    image_id, bbox_x, bbox_y, bbox_w, bbox_h,
-                    cluster_id, review_status, embedding
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    image_id,
-                    float(x1),
-                    float(y1),
-                    float(width),
-                    float(height),
-                    cluster_id,
-                    FACE_REVIEW_STATUS_ACTIVE,
-                    embedding.astype("float32").tobytes(),
-                ),
+        with _IMPORT_INDEX_LOCK:
+            # Look up the index here, after inference. A preceding importer
+            # may have rolled back and discarded its in-memory proposals.
+            if clusterer is None:
+                try:
+                    clusterer = self.resources.get_clusterer()
+                except Exception as exc:
+                    raise ImportFailed(f"Die Gesichtserkennung konnte nicht vorbereitet werden. {exc}") from exc
+            if on_index_ready is not None:
+                on_index_ready()
+            existing_face_ids = self._commit_faces(
+                cursor, connection, image_id, faces, clusterer, distance_threshold, pending_source
             )
 
-        cursor.execute(
-            "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (image_id,),
-        )
-        connection.commit()
+        invalidate_image_query_cache()
+        if existing_face_ids is None:
+            return
         for face_id in existing_face_ids:
             delete_face_thumbnail(face_id)
-        # Face crops are generated on demand and by the idle warmup worker.
-        # Keeping that recoverable JPEG work out of the critical import path
-        # lets detection immediately continue with the next image.
-        invalidate_image_query_cache()
         progress_callback(
             {
                 "total_faces_increment": len(faces),
                 "processed_faces_increment": len(faces),
             }
         )
+
+    def _commit_faces(
+        self,
+        cursor,
+        connection,
+        image_id: int | None,
+        faces,
+        clusterer: FaceClustering,
+        distance_threshold: float,
+        pending_source: HashedImage | None,
+    ) -> list[int] | None:
+        """Persist prepared faces, or only attach the path for a raced duplicate."""
+        index_dirty = False
+        try:
+            if pending_source is not None:
+                pending_source.verify_current()
+                cursor.execute("BEGIN IMMEDIATE")
+                matching = self._find_content(cursor, pending_source.content_hash)
+                image_id = matching["id"] if matching else self._create_image(cursor, pending_source)
+                self._attach_location(cursor, image_id, pending_source)
+                if matching and matching["processed_at"]:
+                    pending_source.verify_current()
+                    connection.commit()
+                    return None
+            assert image_id is not None
+
+            existing_face_ids = [
+                int(row["id"])
+                for row in cursor.execute(
+                    "SELECT id FROM face WHERE image_id = ?", (image_id,)
+                ).fetchall()
+            ]
+            cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
+            fallback_cluster_ids: dict[int, int] = {}
+            for face in faces:
+                embedding = face["embedding"]
+                index_dirty = True
+                cluster_ids, _ = clusterer.add_and_assign(
+                    np.expand_dims(embedding, axis=0),
+                    distance_threshold=distance_threshold,
+                    # Confirmed person matches are surfaced as suggestions.
+                    allow_person_matches=False,
+                )
+                cluster_id = self._resolve_import_cluster_id(
+                    cursor, int(cluster_ids[0]), fallback_cluster_ids
+                )
+                x1, y1, width, height = face["bbox"]
+                cursor.execute(
+                    """
+                    INSERT INTO face(
+                        image_id, bbox_x, bbox_y, bbox_w, bbox_h,
+                        cluster_id, review_status, embedding
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        image_id,
+                        float(x1),
+                        float(y1),
+                        float(width),
+                        float(height),
+                        cluster_id,
+                        FACE_REVIEW_STATUS_ACTIVE,
+                        embedding.astype("float32").tobytes(),
+                    ),
+                )
+            cursor.execute(
+                "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?", (image_id,)
+            )
+            if pending_source is not None:
+                pending_source.verify_current()
+            connection.commit()
+        except Exception:
+            try:
+                connection.rollback()
+            finally:
+                if index_dirty:
+                    self.resources.reset_clusterer(clusterer)
+            raise
+        return existing_face_ids
 
     @staticmethod
     def _resolve_import_cluster_id(
@@ -840,23 +849,45 @@ class ImportProcessor:
         image_id = cursor.lastrowid
         return image_id
 
+    @staticmethod
+    def _find_content(cursor, content_hash: str):
+        return cursor.execute(
+            "SELECT id, processed_at FROM image WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+
+    @classmethod
+    def _attach_processed_content(cls, cursor, connection, hashed: HashedImage) -> bool:
+        """Attach a duplicate only when its canonical image still exists."""
+        matching = cls._find_content(cursor, hashed.content_hash)
+        if not matching or not matching["processed_at"]:
+            return False
+        cursor.execute("BEGIN IMMEDIATE")
+        matching = cls._find_content(cursor, hashed.content_hash)
+        if not matching or not matching["processed_at"]:
+            connection.rollback()
+            return False
+        hashed.verify_current()
+        cls._attach_location(cursor, matching["id"], hashed)
+        hashed.verify_current()
+        connection.commit()
+        invalidate_image_query_cache()
+        return True
+
     @classmethod
     def _attach_location(
         cls,
         cursor,
-        connection,
         image_id: int,
         hashed: HashedImage,
     ) -> None:
-        """Attach a discovered path to canonical content.
+        """Attach a discovered path inside the caller's transaction.
 
         Args:
             cursor: SQLite cursor used for location writes.
-            connection: SQLite connection controlling transactions.
             image_id: Canonical image identifier.
             hashed: Hashed path metadata to attach.
         """
-        record_image_metadata(cursor, image_id, hashed.normalized_path)
+        record_image_metadata(cursor, image_id, hashed.normalized_path, metadata=hashed.metadata)
         existing = cursor.execute(
             "SELECT image_id FROM image_location WHERE path = ?",
             (hashed.normalized_path,),
@@ -875,7 +906,6 @@ class ImportProcessor:
                     hashed.normalized_path,
                 ),
             )
-            connection.commit()
             return
         if existing:
             cls._detach_path(cursor, hashed.normalized_path)
@@ -898,8 +928,6 @@ class ImportProcessor:
                 hashed.modified_at_ns,
             ),
         )
-        connection.commit()
-        invalidate_image_query_cache()
 
     @staticmethod
     def _detach_path(cursor, normalized_path: str) -> None:

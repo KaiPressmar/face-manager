@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { FaceImage, fetchImages, imageFileUrl, ImagePage } from "../../utils/api";
+import { FaceImage, fetchImages, ImagePage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
 import ImageGrid, {
@@ -14,7 +14,6 @@ export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
-const PREFETCH_IMAGE_COUNT = PAGE_SIZE;
 const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
@@ -52,13 +51,6 @@ function persistImageGridSize(size: ImageGridSize) {
   } catch {
     // The in-memory choice still works for the current session.
   }
-}
-
-function preloadPageImages(page: ImagePage) {
-  page.items.slice(0, PREFETCH_IMAGE_COUNT).forEach((image) => {
-    const preload = new Image();
-    preload.src = imageFileUrl(image.id);
-  });
 }
 
 interface PeoplePageProps {
@@ -155,9 +147,6 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
 
       prefetchedPageRef.current = page;
       prefetchedOffsetRef.current = offset;
-      if (page.items.length > 0) {
-        preloadPageImages(page);
-      }
     })();
 
     prefetchPromiseRef.current = prefetchPromise;

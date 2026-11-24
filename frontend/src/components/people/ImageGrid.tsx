@@ -6,7 +6,7 @@ import FullscreenImageGallery from "./FullscreenImageGallery";
 import {
   deleteImage,
   FaceImage,
-  imageFileUrl,
+  imageThumbnailUrl,
   openImageLocation,
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
@@ -16,6 +16,7 @@ import { copyTextToClipboard } from "../../utils/clipboard";
 export type FaceOverlayMode = "all" | "assigned" | "none";
 /** Visual density of the responsive masonry grid. */
 export type ImageGridSize = "xsmall" | "small" | "medium" | "large";
+type PreviewState = { w: number; h: number } | "error";
 
 interface ImageGridProps {
   images: FaceImage[];
@@ -86,9 +87,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const currentImagesRef = useRef(images);
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const fileActionTimerRef = useRef<number | null>(null);
-  const [imageDimensions, setImageDimensions] = useState<
-    Record<string, { w: number; h: number }>
-  >({});
+  const [previewStates, setPreviewStates] = useState<Record<string, PreviewState>>({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
   const breakpointCols = BREAKPOINT_COLUMNS[gridSize];
@@ -170,24 +169,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     };
   }, [gridSize, hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
 
-  useEffect(() => {
-    if (isLoading) return;
-
-    images.forEach((img) => {
-      if (imageDimensions[img.image_path]) return;
-
-      const imgSrc = imageFileUrl(img.id);
-      const image = new Image();
-      image.src = imgSrc;
-      image.onload = () => {
-        setImageDimensions((prev) => ({
-          ...prev,
-          [img.image_path]: { w: image.naturalWidth, h: image.naturalHeight },
-        }));
-      };
-    });
-  }, [images, imageDimensions, isLoading]);
-
   useLayoutEffect(() => {
     currentImagesRef.current = images;
     if (galleryImageId !== null && galleryIndex < 0) setGalleryImageId(null);
@@ -195,6 +176,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
   useLayoutEffect(() => {
     setGalleryImageId(null);
+    setPreviewStates({});
   }, [galleryRevision]);
 
   const removeImage = async (image: FaceImage) => {
@@ -312,14 +294,20 @@ const ImageGrid: React.FC<ImageGridProps> = ({
           columnClassName="masonry-column"
         >
           {images.map((img) => {
-            const dims = imageDimensions[img.image_path];
-            const aspectRatio = dims ? `${dims.w} / ${dims.h}` : "1/1";
+            const previewUrl = imageThumbnailUrl(img.id);
+            const preview = previewStates[previewUrl];
+            const previewSize = preview === "error" ? null : preview;
+            const sourceSize = img.image_width && img.image_height
+              ? { w: img.image_width, h: img.image_height }
+              : null;
+            const size = sourceSize ?? previewSize;
+            const aspectRatio = size ? `${size.w} / ${size.h}` : "1/1";
 
             return (
               <div
                 key={img.id}
                 data-image-id={img.id}
-                className={`image-gallery-card${!dims ? " shimmer-placeholder" : ""}`}
+                className="image-gallery-card"
                 role="button"
                 tabIndex={0}
                 aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
@@ -342,19 +330,30 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   transition: "aspect-ratio 0.2s ease",
                 }}
               >
-                <img
-                  src={imageFileUrl(img.id)}
-                  loading="lazy"
-                  style={{
-                    width: "100%",
-                    height: "100%",
-                    objectFit: "cover",
-                    display: "block",
-                    opacity: dims ? 1 : 0,
-                    transition: "opacity 0.3s ease",
-                  }}
-                  alt=""
-                />
+                {preview === "error" ? (
+                  <span className="image-gallery-card__error">Vorschau nicht verfügbar</span>
+                ) : (
+                  <img
+                    src={previewUrl}
+                    loading="lazy"
+                    decoding="async"
+                    onLoad={(event) => {
+                      const { naturalWidth, naturalHeight } = event.currentTarget;
+                      setPreviewStates((current) => ({
+                        ...current,
+                        [previewUrl]: { w: naturalWidth, h: naturalHeight },
+                      }));
+                    }}
+                    onError={() => setPreviewStates((current) => ({ ...current, [previewUrl]: "error" }))}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "cover",
+                      display: "block",
+                    }}
+                    alt=""
+                  />
+                )}
 
                 <div className="image-file-actions">
                   <button
@@ -407,19 +406,19 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                 </span>
 
                 {faceOverlayMode !== "none" &&
-                  dims &&
+                  sourceSize && previewSize &&
                   (() => {
                     const visibleFaces = img.faces.filter(
                       (face) =>
                         faceOverlayMode === "all" || Boolean(face.person_name),
                     );
-                    const lanes = assignLabelLanes(visibleFaces, dims.w);
+                    const lanes = assignLabelLanes(visibleFaces, sourceSize.w);
                     return visibleFaces.map((face) => (
                       <FaceOverlay
                         key={face.id}
                         face={face}
-                        naturalWidth={dims.w}
-                        naturalHeight={dims.h}
+                        naturalWidth={sourceSize.w}
+                        naturalHeight={sourceSize.h}
                         stackIndex={lanes.get(face.id) ?? 0}
                         onNavigateToCluster={onNavigateToCluster}
                       />

@@ -222,6 +222,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
               : "person-filter__chip"
           }
           onClick={() => onPersonsChange([])}
+          aria-pressed={selectedPersons.length === 0}
           type="button"
         >
           Alle
@@ -231,6 +232,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           <button
             key={person}
             onClick={() => togglePerson(person)}
+            aria-pressed={selectedSet.has(person)}
             className={`person-filter__chip${
               selectedSet.has(person) ? " person-filter__chip--active" : ""
             }`}
@@ -282,6 +284,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
             selectedSet.has(UNASSIGNED_FILTER_VALUE) ? " person-filter__chip--active" : ""
           }`}
           onClick={() => togglePerson(UNASSIGNED_FILTER_VALUE)}
+          aria-pressed={selectedSet.has(UNASSIGNED_FILTER_VALUE)}
           title="Gesichter, die noch keiner Person zugeordnet sind"
           type="button"
         >
@@ -306,6 +309,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
                   )
                 }
                 title={status.hint}
+                aria-pressed={isActive}
                 type="button"
               >
                 {status.label}

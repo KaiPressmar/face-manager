@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import hmac
 import logging
 import os
@@ -23,7 +24,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
@@ -1922,19 +1923,30 @@ def get_image(image_id: int):
     return FileResponse(filesystem_path(path))
 
 
+def _thumbnail_response(thumbnail_path: str, request: Request) -> Response:
+    # The cached filename includes the source version and, for crops, the box.
+    digest = hashlib.sha256(Path(thumbnail_path).name.encode("utf-8")).hexdigest()
+    etag = f'"{digest}"'
+    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    validators = request.headers.get("if-none-match", "").split(",")
+    if any(value.strip().removeprefix("W/") in {etag, "*"} for value in validators):
+        return Response(status_code=304, headers=headers)
+    return FileResponse(thumbnail_path, media_type="image/jpeg", headers=headers)
+
+
 @app.get("/api/images/{image_id}/thumbnail")
-def get_image_thumbnail(image_id: int):
+def get_image_thumbnail(image_id: int, request: Request):
     """Serve a cached, upright, size-limited image thumbnail."""
     path = get_available_image_path(image_id)
     if not path:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     try:
         thumbnail_path = ensure_image_thumbnail(image_id, path)
-    except (OSError, ValueError, UnidentifiedImageError) as exc:
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
         raise HTTPException(
             status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden."
         ) from exc
-    return FileResponse(thumbnail_path, media_type="image/jpeg")
+    return _thumbnail_response(thumbnail_path, request)
 
 
 @app.delete("/api/images/{image_id}")
@@ -1998,62 +2010,44 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
 
 
 @lru_cache(maxsize=2048)
-def get_image_orientation(path):
-    """Read and cache EXIF orientation and dimensions.
-
-    Args:
-        path: Image path to inspect.
-
-    Returns:
-        Orientation value, width, and height.
-    """
+def _read_image_orientation(source, signature):
+    """Read orientation for this version of the source file."""
     try:
-        with Image.open(filesystem_path(path)) as img:
-            exif = img.getexif()
-            orientation = exif.get(274, 1)
-            return orientation, img.width, img.height
-    except (OSError, ValueError):
+        with Image.open(source) as image:
+            return image.getexif().get(274, 1), image.width, image.height
+    except (OSError, ValueError, Image.DecompressionBombError):
         return 1, 0, 0
 
 
-def correct_bbox_for_orientation(path, x, y, w, h):
-    """Transform a face box according to image EXIF orientation.
+def get_image_orientation(path):
+    """Return raw dimensions and EXIF orientation, or zero dimensions."""
+    source = filesystem_path(path)
+    try:
+        info = os.stat(source)
+    except (OSError, ValueError):
+        return 1, 0, 0
+    return _read_image_orientation(
+        source, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    )
 
-    Args:
-        path: Image path used to inspect orientation.
-        x: Original horizontal coordinate.
-        y: Original vertical coordinate.
-        w: Original box width.
-        h: Original box height.
 
-    Returns:
-        Corrected ``x``, ``y``, width, and height tuple.
-    """
-    orientation, width, height = get_image_orientation(path)
-
-    # Orientation corrections
-    if orientation == 3:  # 180°
-        return (
-            width - x - w,
-            height - y - h,
-            w,
-            h,
-        )
-    if orientation == 6:  # 90° CW
-        return (
-            height - y - h,
-            x,
-            h,
-            w,
-        )
-    if orientation == 8:  # 270° CW
-        return (
-            y,
-            width - x - w,
-            h,
-            w,
-        )
-
+def correct_bbox_for_orientation(geometry, x, y, w, h):
+    """Transform a raw-pixel face box to match an upright preview."""
+    orientation, width, height = geometry
+    if orientation == 2:
+        return width - x - w, y, w, h
+    if orientation == 3:
+        return width - x - w, height - y - h, w, h
+    if orientation == 4:
+        return x, height - y - h, w, h
+    if orientation == 5:
+        return y, x, h, w
+    if orientation == 6:
+        return height - y - h, x, h, w
+    if orientation == 7:
+        return height - y - h, width - x - w, h, w
+    if orientation == 8:
+        return y, width - x - w, h, w
     return x, y, w, h
 
 
@@ -2092,13 +2086,25 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
     always describe an image the same way.
     """
     images = {}
+    geometry_by_id = {}
 
     for r in rows:
         image_id = r["image_id"]
         path = r["image_path"]
 
         if image_id not in images:
+            geometry = get_image_orientation(path)
+            if not geometry[1]:
+                alternate = get_available_image_path(image_id)
+                if alternate and alternate != path:
+                    geometry = get_image_orientation(alternate)
+            geometry_by_id[image_id] = geometry
+            orientation, width, height = geometry
+            if orientation in {5, 6, 7, 8}:
+                width, height = height, width
             images[image_id] = {
+                "image_width": width or None,
+                "image_height": height or None,
                 "id": image_id,
                 "image_path": (
                     to_display_path(path) if display_platform == "windows" else path
@@ -2121,7 +2127,7 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
             continue
 
         bbox_x, bbox_y, bbox_w, bbox_h = correct_bbox_for_orientation(
-            path,
+            geometry_by_id[image_id],
             _safe_float(r["bbox_x"]),
             _safe_float(r["bbox_y"]),
             _safe_float(r["bbox_w"]),
@@ -2390,7 +2396,7 @@ def api_apply_image_rename_candidates(data: dict = Body(...)):
 
 
 @app.get("/api/faces/{face_id}/crop")
-def api_face_crop(face_id: int):
+def api_face_crop(face_id: int, request: Request):
     """Return a JPEG crop for one detected face.
 
     Args:
@@ -2425,14 +2431,7 @@ def api_face_crop(face_id: int):
     except (OSError, ValueError) as exc:
         logger.exception("Could not create face crop thumbnail for face %s", face_id)
         raise HTTPException(status_code=404, detail="Der Gesichtsausschnitt wurde nicht gefunden.") from exc
-    # A face crop is immutable: re-importing an image assigns a new face id and
-    # deletes the old thumbnail, so a given id always maps to the same pixels.
-    # Let the browser serve it straight from disk cache without revalidating.
-    return FileResponse(
-        thumbnail_path,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
-    )
+    return _thumbnail_response(thumbnail_path, request)
 
 
 frontend_dist_dir = get_frontend_dist_dir()

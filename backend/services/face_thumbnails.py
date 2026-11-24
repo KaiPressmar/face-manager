@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import Iterable, List, Optional, Tuple
 
-from PIL import ExifTags, Image
+from PIL import Image, ImageOps
 
 from ..config import get_data_root
 from ..db.schema import get_conn
@@ -24,6 +25,10 @@ FACE_THUMBNAIL_QUALITY = 86
 # JPEG encoding releases the GIL, so a small worker pool speeds up bulk warmup
 # without starving request handlers.
 FACE_THUMBNAIL_WARMUP_WORKERS = min(8, (os.cpu_count() or 4))
+_face_locks = tuple(Lock() for _ in range(64))
+
+FileIdentity = tuple[int, int, int, int, int]
+FaceBox = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -45,42 +50,36 @@ def get_face_thumbnail_root() -> Path:
     return get_data_root() / "thumbnails" / "faces"
 
 
-def get_face_thumbnail_path(face_id: int) -> Path:
-    """Return the stable thumbnail path for one face id."""
-    shard = int(face_id) // 1000
-    return get_face_thumbnail_root() / f"{shard:04d}" / f"{int(face_id)}.jpg"
+def _shard(face_id: int) -> Path:
+    return get_face_thumbnail_root() / f"{face_id // 1000:04d}"
+
+
+def _file_identity(info: os.stat_result) -> FileIdentity:
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _thumbnail_target(face_id: int, source: str, identity: FileIdentity, bbox: FaceBox) -> Path:
+    digest = hashlib.sha256(repr((source, identity, bbox)).encode("utf-8")).hexdigest()[:24]
+    return _shard(face_id) / f"{face_id}-{digest}.jpg"
+
+
+def get_face_thumbnail_path(face_id: int, image_path: str, bbox: FaceBox) -> Path:
+    """Return the cache path for this face, photo version and crop rectangle."""
+    source = filesystem_path(image_path)
+    return _thumbnail_target(int(face_id), source, _file_identity(os.stat(source)), bbox)
 
 
 def delete_face_thumbnail(face_id: int) -> None:
-    """Remove one cached face thumbnail if present."""
-    get_face_thumbnail_path(face_id).unlink(missing_ok=True)
-
-
-def _orientation_key() -> int | None:
-    for key, value in ExifTags.TAGS.items():
-        if value == "Orientation":
-            return key
-    return None
-
-
-def _exif_orientation(image: Image.Image) -> int:
-    """Read the EXIF orientation flag, defaulting to upright."""
-    try:
-        orientation_tag = _orientation_key()
-        return image.getexif().get(orientation_tag, 1) if orientation_tag else 1
-    except Exception:
-        return 1
-
-
-def _apply_orientation(image: Image.Image, orientation: int) -> Image.Image:
-    """Rotate an image so its pixels are upright for the given orientation."""
-    if orientation == 3:
-        return image.rotate(180, expand=True)
-    if orientation == 6:
-        return image.rotate(-90, expand=True)
-    if orientation == 8:
-        return image.rotate(90, expand=True)
-    return image
+    """Remove cached variants of a deleted face without failing library writes."""
+    face_id = int(face_id)
+    with _face_locks[face_id % len(_face_locks)]:
+        directory = _shard(face_id)
+        candidates = [directory / f"{face_id}.jpg", *directory.glob(f"{face_id}-*.jpg")]
+        for path in candidates:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove cached thumbnail %s", path, exc_info=True)
 
 
 def _transform_bbox(
@@ -93,10 +92,18 @@ def _transform_bbox(
     h: int,
 ) -> Tuple[int, int, int, int]:
     """Map a raw-image bbox onto the orientation-corrected image."""
+    if orientation == 2:
+        return oriented_width - x - w, y, w, h
     if orientation == 3:
         return oriented_width - x - w, oriented_height - y - h, w, h
+    if orientation == 4:
+        return x, oriented_height - y - h, w, h
+    if orientation == 5:
+        return y, x, h, w
     if orientation == 6:
         return oriented_width - y - h, x, h, w
+    if orientation == 7:
+        return oriented_width - y - h, oriented_height - x - w, h, w
     if orientation == 8:
         return y, oriented_height - x - w, h, w
     return x, y, w, h
@@ -106,15 +113,21 @@ def _render_face_thumbnail(
     oriented_image: Image.Image,
     orientation: int,
     face_id: int,
-    bbox: Tuple[int, int, int, int],
+    bbox: FaceBox,
+    thumbnail_path: Path,
+    source: str,
+    identity: FileIdentity,
 ) -> Path:
     """Crop, resize and atomically persist one face thumbnail.
 
     Args:
         oriented_image: Source image already rotated upright.
         orientation: EXIF orientation flag applied to ``oriented_image``.
-        face_id: Face identifier used to derive the cache path.
+        face_id: Face identifier used in diagnostics.
         bbox: Face bounding box in raw (pre-orientation) image coordinates.
+        thumbnail_path: Cache destination for this crop and source version.
+        source: Original photo path, checked before publication.
+        identity: Original photo file identity at decode time.
 
     Returns:
         The path to the persisted thumbnail.
@@ -135,7 +148,6 @@ def _render_face_thumbnail(
         Image.Resampling.LANCZOS,
     )
 
-    thumbnail_path = get_face_thumbnail_path(face_id)
     thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         prefix=f"{face_id}-",
@@ -151,6 +163,8 @@ def _render_face_thumbnail(
             quality=FACE_THUMBNAIL_QUALITY,
             optimize=True,
         )
+        if _file_identity(os.stat(source)) != identity:
+            raise OSError("Source image changed while rendering face thumbnail")
         os.replace(temp_path, thumbnail_path)
     finally:
         if temp_path.exists():
@@ -159,61 +173,62 @@ def _render_face_thumbnail(
     return thumbnail_path
 
 
-def ensure_face_thumbnail(
-    face_id: int,
-    image_path: str,
-    bbox: Tuple[int, int, int, int],
-) -> Path:
-    """Create a cached JPEG thumbnail for one face crop when missing."""
-    thumbnail_path = get_face_thumbnail_path(face_id)
-    if thumbnail_path.is_file():
-        return thumbnail_path
+def _decode_oriented(source: str, identity: FileIdentity) -> tuple[Image.Image, int]:
+    with open(source, "rb") as file:
+        if _file_identity(os.fstat(file.fileno())) != identity:
+            raise OSError("Source image changed before rendering face thumbnail")
+        with Image.open(file) as image:
+            try:
+                orientation = image.getexif().get(274, 1)
+            except Exception:
+                orientation = 1
+            oriented = ImageOps.exif_transpose(image) if orientation in range(2, 9) else image.copy()
+        if _file_identity(os.fstat(file.fileno())) != identity:
+            raise OSError("Source image changed while reading face thumbnail")
+    return oriented, orientation
 
-    with Image.open(filesystem_path(image_path)) as image:
-        orientation = _exif_orientation(image)
-        oriented_image = _apply_orientation(image, orientation)
-        return _render_face_thumbnail(oriented_image, orientation, face_id, bbox)
+
+def ensure_face_thumbnail(face_id: int, image_path: str, bbox: FaceBox) -> Path:
+    """Create a cached JPEG for the current source and face coordinates."""
+    face_id = int(face_id)
+    source = filesystem_path(image_path)
+    with _face_locks[face_id % len(_face_locks)]:
+        identity = _file_identity(os.stat(source))
+        destination = _thumbnail_target(face_id, source, identity, bbox)
+        if destination.is_file():
+            return destination
+        image, orientation = _decode_oriented(source, identity)
+        return _render_face_thumbnail(image, orientation, face_id, bbox, destination, source, identity)
 
 
 def create_face_thumbnails_for_image(
     image_path: str,
-    faces: Iterable[Tuple[int, Tuple[int, int, int, int]]],
+    faces: Iterable[Tuple[int, FaceBox]],
 ) -> None:
-    """Create thumbnails for several faces of one image in a single decode.
-
-    The source image is opened and oriented once and reused for every face,
-    avoiding a re-decode and re-rotation per face during import. Failures for
-    individual faces are logged without interrupting the rest.
-
-    Args:
-        image_path: Source image path shared by all faces.
-        faces: Pairs of ``(face_id, bbox)`` to render.
-    """
-    pending = [
-        (face_id, bbox)
-        for face_id, bbox in faces
-        if not get_face_thumbnail_path(face_id).is_file()
-    ]
-    if not pending:
-        return
-
+    """Render uncached faces from a shared decode of one source version."""
+    source = filesystem_path(image_path)
     try:
-        with Image.open(filesystem_path(image_path)) as image:
-            orientation = _exif_orientation(image)
-            oriented_image = _apply_orientation(image, orientation)
-            for face_id, bbox in pending:
-                try:
-                    _render_face_thumbnail(
-                        oriented_image, orientation, face_id, bbox
-                    )
-                except Exception:
-                    logger.exception(
-                        "Could not create face thumbnail for face %s", face_id
-                    )
+        identity = _file_identity(os.stat(source))
+        pending = [
+            (face_id, bbox, _thumbnail_target(face_id, source, identity, bbox))
+            for face_id, bbox in faces
+        ]
+        pending = [entry for entry in pending if not entry[2].is_file()]
+        if not pending:
+            return
+
+        image, orientation = _decode_oriented(source, identity)
+        for face_id, bbox, destination in pending:
+            try:
+                with _face_locks[face_id % len(_face_locks)]:
+                    if not destination.is_file():
+                        _render_face_thumbnail(
+                            image, orientation, face_id, bbox, destination, source, identity
+                        )
+            except Exception:
+                logger.exception("Could not create face thumbnail for face %s", face_id)
     except Exception:
-        logger.exception(
-            "Could not open %s to create face thumbnails", image_path
-        )
+        logger.exception("Could not open %s to create face thumbnails", image_path)
 
 
 def get_face_library_signature() -> Tuple[int, int]:
@@ -331,10 +346,6 @@ def warm_missing_face_thumbnails(
         highest_face_id = face_id
         scanned_faces += 1
 
-        if get_face_thumbnail_path(face_id).is_file():
-            skipped_existing += 1
-            continue
-
         image_paths = [
             path for path in (row["image_paths"] or "").split("\n") if path
         ]
@@ -346,18 +357,20 @@ def warm_missing_face_thumbnails(
             skipped_missing_source += 1
             continue
 
-        pending.append(
-            (
-                face_id,
-                image_path,
-                (
-                    int(float(row["bbox_x"] or 0)),
-                    int(float(row["bbox_y"] or 0)),
-                    int(float(row["bbox_w"] or 0)),
-                    int(float(row["bbox_h"] or 0)),
-                ),
-            )
+        bbox = (
+            int(float(row["bbox_x"] or 0)),
+            int(float(row["bbox_y"] or 0)),
+            int(float(row["bbox_w"] or 0)),
+            int(float(row["bbox_h"] or 0)),
         )
+        try:
+            if get_face_thumbnail_path(face_id, image_path, bbox).is_file():
+                skipped_existing += 1
+                continue
+        except OSError:
+            skipped_missing_source += 1
+            continue
+        pending.append((face_id, image_path, bbox))
 
         if len(pending) >= max_created:
             stopped_early = True

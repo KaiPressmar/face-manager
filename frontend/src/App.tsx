@@ -48,14 +48,20 @@ type Changelog =
 const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
   active,
   children,
-}) => (
-  <div
-    className={`page-pane${active ? " page-pane--active" : ""}`}
-    aria-hidden={!active}
-  >
-    <div className="page-content">{children}</div>
-  </div>
-);
+}) => {
+  const applyPaneState = useCallback((pane: HTMLDivElement | null) => {
+    if (pane) pane.inert = !active;
+  }, [active]);
+  return (
+    <div
+      ref={applyPaneState}
+      className={`page-pane${active ? " page-pane--active" : ""}`}
+      aria-hidden={!active}
+    >
+      <div className="page-content">{children}</div>
+    </div>
+  );
+};
 
 const App: React.FC = () => {
   const initialEntry = parseNavigationHash(window.location.hash);

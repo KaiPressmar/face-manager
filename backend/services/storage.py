@@ -13,6 +13,7 @@ from ..db.schema import (
     FACE_REVIEW_STATUS_UNKNOWN_PERSON,
     VALID_FACE_REVIEW_STATUSES,
     get_conn,
+    normalize_person_name_key,
 )
 from ..error_logging import (
     DEFAULT_FILE_LOG_LEVEL,
@@ -800,11 +801,6 @@ def _dedupe_names_in_order(names):
     return ordered
 
 
-def _normalize_person_name_key(name: str) -> str:
-    """Normalize a person name for case-insensitive comparisons."""
-    return (name or "").strip().casefold()
-
-
 def _extract_trailing_person_names(
     stem: str,
     detected_names: list[str],
@@ -997,7 +993,7 @@ def _resolve_person_id(cur, person_name: str) -> int:
     normalized_person_name = (person_name or "").strip()
     if not normalized_person_name:
         raise ValueError("Missing person_name")
-    normalized_name_key = _normalize_person_name_key(normalized_person_name)
+    normalized_name_key = normalize_person_name_key(normalized_person_name)
     matching_people = cur.execute(
         """
         SELECT id, name
@@ -1541,8 +1537,18 @@ def _descendant_filter(folders):
         # On Windows a raw trailing ``\\`` would otherwise escape the SQL ``%``
         # wildcard itself, so only an exact (usually deepest) directory matched.
         separator = "\\" if "\\" in folder and "/" not in folder else os.sep
-        trimmed_folder = folder.rstrip("/\\")
+        trimmed_folder = folder.rstrip(separator)
         prefix = f"{trimmed_folder}{separator}"
+        if separator == "/":
+            # A binary prefix range respects case-sensitive POSIX paths and
+            # keeps literal wildcard characters eligible for an index scan.
+            upper = trimmed_folder + chr(ord(separator) + 1)
+            conditions.append(
+                "(location.directory COLLATE BINARY = ? OR "
+                "(location.directory COLLATE BINARY >= ? AND location.directory COLLATE BINARY < ?))"
+            )
+            params.extend((folder, prefix, upper))
+            continue
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conditions.append(
             "(location.directory = ? OR location.directory LIKE ? ESCAPE '\\')"
@@ -1577,7 +1583,7 @@ def _normalize_person_filters(persons):
         trimmed = (person or "").strip()
         if not trimmed:
             continue
-        key = _normalize_person_name_key(trimmed)
+        key = normalize_person_name_key(trimmed)
         if key in seen:
             continue
         seen.add(key)
@@ -1682,14 +1688,14 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None):
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
             WHERE f.review_status = ?
-              AND LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}'))) IN ({placeholders})
+              AND person_name_key(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')) IN ({placeholders})
             GROUP BY f.image_id
-            HAVING COUNT(DISTINCT LOWER(TRIM(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}')))) = ?
+            HAVING COUNT(DISTINCT person_name_key(COALESCE(p.name, '{UNKNOWN_PERSON_LABEL}'))) = ?
         )
         """
         person_params = [
             FACE_REVIEW_STATUS_ACTIVE,
-            *[_normalize_person_name_key(person) for person in persons],
+            *[normalize_person_name_key(person) for person in persons],
             len(persons),
         ]
 
@@ -4012,13 +4018,15 @@ def _filename_rename_location_order(prefix: str, sort_by: str, sort_direction: s
         return (
             f"{prefix}directory COLLATE NOCASE {direction}, "
             f"{prefix}filename COLLATE NOCASE ASC, "
-            f"{prefix}path COLLATE NOCASE ASC"
+            f"{prefix}path COLLATE NOCASE ASC, "
+            f"{prefix}location_id ASC"
         )
     return (
         f"{prefix}created_at IS NULL ASC, "
         f"{prefix}created_at {direction}, "
         f"{prefix}filename COLLATE NOCASE ASC, "
-        f"{prefix}path COLLATE NOCASE ASC"
+        f"{prefix}path COLLATE NOCASE ASC, "
+        f"{prefix}location_id ASC"
     )
 
 
@@ -4034,13 +4042,15 @@ def _fetch_filename_rename_candidate_rows(
 ):
     """Fetch ordered face rows for a slice of image locations."""
     cte, params = _matching_images_cte(folders=folders, persons=persons)
+    folder_conditions, folder_params = _descendant_filter(folders)
+    folder_scope = f"AND ({' OR '.join(folder_conditions)})" if folder_conditions else ""
+    query_params = [*params, *folder_params]
     location_order = _filename_rename_location_order(
         "matching_locations.", sort_by, sort_direction
     )
     if limit is None:
         paging_cte = ""
         from_table = "matching_locations"
-        query_params = params
     else:
         paging_cte = f"""
         , paged_locations AS (
@@ -4051,7 +4061,7 @@ def _fetch_filename_rename_candidate_rows(
         )
         """
         from_table = "paged_locations"
-        query_params = [*params, limit, offset]
+        query_params.extend((limit, offset))
 
     return conn.execute(
         f"""
@@ -4067,6 +4077,14 @@ def _fetch_filename_rename_candidate_rows(
             FROM image_location location
             JOIN matching_images
                 ON matching_images.image_id = location.image_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM face named_face
+                JOIN cluster named_cluster ON named_cluster.id = named_face.cluster_id
+                JOIN person named_person ON named_person.id = named_cluster.person_id
+                WHERE named_face.image_id = location.image_id
+            )
+            {folder_scope}
         )
         {paging_cte}
         SELECT
@@ -4210,6 +4228,8 @@ def list_filename_rename_candidates_for_paths(
     conn = get_conn()
     try:
         cte, params = _matching_images_cte(folders=folders, persons=persons)
+        folder_conditions, folder_params = _descendant_filter(folders)
+        folder_scope = f"AND ({' OR '.join(folder_conditions)})" if folder_conditions else ""
         rows = conn.execute(
             f"""
             {cte}
@@ -4230,9 +4250,10 @@ def list_filename_rename_candidates_for_paths(
             JOIN cluster c ON f.cluster_id = c.id
             JOIN person p ON c.person_id = p.id
             WHERE location.path IN ({placeholders})
-            ORDER BY location.path COLLATE NOCASE ASC, f.bbox_x ASC, f.id ASC
+            {folder_scope}
+            ORDER BY location.path COLLATE NOCASE ASC, location.id ASC, f.bbox_x ASC, f.id ASC
             """,
-            [*params, *requested_paths],
+            [*params, *requested_paths, *folder_params],
         ).fetchall()
     finally:
         conn.close()

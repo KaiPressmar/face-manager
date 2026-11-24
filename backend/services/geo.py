@@ -42,10 +42,11 @@ def _coordinate(value, reference, positive, negative, maximum):
     return -degrees if reference == negative else degrees
 
 
-def extract_image_metadata(path):
-    """Read metadata without decoding pixel data; invalid fields remain null."""
+def extract_image_metadata(path_or_file):
+    """Read metadata from a path or open photo without decoding pixel data."""
     try:
-        with Image.open(filesystem_path(path)) as image:
+        source = path_or_file if hasattr(path_or_file, "read") else filesystem_path(path_or_file)
+        with Image.open(source) as image:
             exif = image.getexif()
             gps = exif.get_ifd(_GPS_TAG) if _GPS_TAG in exif else {}
             latitude = _coordinate(gps.get(2), gps.get(1), "N", "S", 90)
@@ -73,14 +74,16 @@ def extract_image_metadata(path):
         return None, None, None
 
 
-def record_image_metadata(cursor, image_id, path):
-    """Scan one canonical image once, including images without EXIF."""
+def record_image_metadata(cursor, image_id, path, *, metadata=None):
+    """Save metadata once for a canonical image, including absent EXIF."""
     row = cursor.execute(
         "SELECT metadata_scanned_at FROM image WHERE id = ?", (image_id,)
     ).fetchone()
     if row is None or row["metadata_scanned_at"] not in (None, "missing"):
         return
-    latitude, longitude, captured_at = extract_image_metadata(path)
+    latitude, longitude, captured_at = (
+        metadata if metadata is not None else extract_image_metadata(path)
+    )
     cursor.execute(
         """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?,
                   metadata_scanned_at = CURRENT_TIMESTAMP WHERE id = ?""",

@@ -38,6 +38,33 @@ class ExecutionProviderTest(unittest.TestCase):
     @patch("backend.models.face_model.preload_gpu_runtime_dlls")
     @patch(
         "backend.models.face_model.ort.get_available_providers",
+        return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    def test_loaded_session_providers_override_available_providers(self, _, preload, face_analysis):
+        app = face_analysis.return_value
+        detection = Mock()
+        recognition = Mock()
+        app.models = {"detection": detection, "recognition": recognition}
+        detection.session.get_providers.return_value = ["CPUExecutionProvider"]
+        recognition.session.get_providers.return_value = ["CPUExecutionProvider"]
+
+        model = FaceModel()
+        self.assertEqual(model.compute_mode, "cpu")
+        self.assertEqual(get_execution_provider(), "CPUExecutionProvider")
+
+        for model_session in (detection, recognition):
+            model_session.session.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        self.assertEqual(model.compute_mode, "gpu")
+        self.assertEqual(get_execution_provider(), "CUDAExecutionProvider")
+
+        detection.session.get_providers.return_value = ["CPUExecutionProvider"]
+        self.assertEqual(get_compute_mode(), "cpu")
+        preload.assert_called_once_with()
+
+    @patch("backend.models.face_model.FaceAnalysis")
+    @patch("backend.models.face_model.preload_gpu_runtime_dlls")
+    @patch(
+        "backend.models.face_model.ort.get_available_providers",
         return_value=["CPUExecutionProvider"],
     )
     def test_model_loads_only_required_modules(

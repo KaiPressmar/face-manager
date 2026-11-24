@@ -1,10 +1,43 @@
 import unittest
+from threading import Event, Thread
 from unittest.mock import patch
 
 from backend.services.cache import AppCache
 
 
 class AppCacheTest(unittest.TestCase):
+    def test_invalidated_in_flight_load_cannot_overwrite_a_newer_value(self):
+        for invalidation in ("key", "tags", "clear"):
+            with self.subTest(invalidation=invalidation):
+                cache = AppCache()
+                captured, release = Event(), Event()
+
+                def load_old_value():
+                    captured.set()
+                    release.wait(2)
+                    return "old"
+
+                worker = Thread(
+                    target=cache.get_or_set,
+                    args=("photos", load_old_value),
+                    kwargs={"tags": {"images"}},
+                )
+                worker.start()
+                try:
+                    self.assertTrue(captured.wait(2))
+                    if invalidation == "key":
+                        cache.invalidate_key("photos")
+                    elif invalidation == "tags":
+                        cache.invalidate_tags("images")
+                    else:
+                        cache.clear()
+                    cache.get_or_set("photos", lambda: "current", tags={"images"})
+                finally:
+                    release.set()
+                    worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(cache.get("photos"), "current")
+
     def test_invalidate_tags_removes_only_matching_entries(self):
         cache = AppCache(default_ttl_seconds=60, max_bytes=1024 * 1024, max_entries=10)
         cache.set(("images", 1), {"id": 1}, tags={"images"})

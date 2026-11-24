@@ -36,6 +36,7 @@ export type BackgroundTaskView = {
   title: string;
   status: string;
   summary: string;
+  error?: string | null;
   tone: TaskTone;
   progress: number | null;
   etaSeconds: number | null;
@@ -118,7 +119,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
     running: "In Arbeit",
     paused: "Pausiert",
     cancelling: "Wird beendet",
-    completed: "Abgeschlossen",
+    completed: job.last_error ? "Abgeschlossen mit Hinweisen" : "Abgeschlossen",
     failed: "Nicht abgeschlossen",
     cancelled: "Abgebrochen",
   };
@@ -141,6 +142,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
     summary: importSummary(job),
+    error: job.last_error,
     tone: tone[job.status],
     progress: importProgress(job),
     etaSeconds: finiteDuration(job.eta_seconds),
@@ -698,6 +700,7 @@ const TaskRow: React.FC<{
         <span>{task.status}</span>
       </div>
       <p>{task.summary}</p>
+      {task.error && <p className="import-job__error">{task.error}</p>}
       {!history && task.progress != null && (
         <div
           className="activity-task__progress"

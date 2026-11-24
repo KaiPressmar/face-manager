@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -6,7 +6,25 @@ const FOCUSABLE =
 const isVisible = (element: HTMLElement) =>
   element.getClientRects().length > 0 &&
   getComputedStyle(element).visibility === "visible" &&
-  !element.closest("[inert]");
+  !element.closest('[inert], [aria-hidden="true"]');
+
+const activeModal = () => Array.from(
+  document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
+).filter(isVisible).at(-1);
+
+const canFocus = (element: HTMLElement) => isVisible(element) && !element.matches(":disabled");
+
+function tabStops(dialog: HTMLElement) {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE))
+    .filter((element) => canFocus(element) && element.tabIndex >= 0);
+}
+
+function focusDialog(dialog: HTMLElement) {
+  if (!dialog.hasAttribute("tabindex")) dialog.tabIndex = -1;
+  const preferred = dialog.querySelector<HTMLElement>("[data-initial-focus], [autofocus]");
+  const target = preferred && canFocus(preferred) ? preferred : tabStops(dialog)[0] ?? dialog;
+  target.focus();
+}
 
 /** Keep keyboard focus inside an open dialog and return it to its opener. */
 export function useModalFocus(
@@ -35,16 +53,13 @@ export function useModalFocus(
     const onKeyDown = (event: KeyboardEvent) => {
       const dialog = dialogRef.current;
       if (!dialog) return;
-      const topmost = Array.from(
-        document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
-      ).filter(isVisible).at(-1);
-      if (topmost !== dialog) return;
+      if (activeModal() !== dialog) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
         if (canCloseRef.current) onCloseRef.current();
       } else if (event.key === "Tab") {
-        const items = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isVisible);
+        const items = tabStops(dialog);
         if (items.length === 0) {
           event.preventDefault();
           dialog.focus();
@@ -64,28 +79,26 @@ export function useModalFocus(
         }
       }
     };
+    const onFocusIn = (event: FocusEvent) => {
+      const dialog = dialogRef.current;
+      if (dialog && activeModal() === dialog && !dialog.contains(event.target as Node)) focusDialog(dialog);
+    };
     document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
     return () => {
       document.removeEventListener("keydown", onKeyDown, true);
-      if (openerRef.current?.isConnected && isVisible(openerRef.current)) openerRef.current.focus();
+      document.removeEventListener("focusin", onFocusIn, true);
+      if (openerRef.current?.isConnected && canFocus(openerRef.current)) openerRef.current.focus();
     };
   }, [dialogRef, active]);
 
   // Run after each render to cover a delayed dialog mount as well as focus
   // lost when a save temporarily disables the focused input.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog = dialogRef.current;
-    if (!active || !canClose || !dialog || !isVisible(dialog) || dialog.contains(document.activeElement)) return;
-    const topmost = Array.from(
-      document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
-    ).filter(isVisible).at(-1);
-    if (topmost !== dialog) return;
-    if (!dialog.hasAttribute("tabindex")) dialog.tabIndex = -1;
-    const target = dialog.querySelector<HTMLElement>("[data-initial-focus], [autofocus]");
-    if (target && isVisible(target) && !target.hasAttribute("disabled")) {
-      target.focus();
-    } else {
-      (Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE)).find(isVisible) ?? dialog).focus();
-    }
+    if (!active || !dialog || activeModal() !== dialog) return;
+    const focused = document.activeElement;
+    if (focused && dialog.contains(focused) && !focused.matches(":disabled")) return;
+    focusDialog(dialog);
   });
 }

@@ -14,6 +14,7 @@ from backend.db import schema
 from backend.services.pipeline import (
     ImagePreparer,
     ImportCancelled,
+    ImportFailed,
     ImportProcessor,
     _filesystem_path,
     _stored_filesystem_path,
@@ -177,6 +178,156 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(stored_paths, [str(photo_dir / "valid.jpg")])
             self.assertEqual(len(errors), 1)
             self.assertIn("cache.jpg", errors[0])
+
+    def test_file_replaced_after_hash_is_not_committed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo = root / "photo.png"
+            Image.new("RGB", (32, 32), "red").save(photo)
+            resources = Mock()
+            original_hash = ImagePreparer.hash_image
+
+            def hash_then_replace(path):
+                result = original_hash(path)
+                replacement = root / "replacement.tmp"
+                Image.new("RGB", (32, 32), "blue").save(replacement, format="PNG")
+                os.utime(replacement, ns=(result.modified_at_ns, result.modified_at_ns))
+                replacement.replace(path)
+                return result
+
+            with (
+                patch.object(schema, "DB_PATH", str(root / "database.sqlite")),
+                patch.object(ImagePreparer, "hash_image", side_effect=hash_then_replace),
+            ):
+                schema.init_db()
+                with self.assertRaisesRegex(ImportFailed, "während des Imports geändert"):
+                    ImportProcessor(resources).process(str(root), lambda _: None, threading.Event())
+                conn = schema.get_conn()
+                try:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM image").fetchone()[0], 0)
+                finally:
+                    conn.close()
+
+            resources.get_model.assert_not_called()
+
+    def test_file_changed_during_inference_keeps_previous_library_entry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo = root / "photo.png"
+            Image.new("RGB", (32, 32), "red").save(photo)
+            model = Mock()
+            model.detect_and_embed.return_value = []
+            resources = Mock()
+            resources.get_model.return_value = model
+            processor = ImportProcessor(resources)
+
+            def detect_after_change(_pixels):
+                Image.new("RGB", (32, 32), "green").save(photo)
+                return []
+
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                processor.process(str(root), lambda _: None, threading.Event())
+                conn = schema.get_conn()
+                try:
+                    original = conn.execute("SELECT id, content_hash FROM image").fetchone()
+                    Image.new("RGB", (48, 48), "blue").save(photo)
+                    model.detect_and_embed.side_effect = detect_after_change
+                    with self.assertRaises(ImportFailed):
+                        processor.process(str(root), lambda _: None, threading.Event())
+                    actual = conn.execute("SELECT id, content_hash FROM image").fetchall()
+                    self.assertEqual([tuple(row) for row in actual], [tuple(original)])
+                    location = conn.execute("SELECT path, image_id FROM image_location").fetchone()
+                    self.assertEqual(tuple(location), (str(photo), original["id"]))
+                finally:
+                    conn.close()
+
+    def test_source_change_after_index_mutation_discards_phantom_embedding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "a.png"
+            second = root / "b.png"
+            Image.new("RGB", (32, 32), "red").save(first)
+            Image.new("RGB", (32, 32), "blue").save(second)
+            model = Mock()
+            model.detect_and_embed.return_value = [
+                {"bbox": (1, 2, 10, 12), "embedding": np.ones(512, dtype=np.float32)}
+            ]
+            poisoned_index, fresh_index = Mock(), Mock()
+            fresh_index.add_and_assign.return_value = (np.array([7]), None)
+
+            def index_first_face(*_args, **_kwargs):
+                Image.new("RGB", (48, 48), "green").save(first)
+                return np.array([99]), None
+
+            poisoned_index.add_and_assign.side_effect = index_first_face
+            resources = Mock()
+            resources.get_model.return_value = model
+            resources.get_clusterer.side_effect = [poisoned_index, fresh_index]
+
+            with (
+                patch.object(schema, "DB_PATH", str(root / "database.sqlite")),
+                patch("backend.services.pipeline.get_import_worker_count", return_value=1),
+            ):
+                schema.init_db()
+                ImportProcessor(resources).process(str(root), lambda _: None, threading.Event())
+                conn = schema.get_conn()
+                try:
+                    faces = conn.execute(
+                        "SELECT image.path, face.cluster_id FROM image JOIN face ON face.image_id = image.id"
+                    ).fetchall()
+                    self.assertEqual([tuple(row) for row in faces], [(str(second), 7)])
+                    self.assertIsNone(conn.execute("SELECT id FROM cluster WHERE id = 99").fetchone())
+                finally:
+                    conn.close()
+
+            resources.reset_clusterer.assert_called_once_with(poisoned_index)
+            fresh_index.add_and_assign.assert_called_once()
+
+    def test_model_initialization_failure_is_fatal_without_partial_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for index in range(2):
+                Image.new("RGB", (32, 32), (index * 100, 0, 0)).save(root / f"{index}.png")
+            resources = Mock()
+            resources.get_model.side_effect = RuntimeError("model unavailable")
+            progress = {}
+
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                with self.assertRaisesRegex(ImportFailed, "model unavailable"):
+                    ImportProcessor(resources).process(str(root), progress.update, threading.Event())
+                conn = schema.get_conn()
+                try:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM image").fetchone()[0], 0)
+                finally:
+                    conn.close()
+
+            resources.get_model.assert_called_once()
+            self.assertNotEqual(progress["stage"], "finalizing")
+
+    def test_no_successful_inference_is_reported_as_failed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            Image.new("RGB", (32, 32), "red").save(root / "photo.png")
+            model = Mock()
+            model.detect_and_embed.side_effect = RuntimeError("inference failed")
+            resources = Mock()
+            resources.get_model.return_value = model
+            progress = {}
+
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                with self.assertRaisesRegex(ImportFailed, "inference failed"):
+                    ImportProcessor(resources).process(str(root), progress.update, threading.Event())
+                conn = schema.get_conn()
+                try:
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM image").fetchone()[0], 0)
+                finally:
+                    conn.close()
+
+            model.detect_and_embed.assert_called_once()
+            self.assertNotEqual(progress["stage"], "finalizing")
 
     def test_parallel_preparation_imports_images_and_reports_progress(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -107,7 +107,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 
   const move = useCallback(
     (direction: number) => {
-      if (navigationLength < 2 || sequence?.loading) return;
+      if (isDeleting || navigationLength < 2 || sequence?.loading) return;
       const nextIndex =
         (navigationIndex + direction + navigationLength) % navigationLength;
       if (sequence) {
@@ -117,34 +117,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       }
       setMessage("");
     },
-    [navigationIndex, navigationLength, onChange, sequence]
+    [isDeleting, navigationIndex, navigationLength, onChange, sequence]
   );
-
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "ArrowLeft") move(-1);
-      if (event.key === "ArrowRight") move(1);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [move, onClose]);
-
-  useEffect(() => {
-    const next = images[(activeIndex + 1) % images.length];
-    const previous = images[(activeIndex - 1 + images.length) % images.length];
-    [next, previous].forEach((item) => {
-      if (item && item.id !== image.id) {
-        const preload = new Image();
-        preload.src = imageFileUrl(item.id);
-      }
-    });
-  }, [activeIndex, image.id, images]);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -220,10 +194,13 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   };
 
   const removeCurrentImage = async () => {
-    if (!onDelete) return;
+    if (!onDelete || isDeleting) return;
     setIsDeleting(true);
-    await onDelete(image);
-    setIsDeleting(false);
+    try {
+      await onDelete(image);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -234,8 +211,14 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Bildansicht"
+      aria-busy={isDeleting}
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+        event.preventDefault();
+        move(event.key === "ArrowLeft" ? -1 : 1);
+      }}
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (!isDeleting && event.target === event.currentTarget) onClose();
       }}
     >
       <div className="gallery-ambient" aria-hidden="true" />
@@ -299,6 +282,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-close"
             onClick={onClose}
+            disabled={isDeleting}
             aria-label="Galerie schließen"
             autoFocus
           >
@@ -311,7 +295,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
         ref={stageRef}
         className="gallery-stage"
         onMouseDown={(event) => {
-          if (event.target === event.currentTarget) onClose();
+          if (!isDeleting && event.target === event.currentTarget) onClose();
         }}
       >
         {navigationLength > 1 && (
@@ -319,7 +303,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--previous"
             onClick={() => move(-1)}
-            disabled={sequence?.loading}
+            disabled={isDeleting || sequence?.loading}
             aria-label={sequence?.itemLabel === "Foto" ? "Vorheriges Bild" : sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
           >
             ‹
@@ -349,7 +333,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             }}
             onError={() => setFailedImageId(image.id)}
           />
-          {showFaces &&
+          {showFaces && !isDeleting &&
             naturalSize.width > 0 &&
             (() => {
               const visibleFaces = sequence?.highlightedFaceId
@@ -381,7 +365,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--next"
             onClick={() => move(1)}
-            disabled={sequence?.loading}
+            disabled={isDeleting || sequence?.loading}
             aria-label={sequence?.itemLabel === "Foto" ? "Nächstes Bild" : sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
           >
             ›

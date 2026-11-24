@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
-import { fetchRuntimeInfo, RuntimeInfo } from "../../utils/api";
+import { fetchRuntimeInfo, type ImportQueueState, type RuntimeInfo } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
+import { subscribeToTopic } from "../../utils/events";
 import BackgroundTasksStatus from "../import/BackgroundTasksStatus";
 import FolderPickerModal from "../shared/FolderPickerModal";
 
@@ -28,17 +29,50 @@ const Topbar: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    let requestGeneration = 0;
+    let timer: number | undefined;
+    const checkedCheckpoints = new Map<string, string>();
 
-    fetchRuntimeInfo()
-      .then((info) => {
-        if (!cancelled) setRuntime(info);
-      })
-      .catch(() => {
-        if (!cancelled) setRuntimeUnavailable(true);
-      });
+    const refreshRuntime = () => {
+      const request = ++requestGeneration;
+      void fetchRuntimeInfo()
+        .then((info) => {
+          if (cancelled || request !== requestGeneration) return;
+          setRuntime(info);
+          setRuntimeUnavailable(false);
+        })
+        .catch(() => {
+          if (!cancelled && request === requestGeneration) setRuntimeUnavailable(true);
+        });
+    };
+
+    refreshRuntime();
+    const unsubscribe = subscribeToTopic<ImportQueueState>("imports", ({ jobs }) => {
+      const presentIds = new Set(jobs.map((job) => job.id));
+      for (const id of checkedCheckpoints.keys()) {
+        if (!presentIds.has(id)) checkedCheckpoints.delete(id);
+      }
+
+      let changed = false;
+      for (const job of jobs) {
+        // The pipeline advances to index loading only after the face model is ready.
+        // The final snapshot also catches provider fallback during inference.
+        const checkpoint = job.finished_at ?? (job.stage === "loading_index" ? "model-ready" : null);
+        if (checkpoint && checkpoint !== checkedCheckpoints.get(job.id)) {
+          checkedCheckpoints.set(job.id, checkpoint);
+          changed = true;
+        }
+      }
+      if (changed) {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(refreshRuntime, 120);
+      }
+    });
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
+      unsubscribe();
     };
   }, []);
 

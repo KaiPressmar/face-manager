@@ -72,6 +72,9 @@ const ImageRenamePage: React.FC<{
       });
       if (!controller.signal.aborted) {
         setTotal(nextTotal);
+        if (selectedFolders.length === 0 && selectedPersons.length === 0) {
+          setLibraryTotal(nextTotal);
+        }
       }
     } catch {
       if (!controller.signal.aborted) {
@@ -237,10 +240,13 @@ const ImageRenamePage: React.FC<{
 
     // Unfiltered candidate count, kept independent of the active filter so the
     // bar can always say how much the filter narrowed things down.
+    const libraryTotalController = new AbortController();
     const refreshLibraryTotal = async () => {
+      // The visible count already supplies this value when no filter is active.
+      if (selectedFolders.length === 0 && selectedPersons.length === 0) return;
       try {
-        const page = await fetchImageRenameCandidates({ limit: 1, offset: 0 });
-        if (isMounted && page.total !== null) setLibraryTotal(page.total);
+        const count = await fetchImageRenameCandidateCount({ signal: libraryTotalController.signal });
+        if (isMounted) setLibraryTotal(count);
       } catch {
         // Keep the existing total and retry at the next live checkpoint.
       }
@@ -320,6 +326,7 @@ const ImageRenamePage: React.FC<{
 
     return () => {
       isMounted = false;
+      libraryTotalController.abort();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);

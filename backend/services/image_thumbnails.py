@@ -33,17 +33,17 @@ _decode_slots = Semaphore(2)
 _image_locks = tuple(Lock() for _ in range(64))
 
 
-def _source_signature(path: str) -> tuple[str, int, int]:
+def _source_signature(path: str) -> tuple[str, int, int, int, int, int]:
     source = filesystem_path(path)
-    stat = os.stat(source)
-    return source, stat.st_size, stat.st_mtime_ns
+    info = os.stat(source)
+    return source, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 def _thumbnail_root() -> Path:
     return get_data_root() / "thumbnails" / "images"
 
 
-def _thumbnail_path(image_id: int, signature: tuple[str, int, int]) -> Path:
+def _thumbnail_path(image_id: int, signature: tuple[str, int, int, int, int, int]) -> Path:
     digest = hashlib.sha256(repr(signature).encode("utf-8")).hexdigest()[:20]
     return _thumbnail_root() / f"{image_id // 1000:04d}" / f"{image_id}-{digest}.jpg"
 
