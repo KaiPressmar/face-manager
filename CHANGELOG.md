@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.13.0] - 2026-11-24
+
+### Neu
+
 - Mehrere Bilderordner lassen sich in einem Schritt auswählen. Falls ein Ordner nicht hinzugefügt werden konnte, kannst du ihn einzeln oder zusammen mit weiteren ausstehenden Ordnern erneut versuchen.
 
 ### Verbessert
