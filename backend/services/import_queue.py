@@ -1427,12 +1427,14 @@ class ImportQueue:
                     cancel_event,
                 )
                 self._futures[job_id] = future
-                future.add_done_callback(
-                    lambda done_future, active_job_id=job_id: self._on_job_done(
-                        active_job_id,
-                        done_future,
-                    )
+            # A finished Future invokes its callback inline. Never hold the
+            # queue condition while calling the external finalization guard.
+            future.add_done_callback(
+                lambda done_future, active_job_id=job_id: self._on_job_done(
+                    active_job_id,
+                    done_future,
                 )
+            )
             self._notify_change()
 
     def _run_job(self, job_id: str, cancel_event: threading.Event) -> tuple[str, Optional[str]]:
@@ -1482,15 +1484,24 @@ class ImportQueue:
                                 prior * 0.8 + job.total_images * 0.2
                             )
                 job.current_file = None
-                self._repository.update(job)
-                self._active_job_ids.discard(job_id)
-                self._cancel_events.pop(job_id, None)
-                self._last_progress_persisted.pop(job_id, None)
-                self._live_stage_timing.pop(job_id, None)
-                self._drop_stable_etas(job_id)
-                self._futures.pop(job_id, None)
-                self._trim_history()
-                self._condition.notify_all()
+                try:
+                    self._repository.update(job)
+                except Exception as exc:
+                    logger.exception("Could not persist terminal state of import %s", job_id)
+                    job.status = "failed"
+                    job.last_error = f"Der Importstatus konnte nicht gespeichert werden. {exc}"
+                finally:
+                    self._active_job_ids.discard(job_id)
+                    self._cancel_events.pop(job_id, None)
+                    self._last_progress_persisted.pop(job_id, None)
+                    self._live_stage_timing.pop(job_id, None)
+                    self._drop_stable_etas(job_id)
+                    self._futures.pop(job_id, None)
+                    self._condition.notify_all()
+                try:
+                    self._trim_history()
+                except Exception:
+                    logger.exception("Could not trim import history")
             self._notify_change()
         finally:
             if self._on_after_terminal is not None:
@@ -1590,7 +1601,7 @@ class ImportQueue:
                 import_finished = (
                     job.total_images > 0 and job.processed_images >= job.total_images
                 )
-                if import_finished or job.last_error or now - last_persisted >= 0.5:
+                if import_finished or update_values.get("last_error") or now - last_persisted >= 0.5:
                     self._repository.update(job)
                     self._last_progress_persisted[job_id] = now
             self._notify_change()

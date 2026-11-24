@@ -11,7 +11,19 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Das Bildraster lädt kleinere Vorschauen beim Scrollen. Das Original wird in der Vollbildansicht geöffnet.
+- Die Dateinamenansicht findet Vorschläge auch in großen Bibliotheken schneller.
+
 ### Behoben
+
+- Die Dateinamenansicht berücksichtigt den gewählten Ordner auch bei Fotos mit mehreren Speicherorten und findet ältere Vorschläge zuverlässig.
+- Die Suche nach Personen findet auch Namen mit Umlauten und anderen Sonderzeichen.
+- Änderungen an einer Datei während des Imports lassen sich erneut versuchen. Fehler bei der Erkennung werden angezeigt, und weitere Importe können nach einem Fehler weiterlaufen.
+- Nach dem Wechsel der Bibliothek zeigt Face Manager die Gesichtsvorschauen der aktuellen Fotos.
+- Dialoge behalten den Tastaturfokus, und die Einstellungen lassen sich nach einem Ladefehler erneut abrufen.
+- Auf der Weltkarte lässt sich das Öffnen eines Fotos nach einem Ladefehler wiederholen.
+- Bildraster, Dialoge und Importanzeige funktionieren auch mit der älteren Android-12-WebView.
+- Der Windows-GPU-Installer enthält die benötigten Dateien für die Beschleunigung. Die Anzeige berücksichtigt, wenn die Erkennung auf den Prozessor zurückfällt.
 
 ## [0.12.2] - 2026-11-24
 

@@ -38,11 +38,12 @@ interface Props {
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
 }
 
-const GalleryStatus: React.FC<{ error: string | null; onClose: () => void }> = ({ error, onClose }) => {
+const GalleryStatus: React.FC<{ error: string | null; onClose: () => void; onRetry: () => void }> = ({ error, onClose, onRetry }) => {
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalFocus(dialogRef, onClose);
   return <div ref={dialogRef} className="gps-page__gallery-wait" role="dialog" aria-modal="true" aria-label="Foto öffnen">
     <p role={error ? "alert" : "status"}>{error || "Foto wird geöffnet …"}</p>
+    {error && <button type="button" onClick={onRetry}>Erneut versuchen</button>}
     <button type="button" onClick={onClose}>{error ? "Schließen" : "Abbrechen"}</button>
   </div>;
 };
@@ -366,7 +367,10 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
       loading: displayedGalleryIndex !== galleryIndex && !galleryError,
       error: galleryError,
     }} />}
-    {openedGallery && !lastGalleryImage && <GalleryStatus error={galleryError ?? null} onClose={closeGallery} />}
+    {openedGallery && !lastGalleryImage && <GalleryStatus error={galleryError ?? null} onClose={closeGallery} onRetry={() => {
+      setGalleryResult(null);
+      setDetailRetry((value) => value + 1);
+    }} />}
   </main>;
 };
 

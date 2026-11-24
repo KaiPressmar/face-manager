@@ -75,16 +75,27 @@ export function eventsUrl() {
   return `${API_BASE}/events`;
 }
 
+let libraryMediaRevision = 0;
+
+export function invalidateLibraryMediaUrls() {
+  libraryMediaRevision += 1;
+}
+
+function imageMediaUrl(imageId: number, endpoint: "file" | "thumbnail") {
+  const url = `${API_BASE}/images/${imageId}/${endpoint}`;
+  return libraryMediaRevision ? `${url}?library=${libraryMediaRevision}` : url;
+}
+
 export function imageFileUrl(imageId: number) {
-  return `${API_BASE}/images/${imageId}/file`;
+  return imageMediaUrl(imageId, "file");
 }
 
 export function imageThumbnailUrl(imageId: number) {
-  return `${API_BASE}/images/${imageId}/thumbnail`;
+  return imageMediaUrl(imageId, "thumbnail");
 }
 
 export function faceCropUrl(faceId: number) {
-  return `${API_BASE}/faces/${faceId}/crop`;
+  return `${API_BASE}/faces/${faceId}/crop?v=2&library=${libraryMediaRevision}`;
 }
 
 export interface FolderNode {
@@ -225,6 +236,8 @@ export interface FaceImage {
   directory?: string;
   created_at: string | null;
   content_hash: string | null;
+  image_width?: number | null;
+  image_height?: number | null;
   location_count: number;
   locations: {
     path: string;

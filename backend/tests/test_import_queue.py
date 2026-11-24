@@ -100,6 +100,42 @@ class ImportQueueTest(unittest.TestCase):
         self.wait_for(lambda: len(self.processor.started) == 2)
         self.assertEqual(first["status"], "queued")
 
+    def test_failed_terminal_write_releases_slot_and_reports_error(self):
+        first = self.queue.enqueue("/photos/first")
+        second = self.queue.enqueue("/photos/second")
+        self.wait_for(lambda: self.processor.started == ["/photos/first"])
+        real_update = self.repository.update
+
+        def fail_first_terminal_update(job):
+            if job.id == first["id"] and job.status == "completed":
+                raise sqlite3.OperationalError("database or disk is full")
+            return real_update(job)
+
+        with patch.object(self.repository, "update", side_effect=fail_first_terminal_update):
+            self.processor.release.set()
+            self.wait_for(lambda: self.processor.started == ["/photos/first", "/photos/second"])
+            self.wait_for(lambda: self.queue.snapshot()["active_job_ids"] == [])
+            jobs = {job["id"]: job for job in self.queue.snapshot()["jobs"]}
+
+        self.assertEqual(jobs[first["id"]]["status"], "failed")
+        self.assertIn("database or disk is full", jobs[first["id"]]["last_error"])
+        self.assertEqual(jobs[second["id"]]["status"], "completed")
+
+    def test_old_warning_does_not_disable_progress_throttling(self):
+        self.queue.stop()
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        job = self.queue.enqueue("/photos/warning")
+        update = self.queue._progress_callback(job["id"])
+
+        with (
+            patch("backend.services.import_queue.time.monotonic", return_value=10.0),
+            patch.object(self.repository, "update", wraps=self.repository.update) as persist,
+        ):
+            update({"last_error": "one file was skipped"})
+            update({"processed_images": 2})
+            update({"processed_images": 3})
+            self.assertEqual(persist.call_count, 1)
+
     def test_jobs_can_run_in_parallel_when_configured(self):
         self.processor.release.clear()
         self.queue.stop()

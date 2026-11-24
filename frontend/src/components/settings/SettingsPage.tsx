@@ -137,9 +137,13 @@ const SettingsPage: React.FC<{
     personJoinerInput,
   );
   const joinerPreviewText = SAMPLE_PERSON_NAMES.join(personJoinerInput);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setIsLoading(true);
+    setSettingsLoadError(null);
 
     fetchSettings()
       .then((data) => {
@@ -152,7 +156,7 @@ const SettingsPage: React.FC<{
       })
       .catch((loadError) => {
         if (cancelled) return;
-        setError(
+        setSettingsLoadError(
           loadError instanceof Error
             ? loadError.message
             : "Die Einstellungen konnten nicht geladen werden.",
@@ -168,7 +172,7 @@ const SettingsPage: React.FC<{
         window.clearTimeout(strictnessSaveTimerRef.current);
       }
     };
-  }, []);
+  }, [settingsLoadAttempt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -561,7 +565,14 @@ const SettingsPage: React.FC<{
       </div>
 
       {isLoading ? (
-        <div className="settings-card">Lade Einstellungen…</div>
+        <div className="settings-card" role="status">Lade Einstellungen…</div>
+      ) : settingsLoadError ? (
+        <div className="settings-card">
+          <p role="alert">{settingsLoadError}</p>
+          <button className="neon-card" type="button" onClick={() => setSettingsLoadAttempt((value) => value + 1)}>
+            Erneut versuchen
+          </button>
+        </div>
       ) : (
         <div className="settings-layout">
           <nav className="settings-nav" aria-label="Bereiche">

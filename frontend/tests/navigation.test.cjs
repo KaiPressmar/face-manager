@@ -26,3 +26,9 @@ test('malformed group IDs never silently navigate to another group', () => {
   }
   assert.deepEqual(parseNavigationHash('#/unknown'), { page: 'people' });
 });
+
+test('inherited object keys are not application routes', () => {
+  for (const name of ['constructor', '__proto__', 'toString']) {
+    assert.deepEqual(parseNavigationHash(`#/${name}`), { page: 'people' });
+  }
+});

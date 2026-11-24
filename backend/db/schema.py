@@ -32,7 +32,8 @@ RECOVERABLE_DATABASE_ERROR_MARKERS = (
 )
 
 
-def _normalize_person_name_key(name: str) -> str:
+def normalize_person_name_key(name: str | None) -> str:
+    """Normalize person names consistently in Python and SQLite."""
     """Normalize a person name for case-insensitive deduplication."""
     return (name or "").strip().casefold()
 
@@ -47,7 +48,7 @@ def _repair_person_name_duplicates(cur):
         normalized_name = (row["name"] or "").strip()
         if not normalized_name:
             continue
-        key = _normalize_person_name_key(row["name"])
+        key = normalize_person_name_key(row["name"])
         grouped.setdefault(key, []).append(
             {
                 "id": row["id"],
@@ -192,6 +193,7 @@ def _open_connection():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.create_function("person_name_key", 1, normalize_person_name_key, deterministic=True)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys = ON")

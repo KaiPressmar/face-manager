@@ -1,4 +1,4 @@
-import { eventsUrl } from "./api";
+import { eventsUrl, invalidateLibraryMediaUrls } from "./api";
 
 /**
  * Live backend event channel over Server-Sent Events.
@@ -44,14 +44,17 @@ function setStatus(next: ConnectionStatus) {
 
 function dispatch(topic: EventTopic, event: MessageEvent) {
   const handlers = topicHandlers.get(topic);
-  if (!handlers || handlers.size === 0) return;
+  if (!handlers?.size && topic !== "clusters") return;
   let payload: unknown;
   try {
     payload = JSON.parse(event.data);
   } catch {
     return;
   }
-  for (const handler of handlers) {
+  if (topic === "clusters" && (payload as { reason?: string } | null)?.reason === "database_import") {
+    invalidateLibraryMediaUrls();
+  }
+  for (const handler of handlers ?? []) {
     handler(payload);
   }
 }

@@ -70,7 +70,8 @@ const FolderRow: React.FC<{
           className="folder-expand-button"
           onClick={() => hasChildren && onToggleExpanded(node.path)}
           aria-label={isExpanded ? "Ordner einklappen" : "Ordner ausklappen"}
-          disabled={!hasChildren}
+          aria-expanded={hasChildren ? isExpanded : undefined}
+          disabled={!hasChildren || visiblePaths !== null}
         >
           {hasChildren ? (isExpanded ? "−" : "+") : ""}
         </button>

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from runpy import run_path
 
 from PyInstaller.utils.hooks import (
     collect_data_files,
@@ -19,17 +20,6 @@ if build_variant not in {"cpu", "gpu"}:
 build_variant_path = project_root / "build" / "BUILD_VARIANT"
 build_variant_path.parent.mkdir(parents=True, exist_ok=True)
 build_variant_path.write_text(build_variant + "\n", encoding="ascii")
-
-
-def optional_collect(package_name):
-    try:
-        return (
-            collect_data_files(package_name),
-            collect_dynamic_libs(package_name),
-            copy_metadata(package_name),
-        )
-    except Exception:
-        return ([], [], [])
 
 
 def optional_copy_metadata(distribution_name):
@@ -65,16 +55,11 @@ hiddenimports += [
     "uvicorn.lifespan.on",
 ]
 
-for package_name in (
-    "nvidia.cuda_runtime",
-    "nvidia.cudnn",
-    "nvidia.cublas",
-    "nvidia.cuda_nvrtc",
-):
-    package_datas, package_binaries, package_metadata = optional_collect(package_name)
-    datas += package_datas
-    datas += package_metadata
-    binaries += package_binaries
+if build_variant == "gpu":
+    cuda_runtime = run_path(str(project_root / "packaging" / "windows" / "cuda_runtime.py"))
+    binaries += cuda_runtime["collect_cuda_binaries"]()
+    for distribution_name, _ in cuda_runtime["CUDA_COMPONENTS"].values():
+        datas += copy_metadata(distribution_name)
 
 excludes = [
     "PyQt5",
