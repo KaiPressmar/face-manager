@@ -1,5 +1,7 @@
 import logging
 import os
+import sys
+from pathlib import Path
 from weakref import ref
 
 import numpy as np
@@ -10,6 +12,7 @@ if not _ANDROID:
 else:
     ort = None
 
+from ..config import get_build_variant
 from ..error_logging import configure_error_logging
 
 configure_error_logging()
@@ -17,10 +20,37 @@ logger = logging.getLogger("face_manager.face_model")
 _active_model = None
 
 
+def _configure_bundled_cuda_search_path() -> None:
+    if sys.platform != "win32" or not getattr(sys, "frozen", False) or get_build_variant() != "gpu":
+        return
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root is None:
+        return
+
+    # cuDNN can load NVRTC and companion DLLs by name during inference. Plain
+    # LoadLibrary calls also need their bundled directories on the Windows PATH.
+    runtime_root = Path(bundle_root) / "nvidia"
+    candidates = (runtime_root / "cuda_nvrtc" / "bin", runtime_root / "cudnn" / "bin")
+    bundled = [str(directory) for directory in candidates if directory.is_dir()]
+    if not bundled:
+        return
+
+    def path_key(value: str) -> str:
+        return os.path.normcase(os.path.normpath(value))
+
+    bundled_keys = {path_key(directory) for directory in bundled}
+    current = os.environ.get("PATH", "")
+    entries = current.split(os.pathsep) if current else []
+    path = os.pathsep.join(bundled + [entry for entry in entries if path_key(entry) not in bundled_keys])
+    if path != current:
+        os.environ["PATH"] = path
+
+
 def preload_gpu_runtime_dlls():
     """Preload CUDA/cuDNN DLLs when ONNX Runtime exposes the helper."""
     if hasattr(ort, "preload_dlls"):
         try:
+            _configure_bundled_cuda_search_path()
             ort.preload_dlls(directory="")
         except Exception:
             logger.exception("Could not preload ONNX Runtime GPU DLLs; continuing")
