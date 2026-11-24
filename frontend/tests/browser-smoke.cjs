@@ -410,7 +410,8 @@ async function existingFlow(browser, errors) {
 }
 
 async function liveWorkflowFlow(browser, errors) {
-  const page = await newPage(browser, 1440, 1000, errors);
+  // Keep the initial gallery test separate from speculative grid pagination.
+  const page = await newPage(browser, 1100, 650, errors);
   const publishLibraryChange = (reason) => page.evaluate((reason) => {
     window.workflowTestEvents.dispatchEvent(new MessageEvent('clusters', {
       data: JSON.stringify({ reason }),
@@ -434,6 +435,8 @@ async function liveWorkflowFlow(browser, errors) {
     const galleryTitle = gallery.locator('.gallery-title strong');
     await galleryTitle.waitFor();
     const originalTitle = await galleryTitle.textContent();
+    await page.bringToFront();
+    await page.waitForFunction(() => document.visibilityState === 'visible' && document.hasFocus());
     const isVisiblePageRefresh = (url) => {
       const request = new URL(url);
       return request.pathname === '/api/images' && request.searchParams.get('offset') === '0'
@@ -447,14 +450,9 @@ async function liveWorkflowFlow(browser, errors) {
         { ...data.items[0], id: 987654321, filename: 'Live neu importiert.jpg' },
         ...data.items.slice(0, -1),
       ];
-      await route.fulfill({ json: data, headers: { 'x-test-library-refresh': '1' } });
+      await route.fulfill({ json: data });
     });
-    await page.bringToFront();
-    const refreshed = page.waitForResponse((response) =>
-      isVisiblePageRefresh(response.url()) && response.headers()['x-test-library-refresh'] === '1',
-    );
     await publishLibraryChange('import_completed');
-    await refreshed;
     const syntheticPhoto = page.locator('[data-image-id="987654321"]');
     await syntheticPhoto.waitFor();
     assert.equal(await galleryTitle.textContent(), originalTitle, 'Live refresh changed the active gallery photo');
@@ -465,6 +463,7 @@ async function liveWorkflowFlow(browser, errors) {
     await firstPhoto.press('Enter');
     await gallery.waitFor();
 
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(`${webBase}/#/weltkarte`);
     await page.getByRole('status').filter({ hasText: /^85 Fotos$/ }).waitFor();
     await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
@@ -750,10 +749,14 @@ async function reviewInboxFlow(browser, errors) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
-    assert.ok(await page.locator('.sidebar__brand-mark').evaluate((brand) => {
+    // The entering page briefly transforms the fixed dialog's containing block.
+    // Check the actual paint order once the responsive layout has settled.
+    await page.waitForFunction(() => {
+      const brand = document.querySelector('.sidebar__brand-mark');
+      if (!brand) return false;
       const { x, y, width, height } = brand.getBoundingClientRect();
-      return document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop');
-    }), 'The sidebar logo is painted over the review dialog');
+      return Boolean(document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop'));
+    }, undefined, { timeout: 3000 });
     await apply.scrollIntoViewIfNeeded();
     const bounds = await apply.boundingBox();
     assert.ok(bounds && bounds.y >= -1 && bounds.y + bounds.height <= 361,
