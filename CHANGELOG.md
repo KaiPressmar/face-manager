@@ -13,6 +13,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.14.2] - 2026-11-24
+
+### Neu
+
+- Auf der Projektseite findest du eine bebilderte Tour durch alle Hauptansichten und ein kurzes Bedienvideo.
+
 ## [0.14.1] - 2026-11-24
 
 ### Neu
