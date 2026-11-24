@@ -40,28 +40,117 @@ class DatabaseRestoreTest(unittest.TestCase):
                     app.snapshot_database_backup(backup_path)
                 self.assertEqual(marker_at(backup_path), "from-wal")
 
-    def test_failed_install_restores_old_database_without_file_metadata_copy(self):
-        with tempfile.TemporaryDirectory() as folder:
+    def _isolate_restore(self, patches, current):
+        patches.enter_context(patch.object(app, "DB_PATH", str(current)))
+        patches.enter_context(patch.object(app, "get_conn", side_effect=lambda: sqlite3.connect(current)))
+        patches.enter_context(patch.object(app, "ensure_database_is_idle"))
+        patches.enter_context(patch.object(app.auto_cluster_queue, "request_cancel", return_value=True))
+        patches.enter_context(patch.object(app.auto_cluster_queue, "snapshot", return_value={"task": None}))
+        patches.enter_context(patch.object(app.auto_cluster_queue, "notify_ready"))
+        patches.enter_context(patch.object(app.image_path_cleanup, "stop", return_value=True))
+        patches.enter_context(patch.object(app.image_path_cleanup, "resume"))
+        patches.enter_context(patch.object(app.geo_backfill, "stop"))
+        patches.enter_context(patch.object(app.geo_backfill, "start"))
+        patches.enter_context(patch.object(app, "schedule_version_clustering_upgrade", return_value=True))
+        patches.enter_context(patch.object(app, "reset_import_resources"))
+        patches.enter_context(patch.object(app.app_cache, "clear"))
+
+    def test_failed_install_restores_old_database_without_copying_file_metadata(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
             current = Path(folder) / "database.sqlite"
             incoming = Path(folder) / "incoming.sqlite"
             make_database(current, "old")
             make_database(incoming, "new")
-            payload = incoming.read_bytes()
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "init_db", side_effect=[RuntimeError("migration failed"), None]))
 
-            with ExitStack() as patches:
-                patches.enter_context(patch.object(app, "DB_PATH", str(current)))
-                patches.enter_context(patch.object(app, "get_conn", side_effect=lambda: sqlite3.connect(current)))
-                patches.enter_context(patch.object(app.import_queue, "snapshot", return_value={"running_count": 0, "queued_count": 0, "paused_count": 0}))
-                patches.enter_context(patch.object(app.auto_cluster_queue, "request_cancel", return_value=True))
-                patches.enter_context(patch.object(app.geo_backfill, "stop"))
-                patches.enter_context(patch.object(app.geo_backfill, "start"))
-                patches.enter_context(patch.object(app, "init_db", side_effect=[RuntimeError("migration failed"), None]))
-                patches.enter_context(patch.object(app, "schedule_version_clustering_upgrade", return_value=True))
-                patches.enter_context(patch.object(app, "reset_import_resources"))
-                patches.enter_context(patch.object(app.app_cache, "clear"))
-                with self.assertRaises(HTTPException) as raised:
-                    app.api_import_database(payload)
+            with self.assertRaises(HTTPException) as raised:
+                app.api_import_database(incoming.read_bytes())
 
             self.assertEqual(raised.exception.status_code, 500)
             self.assertEqual(marker_at(current), "old")
-            self.assertFalse(current.with_name("database.pre-import-backup.sqlite").exists())
+            self.assertFalse(list(current.parent.glob("*.pre-import-backup-*.sqlite")))
+            self.assertTrue(all(call.kwargs == {"recover": False} for call in app.init_db.call_args_list))
+
+    def test_incomplete_snapshot_keeps_live_database_and_older_recovery_copy(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            earlier_backup = Path(folder) / "database.pre-import-backup-earlier.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            make_database(earlier_backup, "earlier")
+            self._isolate_restore(patches, current)
+
+            def fail_snapshot(path):
+                path.write_bytes(b"partial")
+                raise OSError("disk full")
+
+            patches.enter_context(patch.object(app, "snapshot_database_backup", side_effect=fail_snapshot))
+            with self.assertRaises(HTTPException) as raised:
+                app.api_import_database(incoming.read_bytes())
+
+            self.assertEqual(raised.exception.status_code, 500)
+            self.assertEqual(marker_at(current), "old")
+            self.assertEqual(marker_at(earlier_backup), "earlier")
+            self.assertEqual(list(current.parent.glob("*.pre-import-backup-*.sqlite")), [earlier_backup])
+
+    def test_failed_rollback_keeps_independent_valid_backup(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "init_db", side_effect=RuntimeError("migration failed")))
+            original_replace = app.os.replace
+
+            def fail_rollback(source, destination):
+                if ".rollback-" in Path(source).name:
+                    raise PermissionError("file is in use")
+                return original_replace(source, destination)
+
+            patches.enter_context(patch.object(app.os, "replace", side_effect=fail_rollback))
+            with self.assertRaises(HTTPException) as raised:
+                app.api_import_database(incoming.read_bytes())
+
+            self.assertEqual(raised.exception.status_code, 500)
+            backup, = current.parent.glob("*.pre-import-backup-*.sqlite")
+            self.assertEqual(marker_at(backup), "old")
+            self.assertIn(str(backup), raised.exception.detail)
+            app.geo_backfill.start.assert_not_called()
+
+    def test_active_path_check_prevents_replacing_database(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            app.image_path_cleanup.stop.return_value = False
+
+            with self.assertRaises(HTTPException) as raised:
+                app.api_import_database(incoming.read_bytes())
+
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(marker_at(current), "old")
+            self.assertFalse(list(current.parent.glob("*.pre-import-backup-*.sqlite")))
+            app.geo_backfill.stop.assert_not_called()
+            app.image_path_cleanup.resume.assert_called_once()
+
+    def test_inflight_clustering_prevents_replacing_database(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            app.auto_cluster_queue.snapshot.return_value = {"task": {"status": "cancelling"}}
+
+            with self.assertRaises(HTTPException) as raised:
+                app.api_import_database(incoming.read_bytes())
+
+            self.assertEqual(raised.exception.status_code, 409)
+            self.assertEqual(marker_at(current), "old")
+            app.image_path_cleanup.stop.assert_not_called()
+            self.assertFalse(app._database_restore_in_progress)

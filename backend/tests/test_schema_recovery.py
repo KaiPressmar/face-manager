@@ -46,6 +46,16 @@ class SchemaRecoveryTest(unittest.TestCase):
         recover_database.assert_called_once()
         healthy_connection.close()
 
+    def test_init_db_can_leave_malformed_database_for_caller_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.sqlite"
+            db_path.write_bytes(b"broken")
+            with patch.object(schema, "DB_PATH", str(db_path)):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    schema.init_db(recover=False)
+            self.assertEqual(db_path.read_bytes(), b"broken")
+            self.assertFalse(db_path.with_name("recovery").exists())
+
     def test_init_db_repairs_cluster_integrity_issues(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "database.sqlite"

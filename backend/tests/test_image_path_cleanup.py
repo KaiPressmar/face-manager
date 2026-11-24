@@ -1,5 +1,6 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -33,6 +34,99 @@ class FolderDescendantFilterTest(unittest.TestCase):
 
 
 class ImagePathCleanupTest(unittest.TestCase):
+    def test_startup_only_counts_unavailable_paths_and_manual_keeps_offline_volumes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            offline = root / "external-drive" / "photo.jpg"
+            deleted = root / "deleted.jpg"
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                person = conn.execute("INSERT INTO person(name) VALUES ('Known person')").lastrowid
+                cluster = conn.execute("INSERT INTO cluster(person_id) VALUES (?)", (person,)).lastrowid
+                for path in (offline, deleted):
+                    image_id = conn.execute(
+                        "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                        (str(path), str(path.parent), path.name),
+                    ).lastrowid
+                    conn.execute(
+                        "INSERT INTO image_location(image_id, path, directory, filename) VALUES (?, ?, ?, ?)",
+                        (image_id, str(path), str(path.parent), path.name),
+                    )
+                    conn.execute("INSERT INTO face(image_id, cluster_id) VALUES (?, ?)", (image_id, cluster))
+                conn.commit()
+                conn.close()
+
+                for reason, removed in (("startup", 0), ("manual", 1)):
+                    with self.subTest(reason=reason):
+                        finished = threading.Event()
+                        cleanup = ImagePathCleanup(
+                            is_idle=lambda: True,
+                            on_change=lambda state: finished.set() if state["status"] == "completed" else None,
+                            check_delay_seconds=0,
+                        )
+                        cleanup.start(reason)
+                        self.assertTrue(finished.wait(2))
+                        self.assertTrue(cleanup.stop())
+                        self.assertEqual(cleanup.snapshot()["unavailable_paths"], 2)
+                        self.assertEqual(cleanup.snapshot()["removed_paths"], removed)
+                        conn = schema.get_conn()
+                        rows = conn.execute(
+                            "SELECT image.path, face.cluster_id FROM image JOIN face ON face.image_id = image.id"
+                        ).fetchall()
+                        conn.close()
+                        self.assertEqual(dict(rows), {
+                            str(path): cluster for path in ((offline, deleted) if not removed else (offline,))
+                        })
+
+    def test_resume_after_stop_timeout_waits_for_existing_worker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo = root / "photo.jpg"
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                image_id = conn.execute(
+                    "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                    (str(photo), str(root), photo.name),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO image_location(image_id, path, directory, filename) VALUES (?, ?, ?, ?)",
+                    (image_id, str(photo), str(root), photo.name),
+                )
+                conn.commit()
+                conn.close()
+
+                entered, release = threading.Event(), threading.Event()
+
+                def slow_path_check(_path):
+                    entered.set()
+                    release.wait(2)
+                    return False
+
+                noticed_idle = threading.Event()
+                cleanup = ImagePathCleanup(
+                    is_idle=lambda: True,
+                    on_change=lambda state: noticed_idle.set() if state["status"] == "idle" else None,
+                    check_delay_seconds=0,
+                )
+                with patch("backend.services.image_path_cleanup.os.path.isfile", side_effect=slow_path_check):
+                    cleanup.start("manual")
+                    worker = cleanup._worker
+                    try:
+                        self.assertTrue(entered.wait(1))
+                        self.assertFalse(cleanup.stop(timeout=0))
+                        cleanup.resume()
+                        self.assertTrue(cleanup._stop_event.is_set())
+                    finally:
+                        release.set()
+                        worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(cleanup._stop_event.is_set())
+                self.assertTrue(noticed_idle.is_set())
+                self.assertEqual(cleanup.snapshot()["status"], "idle")
+                self.assertEqual(cleanup.snapshot()["removed_paths"], 0)
+
     def test_removes_missing_locations_and_images_without_locations(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

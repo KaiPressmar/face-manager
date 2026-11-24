@@ -28,6 +28,7 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const version = update.latest_version ?? "";
+  const isAndroid = update.build_variant === "android";
 
   useEffect(() => {
     if (!update.can_install) return;
@@ -71,6 +72,11 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
     setError(null);
     try {
       await installDownloadedUpdate(version);
+      if (isAndroid) {
+        setBusy(false);
+        setConfirmInstall(false);
+        onClose();
+      }
     } catch (installError) {
       setBusy(false);
       setConfirmInstall(false);
@@ -139,10 +145,14 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
           {confirmInstall && (
             <div className="update-confirm">
               <strong>Update jetzt starten?</strong>
-              <p>Face Manager wird geschlossen und die Installation geöffnet. Da die Installationsdatei noch nicht digital signiert ist, kann Windows weiterhin eine Sicherheitswarnung anzeigen.</p>
+              <p>{isAndroid
+                ? "Android öffnet den Paketinstaller. Dort kannst du das Update bestätigen oder abbrechen."
+                : "Face Manager wird geschlossen und die Installation geöffnet. Da die Installationsdatei noch nicht digital signiert ist, kann Windows weiterhin eine Sicherheitswarnung anzeigen."}</p>
               <div className="update-confirm__actions">
                 <button type="button" className="settings-text-button" onClick={() => setConfirmInstall(false)} disabled={busy}>Abbrechen</button>
-                <button type="button" className="primary-button" onClick={handleInstall} disabled={busy}>{busy ? "Wird gestartet…" : "Face Manager schließen und installieren"}</button>
+                <button type="button" className="primary-button" onClick={handleInstall} disabled={busy}>
+                  {busy ? "Wird gestartet…" : isAndroid ? "Android-Installation öffnen" : "Face Manager schließen und installieren"}
+                </button>
               </div>
             </div>
           )}

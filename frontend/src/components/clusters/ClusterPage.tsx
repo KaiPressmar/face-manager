@@ -571,6 +571,23 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     }
   }, [detailModal, ensurePersonsLoaded]);
 
+  const cancelPendingNavigation = React.useCallback(() => {
+    pendingNavigationClusterIdRef.current = null;
+    pendingMainScrollClusterIdRef.current = null;
+    setHighlightedClusterId(null);
+  }, []);
+
+  const resolvePendingNavigation = React.useCallback((summaries: ClusterSummary[]) => {
+    const clusterId = pendingNavigationClusterIdRef.current;
+    if (clusterId === null) return;
+    const destination = summaries.find((cluster) => cluster.cluster_id === clusterId);
+    if (destination) {
+      setWorkspaceView(destination.person_name?.trim() ? "people" : "open");
+    } else {
+      cancelPendingNavigation();
+    }
+  }, [cancelPendingNavigation]);
+
   const loadSidebarData = React.useCallback(async (background = false) => {
     const requestId = listRequestIdRef.current + 1;
     listRequestIdRef.current = requestId;
@@ -594,6 +611,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         Array.isArray(reviewGroupData) ? reviewGroupData : [],
       );
 
+      resolvePendingNavigation(safeClusters);
       setClusters(safeClusters);
       setReviewGroups(mergedGroups);
       setPersonSuggestions(Array.isArray(suggestionData) ? suggestionData : []);
@@ -613,7 +631,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         setIsListLoading(false);
       }
     }
-  }, []);
+  }, [resolvePendingNavigation]);
 
   const loadTargetDetails = React.useCallback((target: SelectionTarget | null) => {
     if (!target) {
@@ -741,6 +759,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           return;
         }
         const mergedGroups = mergeReviewGroups(overview.review_groups);
+        resolvePendingNavigation(overview.clusters);
         setClusters(overview.clusters);
         setReviewGroups(mergedGroups);
         if (overview.first_cluster) {
@@ -783,7 +802,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     return () => {
       cancelled = true;
     };
-  }, [loadSidebarData, mergeClusterDetails, normalizeClusterDetails]);
+  }, [loadSidebarData, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
 
   useEffect(() => {
     // Pause background polling while the cluster page is not the visible one so
@@ -1046,24 +1065,23 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     }
     appliedNavigationTokenRef.current = navigationTarget.token;
     if (navigationTarget.groupKey) {
+      cancelPendingNavigation();
       setWorkspaceView("archive");
-      pendingNavigationClusterIdRef.current = null;
-      pendingMainScrollClusterIdRef.current = null;
       selectionSourceRef.current = "navigation";
       setSelectedTarget({ type: "group", groupKey: navigationTarget.groupKey });
-      setHighlightedClusterId(null);
       return;
     }
     if (typeof navigationTarget.clusterId !== "number") {
       return;
     }
 
-    // The caller usually knows the person already, so the work area can switch
-    // before the cluster list has arrived. `null` is a real answer here ("no
-    // person"), so distinguish it from "no hint given". If no hint exists, a
-    // separate effect resolves the destination from the loaded summaries.
+    const destination = clusters.find((cluster) => cluster.cluster_id === navigationTarget.clusterId);
+    // A known person or an explicit hint can route immediately. An unseen
+    // destination is resolved against the next successful server response.
     if (navigationTarget.personName !== undefined) {
       setWorkspaceView(navigationTarget.personName ? "people" : "open");
+    } else if (destination) {
+      setWorkspaceView(destination.person_name?.trim() ? "people" : "open");
     }
 
     pendingNavigationClusterIdRef.current = navigationTarget.clusterId;
@@ -1071,6 +1089,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     selectionSourceRef.current = "navigation";
     setSelectedTarget({ type: "cluster", clusterId: navigationTarget.clusterId });
     setHighlightedClusterId(navigationTarget.clusterId);
+    if (!destination && !isListLoading) void loadSidebarData(true);
 
     const timeoutId = window.setTimeout(() => {
       setHighlightedClusterId((current) =>
@@ -1081,18 +1100,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     return () => {
       window.clearTimeout(timeoutId);
     };
-  }, [navigationTarget]);
-
-  useEffect(() => {
-    const pendingClusterId = pendingNavigationClusterIdRef.current;
-    if (pendingClusterId === null) return;
-    const destination = clusters.find(
-      (cluster) => cluster.cluster_id === pendingClusterId,
-    );
-    if (destination) {
-      setWorkspaceView(destination.person_name?.trim() ? "people" : "open");
-    }
-  }, [clusters]);
+    // Only a new navigation token should start a jump. The data loaders
+    // resolve the pending destination when an authoritative list arrives.
+  }, [navigationTarget, cancelPendingNavigation, loadSidebarData]);
 
   /**
    * After a group was emptied by an assignment, continue with the one that
@@ -1596,6 +1606,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     clusterId: number,
     options: { scrollToCluster?: boolean; source?: "explicit" | "navigation" | "scroll" | "system" } = {},
   ) => {
+    cancelPendingNavigation();
     if (options.scrollToCluster) {
       pendingMainScrollClusterIdRef.current = clusterId;
     }
@@ -1604,6 +1615,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   };
 
   const selectReviewGroup = (groupKey: FaceReviewGroupKey) => {
+    cancelPendingNavigation();
     selectionSourceRef.current = "explicit";
     setActiveArchiveSectionKey(null);
     setSelectedTarget({ type: "group", groupKey });
@@ -1619,11 +1631,18 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   /** Jump to one group from the sidebar (table-of-contents style). */
   const selectArchiveSection = React.useCallback(
     (sectionKey: string) => {
+      cancelPendingNavigation();
       setActiveArchiveSectionKey(sectionKey);
       scrollToSection(sectionKey);
     },
-    [scrollToSection],
+    [cancelPendingNavigation, scrollToSection],
   );
+
+  const selectWorkspaceView = (view: ReviewWorkspaceView) => {
+    if (pendingNavigationClusterIdRef.current !== null) setSelectedTarget(null);
+    cancelPendingNavigation();
+    setWorkspaceView(view);
+  };
 
   return (
     <div
@@ -1651,7 +1670,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           <button
             className={workspaceView === view ? "review-page-tab review-page-tab--active" : "review-page-tab"}
             key={view}
-            onClick={() => setWorkspaceView(view)}
+            onClick={() => selectWorkspaceView(view)}
             type="button"
           >
             <span><strong>{label}</strong><small>{description}</small></span>
@@ -1674,7 +1693,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           onDismissPerson={handleDismissSuggestion}
           onAcceptReview={handleAcceptReviewSuggestions}
           onDismissReview={handleDismissReviewSuggestion}
-          onOpenNewFaces={() => setWorkspaceView("open")}
+          onOpenNewFaces={() => selectWorkspaceView("open")}
         />
       ) : (
       <div className="cluster-workspace">

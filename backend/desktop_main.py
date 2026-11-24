@@ -18,63 +18,68 @@ install_global_exception_hooks()
 logger = logging.getLogger("face_manager.desktop")
 
 
-def _reserve_local_port() -> int:
-    """Reserve an ephemeral localhost port for the embedded server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        return int(sock.getsockname()[1])
+class BackendShutdownTimeout(RuntimeError):
+    """The previous startup attempt is still draining."""
 
 
 def _wait_for_server(
-    host: str,
-    port: int,
+    server: uvicorn.Server,
     server_thread: threading.Thread,
     startup_error: list[str],
     timeout_seconds: float = 30.0,
 ) -> None:
     """Block until the local HTTP server starts accepting connections."""
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         if startup_error:
             raise RuntimeError(
                 "Face Manager backend failed to start:\n\n" + startup_error[0]
             )
         if not server_thread.is_alive():
-            raise RuntimeError(
-                f"Face Manager backend stopped before listening on {host}:{port}"
-            )
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.5)
-            if sock.connect_ex((host, port)) == 0:
-                return
+            raise RuntimeError("Face Manager backend stopped before it could listen")
+        if server.started:
+            return
         time.sleep(0.1)
-    raise TimeoutError(f"Face Manager backend did not start on {host}:{port}")
+    raise TimeoutError("Face Manager backend did not start within 30 seconds")
 
 
-def _start_server(host: str, port: int):
-    """Start the embedded backend server on one reserved localhost port."""
+def _start_server(host: str) -> tuple[uvicorn.Server, threading.Thread, int]:
+    """Start the backend and retain the bound port through handoff to Uvicorn."""
     startup_error: list[str] = []
-    server = uvicorn.Server(
-        uvicorn.Config(
-            face_manager_app,
-            host=host,
-            port=port,
-            log_level="warning",
-        )
-    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def run_server() -> None:
         try:
-            server.run()
-        except Exception:  # pragma: no cover - GUI packaging path
+            server.run(sockets=[listener])
+        except (Exception, SystemExit):
             startup_error.append(traceback.format_exc())
-            raise
+            logger.exception("Desktop backend terminated unexpectedly")
+        finally:
+            listener.close()
 
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-    _wait_for_server(host, port, server_thread, startup_error)
-    return server, server_thread
+    try:
+        listener.bind((host, 0))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(
+            face_manager_app, host=host, port=port, workers=1, log_level="warning",
+        ))
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+    except (Exception, SystemExit):
+        listener.close()
+        raise
+
+    try:
+        _wait_for_server(server, server_thread, startup_error)
+    except Exception as exc:
+        server.should_exit = True
+        server_thread.join(timeout=5)
+        if server_thread.is_alive():
+            raise BackendShutdownTimeout(
+                f"{exc}. The local backend is still shutting down."
+            ) from exc
+        raise
+    return server, server_thread, port
 
 
 def _build_error_page(message: str) -> str:
@@ -103,23 +108,19 @@ def main() -> None:
     last_error: Exception | None = None
 
     for attempt in range(2):
-        port = _reserve_local_port()
         try:
-            server, server_thread = _start_server(host, port)
+            server, server_thread, port = _start_server(host)
             break
         except Exception as exc:
             last_error = exc
             logger.exception(
-                "Desktop backend startup attempt %s failed on %s:%s",
+                "Desktop backend startup attempt %s failed",
                 attempt + 1,
-                host,
-                port,
             )
-            if server is not None:
-                server.should_exit = True
-            if server_thread is not None:
-                server_thread.join(timeout=5)
-            time.sleep(0.5 * (attempt + 1))
+            if isinstance(exc, BackendShutdownTimeout):
+                break
+            if attempt == 0:
+                time.sleep(0.5)
 
     if server is None or server_thread is None or port is None:
         message = (
@@ -141,21 +142,20 @@ def main() -> None:
             logger.exception("Could not display the desktop recovery error window")
         raise RuntimeError(message)
 
-    window = webview.create_window(
-        title=f"Face Manager {APP_VERSION}",
-        url=f"http://{host}:{port}",
-        min_size=(1200, 780),
-    )
-    register_shutdown_callback(window.destroy)
     try:
+        window = webview.create_window(
+            title=f"Face Manager {APP_VERSION}",
+            url=f"http://{host}:{port}",
+            min_size=(1200, 780),
+        )
+        register_shutdown_callback(window.destroy)
         webview.start(debug=False)
     except Exception:
         logger.exception("Desktop webview failed during startup or runtime")
         raise
     finally:
-        if window is not None:
-            server.should_exit = True
-            server_thread.join(timeout=10)
+        server.should_exit = True
+        server_thread.join(timeout=10)
 
 
 if __name__ == "__main__":
