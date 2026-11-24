@@ -138,6 +138,32 @@ class DatabaseRestoreTest(unittest.TestCase):
             app.geo_backfill.stop.assert_not_called()
             app.image_path_cleanup.resume.assert_called_once()
 
+    def test_person_suggestion_worker_drains_before_database_swap(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "init_db"))
+            worker = patches.enter_context(patch.object(app, "person_suggestion_worker"))
+            worker.stop.return_value = True
+            original_replace = app.os.replace
+            old_epoch = app.get_person_suggestion_epoch()
+
+            def assert_drained_then_replace(source, destination):
+                worker.stop.assert_called_once()
+                worker.start.assert_not_called()
+                self.assertTrue(app._database_restore_in_progress)
+                original_replace(source, destination)
+
+            patches.enter_context(patch.object(app.os, "replace", side_effect=assert_drained_then_replace))
+
+            self.assertEqual(app.api_import_database(incoming.read_bytes()), {"status": "imported"})
+            self.assertEqual(marker_at(current), "new")
+            self.assertNotEqual(app.get_person_suggestion_epoch(), old_epoch)
+            worker.start.assert_called_once()
+
     def test_inflight_clustering_prevents_replacing_database(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
             current = Path(folder) / "database.sqlite"

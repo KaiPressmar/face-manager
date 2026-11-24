@@ -259,6 +259,8 @@ const App: React.FC = () => {
     [navigate],
   );
 
+  const handleOpenPeople = useCallback(() => navigate({ page: "review" }), [navigate]);
+
   const handleNavigateToCluster = useCallback(
     (clusterId: number, personName?: string | null) =>
       navigate({ page: "review", clusterId, personName }),
@@ -281,6 +283,7 @@ const App: React.FC = () => {
           <PeoplePage
             active={active}
             onNavigateToCluster={handleNavigateToCluster}
+            onOpenPeople={handleOpenPeople}
           />
         );
       case "map":

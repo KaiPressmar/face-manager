@@ -15,6 +15,7 @@ import {
   pauseAutoClusterTask,
   pauseImportJob,
   pauseThumbnailWarmup,
+  processFolder,
   resumeAutoClusterTask,
   resumeImportJob,
   resumeThumbnailWarmup,
@@ -37,6 +38,7 @@ export type BackgroundTaskView = {
   status: string;
   summary: string;
   error?: string | null;
+  retryFolder?: string;
   tone: TaskTone;
   progress: number | null;
   etaSeconds: number | null;
@@ -87,11 +89,12 @@ function importProgress(job: ImportJob): number | null {
 }
 
 function importSummary(job: ImportJob): string {
-  if (job.status === "queued") return "Wartet, bis eine andere Aufgabe fertig ist";
+  if (job.status === "queued") return "Der Ordner wartet auf einen freien Platz.";
   if (job.status === "paused") return "Pausiert und kann jederzeit fortgesetzt werden";
   if (job.status === "cancelling") return "Wird sicher beendet";
   if (job.status === "completed") {
-    return `${job.processed_images} Bilder wurden geprüft`;
+    if (job.total_images === 0) return "Keine JPG-, JPEG- oder PNG-Dateien gefunden.";
+    return job.processed_images === 1 ? "1 Bilddatei geprüft" : `${job.processed_images} Bilddateien geprüft`;
   }
   if (job.status === "failed") {
     return "Konnte nicht vollständig abgeschlossen werden";
@@ -104,7 +107,7 @@ function importSummary(job: ImportJob): string {
       return "Neue und bereits bekannte Bilder werden unterschieden";
     case "processing":
       return job.total_images > 0
-        ? `${job.processed_images} von ${job.total_images} Bildern geprüft`
+        ? `${job.processed_images} von ${job.total_images} Bilddateien geprüft`
         : "Gesichter in den Bildern werden erkannt";
     case "finalizing":
       return "Ergebnisse werden für die Ansichten vorbereitet";
@@ -143,6 +146,9 @@ function importTask(job: ImportJob): BackgroundTaskView {
     status: status[job.status],
     summary: importSummary(job),
     error: job.last_error,
+    retryFolder: job.status === "failed" || (job.status === "completed" && job.last_error)
+      ? job.folder_path
+      : undefined,
     tone: tone[job.status],
     progress: importProgress(job),
     etaSeconds: finiteDuration(job.eta_seconds),
@@ -336,7 +342,7 @@ function finishedLabel(timestamp: string | null): string {
   return date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
-const BackgroundTasksStatus: React.FC = () => {
+const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ openImportsRequest = 0 }) => {
   const [queue, setQueue] = useState<ImportQueueState | null>(null);
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
@@ -346,6 +352,8 @@ const BackgroundTasksStatus: React.FC = () => {
   const [hasFocus, setHasFocus] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const [unseenFinished, setUnseenFinished] = useState(0);
+  const [retriedImports, setRetriedImports] = useState<Set<string>>(() => new Set());
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const knownImportTerminalIds = useRef<Set<string> | null>(null);
   const previousClusterState = useRef<string | null>(null);
@@ -445,12 +453,33 @@ const BackgroundTasksStatus: React.FC = () => {
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (openImportsRequest > 0) setIsPinned(true);
+  }, [openImportsRequest]);
+
+  const retryImport = async (task: BackgroundTaskView) => {
+    if (!task.retryFolder || busyTaskId !== null) return;
+    setBusyTaskId(task.id);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await processFolder(task.retryFolder);
+      setRetriedImports((current) => new Set(current).add(task.id));
+      setActionNotice("Ordner erneut zur Prüfung eingereiht.");
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Der Ordner konnte nicht erneut eingereiht werden.");
+    } finally {
+      setBusyTaskId(null);
+    }
+  };
+
   const controlTask = async (
     task: BackgroundTaskView,
     action: "pause" | "resume" | "cancel",
   ) => {
     setBusyTaskId(task.id);
     setActionError(null);
+    setActionNotice(null);
     try {
       if (task.kind === "import") {
         await (action === "pause"
@@ -482,9 +511,15 @@ const BackgroundTasksStatus: React.FC = () => {
     if (!window.confirm("Diesen Eintrag dauerhaft aus der Historie löschen?")) return;
     setBusyTaskId(task.id);
     setActionError(null);
+    setActionNotice(null);
     try {
       if (task.kind === "import") {
         await deleteImportHistoryEntry(task.sourceId);
+        setRetriedImports((current) => {
+          const next = new Set(current);
+          next.delete(task.id);
+          return next;
+        });
       } else if (task.kind === "groups") {
         if (clustering?.id === task.sourceId) {
           await deleteAutoClusterHistoryEntry(task.sourceId);
@@ -505,8 +540,10 @@ const BackgroundTasksStatus: React.FC = () => {
     if (!window.confirm("Die gesamte Aufgabenhistorie dauerhaft löschen?")) return;
     setBusyTaskId("history");
     setActionError(null);
+    setActionNotice(null);
     try {
       await clearImportHistory();
+      setRetriedImports(new Set());
       const cleanup: Promise<unknown>[] = [];
       if (clustering && ["completed", "failed", "cancelled"].includes(clustering.status)) {
         cleanup.push(deleteAutoClusterHistoryEntry(clustering.id));
@@ -650,12 +687,15 @@ const BackgroundTasksStatus: React.FC = () => {
             </div>
             {history.length > 0 ? (
               <div className="activity-center__history">
-                {history.map((task) => (
+              {history.map((task) => (
                   <TaskRow
                     key={task.id}
                     task={task}
                     history
                     busy={busyTaskId === task.id}
+                  onRetry={task.retryFolder && !retriedImports.has(task.id) && !queue?.jobs.some((job) =>
+                    job.folder_path === task.retryFolder && !TERMINAL_IMPORT_STATUSES.has(job.status)
+                  ) ? () => void retryImport(task) : undefined}
                     onDelete={() => void deleteHistoryTask(task)}
                   />
                 ))}
@@ -668,7 +708,8 @@ const BackgroundTasksStatus: React.FC = () => {
           {connectionError && (
             <p className="activity-center__connection">Der Aufgabenstatus wird gerade neu verbunden.</p>
           )}
-          {actionError && <p className="activity-center__connection">{actionError}</p>}
+          {actionError && <p className="activity-center__connection" role="alert">{actionError}</p>}
+          {actionNotice && <p className="activity-center__connection" role="status">{actionNotice}</p>}
         </section>
       )}
     </div>
@@ -682,6 +723,7 @@ const TaskRow: React.FC<{
   onPause?: () => void;
   onResume?: () => void;
   onCancel?: () => void;
+  onRetry?: () => void;
   onDelete?: () => void;
 }> = ({
   task,
@@ -690,6 +732,7 @@ const TaskRow: React.FC<{
   onPause,
   onResume,
   onCancel,
+  onRetry,
   onDelete,
 }) => {
   const duration = formatFriendlyDuration(history ? task.elapsedSeconds : task.etaSeconds);
@@ -718,6 +761,11 @@ const TaskRow: React.FC<{
         {history && duration && <span>Dauer: {duration}</span>}
       </div>
       <div className="activity-task__actions">
+        {history && onRetry && (
+          <button type="button" disabled={busy} onClick={onRetry}>
+            Ordner erneut prüfen
+          </button>
+        )}
         {!history && task.controlState === "paused" && onResume && (
           <button
             type="button"

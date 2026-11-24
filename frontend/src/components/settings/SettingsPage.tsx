@@ -36,7 +36,7 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; description: string }[] 
 
 const PERSON_NAME_JOINER_PRESETS = [
   { label: "Komma", value: ", " },
-  { label: "Schrägstrich", value: " / " },
+  { label: "Punkt", value: " . " },
   { label: "Und", value: " und " },
   { label: "Plus", value: " + " },
 ];
@@ -44,7 +44,7 @@ const FILENAME_TO_NAMES_SEPARATOR_PRESETS = [
   { label: "Leerzeichen", value: " " },
   { label: "Bindestrich", value: " - " },
   { label: "Unterstrich", value: "_" },
-  { label: "In Klammern", value: " (" },
+  { label: "Doppelter Bindestrich", value: " -- " },
 ];
 
 const SAMPLE_BASENAME = "Sommerurlaub.jpg";
@@ -83,9 +83,12 @@ function buildSuffixFormatPreview(
       : SAMPLE_BASENAME;
   const extension = extensionIndex >= 0 ? SAMPLE_BASENAME.slice(extensionIndex) : "";
   const joinedNames = SAMPLE_PERSON_NAMES.join(joiner);
-  const suffix = `${blockSeparator}${joinedNames}`;
-  const closing = blockSeparator === " (" ? ")" : "";
-  return `${stem}${suffix}${closing}${extension}`;
+  const nextStem = `${stem}${blockSeparator}${joinedNames}`.trim();
+  return `${nextStem}${extension}`;
+}
+
+function hasInvalidFilenameCharacters(value: string) {
+  return /[<>:"/\\|?*\u0000-\u001f]/.test(value);
 }
 
 function visibleSeparator(value: string) {
@@ -126,6 +129,7 @@ const SettingsPage: React.FC<{
   const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filenameFeedback, setFilenameFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const strictnessSaveTimerRef = useRef<number | null>(null);
   const strictnessRevisionRef = useRef(0);
@@ -136,7 +140,14 @@ const SettingsPage: React.FC<{
     filenameBlockSeparatorInput,
     personJoinerInput,
   );
-  const joinerPreviewText = SAMPLE_PERSON_NAMES.join(personJoinerInput);
+  const missingBlockSeparator = filenameBlockSeparatorInput.length === 0;
+  const invalidBlockSeparator = missingBlockSeparator || hasInvalidFilenameCharacters(filenameBlockSeparatorInput);
+  const invalidPersonJoiner = hasInvalidFilenameCharacters(personJoinerInput);
+  const filenameFormatChanged = settings !== null && (
+    filenameBlockSeparatorInput !== settings.filename_person_block_separator ||
+    personJoinerInput !== settings.filename_person_joiner
+  );
+  const canSaveFilenameFormat = filenameFormatChanged && !invalidBlockSeparator && !invalidPersonJoiner && !isSaving;
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
 
@@ -365,9 +376,11 @@ const SettingsPage: React.FC<{
   };
 
   const handleSaveSuffixFormat = async () => {
+    if (!canSaveFilenameFormat) return;
     setIsSaving(true);
     setError(null);
     setMessage(null);
+    setFilenameFeedback(null);
     try {
       const next = await updateSettings({
         filename_person_block_separator: filenameBlockSeparatorInput,
@@ -376,13 +389,14 @@ const SettingsPage: React.FC<{
       setSettings(next);
       setFilenameBlockSeparatorInput(next.filename_person_block_separator);
       setPersonJoinerInput(next.filename_person_joiner);
-      setMessage("Einstellungen für Personennamen im Dateinamen gespeichert.");
+      setFilenameFeedback({ text: "Einstellungen für Personennamen im Dateinamen gespeichert.", error: false });
     } catch (saveError) {
-      setError(
-        saveError instanceof Error
+      setFilenameFeedback({
+        text: saveError instanceof Error
           ? saveError.message
           : "Die Dateinamen-Einstellungen konnten nicht gespeichert werden.",
-      );
+        error: true,
+      });
     } finally {
       setIsSaving(false);
     }
@@ -716,23 +730,22 @@ const SettingsPage: React.FC<{
             <section className="settings-group" id="settings-dateinamen">
               <header className="settings-group__header">
                 <h2>Dateinamen</h2>
-                <p>Wie erkannte Personennamen an Dateinamen angehängt werden.</p>
+                <p>Lege fest, wie zugeordnete Personennamen in den Dateinamenvorschlägen erscheinen.</p>
               </header>
               <div className="settings-group__cards">
             <section className="settings-card">
               <h2 className="settings-card__title">Benennungsschema</h2>
               <p className="settings-card__copy">
-                Der ursprüngliche Dateiname bleibt erhalten. Die folgenden zwei
-                Regeln bestimmen nur, wie die erkannten Personen angehängt werden.
+                Speichere die Regel für künftige Vorschläge. Welche Fotos du umbenennst,
+                entscheidest du anschließend in der Dateinamen-Ansicht.
               </p>
 
               <div className="filename-rule-grid">
                 <section className="filename-rule-card" aria-labelledby="filename-rule-start">
                   <header className="filename-rule-card__header">
-                    <span aria-hidden="true">1</span>
                     <div>
-                      <h3 id="filename-rule-start">Beginn des Personen-Anhangs</h3>
-                      <p>Dieses Zeichen steht einmal zwischen dem bisherigen Dateinamen und dem ersten Namen.</p>
+                      <h3 id="filename-rule-start">Zwischen Dateiname und Namen</h3>
+                      <p>Wähle die Trennung zwischen dem Dateinamen und der ersten Person.</p>
                     </div>
                   </header>
                   <div className="filename-rule-card__formula" aria-label="Position der Einstellung">
@@ -752,11 +765,15 @@ const SettingsPage: React.FC<{
                             : "settings-format-preset"
                         }
                         type="button"
+                        disabled={isSaving}
                         aria-pressed={filenameBlockSeparatorInput === preset.value}
-                        onClick={() => setFilenameBlockSeparatorInput(preset.value)}
+                        onClick={() => {
+                          setFilenameBlockSeparatorInput(preset.value);
+                          setFilenameFeedback(null);
+                        }}
                       >
                         <strong>{preset.label}</strong>
-                        <code>{`Datei${preset.value}Kai${preset.value === " (" ? ")" : ""}.jpg`}</code>
+                        <code>{`Datei${preset.value}Kai.jpg`}</code>
                       </button>
                     ))}
                   </div>
@@ -766,7 +783,13 @@ const SettingsPage: React.FC<{
                       className="settings-number-input settings-text-input"
                       type="text"
                       value={filenameBlockSeparatorInput}
-                      onChange={(event) => setFilenameBlockSeparatorInput(event.target.value)}
+                      disabled={isSaving}
+                      aria-invalid={invalidBlockSeparator}
+                      aria-describedby={invalidBlockSeparator ? "filename-rule-start-error" : undefined}
+                      onChange={(event) => {
+                        setFilenameBlockSeparatorInput(event.target.value);
+                        setFilenameFeedback(null);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" && !event.nativeEvent.isComposing && !isSaving) {
                           event.preventDefault();
@@ -775,15 +798,21 @@ const SettingsPage: React.FC<{
                       }}
                       placeholder="z. B.  - "
                     />
+                    {invalidBlockSeparator && (
+                      <small id="filename-rule-start-error" className="settings-save-state--error">
+                        {missingBlockSeparator
+                          ? "Wähle mindestens ein Trennzeichen, etwa ein Leerzeichen."
+                          : "Verwende gültige Zeichen für einen Dateinamen, etwa einen Bindestrich."}
+                      </small>
+                    )}
                   </label>
                 </section>
 
                 <section className="filename-rule-card" aria-labelledby="filename-rule-people">
                   <header className="filename-rule-card__header">
-                    <span aria-hidden="true">2</span>
                     <div>
                       <h3 id="filename-rule-people">Mehrere Personen verbinden</h3>
-                      <p>Dieses Zeichen wird nur zwischen zwei oder mehr erkannten Personennamen verwendet.</p>
+                      <p>Diese Verbindung steht zwischen den Namen, wenn mehrere Personen zugeordnet sind.</p>
                     </div>
                   </header>
                   <div className="filename-rule-card__formula" aria-label="Position der Einstellung">
@@ -803,8 +832,12 @@ const SettingsPage: React.FC<{
                             : "settings-format-preset"
                         }
                         type="button"
+                        disabled={isSaving}
                         aria-pressed={personJoinerInput === preset.value}
-                        onClick={() => setPersonJoinerInput(preset.value)}
+                        onClick={() => {
+                          setPersonJoinerInput(preset.value);
+                          setFilenameFeedback(null);
+                        }}
                       >
                         <strong>{preset.label}</strong>
                         <code>{SAMPLE_PERSON_NAMES.join(preset.value)}</code>
@@ -817,22 +850,30 @@ const SettingsPage: React.FC<{
                       className="settings-number-input settings-text-input"
                       type="text"
                       value={personJoinerInput}
-                      onChange={(event) => setPersonJoinerInput(event.target.value)}
+                      disabled={isSaving}
+                      aria-invalid={invalidPersonJoiner}
+                      aria-describedby={invalidPersonJoiner ? "filename-rule-people-error" : undefined}
+                      onChange={(event) => {
+                        setPersonJoinerInput(event.target.value);
+                        setFilenameFeedback(null);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" && !event.nativeEvent.isComposing && !isSaving) {
                           event.preventDefault();
                           void handleSaveSuffixFormat();
                         }
                       }}
-                      placeholder="z. B. ,  oder  / "
+                      placeholder="z. B. ,  oder und"
                     />
-                    <small>Nur die Namen: {joinerPreviewText}</small>
+                    {invalidPersonJoiner && <small id="filename-rule-people-error" className="settings-save-state--error">
+                      Wähle ein erlaubtes Zeichen oder Wort, etwa ein Komma oder „und“.
+                    </small>}
                   </label>
                 </section>
               </div>
 
               <div className="settings-format-preview filename-format-result">
-                <span className="settings-format-preview__label">Ergebnis mit beiden Regeln</span>
+                <span className="settings-format-preview__label">Vorgeschlagener Dateiname</span>
                 <code>{suffixPreview}</code>
                 <small>
                   Vorschau für den ursprünglichen Namen <code>{SAMPLE_BASENAME}</code>
@@ -843,23 +884,37 @@ const SettingsPage: React.FC<{
                 <button
                   className="neon-card"
                   onClick={handleSaveSuffixFormat}
-                  disabled={isSaving}
+                  disabled={!canSaveFilenameFormat}
                 >
                   {isSaving ? "Speichern…" : "Dateinamen-Regeln speichern"}
                 </button>
                 <button
                   className="neon-card"
+                  disabled={isSaving}
                   onClick={() => {
                     if (!settings) return;
                     setFilenameBlockSeparatorInput(
                       settings.filename_person_block_separator_default,
                     );
                     setPersonJoinerInput(settings.filename_person_joiner_default);
+                    setFilenameFeedback(null);
                   }}
                 >
-                  Auf Standard zurücksetzen
+                  Standardwerte in der Vorschau
                 </button>
               </div>
+              {filenameFormatChanged && !filenameFeedback && (
+                <small className="settings-save-state settings-save-state--pending" role="status">Ungespeicherte Änderung</small>
+              )}
+              {filenameFeedback && (
+                <p
+                  className={filenameFeedback.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
+                  role={filenameFeedback.error ? "alert" : "status"}
+                >
+                  {filenameFeedback.text}
+                </p>
+              )}
+              <a className="rename-settings-link" href="#/dateinamen">Zu den Dateinamenvorschlägen <span aria-hidden="true">→</span></a>
             </section>
               </div>
             </section>

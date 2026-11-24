@@ -69,6 +69,7 @@ interface LibraryFilterBarProps {
   /** Archived statuses to include. Omit to hide those filters entirely. */
   faceStatuses?: string[];
   onFaceStatusesChange?: (statuses: string[]) => void;
+  onResetFilters?: () => void;
 
   /** Optional extra compact control, e.g. the face-overlay toggle. */
   children?: React.ReactNode;
@@ -88,6 +89,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
   resultNoun,
   faceStatuses,
   onFaceStatusesChange,
+  onResetFilters,
   children,
 }) => {
   const [search, setSearch] = useState("");
@@ -141,7 +143,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
   return (
     <section className="filter-bar" aria-label="Filter und Sortierung">
       <div className="filter-bar__controls">
-        <div className="filter-bar__result">
+        <div className="filter-bar__result" aria-live="polite">
           <strong>{resultCount === null ? "…" : resultCount.toLocaleString()}</strong>
           <span>
             {/* Only mention the whole library while a filter actually narrows it. */}
@@ -153,7 +155,6 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
 
         <div className="filter-bar__tools">
           <div className="filter-bar__tool-group">
-            <span className="filter-bar__tool-label">Filtern</span>
             <div className="filter-bar__tool-group-controls">
               {orderedPersons.length > SEARCH_THRESHOLD && (
                 <input
@@ -182,7 +183,6 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           </div>
 
           <div className="filter-bar__tool-group">
-            <span className="filter-bar__tool-label">Sortieren</span>
             <div className="filter-bar__tool-group-controls">
               <select
                 className="filter-bar__control filter-bar__select"
@@ -205,15 +205,16 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           </div>
 
           {children && (
-            <div className="filter-bar__tool-group filter-bar__tool-group--view">
-              <span className="filter-bar__tool-label">Ansicht</span>
+            <details className="filter-bar__view">
+              <summary className="filter-bar__control">Ansicht</summary>
               <div className="filter-bar__tool-group-controls">{children}</div>
-            </div>
+            </details>
           )}
+          {onResetFilters && <button type="button" className="filter-bar__control" onClick={onResetFilters}>Filter zurücksetzen</button>}
         </div>
       </div>
 
-      <div className="filter-bar__chips">
+      <div className="filter-bar__chips" role="group" aria-label="Nach Personen filtern">
         <span className="filter-bar__row-label">Personen</span>
         <button
           className={
@@ -223,6 +224,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           }
           onClick={() => onPersonsChange([])}
           aria-pressed={selectedPersons.length === 0}
+          aria-label="Alle Personen"
           type="button"
         >
           Alle
@@ -267,19 +269,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
         {query && filteredPersons.length === 0 && (
           <span className="filter-bar__hint">Keine Person passt zu „{search}“.</span>
         )}
-        {orderedPersons.length === 0 && (
-          <span className="filter-bar__hint">
-            Noch keine benannten Personen. Ordne unter „Gesichter prüfen“ zuerst
-            Gesichter einer Person zu.
-          </span>
-        )}
-      </div>
-
-      {/* Kept out of the person row: these are categories, not people. The
-          divider alone sets them apart, so they can share the chip design. */}
-      <div className="filter-bar__categories">
-        <span className="filter-bar__row-label">Status</span>
-        <button
+        {(persons.includes(UNASSIGNED_FILTER_VALUE) || selectedSet.has(UNASSIGNED_FILTER_VALUE)) && <button
           className={`person-filter__chip${
             selectedSet.has(UNASSIGNED_FILTER_VALUE) ? " person-filter__chip--active" : ""
           }`}
@@ -289,34 +279,39 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           type="button"
         >
           {UNASSIGNED_FILTER_LABEL}
-        </button>
-
-        {faceStatuses !== undefined &&
-          onFaceStatusesChange &&
-          STATUS_FILTERS.map((status) => {
-            const isActive = faceStatuses.includes(status.value);
-            return (
-              <button
-                key={status.value}
-                className={`person-filter__chip${
-                  isActive ? " person-filter__chip--active" : ""
-                }`}
-                onClick={() =>
-                  onFaceStatusesChange(
-                    isActive
-                      ? faceStatuses.filter((entry) => entry !== status.value)
-                      : [...faceStatuses, status.value],
-                  )
-                }
-                title={status.hint}
-                aria-pressed={isActive}
-                type="button"
-              >
-                {status.label}
-              </button>
-            );
-          })}
+        </button>}
       </div>
+
+      {faceStatuses && onFaceStatusesChange && (
+        <details className="filter-bar__archive">
+          <summary>Ausgesonderte Gesichter{faceStatuses.length > 0 && ` (${faceStatuses.length})`}</summary>
+          <div className="filter-bar__categories" role="group" aria-label="Ausgesonderte Gesichter filtern">
+            {STATUS_FILTERS.map((status) => {
+              const isActive = faceStatuses.includes(status.value);
+              return (
+                <button
+                  key={status.value}
+                  className={`person-filter__chip${
+                    isActive ? " person-filter__chip--active" : ""
+                  }`}
+                  onClick={() =>
+                    onFaceStatusesChange(
+                      isActive
+                        ? faceStatuses.filter((entry) => entry !== status.value)
+                        : [...faceStatuses, status.value],
+                    )
+                  }
+                  title={status.hint}
+                  aria-pressed={isActive}
+                  type="button"
+                >
+                  {status.label}
+                </button>
+              );
+            })}
+          </div>
+        </details>
+      )}
     </section>
   );
 };

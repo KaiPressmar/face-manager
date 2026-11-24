@@ -1,69 +1,108 @@
 import React, { useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
-
 import { processFolder, selectImportFolder } from "../../utils/api";
+import { pathBasename } from "../../utils/pathDisplay";
+import "../import/import-sources.css";
 
 interface FolderPickerModalProps {
   onClose: (started?: boolean) => void;
 }
 
+interface ImportSource {
+  path: string;
+  error?: string;
+}
+
 const IS_DEVELOPMENT = import.meta.env.DEV;
 
 const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
-  const [folderPath, setFolderPath] = useState("");
+  const [sources, setSources] = useState<ImportSource[]>([]);
+  const [draftPath, setDraftPath] = useState("");
   const [isBrowsing, setIsBrowsing] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [startingPath, setStartingPath] = useState("");
+  const [queuedCount, setQueuedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const queuedPaths = useRef(new Set<string>());
+  const busyRef = useRef(false);
   const busy = isBrowsing || isStarting;
   const dialogRef = useRef<HTMLElement>(null);
-  useModalFocus(dialogRef, () => onClose(false), !busy);
+  const close = () => onClose(queuedPaths.current.size > 0);
+  useModalFocus(dialogRef, close, !busy);
+
+  const trimmedDraft = draftPath.trim();
+  const hasSource = (path: string) => queuedPaths.current.has(path) || sources.some((source) => source.path === path);
+  const draftIsNew = Boolean(trimmedDraft && !hasSource(trimmedDraft));
+  const pendingCount = sources.length + Number(draftIsNew);
+  const hasSourceError = sources.some((source) => Boolean(source.error));
+
+  const addSource = (input: string) => {
+    const path = input.trim();
+    if (!path) return;
+    if (hasSource(path)) {
+      setError("Dieser Ordner ist bereits in deiner Auswahl oder wurde schon eingereiht.");
+      return;
+    }
+    setSources((current) => [...current, { path }]);
+    setDraftPath("");
+    setError(null);
+  };
 
   const browse = async () => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setIsBrowsing(true);
     setError(null);
     try {
-      const selectedPath = await selectImportFolder();
-      if (selectedPath) setFolderPath(selectedPath);
+      const path = await selectImportFolder();
+      if (path) addSource(path);
     } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Der Ordnerdialog konnte nicht geöffnet werden.",
-      );
+      setError(requestError instanceof Error ? requestError.message : "Der Ordnerdialog konnte nicht geöffnet werden.");
     } finally {
+      busyRef.current = false;
       setIsBrowsing(false);
     }
   };
 
   const submit = async () => {
-    const normalizedPath = folderPath.trim();
-    if (!normalizedPath || busy) return;
-
+    if (busyRef.current || pendingCount === 0) return;
+    busyRef.current = true;
     setIsStarting(true);
     setError(null);
-    try {
-      await processFolder(normalizedPath);
-      onClose(true);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Der Ordner konnte nicht hinzugefügt werden.",
-      );
-      setIsStarting(false);
+    const pending = draftIsNew ? [...sources, { path: trimmedDraft }] : sources;
+    const failed: ImportSource[] = [];
+    setSources(pending);
+    setDraftPath("");
+    for (const { path } of pending) {
+      setStartingPath(path);
+      try {
+        await processFolder(path);
+        queuedPaths.current.add(path);
+        setQueuedCount(queuedPaths.current.size);
+        setSources((current) => current.filter((source) => source.path !== path));
+      } catch (requestError) {
+        failed.push({
+          path,
+          error: requestError instanceof Error ? requestError.message : "Der Ordner konnte nicht eingereiht werden.",
+        });
+      }
     }
+    busyRef.current = false;
+    setIsStarting(false);
+    setStartingPath("");
+    setSources(failed);
+    if (failed.length === 0) close();
   };
 
   return (
     <div
       className="modal-backdrop folder-picker-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose(false);
+        if (event.target === event.currentTarget && !busyRef.current) close();
       }}
     >
       <section
-        className={`folder-picker-modal ${IS_DEVELOPMENT ? "folder-picker-modal--dev" : "folder-picker-modal--prod"}`}
+        className="folder-picker-modal import-sources-modal"
         role="dialog"
         ref={dialogRef}
         aria-modal="true"
@@ -71,114 +110,96 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
       >
         <header className="folder-picker-modal__header">
           <div>
-            <span className="folder-picker-modal__eyebrow">
-              {IS_DEVELOPMENT ? "Entwicklungsserver · WSL" : "Bildersammlung"}
-            </span>
             <h2 id="folder-picker-title">Bilderordner hinzufügen</h2>
-            <p>
-              {IS_DEVELOPMENT
-                ? "Der Entwicklungsserver greift direkt auf das WSL-Dateisystem zu."
-                : "Wähle den Ordner aus, dessen Bilder Face Manager erkennen soll."}
-            </p>
+            <p>Sammle Ordner von deinem Gerät oder einem verbundenen Laufwerk.</p>
           </div>
-          <button
-            type="button"
-            className="modal-close-button"
-            onClick={() => onClose(false)}
-            disabled={busy}
-            aria-label="Ordnerauswahl schließen"
-          >
-            ×
-          </button>
+          <button type="button" className="modal-close-button" onClick={close} disabled={busy} aria-label="Ordnerauswahl schließen">×</button>
         </header>
 
         <form
           className="folder-picker-modal__form"
           onSubmit={(event) => {
             event.preventDefault();
-            void submit();
+            if (!busyRef.current) addSource(draftPath);
           }}
         >
           <div className="folder-picker-modal__content">
             {IS_DEVELOPMENT ? (
               <div className="folder-picker-modal__dev-input">
                 <label htmlFor="development-import-path">Pfad zum Bilderordner</label>
-                <input
-                  id="development-import-path"
-                  type="text"
-                  value={folderPath}
-                  onChange={(event) => setFolderPath(event.target.value)}
-                  placeholder="C:\\Users\\Name\\Pictures oder /mnt/c/Users/Name/Pictures"
-                  disabled={isStarting}
-                  autoFocus
-                  data-initial-focus
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p>
-                  Windows-Pfade werden für WSL automatisch übersetzt. Alternativ kannst du
-                  direkt einen Linux- oder <code>/mnt/…</code>-Pfad einfügen.
-                </p>
+                <div className="import-sources__path-entry">
+                  <input
+                    id="development-import-path"
+                    type="text"
+                    value={draftPath}
+                    onChange={(event) => { setDraftPath(event.target.value); setError(null); }}
+                    placeholder="/mnt/c/Users/Name/Pictures"
+                    disabled={busy}
+                    data-initial-focus
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button type="submit" className="secondary-button" disabled={!trimmedDraft || busy}>Zur Liste hinzufügen</button>
+                </div>
+                <p>Verwende einen Pfad, auf den der Entwicklungsserver zugreifen kann.</p>
               </div>
             ) : (
-              <div className="folder-picker-modal__native-picker">
-                <button
-                  type="button"
-                  className="folder-picker-modal__browse"
-                  autoFocus
-                  data-initial-focus
-                  onClick={() => void browse()}
-                  disabled={busy}
-                >
-                  <span className="folder-icon" aria-hidden="true" />
-                  <span>
-                    <strong>
-                      {isBrowsing
-                        ? "Windows-Ordnerauswahl wird geöffnet…"
-                        : folderPath
-                          ? "Anderen Ordner auswählen"
-                          : "Ordner auswählen"}
-                    </strong>
-                    <small>Öffnet den sicheren Systemdialog</small>
-                  </span>
-                </button>
-
-                {folderPath && (
-                  <div className="folder-picker-modal__selected" title={folderPath}>
-                    <span>Ausgewählt</span>
-                    <strong>{folderPath}</strong>
-                  </div>
-                )}
-              </div>
+              <button type="button" className="folder-picker-modal__browse" data-initial-focus onClick={() => void browse()} disabled={busy}>
+                <span className="folder-icon" aria-hidden="true" />
+                <span><strong>{isBrowsing ? "Ordnerauswahl wird geöffnet…" : sources.length > 0 ? "Weiteren Ordner auswählen" : "Ordner auswählen"}</strong></span>
+              </button>
             )}
 
-            {isStarting && (
-              <div className="folder-picker-modal__status" role="status">
-                Der Bilderordner wird zur Import-Warteschlange hinzugefügt…
-              </div>
+            {sources.length > 0 && (
+              <section className="import-sources__selection" aria-label="Ausgewählte Ordner">
+                <h3>{sources.length === 1 ? "1 ausgewählter Ordner" : `${sources.length} ausgewählte Ordner`}</h3>
+                <ul>
+                  {sources.map((source) => (
+                    <li key={source.path}>
+                      <div className="import-sources__source-name">
+                        <strong>{pathBasename(source.path)}</strong>
+                        <span>{source.path}</span>
+                        {source.error && <p className="import-sources__source-error" role="alert">{source.error}</p>}
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button import-sources__remove"
+                        aria-label={`Ordner ${source.path} aus der Auswahl entfernen`}
+                        onClick={() => setSources((current) => current.filter((entry) => entry.path !== source.path))}
+                        disabled={busy}
+                      >
+                        Entfernen
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             )}
-            {error && (
-              <div className="folder-picker-modal__error" role="alert">
-                {error}
-              </div>
+
+            {error && <p className="folder-picker-modal__error" role="alert">{error}</p>}
+            {(isStarting || queuedCount > 0) && (
+              <p className="folder-picker-modal__status" role="status">
+                {queuedCount > 0 && (queuedCount === 1 ? "1 Ordner eingereiht. " : `${queuedCount} Ordner eingereiht. `)}
+                {isStarting ? `„${pathBasename(startingPath)}“ wird eingereiht…` : "Den Fortschritt findest du unter Aktivitäten."}
+              </p>
             )}
+
+            <section className="import-sources__explanation" aria-label="So funktioniert der Import">
+              <h3>Was passiert mit deinen Bildern?</h3>
+              <ul>
+                <li>Face Manager sucht in den Ordnern und Unterordnern nach JPG-, JPEG- und PNG-Dateien.</li>
+                <li>Die Dateien bleiben an ihren Speicherorten. Identische Dateien erscheinen als ein Bild mit mehreren Speicherorten.</li>
+                <li>Gesichter werden erkannt und ähnliche Gesichter gruppiert. Du kannst die Gruppen prüfen und Personen benennen.</li>
+              </ul>
+            </section>
           </div>
 
           <footer className="folder-picker-modal__footer">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => onClose(false)}
-              disabled={busy}
-            >
-              Abbrechen
+            <button type="button" className="secondary-button" onClick={close} disabled={busy}>
+              {queuedCount > 0 ? "Schließen" : "Abbrechen"}
             </button>
-            <button
-              type="submit"
-              className="primary-button"
-              disabled={!folderPath.trim() || busy}
-            >
-              {isStarting ? "Wird hinzugefügt…" : "Bilder hinzufügen"}
+            <button type="button" className="primary-button" disabled={pendingCount === 0 || busy} onClick={() => void submit()}>
+              {isStarting ? "Wird eingereiht…" : hasSourceError ? "Ausstehende Ordner erneut versuchen" : pendingCount > 1 ? `${pendingCount} Ordner importieren` : "Bilder hinzufügen"}
             </button>
           </footer>
         </form>

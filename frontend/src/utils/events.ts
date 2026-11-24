@@ -14,6 +14,7 @@ export type EventTopic =
   | "imports"
   | "autocluster"
   | "thumbnail-warmup"
+  | "person-suggestions"
   | "clusters";
 
 export type ConnectionStatus = "connecting" | "open" | "closed";
@@ -31,6 +32,7 @@ const ALL_TOPICS: EventTopic[] = [
   "imports",
   "autocluster",
   "thumbnail-warmup",
+  "person-suggestions",
   "clusters",
 ];
 

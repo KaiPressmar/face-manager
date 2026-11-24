@@ -663,6 +663,61 @@ def _create_recluster_dirty_person_table(cur):
     )
 
 
+def _create_person_suggestion_generation(cur):
+    """Invalidate proposal snapshots in the same transaction as evidence changes."""
+    columns = {row["name"] for row in cur.execute("PRAGMA table_info(cluster_person_suggestion)")}
+    for name, kind in (
+        ("generation", "INTEGER"),
+        ("snapshot_token", "TEXT"),
+        ("eligible_face_ids", "TEXT"),
+        ("reference_face_ids", "TEXT"),
+    ):
+        if name not in columns:
+            cur.execute(f"ALTER TABLE cluster_person_suggestion ADD COLUMN {name} {kind}")
+
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS person_suggestion_state (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               generation INTEGER NOT NULL,
+               processed_generation INTEGER NOT NULL
+           )"""
+    )
+    cur.execute("INSERT OR IGNORE INTO person_suggestion_state VALUES (1, 1, 0)")
+    settings_keys = """
+        ('cluster_distance_threshold', 'cluster_person_anchor_threshold',
+         'cluster_ambiguity_margin', 'cluster_support_ratio')
+    """
+    triggers = (
+        ("face_insert", "AFTER INSERT ON face"),
+        ("face_delete", "AFTER DELETE ON face"),
+        ("face_update", """AFTER UPDATE OF image_id, cluster_id, review_status, embedding,
+                            bbox_x, bbox_y, bbox_w, bbox_h ON face
+                         WHEN OLD.image_id IS NOT NEW.image_id
+                           OR OLD.cluster_id IS NOT NEW.cluster_id
+                           OR OLD.review_status IS NOT NEW.review_status
+                           OR OLD.embedding IS NOT NEW.embedding
+                           OR OLD.bbox_x IS NOT NEW.bbox_x OR OLD.bbox_y IS NOT NEW.bbox_y
+                           OR OLD.bbox_w IS NOT NEW.bbox_w OR OLD.bbox_h IS NOT NEW.bbox_h"""),
+        ("cluster_person", """AFTER UPDATE OF person_id ON cluster
+                               WHEN OLD.person_id IS NOT NEW.person_id"""),
+        ("person_rename", """AFTER UPDATE OF name ON person
+                              WHEN OLD.name IS NOT NEW.name"""),
+        ("person_delete", "AFTER DELETE ON person"),
+        ("settings_insert", f"AFTER INSERT ON app_settings WHEN NEW.key IN {settings_keys}"),
+        ("settings_delete", f"AFTER DELETE ON app_settings WHEN OLD.key IN {settings_keys}"),
+        ("settings_update", f"""AFTER UPDATE OF key, value ON app_settings
+                                WHEN (OLD.key IN {settings_keys} OR NEW.key IN {settings_keys})
+                                 AND (OLD.key IS NOT NEW.key OR OLD.value IS NOT NEW.value)"""),
+    )
+    for name, condition in triggers:
+        cur.execute(
+            f"""CREATE TRIGGER IF NOT EXISTS person_suggestion_{name} {condition}
+                BEGIN UPDATE person_suggestion_state
+                    SET generation = generation + 1 WHERE id = 1;
+                END"""
+        )
+
+
 def _migrate_legacy_faces(conn):
     """Migrate face rows that referenced image paths directly.
 
@@ -786,6 +841,7 @@ def _initialize_schema(conn):
     _create_import_job_table(cur)
     _create_app_settings_table(cur)
     _create_recluster_dirty_person_table(cur)
+    _create_person_suggestion_generation(cur)
 
     cur.execute(
         """
