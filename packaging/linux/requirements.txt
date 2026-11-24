@@ -1,0 +1,14 @@
+# The Ubuntu build uses the distro's Python 3.14 and PyGObject. Keep one ORT
+# distribution and retain the NVIDIA and OpenVINO wheel directory layouts.
+onnxruntime-gpu==1.26.0
+onnxruntime-ep-openvino==1.8.1
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-nvjitlink-cu12==12.9.86
+nvidia-cublas-cu12==12.9.1.4
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-cudnn-cu12==9.21.0.82
+pywebview==5.4
+# InsightFace 1.x requests a second, plain ONNX Runtime distribution.
+insightface==0.7.3

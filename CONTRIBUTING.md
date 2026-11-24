@@ -22,7 +22,7 @@ release-prep branch -> PR -----> develop
                            successful CI
                                   |
                                   v
-                  tag + release + Windows artifacts
+                  tag + release + desktop artifacts
 ```
 
 ## Branch Model
@@ -285,30 +285,33 @@ The publication then performs these steps:
 1. Check out the exact successful `main` commit and validate its version.
 2. Extract the curated `vX.Y.Z` section from `CHANGELOG.md`.
 3. Create and push the annotated `vX.Y.Z` tag if it does not exist.
-4. Create the matching GitHub Release from those curated notes, or synchronize
-   an already existing release page with them during a safe retry.
-5. Build CPU and GPU Windows installers independently on Windows runners.
-6. Verify the embedded product name and version and create SHA-256 files.
-7. Create GitHub build-provenance attestations when the repository is public.
-8. Upload installers and checksums to the matching GitHub Release.
+4. Create a GitHub Release draft from the curated notes or refresh the draft
+   for an unchanged retry.
+5. Build and verify the Windows installer and Ubuntu 26.04 amd64 package on
+   their target runners. Build the Android APK and sign it when CI signing
+   credentials are configured.
+6. Upload both desktop installers and their SHA-256 files to the draft.
+   Upload the Android APK and checksum when CI signs the APK. Public builds
+   also provide GitHub provenance attestations for the uploaded installers.
+7. After all packaging jobs succeed, verify that both desktop installers and
+   their checksum assets are present, nonempty and uploaded. Publish the draft
+   and mark it as the latest release.
 
-The release page is created before the Windows matrix finishes. Do not announce
-a release until both Windows jobs are successful and all expected files are
-visible.
+Users continue to see the previous latest release until these checks succeed.
 
 GitHub Release notes are never maintained as a separate changelog. The workflow
 always renders them from the matching released section in `CHANGELOG.md`. On a
-retry for the same unchanged release commit, it synchronizes the title and notes
-again before continuing with the artifacts.
+retry for the same unchanged release commit, it synchronizes the draft title
+and notes before continuing with the artifacts.
 
 ### Published artifacts
 
 | Artifact | Purpose |
 | --- | --- |
-| `FaceManager-Setup-X.Y.Z.exe` | CPU Windows installer |
-| `FaceManager-Setup-X.Y.Z.exe.sha256` | CPU installer checksum |
-| `FaceManager-Setup-GPU-X.Y.Z.exe` | NVIDIA-capable Windows installer |
-| `FaceManager-Setup-GPU-X.Y.Z.exe.sha256` | GPU installer checksum |
+| `FaceManager-Setup-X.Y.Z.exe` | Shared Windows x64 installer for NVIDIA, Intel GPU and CPU |
+| `FaceManager-Setup-X.Y.Z.exe.sha256` | Windows installer checksum |
+| `face-manager_X.Y.Z_amd64.deb` | Ubuntu 26.04 amd64 package for NVIDIA, Intel GPU and CPU |
+| `face-manager_X.Y.Z_amd64.deb.sha256` | Ubuntu package checksum |
 | `FaceManager-Android-X.Y.Z.apk` | Signed standalone Android app (ARM64 and x86-64) |
 | `FaceManager-Android-X.Y.Z.apk.sha256` | Android APK checksum |
 
@@ -344,50 +347,41 @@ application name in the sidebar.
 
 The application also checks the public GitHub latest-release endpoint at startup
 and then no more than once per hour unless the user triggers a manual check.
-Release assets must retain the documented CPU/GPU filenames and matching
-`.sha256` files: the desktop updater chooses the exact build variant and refuses
-to publish a download as installable until its SHA-256 value is verified. Keep
-the explicit installation confirmation while artifacts are not Authenticode
-signed. Update-check settings and skipped versions are persisted locally.
+Release assets must retain the filenames above and their matching `.sha256`
+files. The updater chooses the asset for the installed platform and verifies
+its SHA-256 before allowing installation. Owners of the legacy Windows GPU
+installer can download the shared installer from GitHub Releases and upgrade
+once. Ubuntu package users can open the release page and install the downloaded
+`.deb` with APT. Keep the explicit installation confirmation for unsigned Windows
+installers. Update-check settings and skipped versions are persisted locally.
 
 ### Failures and retries
 
 - If CI on `main` fails, publication does not proceed. Fix the issue through
   `develop` and a new release pull request. The version may be reused only if no
   tag or GitHub Release was created for it.
-- If publication or one Windows matrix job fails for an otherwise unchanged
-  release commit, rerun the failed GitHub Actions jobs. Tag and release creation
-  are idempotent, and artifact upload uses `--clobber` to support this retry.
+- If a packaging or publication job fails for an unchanged release commit,
+  rerun the failed GitHub Actions jobs. The workflow reuses the existing tag
+  and draft, and replaces matching draft assets on retry.
 - If fixing the failure changes application source after a tag or GitHub Release
   exists, bump at least the patch version and publish a new release. Do not
   replace an existing version with binaries from another commit.
 
-## Manual Windows Release Build
+## Manual desktop release builds
 
-Manual build instructions live in the **Windows Desktop Release** section of
-`README.md`. A normal unsigned build is:
-
-```powershell
-./packaging/windows/build-release.ps1
-./packaging/windows/build-release.ps1 -Variant gpu
-```
-
-The optional `-RequireSigned` switch is a guard for a future signing setup. It
-does not sign files; it makes the build fail unless both the application and
-installer already have valid Authenticode signatures. The automated workflow
-does not currently enable this switch.
+Follow [Build desktop installers](README.md#build-desktop-installers) for the
+Windows x64 and Ubuntu amd64 build commands. For an existing Windows signing
+setup, `-RequireSigned` verifies that both executables have valid Authenticode
+signatures. The automated workflow currently produces unsigned Windows builds.
 
 ## Recommended GitHub Protection
 
-Set `develop` as the repository default branch. After GitHub CLI authentication,
-the repository helper performs that setting:
-
-```bash
-./scripts/configure-github-repo.sh
-```
-
-The helper does not create branch rulesets. Configure those under **Settings >
-Rules > Rulesets**.
+Keep `main` as the repository default branch so visitors see the released
+version by default. Open development pull requests against `develop`.
+Repository administrators can run `./scripts/configure-github-repo.sh` with a
+GitHub CLI credential that can edit repository settings to set the description,
+latest-release link and topics.
+Configure branch protection under **Settings > Rules > Rulesets**.
 
 ### `develop`
 

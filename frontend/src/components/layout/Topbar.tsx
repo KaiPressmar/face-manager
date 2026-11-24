@@ -35,6 +35,7 @@ const Topbar: React.FC = () => {
     let cancelled = false;
     let requestGeneration = 0;
     let timer: number | undefined;
+    let runtimePoll: number | undefined;
     const checkedCheckpoints = new Map<string, string>();
 
     const refreshRuntime = () => {
@@ -52,6 +53,12 @@ const Topbar: React.FC = () => {
 
     refreshRuntime();
     const unsubscribe = subscribeToTopic<ImportQueueState>("imports", ({ jobs }) => {
+      if (jobs.some((job) => job.status === "running")) {
+        runtimePoll ??= window.setInterval(refreshRuntime, 4000);
+      } else {
+        window.clearInterval(runtimePoll);
+        runtimePoll = undefined;
+      }
       const presentIds = new Set(jobs.map((job) => job.id));
       for (const id of checkedCheckpoints.keys()) {
         if (!presentIds.has(id)) checkedCheckpoints.delete(id);
@@ -76,19 +83,25 @@ const Topbar: React.FC = () => {
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      window.clearInterval(runtimePoll);
       unsubscribe();
     };
   }, []);
 
-  const mode = runtime?.compute_mode;
+  const waitingForModel = runtime?.provider_initialized === false;
+  const mode = waitingForModel ? undefined : runtime?.compute_mode;
   const modeLabel = mode
     ? mode.toUpperCase()
     : runtimeUnavailable
       ? "Nicht verfügbar"
       : "Wird erkannt";
-  const modeTitle = runtime
+  const modeTitle = waitingForModel
+    ? "Die Grafikkarte wird beim ersten Import geprüft"
+    : runtime
     ? mode === "gpu"
-      ? "Gesichtserkennung nutzt die Grafikkarte"
+      ? runtime.execution_provider === "CUDAExecutionProvider"
+        ? "Gesichtserkennung nutzt NVIDIA CUDA"
+        : "Gesichtserkennung nutzt die Intel-Grafik über OpenVINO"
       : "Gesichtserkennung nutzt den Prozessor"
     : runtimeUnavailable
       ? "Die verwendete Beschleunigung konnte nicht ermittelt werden"

@@ -16,7 +16,7 @@ from backend.services.update_manager import (
 
 def release_payload(version="1.2.0", variant="cpu", content=b"installer"):
     suffix = "-GPU" if variant == "gpu" else ""
-    installer = f"FaceManager-Setup{suffix}-{version}.exe"
+    installer = f"face-manager_{version}_amd64.deb" if variant == "linux" else f"FaceManager-Setup{suffix}-{version}.exe"
     checksum = hashlib.sha256(content).hexdigest()
     base = f"https://github.com/KaiPressmar/face-manager/releases/download/v{version}"
     return {
@@ -83,6 +83,19 @@ class UpdateMetadataTest(unittest.TestCase):
         self.assertTrue(result["update_available"])
         self.assertFalse(result["download_available"])
         self.assertIsNone(candidate)
+
+    def test_desktop_channels_select_the_packages_for_each_os(self):
+        linux_payload = release_payload(variant="linux")
+        windows_payload = release_payload(variant="windows")
+        combined = {**linux_payload, "assets": linux_payload["assets"] + windows_payload["assets"]}
+        for variant, filename in (
+            ("windows", "FaceManager-Setup-1.2.0.exe"),
+            ("linux", "face-manager_1.2.0_amd64.deb"),
+        ):
+            with self.subTest(variant=variant):
+                result, candidate = parse_latest_release(combined, "1.1.0", variant)
+                self.assertEqual(result["installer_name"], filename)
+                self.assertTrue(candidate["checksum_url"].endswith(f"/{filename}.sha256"))
 
     def test_prerelease_is_rejected(self):
         payload = release_payload()

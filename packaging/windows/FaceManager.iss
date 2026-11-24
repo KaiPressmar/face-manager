@@ -2,9 +2,6 @@
 #define MyAppPublisher "Face Manager Project"
 #define MyAppURL "https://github.com/KaiPressmar/face-manager"
 #define MyAppExeName "FaceManager.exe"
-#ifndef InstallerSuffix
-  #define InstallerSuffix ""
-#endif
 
 [Setup]
 AppId={{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}
@@ -20,16 +17,17 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir={#OutputDir}
-OutputBaseFilename=FaceManager-Setup{#InstallerSuffix}-{#AppVersion}
+OutputBaseFilename=FaceManager-Setup-{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 SetupIconFile={#SourceDir}\packaging\windows\assets\face-manager-icon.ico
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} installer
-VersionInfoOriginalFileName=FaceManager-Setup{#InstallerSuffix}-{#AppVersion}.exe
+VersionInfoOriginalFileName=FaceManager-Setup-{#AppVersion}.exe
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}

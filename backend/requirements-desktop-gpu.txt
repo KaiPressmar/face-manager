@@ -1,4 +1,7 @@
-onnxruntime-gpu>=1.21,<1.27
+# InsightFace 1.x pulls in the separate CPU wheel, which shares onnxruntime's namespace.
+insightface==0.7.3
+onnxruntime-gpu==1.26.0
+onnxruntime-ep-openvino==1.8.1
 nvidia-cuda-runtime-cu12
 nvidia-cublas-cu12
 nvidia-cufft-cu12

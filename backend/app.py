@@ -43,7 +43,7 @@ from .error_logging import (
     configure_error_logging,
     install_global_exception_hooks,
 )
-from .models.face_model import get_compute_mode, get_execution_provider
+from .models.face_model import get_compute_mode, get_execution_provider_status
 from .services.desktop import (
     is_windows_host,
     is_wsl_host,
@@ -906,10 +906,11 @@ def api_runtime():
     Returns:
         Runtime provider details used by the UI badge.
     """
-    execution_provider = get_execution_provider()
+    execution_provider, provider_initialized = get_execution_provider_status()
     return {
         "compute_mode": get_compute_mode(execution_provider),
         "execution_provider": execution_provider,
+        "provider_initialized": provider_initialized,
         "host_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
         "display_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
     }

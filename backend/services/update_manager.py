@@ -62,6 +62,8 @@ def _release_sections(body: str) -> list[dict[str, object]]:
 def _asset_name(version: str, variant: str) -> str:
     if variant == "android":
         return f"FaceManager-Android-{version}.apk"
+    if variant == "linux":
+        return f"face-manager_{version}_amd64.deb"
     suffix = "-GPU" if variant == "gpu" else ""
     return f"FaceManager-Setup{suffix}-{version}.exe"
 
@@ -323,7 +325,7 @@ class UpdateManager:
     def launch_downloaded_installer(self, version: str) -> None:
         if not self.can_install():
             raise UpdateError(
-                "Die automatische Installation ist nur in der Windows-App verfügbar."
+                "Öffne die Release-Seite, um das Paket für dein System zu installieren."
             )
         with self._download_lock:
             state = dict(self._download_state)

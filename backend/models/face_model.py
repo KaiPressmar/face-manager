@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from threading import Lock
 from weakref import ref
 
 import numpy as np
@@ -9,6 +10,7 @@ _ANDROID = os.environ.get("FACE_MANAGER_PLATFORM") == "android"
 if not _ANDROID:
     import onnxruntime as ort
     from insightface.app import FaceAnalysis
+    from onnxruntime.capi.onnxruntime_pybind11_state import EPFail, Fail, RuntimeException
 else:
     ort = None
 
@@ -18,10 +20,18 @@ from ..error_logging import configure_error_logging
 configure_error_logging()
 logger = logging.getLogger("face_manager.face_model")
 _active_model = None
+CPU_PROVIDER = "CPUExecutionProvider"
+CUDA_PROVIDER = "CUDAExecutionProvider"
+INTEL_PROVIDER = "OpenVINOExecutionProvider"
+FACE_MODELS = ("detection", "recognition")
+DETECTION_SIZE = (1024, 1024)
+_openvino_lock = Lock()
+_openvino_registered = False
+_openvino_dll_directory = None
 
 
 def _configure_bundled_cuda_search_path() -> None:
-    if sys.platform != "win32" or not getattr(sys, "frozen", False) or get_build_variant() != "gpu":
+    if sys.platform != "win32" or not getattr(sys, "frozen", False) or get_build_variant() not in {"gpu", "windows"}:
         return
     bundle_root = getattr(sys, "_MEIPASS", None)
     if bundle_root is None:
@@ -57,32 +67,19 @@ def preload_gpu_runtime_dlls():
 
 
 def get_execution_provider(available_providers=None):
-    """Report the loaded model's provider, or select one before model startup.
+    """Report a verified active provider, or check an explicit provider list."""
+    if available_providers is not None and not _ANDROID:
+        return CUDA_PROVIDER if CUDA_PROVIDER in available_providers else CPU_PROVIDER
+    return get_execution_provider_status()[0]
 
-    Args:
-        available_providers: Optional provider names reported by ONNX Runtime.
 
-    Returns:
-        CUDA when effective for both loaded sessions, or available before startup.
-    """
+def get_execution_provider_status() -> tuple[str, bool]:
+    """Return the active provider and whether desktop inference has initialized."""
     if _ANDROID:
-        return "CPUExecutionProvider"
-    if available_providers is None:
-        active_model_ref = _active_model
-        active_model = active_model_ref() if active_model_ref is not None else None
-        if active_model is not None:
-            return active_model.execution_provider
-        preload_gpu_runtime_dlls()
-        try:
-            available_providers = ort.get_available_providers()
-        except Exception:
-            logger.exception(
-                "Could not query ONNX Runtime providers; falling back to CPU execution"
-            )
-            return "CPUExecutionProvider"
-    if "CUDAExecutionProvider" in available_providers:
-        return "CUDAExecutionProvider"
-    return "CPUExecutionProvider"
+        return CPU_PROVIDER, True
+    active_model_ref = _active_model
+    active_model = active_model_ref() if active_model_ref is not None else None
+    return (active_model.execution_provider, True) if active_model is not None else (CPU_PROVIDER, False)
 
 
 def get_compute_mode(execution_provider=None):
@@ -96,7 +93,44 @@ def get_compute_mode(execution_provider=None):
     """
     if execution_provider is None:
         execution_provider = get_execution_provider()
-    return "gpu" if execution_provider == "CUDAExecutionProvider" else "cpu"
+    return "gpu" if execution_provider in {CUDA_PROVIDER, INTEL_PROVIDER} else "cpu"
+
+
+def _find_intel_gpu():
+    """Register the standalone plugin once and select only an Intel GPU."""
+    global _openvino_registered, _openvino_dll_directory
+    try:
+        from onnxruntime_ep_openvino import get_library_path
+    except ImportError:
+        return None
+
+    with _openvino_lock:
+        if not _openvino_registered:
+            path = Path(get_library_path())
+            if sys.platform == "win32" and _openvino_dll_directory is None:
+                # Keep the handle alive for the plugin and its adjacent OpenVINO DLLs.
+                _openvino_dll_directory = os.add_dll_directory(str(path.parent))
+            ort.register_execution_provider_library("face_manager_openvino", str(path))
+            _openvino_registered = True
+        return next((
+            device for device in ort.get_ep_devices()
+            if device.ep_name == INTEL_PROVIDER
+            and device.ep_metadata.get("ov_device", "").split(".", 1)[0] == "GPU"
+        ), None)
+
+
+def _check_accelerated_sessions(app, provider):
+    """Exercise both real ONNX sessions before reporting GPU acceleration."""
+    for task in FACE_MODELS:
+        model = app.models[task]
+        session = model.session
+        if provider not in session.get_providers():
+            raise RuntimeError(f"{task} did not activate {provider}")
+        # Let the application select the next accelerator if Run fails.
+        session.disable_fallback()
+        width, height = DETECTION_SIZE if task == "detection" else model.input_size
+        input_name = session.get_inputs()[0].name
+        session.run(None, {input_name: np.zeros((1, 3, height, width), dtype=np.float32)})
 
 
 class FaceModel:
@@ -107,52 +141,68 @@ class FaceModel:
         """Build and prepare one InsightFace application instance."""
         app = FaceAnalysis(
             name="buffalo_l",
-            allowed_modules=["detection", "recognition"],
+            allowed_modules=list(FACE_MODELS),
             providers=providers,
         )
-        app.prepare(ctx_id=ctx_id, det_size=(1024, 1024))
+        app.prepare(ctx_id=ctx_id, det_size=DETECTION_SIZE)
         return app
 
     def __init__(self):
         """Load only the detection and recognition InsightFace modules."""
         global _active_model
-        preload_gpu_runtime_dlls()
-        try:
-            available_providers = ort.get_available_providers()
-        except Exception:
-            logger.exception(
-                "Could not read ONNX Runtime providers during model startup; using CPU mode"
-            )
-            available_providers = ["CPUExecutionProvider"]
-        self._requested_provider = get_execution_provider(available_providers)
-        if self._requested_provider == "CUDAExecutionProvider":
+        self._lock = Lock()
+        providers = []
+        if os.environ.get("FACE_MANAGER_CPU_ONLY") != "1":
+            preload_gpu_runtime_dlls()
             try:
-                self.app = self._create_face_analysis(
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"],
-                    0,
-                )
-                _active_model = ref(self)
-                return
+                if CUDA_PROVIDER in ort.get_available_providers():
+                    providers.append(CUDA_PROVIDER)
             except Exception:
-                logger.exception(
-                    "GPU face model startup failed; retrying with CPU execution"
-                )
-
-        self.app = self._create_face_analysis(["CPUExecutionProvider"], -1)
-        self._requested_provider = "CPUExecutionProvider"
+                logger.exception("Could not query CUDA availability")
+            providers.append(INTEL_PROVIDER)
+        self._remaining_providers = iter(providers)
+        self._active = self._load_next_provider()
         _active_model = ref(self)
+
+    def _load_next_provider(self):
+        cpu_app = None
+        for provider in self._remaining_providers:
+            try:
+                if provider == CUDA_PROVIDER:
+                    app = self._create_face_analysis([CUDA_PROVIDER, CPU_PROVIDER], 0)
+                else:
+                    device = _find_intel_gpu()
+                    if device is None:
+                        continue
+                    # InsightFace 0.7 forwards legacy provider names but drops custom
+                    # SessionOptions. Reuse its preprocessing and model metadata and
+                    # attach the plugin sessions through the public ORT API instead.
+                    cpu_app = self._create_face_analysis([CPU_PROVIDER], -1)
+                    options = ort.SessionOptions()
+                    options.add_provider_for_devices([device], {})
+                    sessions = {
+                        task: ort.InferenceSession(cpu_app.models[task].model_file, sess_options=options)
+                        for task in FACE_MODELS
+                    }
+                    original = {task: cpu_app.models[task].session for task in FACE_MODELS}
+                    for task, session in sessions.items():
+                        cpu_app.models[task].session = session
+                    try:
+                        _check_accelerated_sessions(cpu_app, provider)
+                    except Exception:
+                        for task, session in original.items():
+                            cpu_app.models[task].session = session
+                        raise
+                    return cpu_app, provider
+                _check_accelerated_sessions(app, provider)
+                return app, provider
+            except Exception:
+                logger.warning("%s could not start; trying the next provider", provider, exc_info=True)
+        return cpu_app or self._create_face_analysis([CPU_PROVIDER], -1), CPU_PROVIDER
 
     @property
     def execution_provider(self):
-        # ONNX Runtime can return a CPU session even when CUDA was requested,
-        # and can switch providers later after an inference error.
-        if self._requested_provider == "CUDAExecutionProvider" and all(
-            name in self.app.models
-            and "CUDAExecutionProvider" in self.app.models[name].session.get_providers()
-            for name in ("detection", "recognition")
-        ):
-            return "CUDAExecutionProvider"
-        return "CPUExecutionProvider"
+        return self._active[1]
 
     @property
     def compute_mode(self):
@@ -167,7 +217,23 @@ class FaceModel:
         Returns:
             Face dictionaries containing bounding boxes and embeddings.
         """
-        faces = self.app.get(image_np)
+        while True:
+            active = self._active
+            app, provider = active
+            if provider == CPU_PROVIDER:
+                faces = app.get(image_np)
+                break
+            # Imports can share a model. Run one inference at a time on the
+            # accelerator so switching sessions cannot race another GPU call.
+            with self._lock:
+                if self._active is not active:
+                    continue
+                try:
+                    faces = app.get(image_np)
+                    break
+                except (EPFail, Fail, RuntimeException, RuntimeError):
+                    logger.warning("%s failed during inference; retrying the image", provider, exc_info=True)
+                    self._active = self._load_next_provider()
         results = []
         for f in faces:
             x1, y1, x2, y2 = f.bbox.astype(int)

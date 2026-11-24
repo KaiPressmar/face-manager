@@ -52,10 +52,14 @@ class CudaBundleTest(unittest.TestCase):
         internal = app / "_internal"
         provider = internal / "onnxruntime" / "capi" / "onnxruntime_providers_cuda.dll"
         validate = self.module["validate_cuda_bundle"]
-        with self.assertRaisesRegex(RuntimeError, "Missing the ONNX Runtime CUDA provider"):
-            validate(app)
         provider.parent.mkdir(parents=True)
+        with self.assertRaisesRegex(RuntimeError, "Missing onnxruntime.dll"):
+            validate(app)
+        (provider.parent / "onnxruntime.dll").touch()
+        with self.assertRaisesRegex(RuntimeError, "Missing onnxruntime_providers_cuda.dll"):
+            validate(app)
         provider.touch()
+        (provider.parent / "onnxruntime_providers_shared.dll").touch()
         for component, filenames in CUDA_WHEELS.values():
             folder = internal / "nvidia" / component / "bin"
             folder.mkdir(parents=True)

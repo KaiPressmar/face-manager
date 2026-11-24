@@ -1,0 +1,32 @@
+name: Suggest a feature
+description: Describe a photo-library workflow you would like to improve.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Describe examples without including personal photos,
+        names, or library files.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Relevant platform
+      multiple: true
+      options:
+        - Windows 11 x64
+        - Ubuntu 26.04 amd64
+        - Android
+        - Source checkout or another platform
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What are you trying to do?
+      description: Describe your workflow and where you get stuck or spend extra time.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What would help?
+      description: Describe the behavior you would like to see and when you would use it.
+    validations:
+      required: true

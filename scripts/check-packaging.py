@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,16 +63,20 @@ def main() -> None:
         raise RuntimeError("PyInstaller is not configured with Windows version metadata")
     if 'project_root / "CHANGELOG.md"' not in spec:
         raise RuntimeError("PyInstaller is not configured to bundle CHANGELOG.md")
-    if 'build_variant_path = project_root / "build" / "BUILD_VARIANT"' not in spec:
-        raise RuntimeError("PyInstaller is not configured to bundle the build variant")
+    if (
+        'build_variant_path.write_text("windows\\n", encoding="ascii")' not in spec
+        or '(str(build_variant_path), ".")' not in spec
+    ):
+        raise RuntimeError("PyInstaller is not configured to bundle the Windows updater marker")
 
     build_script = (
         PROJECT_ROOT / "packaging/windows/build-release.ps1"
     ).read_text(encoding="utf-8")
-    if 'Join-Path $buildDir "BUILD_VARIANT"' not in build_script:
-        raise RuntimeError("Windows release builds do not emit the updater variant")
-    if "$env:FACE_MANAGER_BUILD_VARIANT = $Variant" not in build_script:
-        raise RuntimeError("Windows release builds do not pass the updater variant")
+    if "python -m venv $buildVenv" not in build_script:
+        raise RuntimeError("Windows release builds must install dependencies in an isolated environment")
+    for script in ("cuda_runtime.py", "openvino_runtime.py"):
+        if f"& $buildPython packaging/windows/{script}" not in build_script:
+            raise RuntimeError(f"Windows release builds do not run {script}")
     if (
         "$installerProductVersion = $installerVersionInfo.ProductVersion.Trim()"
         not in build_script
@@ -90,6 +95,7 @@ def main() -> None:
         "AppPublisherURL=",
         "AppSupportURL=",
         "AppUpdatesURL=",
+        "OutputBaseFilename=FaceManager-Setup-{#AppVersion}",
         "VersionInfoProductName=",
         "VersionInfoProductVersion=",
     )
@@ -109,8 +115,18 @@ def main() -> None:
     release_workflow = (PROJECT_ROOT / ".github/workflows/release.yml").read_text(
         encoding="utf-8"
     )
-    if "backend/requirements-desktop-gpu.txt" not in release_workflow:
+    windows_job = re.search(r"(?ms)^  windows-installer:\n(.*?)(?=^  [\w-]+:|\Z)", release_workflow)
+    if windows_job is None:
+        raise RuntimeError("Windows installer job is missing")
+    windows_job = windows_job.group(1)
+    if "backend/requirements-desktop-gpu.txt" not in windows_job:
         raise RuntimeError("Windows GPU dependencies are missing from the pip cache key")
+    if (
+        "matrix:" in windows_job
+        or "INSTALLER_SUFFIX" in windows_job
+        or '"dist/FaceManager-Setup-$env:VERSION.exe.sha256"' not in windows_job
+    ):
+        raise RuntimeError("Windows release builds must publish one installer")
 
     print("Packaging metadata and dependency inventory checks passed.")
 
