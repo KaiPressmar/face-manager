@@ -176,6 +176,7 @@ export interface ImagePathCleanupStatus {
   status: "idle" | "queued" | "running" | "completed" | "failed";
   reason: string | null;
   scanned_paths: number;
+  unavailable_paths: number;
   removed_paths: number;
   removed_images: number;
   started_at: string | null;
@@ -693,10 +694,10 @@ export function invalidatePersonsCache() {
 
 export async function fetchClusters(): Promise<ClusterSummary[]> {
   const res = await apiFetch(`${API_BASE}/clusters`);
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error("Die Gesichtsgruppen konnten nicht geladen werden.");
   const payload = await res.json();
   if (!Array.isArray(payload)) {
-    return [];
+    throw new Error("Die Liste der Gesichtsgruppen ist ungültig.");
   }
   return payload.map((item) => ({
     cluster_id: Number(item?.cluster_id ?? item?.id ?? 0),
@@ -772,11 +773,12 @@ export async function fetchClusterOverview(): Promise<ClusterOverview> {
     throw new Error("Die Übersicht der Gesichtsgruppen ist nicht verfügbar.");
   }
   const payload = await res.json();
-  const clusters = Array.isArray(payload?.clusters)
-    ? payload.clusters
-        .map(normalizeClusterSummaryItem)
-        .filter((cluster: ClusterSummary) => cluster.cluster_id > 0)
-    : [];
+  if (!Array.isArray(payload?.clusters)) {
+    throw new Error("Die Liste der Gesichtsgruppen ist ungültig.");
+  }
+  const clusters = payload.clusters
+    .map(normalizeClusterSummaryItem)
+    .filter((cluster: ClusterSummary) => cluster.cluster_id > 0);
   const reviewGroups = Array.isArray(payload?.review_groups)
     ? payload.review_groups.map(normalizeReviewGroupItem)
     : [];

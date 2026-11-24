@@ -73,11 +73,17 @@ jobs:
           cache-dependency-path: backend/requirements.txt
 
       - name: Install backend dependencies
-        run: python -m pip install -r backend/requirements.txt
+        env:
+          HNSWLIB_NO_NATIVE: '1'
+        run: |
+          # Older cache entries were built with -march=native on another runner.
+          python -m pip cache remove hnswlib
+          python -m pip install -r backend/requirements.txt
 
       - name: Check backend
         env:
           PYTHON_BIN: python
+          PYTHONFAULTHANDLER: '1'
         run: ./scripts/check-backend.sh
 
       - name: Set up Node.js for browser smoke tests

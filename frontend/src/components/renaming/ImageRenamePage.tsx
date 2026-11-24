@@ -47,6 +47,7 @@ const ImageRenamePage: React.FC<{
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [mutationRefresh, setMutationRefresh] = useState(0);
   const [pageJumpInput, setPageJumpInput] = useState("1");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const activeRequestRef = useRef(0);
@@ -150,6 +151,20 @@ const ImageRenamePage: React.FC<{
   useEffect(() => {
     void loadTotalCount();
   }, [groupingMode, sortDirection, selectedFolders, selectedPersons]);
+
+  useEffect(() => {
+    if (!mutationRefresh) return;
+    // Refresh the filters visible when the write completes. The user may have
+    // changed folders or people while the selected files were being renamed.
+    void Promise.all([loadData(pendingOffsetRef.current), loadTotalCount()]);
+  }, [mutationRefresh]);
+
+  const pageOutOfRange = total !== null && offset > 0 && offset >= total;
+  useEffect(() => {
+    if (total === null || !pageOutOfRange || isLoading || isTotalLoading || loadError) return;
+    const lastOffset = Math.floor(Math.max(0, total - 1) / pageSize) * pageSize;
+    void loadData(lastOffset);
+  }, [total, pageOutOfRange, isLoading, isTotalLoading, loadError, pageSize]);
 
   useEffect(() => {
     handleClearSelection();
@@ -346,8 +361,7 @@ const ImageRenamePage: React.FC<{
         `${result.renamed_count} Dateinamen aktualisiert, ${result.skipped_count} übersprungen, ${result.error_count} nicht geändert.`,
       );
       handleClearSelection();
-      await loadData(offset);
-      await loadTotalCount();
+      setMutationRefresh((value) => value + 1);
     } catch (submitError) {
       setActionError(
         submitError instanceof Error
@@ -658,7 +672,7 @@ const ImageRenamePage: React.FC<{
         {showSkeletonRows ? (
           renderSkeletonRows()
         ) : items.length === 0 ? (
-          !loadError && (
+          !loadError && !pageOutOfRange && (
             <div className="rename-empty-state">
               Alle Dateinamen entsprechen bereits deinem Benennungsschema.
             </div>

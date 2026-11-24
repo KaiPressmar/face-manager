@@ -77,6 +77,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
   const [imageGridSize, setImageGridSize] = useState<ImageGridSize>(readImageGridSize);
+  const [galleryRevision, setGalleryRevision] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -242,8 +243,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   }, [faceStatuses, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
+    const closeGalleryAfterRestore = (update: { reason?: string }) => {
+      if (update?.reason === "database_import") setGalleryRevision((value) => value + 1);
+    };
     if (!active) {
-      return;
+      // Keep the gallery's image IDs scoped to the current library even while
+      // its page is hidden. Other background events still pause with the page.
+      return subscribeToTopic<{ reason?: string }>("clusters", closeGalleryAfterRestore);
     }
     let isMounted = true;
     let refreshInFlight = false;
@@ -415,6 +421,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
       (update) => {
+        closeGalleryAfterRestore(update);
         const isBackgroundCheckpoint = update?.reason === "background_progress";
         scheduleRefresh(
           true,
@@ -688,6 +695,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
         gridSize={imageGridSize}
+        galleryRevision={galleryRevision}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
         hasActiveFilters={hasActiveFilters}

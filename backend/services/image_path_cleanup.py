@@ -21,6 +21,18 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _confirmed_absent(path: str) -> bool:
+    """Only prune an absent entry in a directory that is still accessible."""
+    source = filesystem_path(path)
+    try:
+        os.stat(source, follow_symlinks=False)
+    except FileNotFoundError:
+        return os.path.isdir(os.path.dirname(source) or ".")
+    except OSError:
+        pass
+    return False
+
+
 class ImagePathCleanup:
     """Validate paths off the request thread and prune missing locations in batches."""
 
@@ -40,6 +52,7 @@ class ImagePathCleanup:
         self._retry_seconds = max(0.1, retry_seconds)
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._resume_pending = False
         self._worker: threading.Thread | None = None
         self._timer: threading.Timer | None = None
         self._pending_reason: str | None = None
@@ -51,6 +64,7 @@ class ImagePathCleanup:
             "status": "idle",
             "reason": None,
             "scanned_paths": 0,
+            "unavailable_paths": 0,
             "removed_paths": 0,
             "removed_images": 0,
             "started_at": None,
@@ -103,22 +117,29 @@ class ImagePathCleanup:
             timer.start()
 
     def resume(self) -> None:
-        """Allow scheduling after an application lifecycle restart in tests."""
-        self._stop_event.clear()
+        """Allow new scans once an earlier worker has finished stopping."""
+        with self._lock:
+            if self._stop_event.is_set() and self._worker is not None:
+                self._resume_pending = True
+            else:
+                self._stop_event.clear()
 
     def snapshot(self) -> dict:
         with self._lock:
             return dict(self._state)
 
-    def stop(self) -> None:
-        self._stop_event.set()
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Request a stop and report whether the current worker has exited."""
         with self._lock:
+            self._resume_pending = False
+            self._stop_event.set()
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
             worker = self._worker
         if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=5.0)
+            worker.join(timeout=timeout)
+        return worker is None or not worker.is_alive()
 
     def _start_scheduled(self) -> None:
         with self._lock:
@@ -155,6 +176,7 @@ class ImagePathCleanup:
 
     def _run(self) -> None:
         try:
+            prune = self.snapshot()["reason"] == "manual"
             if not self._wait_until_idle():
                 return
             last_id = 0
@@ -184,13 +206,17 @@ class ImagePathCleanup:
                         return
                     if not self._wait_until_idle():
                         return
-                    if not os.path.isfile(filesystem_path(row["path"])):
+                    unavailable = not os.path.isfile(filesystem_path(row["path"]))
+                    if prune and unavailable:
                         missing_paths.append(row["path"])
                     with self._lock:
                         self._state["scanned_paths"] += 1
+                        self._state["unavailable_paths"] += int(unavailable)
                     if self._check_delay_seconds:
                         self._stop_event.wait(self._check_delay_seconds)
-                if missing_paths:
+                if self._stop_event.is_set():
+                    return
+                if prune and missing_paths:
                     removed_paths, removed_images, face_ids = self._remove_missing(
                         missing_paths
                     )
@@ -219,7 +245,17 @@ class ImagePathCleanup:
             self._notify(snapshot)
         finally:
             with self._lock:
+                interrupted = None
+                if self._stop_event.is_set() and self._state["status"] in {"queued", "running"}:
+                    self._state["status"] = "idle"
+                    interrupted = dict(self._state)
+            if interrupted is not None:
+                self._notify(interrupted)
+            with self._lock:
                 self._worker = None
+                if self._resume_pending:
+                    self._resume_pending = False
+                    self._stop_event.clear()
 
     @staticmethod
     def _remove_missing(paths: list[str]) -> tuple[int, int, list[int]]:
@@ -230,8 +266,9 @@ class ImagePathCleanup:
             affected_image_ids: set[int] = set()
             removed_paths = 0
             for path in paths:
-                # A removable drive or network share may have returned meanwhile.
-                if os.path.isfile(filesystem_path(path)):
+                # Recheck before touching SQLite. An unavailable mount, a
+                # permission error, or a source that returned is not a deletion.
+                if not _confirmed_absent(path):
                     continue
                 row = cur.execute(
                     "SELECT image_id FROM image_location WHERE path = ?", (path,)

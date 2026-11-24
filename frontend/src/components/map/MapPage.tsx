@@ -6,9 +6,13 @@ import {
 import FullscreenImageGallery from "../people/FullscreenImageGallery";
 import WorldMap, { boundsForView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
 import { useModalFocus } from "../../hooks/useModalFocus";
+import { subscribeToTopic } from "../../utils/events";
 import "./map.css";
 
 const PAGE_SIZE = 36;
+const MAP_LIBRARY_EVENTS = new Set([
+  "database_import", "delete_image", "image_path_cleanup", "image_rename", "import_completed",
+]);
 const EMPTY_POINTS: MapPoint[] = [];
 const EMPTY_IMAGES: MapImage[] = [];
 type MapResult<T> = { key: string; data: T | null; error: string };
@@ -68,6 +72,7 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
   const [galleryResult, setGalleryResult] = useState<{ id: number; error: string } | null>(null);
   const [pointRefresh, setPointRefresh] = useState(0);
   const [imageRefresh, setImageRefresh] = useState(0);
+  const [libraryRevision, setLibraryRevision] = useState(0);
   const [detailRetry, setDetailRetry] = useState(0);
 
   const invalidDate = !!(fromDate && toDate && fromDate > toDate);
@@ -86,9 +91,10 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
     grid_rows: pointGrid?.rows,
   };
   const filterKey = JSON.stringify(imageQuery);
-  const pointKey = JSON.stringify(pointQuery);
+  const pointKey = JSON.stringify([pointQuery, libraryRevision]);
+  const imageKey = JSON.stringify([imageQuery, libraryRevision]);
   const pointResult = canLoad && pointsResult?.key === pointKey ? pointsResult : null;
-  const imageResult = canLoad && imagesResult?.key === filterKey ? imagesResult : null;
+  const imageResult = canLoad && imagesResult?.key === imageKey ? imagesResult : null;
   const points = pointResult?.error ? null : pointResult?.data;
   const collection = pointsResult?.data;
   const images = imageResult?.data?.items ?? EMPTY_IMAGES;
@@ -101,6 +107,35 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
   const galleryImageId = openedGallery?.items[galleryIndex]?.id;
   const displayedGalleryIndex = openedGallery?.items.findIndex((image) => image.id === lastGalleryImage?.id) ?? -1;
   const galleryError = galleryResult?.id === galleryImageId ? galleryResult?.error : undefined;
+
+  const clearGallery = useCallback(() => {
+    setGallery(null);
+    setLastGalleryImage(null);
+    setGalleryResult(null);
+  }, []);
+
+  useEffect(() => {
+    let timer: number | undefined;
+    const unsubscribe = subscribeToTopic<{ reason?: string }>("clusters", (update) => {
+      if (!update?.reason || !MAP_LIBRARY_EVENTS.has(update.reason)) return;
+      if (update.reason === "database_import") {
+        clearGallery();
+        window.clearTimeout(timer);
+        timer = undefined;
+        setLibraryRevision((value) => value + 1);
+        return;
+      }
+      if (timer !== undefined) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        setLibraryRevision((value) => value + 1);
+      }, 150);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, [clearGallery]);
 
   useEffect(() => {
     if (!canLoadPoints) return;
@@ -121,12 +156,13 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
 
   useEffect(() => {
     resultsRef.current?.scrollTo({ top: 0 });
-    setGallery(null);
-    setLastGalleryImage(null);
-    setGalleryResult(null);
+    clearGallery();
+  }, [canLoad, filterKey, clearGallery]);
+
+  useEffect(() => {
     setMoreError("");
     return () => { moreController.current?.abort(); };
-  }, [canLoad, filterKey]);
+  }, [canLoad, imageKey]);
 
   useEffect(() => {
     if (!canLoad) return;
@@ -137,9 +173,9 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
           if (controller.signal.aborted || moreController.current) return;
           setImagesResult((current) => {
             // Keep the cursor and already loaded pages together during indexing.
-            if (current?.key === filterKey && current.data?.extended) return current;
+            if (current?.key === imageKey && current.data?.extended) return current;
             return {
-              key: filterKey,
+              key: imageKey,
               data: { items: page.items, total: page.total, nextCursor: page.next_cursor, extended: false },
               error: "",
             };
@@ -147,13 +183,13 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
         })
         .catch((reason) => {
           if (!controller.signal.aborted && !moreController.current) setImagesResult((current) => ({
-            key: filterKey, data: current?.key === filterKey ? current.data : null,
+            key: imageKey, data: current?.key === imageKey ? current.data : null,
             error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
           }));
         });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [canLoad, filterKey, imageRefresh]);
+  }, [canLoad, imageKey, imageRefresh]);
 
   useEffect(() => {
     if (!canLoad || !points?.indexing || openedGallery || moreLoading) return;
@@ -205,11 +241,12 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
     if (view.zoom < 8) setView({ longitude: marker.longitude, latitude: marker.latitude, zoom: Math.min(8, view.zoom * 2) });
   };
   const closeGallery = () => {
-    setGallery(null);
-    setLastGalleryImage(null);
-    setGalleryResult(null);
+    clearGallery();
     const opener = galleryOpenerRef.current;
-    window.requestAnimationFrame(() => { if (opener?.isConnected) opener.focus(); });
+    window.requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus();
+      else resultsRef.current?.focus();
+    });
   };
   const loadMore = async () => {
     if (moreController.current || !canLoad || !nextCursor) return;
@@ -223,7 +260,7 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
       if (controller.signal.aborted) return;
       const seen = new Set(loadedImages.map((image) => image.id));
       setImagesResult({
-        key: filterKey,
+        key: imageKey,
         data: {
           items: loadedImages.concat(page.items.filter((image) => !seen.has(image.id))),
           total: page.total,

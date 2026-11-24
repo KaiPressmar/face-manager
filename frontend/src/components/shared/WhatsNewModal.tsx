@@ -9,6 +9,9 @@ interface Props {
   variant?: Variant;
   onClose: () => void;
   onShowFullChangelog?: () => void;
+  loading?: boolean;
+  error?: string;
+  onRetry?: () => void;
 }
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -29,6 +32,9 @@ const WhatsNewModal: React.FC<Props> = ({
   variant = "whats-new",
   onClose,
   onShowFullChangelog,
+  loading = false,
+  error,
+  onRetry,
 }) => {
   const dialogRef = useRef<HTMLElement>(null);
   useModalFocus(dialogRef, onClose);
@@ -87,7 +93,14 @@ const WhatsNewModal: React.FC<Props> = ({
         </header>
 
         <div className="whats-new-modal__content">
-          {releases.length === 0 && (
+          {loading && <p role="status">Änderungsprotokoll wird geladen …</p>}
+          {error && (
+            <div role="alert">
+              <p>{error}</p>
+              {onRetry && <button type="button" className="secondary-button" onClick={onRetry}>Erneut versuchen</button>}
+            </div>
+          )}
+          {!loading && !error && releases.length === 0 && (
             <p className="whats-new-modal__empty">
               Es sind noch keine veröffentlichten Änderungen vorhanden.
             </p>

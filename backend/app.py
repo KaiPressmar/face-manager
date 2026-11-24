@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -94,6 +95,7 @@ from .services.storage import (
     get_faces_for_review_group,
     get_image_detail_rows,
     get_available_image_path,
+    invalidate_image_query_cache,
     get_cluster_faces,
     get_cluster_overview,
     get_cluster_summary,
@@ -159,6 +161,7 @@ _version_clustering_lock = threading.Lock()
 _version_clustering_pending = False
 _cluster_operation_lock = threading.RLock()
 _imports_finalizing = 0
+_database_restore_in_progress = False
 
 
 def _describe_background_activity() -> str | None:
@@ -351,7 +354,7 @@ def _reclustering_writer_available() -> bool:
     must wait while an import is running, queued, or finalizing. It does not
     consult the auto-cluster queue itself, which serialises its own tasks.
     """
-    if _imports_finalizing > 0:
+    if _imports_finalizing > 0 or _database_restore_in_progress:
         return False
     import_snapshot = import_queue.snapshot()
     return not (
@@ -768,16 +771,17 @@ def api_full_changelog():
     """Return the complete released changelog history, newest first."""
     try:
         document = load_changelog(get_changelog_path())
-    except (ChangelogError, OSError):
+    except (ChangelogError, OSError) as exc:
         logger.exception("Could not load full changelog")
-        return {"versions": []}
+        raise HTTPException(status_code=503, detail="Das Änderungsprotokoll konnte nicht geladen werden.") from exc
     return {"versions": released_versions(document)}
 
 
 @app.post("/api/changelog/current/acknowledge")
 def api_acknowledge_current_changelog():
     """Remember that the running version's notes were dismissed."""
-    set_last_seen_changelog_version(APP_VERSION)
+    with _cluster_operation_lock:
+        set_last_seen_changelog_version(APP_VERSION)
     return {"version": APP_VERSION, "seen": True}
 
 
@@ -817,7 +821,8 @@ def api_skip_update(data: dict = Body(...)):
         update_manager.get_cached_release(version)
     except UpdateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    set_skipped_update_version(version)
+    with _cluster_operation_lock:
+        set_skipped_update_version(version)
     return {"version": version, "skipped": True}
 
 
@@ -995,6 +1000,8 @@ def validate_database_file(path: Path) -> None:
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
+        if conn.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
+            raise sqlite3.DatabaseError("Database integrity check failed")
     except sqlite3.DatabaseError as exc:
         raise HTTPException(
             status_code=400,
@@ -1239,80 +1246,117 @@ def api_export_database():
     )
 
 
+def _restore_work_file(db_path: Path, purpose: str) -> Path:
+    fd, name = tempfile.mkstemp(
+        suffix=".sqlite", prefix=f"{db_path.stem}.{purpose}-", dir=db_path.parent
+    )
+    os.close(fd)
+    return Path(name)
+
+
+def _initialize_restored_library() -> None:
+    init_db(recover=False)
+    reset_import_resources()
+    invalidate_image_query_cache()
+    app_cache.clear()
+
+
 @app.post("/api/database/import")
 @safe_cluster_mutation
 def api_import_database(payload: bytes = Body(..., media_type="application/octet-stream")):
-    """Replace the current database with an uploaded SQLite file."""
+    """Replace the active library, keeping its snapshot until recovery is verified."""
+    global _database_restore_in_progress
     ensure_database_is_idle()
     if not payload:
         raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
 
-    current_db_path = Path(DB_PATH)
-    current_db_path.parent.mkdir(parents=True, exist_ok=True)
+    current = Path(DB_PATH)
+    upload = backup = rollback_copy = None
+    backup_ready = replaced = library_ready = False
+    restore_gate = drain_started = geo_stopped = False
 
-    fd, temp_path_str = tempfile.mkstemp(
-        suffix=".sqlite",
-        prefix="face-manager-import-",
-        dir=current_db_path.parent,
-    )
-    os.close(fd)
-    temp_path = Path(temp_path_str)
-    temp_path.write_bytes(payload)
-    backup_path = current_db_path.with_name(f"{current_db_path.stem}.pre-import-backup.sqlite")
-
-    # The indexer owns short-lived SQLite connections. Drain it before replacing
-    # the database and its WAL sidecars; restart against the restored or new DB.
-    geo_backfill.stop()
     try:
-        if current_db_path.exists():
-            snapshot_database_backup(backup_path)
-        validate_database_file(temp_path)
-        os.replace(temp_path, current_db_path)
-        remove_database_sidecars(current_db_path)
-        init_db()
-        if not schedule_version_clustering_upgrade():
-            run_startup_repairs("database_import")
-        reset_import_resources()
-        app_cache.clear()
-    except HTTPException:
-        raise
+        current.parent.mkdir(parents=True, exist_ok=True)
+        upload = _restore_work_file(current, "import")
+        upload.write_bytes(payload)
+        validate_database_file(upload)
+
+        _database_restore_in_progress = restore_gate = True
+        clustering_task = auto_cluster_queue.snapshot().get("task")
+        if _imports_finalizing or (
+            clustering_task and clustering_task["status"] in {"running", "paused", "cancelling"}
+        ):
+            raise HTTPException(
+                status_code=409, detail="Hintergrundarbeiten werden noch beendet. Bitte versuche es erneut."
+            )
+        drain_started = True
+        if not image_path_cleanup.stop():
+            raise HTTPException(status_code=409, detail="Die Pfadprüfung läuft noch. Bitte versuche es erneut.")
+        geo_backfill.stop()
+        geo_stopped = True
+
+        if current.exists():
+            backup = _restore_work_file(current, "pre-import-backup")
+            snapshot_database_backup(backup)
+            validate_database_file(backup)
+            backup_ready = True
+
+        os.replace(upload, current)
+        replaced = True
+        remove_database_sidecars(current)
+        _initialize_restored_library()
+        library_ready = True
     except Exception as exc:
-        logger.exception("Database import failed; attempting recovery")
-        try:
-            if backup_path.exists():
-                os.replace(backup_path, current_db_path)
-                remove_database_sidecars(current_db_path)
-                init_db()
-                if not schedule_version_clustering_upgrade():
-                    run_startup_repairs("database_import_recovery")
-                reset_import_resources()
-                app_cache.clear()
-            elif current_db_path.exists():
-                current_db_path.unlink()
-                remove_database_sidecars(current_db_path)
-                init_db()
-                if not schedule_version_clustering_upgrade():
-                    run_startup_repairs("database_import_recovery")
-                reset_import_resources()
-                app_cache.clear()
-        except Exception:
-            logger.exception("Automatic recovery after failed database import also failed")
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Die Sicherung konnte nicht wiederhergestellt werden. "
-                "Face Manager hat nach Möglichkeit den vorherigen Stand beibehalten."
-            ),
-        ) from exc
+        if not replaced and isinstance(exc, HTTPException):
+            raise
+        logger.exception("Database import failed")
+        if replaced:
+            try:
+                if backup_ready:
+                    # Keep the independent snapshot even if reinitializing its copy fails.
+                    rollback_copy = _restore_work_file(current, "rollback")
+                    shutil.copyfile(backup, rollback_copy)
+                    os.replace(rollback_copy, current)
+                else:
+                    current.unlink(missing_ok=True)
+                remove_database_sidecars(current)
+                _initialize_restored_library()
+                library_ready = True
+            except Exception:
+                logger.exception("Database rollback failed; previous snapshot retained at %s", backup)
+        detail = "Die Sicherung konnte nicht wiederhergestellt werden."
+        if not replaced or (library_ready and backup_ready):
+            detail += " Der vorherige Stand wurde beibehalten."
+        elif backup_ready:
+            detail += f" Die vorherige Bibliothek ist gesichert unter {backup}."
+        raise HTTPException(status_code=500, detail=detail) from exc
     finally:
-        if backup_path.exists():
-            backup_path.unlink()
-        if temp_path.exists():
-            temp_path.unlink()
-        try:
-            geo_backfill.start()
-        except Exception:
-            logger.exception("Could not restart photo metadata indexing after database import")
+        if restore_gate:
+            _database_restore_in_progress = False
+        disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
+        for path in (upload, rollback_copy, disposable_backup):
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove database restore work file %s", path, exc_info=True)
+        if not replaced or library_ready:
+            if drain_started:
+                image_path_cleanup.resume()
+            if geo_stopped:
+                try:
+                    geo_backfill.start()
+                except Exception:
+                    logger.exception("Could not restart photo metadata indexing after database import")
+            if restore_gate:
+                auto_cluster_queue.notify_ready()
+        if library_ready:
+            notify_clusters_changed("database_import")
+            try:
+                if not schedule_version_clustering_upgrade():
+                    run_startup_repairs("database_import")
+            except Exception:
+                logger.exception("Could not schedule post-restore clustering")
 
     return {"status": "imported"}
 
@@ -2037,7 +2081,8 @@ def api_get_image_path_cleanup():
 @app.post("/api/maintenance/image-paths")
 def api_start_image_path_cleanup():
     """Queue a low-priority validation of every stored image location."""
-    return image_path_cleanup.start("manual")
+    with _cluster_operation_lock:
+        return image_path_cleanup.start("manual")
 
 
 def _group_image_rows(rows, display_platform: str) -> list[dict]:

@@ -13,6 +13,18 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.12.2] - 2026-11-24
+
+### Behoben
+
+- Eine fehlgeschlagene Wiederherstellung schützt die bisherige Fotobibliothek und behält bei Bedarf eine Kopie zur Wiederherstellung.
+- Wenn ein Fotolaufwerk vorübergehend fehlt, bleiben Bilder und Personenzuordnungen in der Bibliothek erhalten.
+- Beim Zusammenführen identischer Fotos aus älteren Bibliotheken bleiben vorhandene Gesichtszuordnungen erhalten.
+- Die Vollbildgalerie bleibt beim geöffneten Foto, wenn sich die Bibliothek im Hintergrund ändert. Die Fotokarte zeigt neue Änderungen auch bei geöffneter Ansicht an.
+- Veraltete Links zu Gesichtsgruppen blockieren die Auswahl nicht mehr. Die Dateinamenliste springt nach dem Umbenennen auf eine gültige Seite, und das Änderungsprotokoll lässt sich nach einem Fehler erneut laden.
+- Folgeaufgaben zur Gesichtergruppierung bleiben erhalten, wenn ein abgeschlossener Eintrag ausgeblendet wird.
+- Der Windows-Start und fehlgeschlagene Update-Downloads lassen sich zuverlässig wiederholen. Auf Android lässt sich Face Manager nach Abbruch der Installation weiter bedienen.
+
 ## [0.12.1] - 2026-11-24
 
 ### Verbessert

@@ -33,6 +33,8 @@ PRIORITY_STARTUP_REPAIR = 5
 PRIORITY_IDLE_RECLUSTER = 10
 PRIORITY_MANUAL_RECLUSTER = 20
 PRIORITY_VERSION_UPGRADE = 30
+ACTIVE_STATUSES = {"queued", "running", "paused", "cancelling"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def _utc_now() -> str:
@@ -144,15 +146,9 @@ class AutoClusterQueue:
         with self._lock:
             self._stopping = True
             self._pending_request = None
-            if self._task is not None and self._task.status == "queued":
-                self._task.status = "cancelled"
-                self._task.finished_at = _utc_now()
-                self._task.stage = "cancelled"
-                self._active_request = None
-            elif self._task is not None and self._task.status in {"running", "paused", "cancelling"}:
-                self._task.status = "cancelling"
-                self._cancel_event.set()
             thread = self._thread
+            if self._task is not None and self._task.status in ACTIVE_STATUSES:
+                self._request_cancel_locked()
         self._notify_change()
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
@@ -180,12 +176,14 @@ class AutoClusterQueue:
             count_callable=count_callable or self._count_callable,
             repair_callable=repair_callable or self._repair_callable,
         )
+        result = None
         with self._lock:
             if self._stopping:
                 return None
-            active = self._task is not None and self._task.status in {
-                "queued", "running", "paused", "cancelling"
-            }
+            # A new request can arrive during the terminal notification, before
+            # the worker has handed off its already accepted follow-up.
+            promoted = self._promote_pending_locked()
+            active = self._task is not None and self._task.status in ACTIVE_STATUSES
             if active and self._task.status in {"running", "paused", "cancelling"}:
                 # Coalesce behind the running task; it is picked up on completion.
                 self._coalesce_pending_locked(request)
@@ -200,21 +198,22 @@ class AutoClusterQueue:
                 result = self._task.to_dict()
             else:
                 total_faces = request.count_callable()
-                if total_faces <= 0:
-                    return None
-                self._task = AutoClusterTask(
-                    id=f"autocluster-{uuid.uuid4().hex[:12]}",
-                    kind=request.kind,
-                    reason=request.reason,
-                    status="queued",
-                    created_at=_utc_now(),
-                    total_faces=total_faces,
-                    stage="preparing",
-                )
-                self._active_request = request
-                self._maybe_launch_locked()
-                result = self._task.to_dict()
-        self._notify_change()
+                if total_faces > 0:
+                    self._task = AutoClusterTask(
+                        id=f"autocluster-{uuid.uuid4().hex[:12]}",
+                        kind=request.kind,
+                        reason=request.reason,
+                        status="queued",
+                        created_at=_utc_now(),
+                        total_faces=total_faces,
+                        stage="preparing",
+                    )
+                    self._active_request = request
+                    self._thread = None
+                    self._maybe_launch_locked()
+                    result = self._task.to_dict()
+        if result is not None or promoted:
+            self._notify_change()
         return result
 
     def notify_ready(self) -> None:
@@ -282,35 +281,30 @@ class AutoClusterQueue:
         Returns:
             Whether no clustering pass is active anymore.
         """
-        notify = False
-        promote_task_id = None
         with self._lock:
-            active = self._task is not None and self._task.status in {
-                "queued", "running", "paused", "cancelling"
-            }
-            if not active:
+            if self._task is None or self._task.status not in ACTIVE_STATUSES:
                 return True
-            if self._thread is None or not self._thread.is_alive():
-                self._task.status = "cancelled"
-                self._task.finished_at = _utc_now()
-                self._task.stage = "cancelled"
-                promote_task_id = self._task.id
-                notify = True
-            else:
-                self._task.status = "cancelling"
-                self._cancel_event.set()
             thread = self._thread
-        if notify:
-            self._notify_change()
-            self._promote_pending(promote_task_id)
-        if timeout > 0 and thread is not None:
+            self._request_cancel_locked()
+        self._notify_change()
+        if timeout > 0 and thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
         with self._lock:
-            return not (
-                self._task is not None and self._task.status in {
-                    "queued", "running", "paused", "cancelling"
-                }
-            )
+            return self._task is None or self._task.status not in ACTIVE_STATUSES
+
+    def _request_cancel_locked(self) -> dict:
+        """Cancel the selected task and return its state before any handoff."""
+        task = self._task
+        if self._thread is not None and self._thread.is_alive():
+            task.status = "cancelling"
+            self._cancel_event.set()
+            return task.to_dict()
+        task.status = "cancelled"
+        task.finished_at = _utc_now()
+        task.stage = "cancelled"
+        result = task.to_dict()
+        self._promote_pending_locked()
+        return result
 
     def pause(self, task_id: str) -> Optional[dict]:
         """Pause queued or running clustering at a committed group boundary."""
@@ -349,12 +343,12 @@ class AutoClusterQueue:
             if (
                 self._task is None
                 or self._task.id != task_id
-                or self._task.status not in {"queued", "running", "paused", "cancelling"}
+                or self._task.status not in ACTIVE_STATUSES
             ):
                 return None
-        self.request_cancel()
-        with self._lock:
-            return self._task.to_dict() if self._task is not None else None
+            result = self._request_cancel_locked()
+        self._notify_change()
+        return result
 
     def dismiss(self, task_id: str) -> bool:
         """Remove one terminal clustering task from visible history."""
@@ -362,12 +356,12 @@ class AutoClusterQueue:
             if (
                 self._task is None
                 or self._task.id != task_id
-                or self._task.status not in {"completed", "failed", "cancelled"}
+                or self._task.status not in TERMINAL_STATUSES
             ):
                 return False
-            self._task = None
-            self._active_request = None
-            self._thread = None
+            if not self._promote_pending_locked():
+                self._task = None
+                self._active_request = None
         self._notify_change()
         return True
 
@@ -455,36 +449,50 @@ class AutoClusterQueue:
 
     def _promote_pending(self, finished_task_id: str) -> None:
         """Start the coalesced pending request once the worker is free."""
-        launched = False
         with self._lock:
-            if self._stopping:
-                self._pending_request = None
-                self._active_request = None
-                return
-            if self._task is None or self._task.id != finished_task_id:
-                return
-            if self._task.status not in {"completed", "failed", "cancelled"}:
-                return
-            request = self._pending_request
-            self._pending_request = None
-            if request is None:
-                self._active_request = None
-                return
+            promoted = (
+                self._task is not None and self._task.id == finished_task_id
+                and self._promote_pending_locked()
+            )
+        if promoted:
+            self._notify_change()
+
+    def _promote_pending_locked(self) -> bool:
+        """Claim pending work before a terminal task can be dismissed or replaced."""
+        if self._task is None or self._task.status not in TERMINAL_STATUSES:
+            return False
+        self._active_request = None
+        request = self._pending_request
+        self._pending_request = None
+        if self._stopping or request is None:
+            return False
+        try:
             total_faces = max(0, request.count_callable())
-            if total_faces <= 0:
-                self._active_request = None
-                return
+        except Exception as exc:
+            logger.exception("Could not count faces for pending clustering")
             self._task = AutoClusterTask(
                 id=f"autocluster-{uuid.uuid4().hex[:12]}",
                 kind=request.kind,
                 reason=request.reason,
-                status="queued",
+                status="failed",
                 created_at=_utc_now(),
-                total_faces=total_faces,
-                stage="preparing",
+                finished_at=_utc_now(),
+                stage="failed",
+                last_error=str(exc),
             )
-            self._active_request = request
-            self._maybe_launch_locked()
-            launched = True
-        if launched:
-            self._notify_change()
+            return True
+        if total_faces <= 0:
+            return False
+        self._task = AutoClusterTask(
+            id=f"autocluster-{uuid.uuid4().hex[:12]}",
+            kind=request.kind,
+            reason=request.reason,
+            status="queued",
+            created_at=_utc_now(),
+            total_faces=total_faces,
+            stage="preparing",
+        )
+        self._active_request = request
+        self._thread = None
+        self._maybe_launch_locked()
+        return True

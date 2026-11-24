@@ -40,6 +40,11 @@ const MapPage = lazy(() => import("./components/map/MapPage"));
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
+type Changelog =
+  | { status: "idle" | "loading" }
+  | { status: "error"; message: string }
+  | { status: "loaded"; releases: ReleaseNotes[] };
+
 const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
   active,
   children,
@@ -70,7 +75,8 @@ const App: React.FC = () => {
   );
   const [unseenReleases, setUnseenReleases] = useState<ReleaseNotes[]>([]);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
-  const [fullChangelog, setFullChangelog] = useState<ReleaseNotes[] | null>(null);
+  const [changelog, setChangelog] = useState<Changelog>({ status: "idle" });
+  const changelogInFlight = useRef(false);
   const [showChangelog, setShowChangelog] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [showUpdate, setShowUpdate] = useState(false);
@@ -204,14 +210,23 @@ const App: React.FC = () => {
     setShowReleaseNotes(false);
   }, [unseenReleases.length]);
 
+  const loadFullChangelog = useCallback(() => {
+    if (changelogInFlight.current) return;
+    changelogInFlight.current = true;
+    setChangelog({ status: "loading" });
+    void fetchFullChangelog()
+      .then((releases) => setChangelog({ status: "loaded", releases }))
+      .catch((error) => setChangelog({
+        status: "error",
+        message: error instanceof Error ? error.message : "Das Änderungsprotokoll ist nicht verfügbar.",
+      }))
+      .finally(() => { changelogInFlight.current = false; });
+  }, []);
+
   const openFullChangelog = useCallback(() => {
     setShowChangelog(true);
-    if (fullChangelog === null) {
-      fetchFullChangelog()
-        .then((versions) => setFullChangelog(versions))
-        .catch(() => setFullChangelog([]));
-    }
-  }, [fullChangelog]);
+    if (changelog.status === "idle" || changelog.status === "error") loadFullChangelog();
+  }, [changelog.status, loadFullChangelog]);
 
   useEffect(() => {
     const restoreFromLocation = () => {
@@ -330,8 +345,11 @@ const App: React.FC = () => {
       )}
       {showChangelog && (
         <WhatsNewModal
-          releases={fullChangelog ?? []}
+          releases={changelog.status === "loaded" ? changelog.releases : []}
           variant="history"
+          loading={changelog.status === "idle" || changelog.status === "loading"}
+          error={changelog.status === "error" ? changelog.message : undefined}
+          onRetry={loadFullChangelog}
           onClose={() => setShowChangelog(false)}
         />
       )}

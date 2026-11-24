@@ -109,6 +109,50 @@ class UpdateMetadataTest(unittest.TestCase):
 
 
 class UpdateDownloadTest(unittest.TestCase):
+    def test_directory_failure_leaves_a_retryable_error(self):
+        manager = UpdateManager()
+        _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            blocked = Path(temporary_directory) / "updates"
+            blocked.write_text("not a directory", encoding="utf-8")
+            manager._download_state = {"status": "downloading"}
+            manager._download(candidate, blocked)
+
+        self.assertEqual(manager.download_state()["status"], "error")
+
+    def test_cleanup_failure_preserves_the_download_error(self):
+        manager = UpdateManager()
+        _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")
+
+        with tempfile.TemporaryDirectory() as temporary_directory, patch.object(
+            manager, "_fetch_checksum", side_effect=OSError("Connection interrupted")
+        ), patch.object(Path, "unlink", side_effect=PermissionError("Partial file locked")):
+            manager._download_state = {"status": "downloading"}
+            manager._download(candidate, Path(temporary_directory))
+
+        self.assertEqual(manager.download_state()["status"], "error")
+        self.assertEqual(manager.download_state()["error"], "Connection interrupted")
+
+    def test_thread_start_failure_allows_retry(self):
+        manager = UpdateManager()
+        manager._cached_result, manager._candidate = parse_latest_release(
+            release_payload(), "1.1.0", "cpu"
+        )
+        version = str(manager._cached_result["latest_version"])
+
+        with tempfile.TemporaryDirectory() as temporary_directory, patch(
+            "backend.services.update_manager.threading.Thread"
+        ) as worker:
+            worker.return_value.start.side_effect = [RuntimeError("Cannot start worker"), None]
+            target = Path(temporary_directory)
+            failed = manager.start_download(version, target)
+            retried = manager.start_download(version, target)
+
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(retried["status"], "downloading")
+        self.assertEqual(worker.return_value.start.call_count, 2)
+
     def test_download_is_written_only_after_matching_checksum(self):
         content = b"verified installer bytes"
         payload = release_payload(content=content)
