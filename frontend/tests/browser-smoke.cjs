@@ -746,10 +746,14 @@ async function reviewInboxFlow(browser, errors) {
     detailCrops.release();
     await apply.and(dialog.locator('button:enabled')).waitFor();
 
-    for (const [width, height] of [...viewports, [390, 360]]) {
+    for (const [width, height] of [...viewports, [640, 400], [390, 360]]) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
+    assert.ok(await page.locator('.sidebar__brand-mark').evaluate((brand) => {
+      const { x, y, width, height } = brand.getBoundingClientRect();
+      return document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop');
+    }), 'The sidebar logo is painted over the review dialog');
     await apply.scrollIntoViewIfNeeded();
     const bounds = await apply.boundingBox();
     assert.ok(bounds && bounds.y >= -1 && bounds.y + bounds.height <= 361,

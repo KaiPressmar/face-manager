@@ -139,6 +139,10 @@
   padding-top: 6px;
 }
 
+.workflow-sidebar .sidebar__brand-mark {
+  z-index: auto;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     flex-direction: column;
