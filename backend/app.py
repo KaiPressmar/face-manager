@@ -2011,7 +2011,8 @@ async def _run_source_work(operation):
     pending = asyncio.wrap_future(future)
     try:
         return await asyncio.wait_for(asyncio.shield(pending), timeout=_SOURCE_TIMEOUT_SECONDS)
-    except (TimeoutError, asyncio.CancelledError) as exc:
+    except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
+        # Python 3.10 uses a distinct asyncio timeout exception.
         # A cancelled await cannot interrupt an OS file operation. Running reads
         # retain their worker; queued requests are skipped when dequeued.
         future.cancel()
