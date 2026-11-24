@@ -63,6 +63,26 @@ class ImageThumbnailTest(unittest.TestCase):
                     image.verify()
                 self.assertEqual(len(list((root / "thumbnails" / "images").rglob("*jpg"))), 1)
 
+    def test_replacement_with_preserved_size_and_mtime_uses_new_cache_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source, replacement = root / "photo.bmp", root / "replacement.bmp"
+            Image.new("RGB", (60, 30), "red").save(source)
+            Image.new("RGB", (60, 30), "blue").save(replacement)
+            original = source.stat()
+            os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+            with patch.object(image_thumbnails, "get_data_root", return_value=root):
+                first = ensure_image_thumbnail(5, str(source))
+                replacement.replace(source)
+                self.assertEqual(source.stat().st_size, original.st_size)
+                self.assertEqual(source.stat().st_mtime_ns, original.st_mtime_ns)
+                second = ensure_image_thumbnail(5, str(source))
+
+            self.assertNotEqual(first, second)
+            with Image.open(second) as image:
+                red, _, blue = image.getpixel((10, 10))
+                self.assertGreater(blue, red)
+
     def test_prunes_expired_cache_entries_but_preserves_recently_used_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

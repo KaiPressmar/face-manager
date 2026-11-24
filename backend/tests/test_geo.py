@@ -374,15 +374,18 @@ class GeoApiTest(unittest.TestCase):
     @patch("backend.app.get_available_image_path", return_value="/photos/a.jpg")
     def test_thumbnail_endpoint_returns_jpeg(self, _available, ensure):
         from backend import app
-        response = app.get_image_thumbnail(7)
+        response = app.get_image_thumbnail(7, Mock(headers={}))
         self.assertEqual(response.media_type, "image/jpeg")
+        self.assertEqual(response.headers["cache-control"], "private, no-cache")
         ensure.assert_called_once_with(7, "/photos/a.jpg")
+        validated = app.get_image_thumbnail(7, Mock(headers={"if-none-match": response.headers["etag"]}))
+        self.assertEqual(validated.status_code, 304)
 
     @patch("backend.app.get_available_image_path", return_value=None)
     def test_thumbnail_endpoint_reports_missing_image(self, _available):
         from backend import app
         with self.assertRaises(HTTPException) as raised:
-            app.get_image_thumbnail(7)
+            app.get_image_thumbnail(7, Mock(headers={}))
         self.assertEqual(raised.exception.status_code, 404)
 
 

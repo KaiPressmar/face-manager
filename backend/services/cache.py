@@ -76,6 +76,7 @@ class AppCache:
         self.max_entry_bytes = max(1, int(max_entry_bytes))
         self._entries: dict[Hashable, CacheEntry] = {}
         self._lock = threading.RLock()
+        self._generation = 0
         self._total_bytes = 0
         self._hits = 0
         self._misses = 0
@@ -108,6 +109,8 @@ class AppCache:
         ttl_seconds: float | None = None,
         tags: set[str] | tuple[str, ...] | None = None,
         size_bytes: int | None = None,
+        *,
+        _generation: int | None = None,
     ) -> Any:
         """Store one cache entry when it fits within configured budgets."""
         ttl = self.default_ttl_seconds if ttl_seconds is None else max(0.1, float(ttl_seconds))
@@ -125,6 +128,8 @@ class AppCache:
         )
 
         with self._lock:
+            if _generation is not None and _generation != self._generation:
+                return value
             previous = self._entries.pop(key, None)
             if previous is not None:
                 self._total_bytes -= previous.size_bytes
@@ -143,7 +148,9 @@ class AppCache:
         size_bytes: int | None = None,
     ) -> Any:
         """Load and cache a value when absent."""
-        cached = self.get(key)
+        with self._lock:
+            generation = self._generation
+            cached = self.get(key)
         if cached is not None:
             return cached
         value = loader()
@@ -153,11 +160,13 @@ class AppCache:
             ttl_seconds=ttl_seconds,
             tags=tags,
             size_bytes=size_bytes,
+            _generation=generation,
         )
 
     def invalidate_key(self, key: Hashable) -> None:
         """Remove one cached entry if it exists."""
         with self._lock:
+            self._generation += 1
             entry = self._entries.pop(key, None)
             if entry is None:
                 return
@@ -170,6 +179,7 @@ class AppCache:
         if not wanted:
             return 0
         with self._lock:
+            self._generation += 1
             matching_keys = [
                 key for key, entry in self._entries.items() if entry.tags.intersection(wanted)
             ]
@@ -187,6 +197,7 @@ class AppCache:
     def clear(self) -> None:
         """Remove every cached entry."""
         with self._lock:
+            self._generation += 1
             removed = len(self._entries)
             self._entries.clear()
             self._total_bytes = 0

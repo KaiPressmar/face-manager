@@ -60,8 +60,8 @@ export function navigationHash(entry: NavigationEntry): string {
 /** Restore a useful view after refresh or a directly opened hash URL. */
 export function parseNavigationHash(hash: string): NavigationEntry {
   const segments = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  if (!Object.prototype.hasOwnProperty.call(PAGES_BY_SEGMENT, segments[0])) return { page: "people" };
   const page = PAGES_BY_SEGMENT[segments[0]];
-  if (!page) return { page: "people" };
 
   if (page === "review" && segments[1] === "gruppe") {
     const rawId = segments[2] ?? "";

@@ -1670,6 +1670,17 @@ img {
     transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
 }
 
+.image-gallery-card__error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
 .image-gallery-card:hover,
 .image-gallery-card:focus-visible {
   border-color: var(--accent-border) !important;
@@ -1836,6 +1847,7 @@ img {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
+  overscroll-behavior: contain;
   background:
     radial-gradient(circle at 50% 42%, rgba(22, 36, 48, 0.72), transparent 44%),
     var(--card-grad-bottom);

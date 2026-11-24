@@ -76,6 +76,9 @@ $appExe = Join-Path $distDir "FaceManager/FaceManager.exe"
 if (-not (Test-Path $appExe)) {
     throw "PyInstaller did not create $appExe"
 }
+if ($Variant -eq "gpu") {
+    python packaging/windows/cuda_runtime.py (Split-Path -Parent $appExe)
+}
 
 $appVersionInfo = (Get-Item $appExe).VersionInfo
 if ($appVersionInfo.ProductVersion -ne $version) {

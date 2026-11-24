@@ -56,6 +56,27 @@ class DesktopStartupTests(unittest.TestCase):
         start.assert_called_once_with("127.0.0.1")
         self.assertIn("Backend is still stopping", self.desktop.webview.create_window.call_args.kwargs["html"])
 
+    def test_backend_import_failure_shows_recovery_window(self):
+        with (
+            patch.object(self.desktop, "_load_backend_app", side_effect=ImportError("Backend import failed")) as load,
+            patch.object(self.desktop.time, "sleep"),
+        ):
+            self.desktop.main()
+
+        self.assertEqual(load.call_count, 2)
+        self.assertIn("Backend import failed", self.desktop.webview.create_window.call_args.kwargs["html"])
+
+    def test_log_setup_failure_shows_recovery_window(self):
+        with (
+            patch.object(self.desktop, "configure_error_logging", side_effect=PermissionError("Log path unavailable")),
+            patch.object(self.desktop, "_start_server") as start,
+            patch.object(self.desktop.time, "sleep"),
+        ):
+            self.desktop.main()
+
+        start.assert_not_called()
+        self.assertIn("Log path unavailable", self.desktop.webview.create_window.call_args.kwargs["html"])
+
     def test_window_creation_failure_stops_the_started_backend(self):
         server = SimpleNamespace(should_exit=False)
         thread = Mock()

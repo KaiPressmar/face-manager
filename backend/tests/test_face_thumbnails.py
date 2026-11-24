@@ -10,6 +10,7 @@ from PIL import Image
 from backend.services.face_thumbnails import (
     FaceThumbnailWarmupResult,
     create_face_thumbnails_for_image,
+    delete_face_thumbnail,
     ensure_face_thumbnail,
     get_face_library_signature,
     get_face_thumbnail_path,
@@ -40,6 +41,43 @@ class FaceThumbnailTest(unittest.TestCase):
                 self.assertEqual(reused_path, thumbnail_path)
                 self.assertEqual(thumbnail_path.stat().st_mtime_ns, first_mtime)
 
+    def test_reused_face_id_matches_current_photo_and_bbox(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original, replacement = root / "red.png", root / "blue.png"
+            Image.new("RGB", (32, 32), "red").save(original)
+            Image.new("RGB", (32, 32), "blue").save(replacement)
+            bbox = (0, 0, 20, 20)
+
+            with patch("backend.services.face_thumbnails.get_data_root", return_value=root):
+                old_crop = ensure_face_thumbnail(42, str(original), bbox)
+                restored_crop = ensure_face_thumbnail(42, str(replacement), bbox)
+                edited_crop = ensure_face_thumbnail(42, str(replacement), (2, 2, 16, 16))
+                self.assertEqual(len({old_crop.name, restored_crop.name, edited_crop.name}), 3)
+                with Image.open(edited_crop) as image:
+                    self.assertEqual(image.size, (16, 16))
+                    self.assertGreater(image.getpixel((0, 0))[2], 240)
+                Image.new("RGB", (32, 32), "yellow").save(replacement)
+                changed_crop = ensure_face_thumbnail(42, str(replacement), bbox)
+                self.assertNotEqual(changed_crop.name, restored_crop.name)
+                delete_face_thumbnail(42)
+                self.assertEqual(list(old_crop.parent.glob("42-*.jpg")), [])
+
+    def test_mirrored_exif_crop_uses_the_same_source_region(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original = root / "mirrored.png"
+            photo = Image.new("RGB", (40, 24), "blue")
+            photo.paste("red", (0, 0, 20, 24))
+            exif = photo.getexif()
+            exif[274] = 2
+            photo.save(original, exif=exif)
+
+            with patch("backend.services.face_thumbnails.get_data_root", return_value=root):
+                path = ensure_face_thumbnail(3, str(original), (0, 0, 16, 20))
+                with Image.open(path) as image:
+                    self.assertGreater(image.getpixel((6, 6))[0], 240)
+
     def test_create_face_thumbnails_for_image_renders_all_faces_from_one_decode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -64,8 +102,8 @@ class FaceThumbnailTest(unittest.TestCase):
                 # A single decode is shared across every requested face.
                 self.assertEqual(open_spy.call_count, 1)
 
-                for face_id, _ in faces:
-                    thumbnail_path = get_face_thumbnail_path(face_id)
+                for face_id, bbox in faces:
+                    thumbnail_path = get_face_thumbnail_path(face_id, str(image_path), bbox)
                     self.assertTrue(thumbnail_path.exists())
                     with Image.open(thumbnail_path) as thumbnail:
                         self.assertLessEqual(max(thumbnail.size), 256)
@@ -78,7 +116,7 @@ class FaceThumbnailTest(unittest.TestCase):
 
             with patch("backend.services.face_thumbnails.get_data_root", return_value=root):
                 ensure_face_thumbnail(1, str(image_path), (10, 10, 100, 100))
-                first_mtime = get_face_thumbnail_path(1).stat().st_mtime_ns
+                first_mtime = get_face_thumbnail_path(1, str(image_path), (10, 10, 100, 100)).stat().st_mtime_ns
 
                 # Face 1 already cached, face 2 has an out-of-bounds/degenerate
                 # crop, face 3 is valid; nothing should raise.
@@ -92,12 +130,12 @@ class FaceThumbnailTest(unittest.TestCase):
                 )
 
                 self.assertEqual(
-                    get_face_thumbnail_path(1).stat().st_mtime_ns, first_mtime
+                    get_face_thumbnail_path(1, str(image_path), (10, 10, 100, 100)).stat().st_mtime_ns, first_mtime
                 )
-                self.assertFalse(get_face_thumbnail_path(2).exists())
-                self.assertTrue(get_face_thumbnail_path(3).exists())
+                self.assertFalse(get_face_thumbnail_path(2, str(image_path), (10_000, 10_000, 5, 5)).exists())
+                self.assertTrue(get_face_thumbnail_path(3, str(image_path), (50, 50, 80, 80)).exists())
 
-    def test_warm_missing_face_thumbnails_creates_legacy_cache_entries(self):
+    def test_warm_missing_face_thumbnails_creates_versioned_cache_entries(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             db_path = root / "faces.sqlite"
@@ -153,7 +191,11 @@ class FaceThumbnailTest(unittest.TestCase):
                 self.assertEqual(result.scanned_faces, 1)
                 self.assertEqual(result.created_thumbnails, 1)
                 self.assertTrue(result.reached_end)
-                self.assertTrue((root / "thumbnails" / "faces" / "0000" / "1.jpg").exists())
+                thumbnail = get_face_thumbnail_path(1, str(image_path), (15, 20, 300, 220))
+                self.assertTrue(thumbnail.exists())
+                warm_again = warm_missing_face_thumbnails(max_created=10, scan_limit=10)
+                self.assertEqual(warm_again.skipped_existing, 1)
+                self.assertEqual(warm_again.created_thumbnails, 0)
 
 
     def test_get_face_library_signature_reports_count_and_max_id(self):

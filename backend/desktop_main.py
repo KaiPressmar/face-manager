@@ -8,13 +8,10 @@ import traceback
 import uvicorn
 import webview
 
-from backend.app import app as face_manager_app
 from backend.config import APP_VERSION, get_error_log_path
 from backend.error_logging import configure_error_logging, install_global_exception_hooks
 from backend.services.update_manager import register_shutdown_callback
 
-configure_error_logging()
-install_global_exception_hooks()
 logger = logging.getLogger("face_manager.desktop")
 
 
@@ -43,8 +40,17 @@ def _wait_for_server(
     raise TimeoutError("Face Manager backend did not start within 30 seconds")
 
 
+def _load_backend_app():
+    # Import initializes the database and native dependencies. Let failures
+    # reach the same recovery window as errors raised during server startup.
+    from backend.app import app
+
+    return app
+
+
 def _start_server(host: str) -> tuple[uvicorn.Server, threading.Thread, int]:
     """Start the backend and retain the bound port through handoff to Uvicorn."""
+    application = _load_backend_app()
     startup_error: list[str] = []
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -61,7 +67,7 @@ def _start_server(host: str) -> tuple[uvicorn.Server, threading.Thread, int]:
         listener.bind((host, 0))
         port = listener.getsockname()[1]
         server = uvicorn.Server(uvicorn.Config(
-            face_manager_app, host=host, port=port, workers=1, log_level="warning",
+            application, host=host, port=port, workers=1, log_level="warning",
         ))
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
@@ -90,7 +96,7 @@ def _build_error_page(message: str) -> str:
     <html>
       <body style="font-family: Segoe UI, sans-serif; background: #111827; color: #f3f4f6; padding: 32px;">
         <h1 style="margin-top: 0;">Face Manager could not recover automatically</h1>
-        <p>The app wrote diagnostic details to:</p>
+        <p>Application log location:</p>
         <pre style="padding: 12px; background: #1f2937; border-radius: 8px;">{escaped_log_path}</pre>
         <p style="white-space: pre-wrap;">{escaped_message}</p>
       </body>
@@ -109,6 +115,8 @@ def main() -> None:
 
     for attempt in range(2):
         try:
+            configure_error_logging()
+            install_global_exception_hooks()
             server, server_thread, port = _start_server(host)
             break
         except Exception as exc:

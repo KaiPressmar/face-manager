@@ -27,6 +27,8 @@ async function newPage(browser, width, height, errors) {
   const page = await browser.newPage({ viewport: { width, height } });
   page.setDefaultTimeout(12000);
   page.on('pageerror', (error) => errors.push(error.message));
+  // Android 12's system WebView in CI lacks Array.prototype.at.
+  await page.addInitScript(() => Reflect.deleteProperty(Array.prototype, 'at'));
   return page;
 }
 
@@ -43,6 +45,46 @@ async function assertTabTrap(page, dialog) {
   assert.ok(await last.evaluate((element) => element === document.activeElement), 'Shift+Tab did not wrap to the last dialog control');
   await page.keyboard.press('Tab');
   assert.ok(await first.evaluate((element) => element === document.activeElement), 'Tab did not wrap to the first dialog control');
+}
+
+async function previewFlow(browser, errors) {
+  const page = await newPage(browser, 1280, 800, errors);
+  const originals = [];
+  page.on('request', (request) => {
+    if (/\/api\/images\/\d+\/file$/.test(new URL(request.url()).pathname)) {
+      originals.push(request.url());
+    }
+  });
+  try {
+    let firstPreview = true;
+    await page.route('**/api/images/*/thumbnail', (route) => {
+      if (!firstPreview) return route.continue();
+      firstPreview = false;
+      return route.fulfill({ status: 422, body: 'Invalid preview fixture' });
+    });
+    await page.goto(`${webBase}/#/bilder`);
+    const tile = page.locator('[data-image-id]').first();
+    await tile.waitFor();
+    await page.getByText('Vorschau nicht verfügbar', { exact: true }).waitFor();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll('[data-image-id] img'))
+      .some((image) => image.naturalWidth > 0 && image.src.includes('/thumbnail')));
+    assert.deepEqual(originals, [], 'The library fetched full-size photos before opening a viewer');
+    await tile.click();
+    await page.locator('img.gallery-image').waitFor();
+    await page.waitForFunction(() => document.querySelector('img.gallery-image').naturalWidth > 0);
+    assert.ok(originals.length > 0, 'The fullscreen viewer must still request the original');
+    const firstOriginal = await page.locator('img.gallery-image').getAttribute('src');
+    await page.keyboard.press('ArrowRight');
+    await page.waitForFunction((src) => {
+      const current = document.querySelector('img.gallery-image')?.getAttribute('src');
+      return Boolean(current) && current !== src;
+    }, firstOriginal);
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog', { name: 'Bildansicht' }).waitFor({ state: 'hidden' });
+    console.log('PASS photo previews: lazy thumbnails in the grid and originals in the viewer');
+  } finally {
+    await page.close();
+  }
 }
 
 async function mapFlow(browser, errors) {
@@ -152,6 +194,15 @@ async function mapFlow(browser, errors) {
     await page.waitForTimeout(1100);
     assert.equal(await page.getByRole('dialog', { name: 'Bildansicht' }).count(), 0, 'Cancelled detail request reopened the gallery');
     await page.unroute('**/api/images/*/detail');
+
+    await page.route('**/api/images/*/detail', (route) => route.fulfill({ status: 503, body: 'Unavailable detail fixture' }));
+    await galleryTile.click();
+    const failedDetail = page.getByRole('dialog', { name: 'Foto öffnen' });
+    await failedDetail.getByRole('alert').waitFor();
+    await page.unroute('**/api/images/*/detail');
+    await failedDetail.getByRole('button', { name: 'Erneut versuchen' }).click();
+    await gallery.waitFor();
+    await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
     await page.route('**/api/images/*/file', (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
     await galleryTile.click();
@@ -354,11 +405,13 @@ async function liveWorkflowFlow(browser, errors) {
       await route.fulfill({ response, json: data });
     });
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await page.locator('[data-image-id="987654321"]').waitFor();
+    const syntheticPhoto = page.locator('[data-image-id="987654321"]');
+    await syntheticPhoto.waitFor();
     assert.equal(await galleryTitle.textContent(), originalTitle, 'Live refresh changed the active gallery photo');
     await page.unroute('**/api/images?**');
     await publishLibraryChange('database_import');
     await gallery.waitFor({ state: 'hidden' });
+    await syntheticPhoto.waitFor({ state: 'detached' });
     await firstPhoto.click();
     await gallery.waitFor();
 
@@ -438,7 +491,11 @@ async function liveWorkflowFlow(browser, errors) {
 async function settingsFlow(browser, errors) {
   const page = await newPage(browser, 1440, 1000, errors);
   try {
+    await page.route('**/api/settings', (route) => route.fulfill({ status: 503 }));
     await page.goto(`${webBase}/#/einstellungen/darstellung`);
+    await page.getByRole('alert').waitFor();
+    await page.unroute('**/api/settings');
+    await page.getByRole('button', { name: 'Erneut versuchen' }).click();
     const themes = page.getByRole('radiogroup', { name: 'Darstellung' });
     await themes.waitFor();
     const theme = (label) => themes.getByRole('radio').filter({ has: page.getByText(label, { exact: true }) });
@@ -525,6 +582,7 @@ async function responsiveFlow(browser, errors) {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
+    await previewFlow(browser, errors);
     await mapFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
