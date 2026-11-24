@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.12.3] - 2026-11-24
+
+### Verbessert
+
 - Das Bildraster lädt kleinere Vorschauen beim Scrollen. Das Original wird in der Vollbildansicht geöffnet.
 - Die Dateinamenansicht findet Vorschläge auch in großen Bibliotheken schneller.
 
