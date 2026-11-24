@@ -1,4 +1,4 @@
-"""Collect and verify the Windows CUDA 12 runtime used by the GPU installer."""
+"""Collect and verify the CUDA 12 runtime in the Windows installer."""
 
 import argparse
 from importlib import metadata
@@ -42,18 +42,24 @@ def collect_cuda_binaries() -> list[tuple[str, str]]:
 
 
 def validate_cuda_bundle(app_dir: Path) -> None:
-    """Fail packaging if the frozen application is missing its GPU runtime."""
+    """Fail packaging if the frozen application is missing its CUDA runtime."""
     internal = app_dir / "_internal"
-    if not (internal / "onnxruntime" / "capi" / "onnxruntime_providers_cuda.dll").is_file():
-        raise RuntimeError("Missing the ONNX Runtime CUDA provider in the Windows GPU bundle")
+    ort_dir = internal / "onnxruntime" / "capi"
+    for filename in (
+        "onnxruntime.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+    ):
+        if not (ort_dir / filename).is_file():
+            raise RuntimeError(f"Missing {filename} from the Windows bundle")
     for source, destination in collect_cuda_binaries():
         bundled = internal / destination / Path(source).name
         if not bundled.is_file():
-            raise RuntimeError(f"Missing NVIDIA runtime file from Windows GPU bundle: {bundled}")
+            raise RuntimeError(f"Missing NVIDIA runtime file from the Windows bundle: {bundled}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_dir", type=Path)
     validate_cuda_bundle(parser.parse_args().app_dir)
-    print("Verified ONNX Runtime and NVIDIA DLLs in the Windows GPU bundle")
+    print("Verified ONNX Runtime and NVIDIA DLLs in the Windows bundle")

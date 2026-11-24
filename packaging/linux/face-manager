@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+app_dir=/opt/face-manager
+export FACE_MANAGER_PROJECT_ROOT="$app_dir"
+export PYWEBVIEW_GUI=gtk
+
+if [ -z "${FACE_MANAGER_DATA_DIR:-}" ]; then
+    case "${XDG_DATA_HOME:-}" in
+        /*) data_home=$XDG_DATA_HOME ;;
+        *) data_home="$HOME/.local/share" ;;
+    esac
+    FACE_MANAGER_DATA_DIR="$data_home/face-manager"
+    if [ ! -e "$FACE_MANAGER_DATA_DIR/database.sqlite" ] && [ -f "$HOME/.face-manager/database.sqlite" ]; then
+        FACE_MANAGER_DATA_DIR="$HOME/.face-manager"
+    fi
+    export FACE_MANAGER_DATA_DIR
+fi
+
+# The loader must see vendor SONAMEs before Python starts. The driver itself
+# is always supplied by the host and remains optional.
+cuda_dirs=
+for directory in "$app_dir"/vendor/nvidia/*/lib; do
+    if [ -d "$directory" ]; then
+        cuda_dirs="${cuda_dirs:+$cuda_dirs:}$directory"
+    fi
+done
+if [ -n "$cuda_dirs" ]; then
+    export LD_LIBRARY_PATH="$cuda_dirs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+exec /usr/bin/python3.14 -I "$app_dir/launch.py" "$@"

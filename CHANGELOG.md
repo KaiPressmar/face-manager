@@ -9,7 +9,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Face Manager lässt sich auf Ubuntu 26.04 als Desktop-App installieren.
+
 ### Verbessert
+
+- Ein Windows-Installer deckt Rechner mit und ohne Grafikkarte ab. Unter Windows und Ubuntu nutzt die App bevorzugt NVIDIA, danach eine geeignete Intel-Grafik und bei Bedarf den Prozessor.
+- Wer bisher die Windows-GPU-Ausgabe nutzt, kann von der Release-Seite einmalig zum gemeinsamen Installer wechseln.
 
 ### Behoben
 

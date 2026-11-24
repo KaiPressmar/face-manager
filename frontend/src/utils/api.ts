@@ -115,6 +115,7 @@ export interface FolderTree {
 export interface RuntimeInfo {
   compute_mode: "gpu" | "cpu";
   execution_provider: string;
+  provider_initialized?: boolean;
   host_platform: "windows" | "linux" | "android";
   display_platform?: "windows" | "linux" | "android";
 }
@@ -144,7 +145,7 @@ export interface AvailableUpdate {
   release_url?: string;
   published_at?: string | null;
   sections?: ReleaseNotesSection[];
-  build_variant?: "cpu" | "gpu" | "android";
+  build_variant?: "cpu" | "gpu" | "android" | "windows" | "linux";
   installer_name?: string | null;
   skipped?: boolean;
   can_install?: boolean;

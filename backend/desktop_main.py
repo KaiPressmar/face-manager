@@ -1,9 +1,11 @@
 import html
 import logging
 import socket
+import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 import uvicorn
 import webview
@@ -167,4 +169,15 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--check-runtime" and getattr(sys, "frozen", False):
+        report = Path(sys.argv[2])
+        try:
+            from backend.desktop_runtime import check_inference_runtime
+
+            ort_version = check_inference_runtime(Path(sys._MEIPASS))
+        except Exception:
+            report.write_text(traceback.format_exc(), encoding="utf-8")
+            sys.exit(1)
+        report.write_text(f"Face Manager {APP_VERSION}, ONNX Runtime {ort_version} and CPU inference passed.\n", encoding="utf-8")
+    else:
+        main()

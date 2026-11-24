@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from backend.models.face_model import FaceModel, get_compute_mode, get_execution_provider, preload_gpu_runtime_dlls
@@ -45,16 +46,11 @@ class ExecutionProviderTest(unittest.TestCase):
                     preload_gpu_runtime_dlls()
                     self.assertEqual(os.environ["PATH"], "original")
 
-    @patch("backend.models.face_model.ort.preload_dlls")
-    @patch(
-        "backend.models.face_model.ort.get_available_providers",
-        return_value=["CPUExecutionProvider"],
-    )
-    def test_execution_provider_preloads_runtime_dlls(self, _, preload_dlls):
-        provider = get_execution_provider()
-
-        self.assertEqual(provider, "CPUExecutionProvider")
-        preload_dlls.assert_called_once_with(directory="")
+    @patch("backend.models.face_model._active_model", None)
+    @patch("backend.models.face_model.ort.get_available_providers")
+    def test_unloaded_model_does_not_claim_gpu_acceleration(self, available):
+        self.assertEqual(get_execution_provider(), "CPUExecutionProvider")
+        available.assert_not_called()
 
     def test_cuda_is_selected_when_available(self):
         provider = get_execution_provider(
@@ -72,6 +68,7 @@ class ExecutionProviderTest(unittest.TestCase):
 
     def test_compute_mode_matches_execution_provider(self):
         self.assertEqual(get_compute_mode("CUDAExecutionProvider"), "gpu")
+        self.assertEqual(get_compute_mode("OpenVINOExecutionProvider"), "gpu")
         self.assertEqual(get_compute_mode("CPUExecutionProvider"), "cpu")
 
     @patch("backend.models.face_model.FaceAnalysis")
@@ -80,8 +77,9 @@ class ExecutionProviderTest(unittest.TestCase):
         "backend.models.face_model.ort.get_available_providers",
         return_value=["CUDAExecutionProvider", "CPUExecutionProvider"],
     )
-    def test_loaded_session_providers_override_available_providers(self, _, preload, face_analysis):
-        app = face_analysis.return_value
+    def test_silent_cuda_session_fallback_is_not_reported_as_gpu(self, _, preload, face_analysis):
+        app = Mock()
+        face_analysis.side_effect = [app, Mock()]
         detection = Mock()
         recognition = Mock()
         app.models = {"detection": detection, "recognition": recognition}
@@ -91,14 +89,7 @@ class ExecutionProviderTest(unittest.TestCase):
         model = FaceModel()
         self.assertEqual(model.compute_mode, "cpu")
         self.assertEqual(get_execution_provider(), "CPUExecutionProvider")
-
-        for model_session in (detection, recognition):
-            model_session.session.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        self.assertEqual(model.compute_mode, "gpu")
-        self.assertEqual(get_execution_provider(), "CUDAExecutionProvider")
-
-        detection.session.get_providers.return_value = ["CPUExecutionProvider"]
-        self.assertEqual(get_compute_mode(), "cpu")
+        self.assertEqual(face_analysis.call_count, 2)
         preload.assert_called_once_with()
 
     @patch("backend.models.face_model.FaceAnalysis")
@@ -152,3 +143,55 @@ class ExecutionProviderTest(unittest.TestCase):
             ["CPUExecutionProvider"],
         )
         cpu_app.prepare.assert_called_once_with(ctx_id=-1, det_size=(1024, 1024))
+
+    @patch("backend.models.face_model._find_intel_gpu")
+    @patch("backend.models.face_model.preload_gpu_runtime_dlls")
+    @patch("backend.models.face_model._check_accelerated_sessions")
+    @patch("backend.models.face_model.FaceModel._create_face_analysis")
+    @patch("backend.models.face_model.ort.get_available_providers", return_value=["CUDAExecutionProvider"])
+    def test_working_cuda_precedes_intel(self, _available, create, warm, _preload, intel):
+        model = FaceModel()
+        self.assertEqual(model.execution_provider, "CUDAExecutionProvider")
+        warm.assert_called_once_with(create.return_value, "CUDAExecutionProvider")
+        intel.assert_not_called()
+
+    @patch("backend.models.face_model.preload_gpu_runtime_dlls")
+    @patch("backend.models.face_model._find_intel_gpu")
+    @patch("backend.models.face_model.ort.SessionOptions")
+    @patch("backend.models.face_model.ort.InferenceSession")
+    @patch("backend.models.face_model._check_accelerated_sessions")
+    @patch("backend.models.face_model.FaceModel._create_face_analysis")
+    @patch("backend.models.face_model.ort.get_available_providers", return_value=["CUDAExecutionProvider"])
+    def test_inference_retries_cuda_then_intel_then_cpu_before_returning_faces(
+        self, _available, create, _warm, sessions, options, intel, _preload
+    ):
+        cuda = Mock()
+        cuda.get.side_effect = RuntimeError("CUDA runtime failure")
+        intel_app = Mock(models={
+            "detection": SimpleNamespace(model_file="detect.onnx", session=object()),
+            "recognition": SimpleNamespace(model_file="recognize.onnx", session=object()),
+        })
+        intel_app.get.side_effect = RuntimeError("Intel runtime failure")
+        cpu = Mock()
+        cpu.get.return_value = []
+        create.side_effect = [cuda, intel_app, cpu]
+
+        model = FaceModel()
+        image = object()
+        self.assertEqual(model.detect_and_embed(image), [])
+        self.assertEqual(get_execution_provider(), "CPUExecutionProvider")
+        for app in (cuda, intel_app, cpu):
+            app.get.assert_called_once_with(image)
+        options.return_value.add_provider_for_devices.assert_called_once_with([intel.return_value], {})
+        self.assertEqual([call.args[0] for call in sessions.call_args_list], ["detect.onnx", "recognize.onnx"])
+
+    @patch.dict(os.environ, {"FACE_MANAGER_CPU_ONLY": "1"})
+    @patch("backend.models.face_model.preload_gpu_runtime_dlls")
+    @patch("backend.models.face_model._find_intel_gpu")
+    @patch("backend.models.face_model.FaceModel._create_face_analysis")
+    def test_cpu_override_skips_both_accelerators(self, create, intel, preload):
+        model = FaceModel()
+        self.assertEqual(model.compute_mode, "cpu")
+        create.assert_called_once_with(["CPUExecutionProvider"], -1)
+        intel.assert_not_called()
+        preload.assert_not_called()

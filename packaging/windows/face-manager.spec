@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from runpy import run_path
 
@@ -14,19 +13,16 @@ project_root = Path.cwd()
 frontend_dist = project_root / "frontend" / "dist"
 icon_path = project_root / "packaging" / "windows" / "assets" / "face-manager-icon.ico"
 version_info_path = project_root / "build" / "windows-version-info.txt"
-build_variant = os.environ.get("FACE_MANAGER_BUILD_VARIANT", "cpu").strip().lower()
-if build_variant not in {"cpu", "gpu"}:
-    raise ValueError(f"Unsupported FACE_MANAGER_BUILD_VARIANT: {build_variant}")
 build_variant_path = project_root / "build" / "BUILD_VARIANT"
 build_variant_path.parent.mkdir(parents=True, exist_ok=True)
-build_variant_path.write_text(build_variant + "\n", encoding="ascii")
+build_variant_path.write_text("windows\n", encoding="ascii")
 
+packaging_dir = project_root / "packaging" / "windows"
+cuda_runtime = run_path(str(packaging_dir / "cuda_runtime.py"))
+openvino_runtime = run_path(str(packaging_dir / "openvino_runtime.py"))
+openvino_runtime["validate_onnxruntime_installation"]()
+openvino_binaries, openvino_data = openvino_runtime["collect_openvino_files"]()
 
-def optional_copy_metadata(distribution_name):
-    try:
-        return copy_metadata(distribution_name)
-    except Exception:
-        return []
 
 datas = [
     (str(project_root / "VERSION"), "."),
@@ -38,11 +34,16 @@ datas += collect_data_files("insightface")
 datas += collect_data_files("cv2")
 datas += copy_metadata("insightface")
 datas += copy_metadata("pywebview")
-datas += optional_copy_metadata("onnxruntime")
-datas += optional_copy_metadata("onnxruntime-gpu")
+datas += copy_metadata("onnxruntime-gpu")
+datas += copy_metadata(openvino_runtime["OPENVINO_DISTRIBUTION"])
+datas += openvino_data
+for distribution_name, _ in cuda_runtime["CUDA_COMPONENTS"].values():
+    datas += copy_metadata(distribution_name)
 
 binaries = []
 binaries += collect_dynamic_libs("onnxruntime")
+binaries += cuda_runtime["collect_cuda_binaries"]()
+binaries += openvino_binaries
 
 hiddenimports = []
 hiddenimports += collect_submodules("uvicorn")
@@ -53,13 +54,8 @@ hiddenimports += [
     "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
+    "onnxruntime_ep_openvino",
 ]
-
-if build_variant == "gpu":
-    cuda_runtime = run_path(str(project_root / "packaging" / "windows" / "cuda_runtime.py"))
-    binaries += cuda_runtime["collect_cuda_binaries"]()
-    for distribution_name, _ in cuda_runtime["CUDA_COMPONENTS"].values():
-        datas += copy_metadata(distribution_name)
 
 excludes = [
     "PyQt5",

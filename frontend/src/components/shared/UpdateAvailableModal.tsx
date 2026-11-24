@@ -29,6 +29,7 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
   const [error, setError] = useState<string | null>(null);
   const version = update.latest_version ?? "";
   const isAndroid = update.build_variant === "android";
+  const isLinux = update.build_variant === "linux";
 
   useEffect(() => {
     if (!update.can_install) return;
@@ -173,7 +174,9 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
               )
             ) : (
               <span className="update-modal__availability">
-                {update.can_install ? "Die passende Installationsdatei wird noch bereitgestellt." : "Die automatische Installation ist nur in der Windows-App verfügbar."}
+                {isLinux && update.download_available
+                  ? "Lade das Ubuntu-Paket auf GitHub herunter. Schließe Face Manager vor der Installation über APT."
+                  : "Öffne die Release-Seite für die Downloads zu dieser Version."}
               </span>
             )}
           </footer>

@@ -14,7 +14,7 @@ Users receive the improvements described in the finalized release section of `CH
 ## Developer Notes
 
 - This develop-to-main pull request is the single release boundary.
-- CI creates the annotated tag, release notes, checksums, provenance attestations, and Windows installers after merge.
+- CI creates the annotated tag and drafts the release notes after merge. It tests the Windows and Ubuntu packages, uploads their checksums and provenance, and then publishes.
 
 ## Validation
 
