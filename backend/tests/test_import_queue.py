@@ -81,7 +81,11 @@ class ImportQueueTest(unittest.TestCase):
     def test_jobs_run_serially_in_queue_order(self):
         first = self.queue.enqueue("/photos/first")
         second = self.queue.enqueue("/photos/second")
-        self.wait_for(lambda: self.processor.started == ["/photos/first"])
+        self.wait_for(lambda: any(
+            job["id"] == first["id"] and job["stage"] == "processing"
+            for job in self.queue.snapshot()["jobs"]
+        ))
+        self.assertEqual(self.processor.started, ["/photos/first"])
 
         snapshot = self.queue.snapshot()
         queued = next(job for job in snapshot["jobs"] if job["id"] == second["id"])

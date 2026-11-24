@@ -1,9 +1,15 @@
+import json
 import logging
 import os
 import re
 import sqlite3
 from collections import defaultdict
+from contextlib import closing
+from itertools import groupby
+from threading import Lock
+from time import monotonic
 from typing import List, Tuple
+from uuid import uuid4
 
 import numpy as np
 
@@ -116,16 +122,18 @@ def _safe_float(v):
 
 def get_cluster_distance_threshold() -> float:
     """Return the persisted clustering distance threshold."""
-    conn = get_conn()
+    with closing(get_conn()) as conn:
+        return _read_cluster_distance_threshold(conn)
+
+
+def _read_cluster_distance_threshold(conn) -> float:
     try:
         row = conn.execute(
             "SELECT value FROM app_settings WHERE key = ?",
             ("cluster_distance_threshold",),
         ).fetchone()
     except sqlite3.OperationalError:
-        conn.close()
         return DEFAULT_CLUSTER_DISTANCE_THRESHOLD
-    conn.close()
     if not row:
         return DEFAULT_CLUSTER_DISTANCE_THRESHOLD
     try:
@@ -288,16 +296,20 @@ def _derive_clustering_profile(distance_threshold: float) -> dict[str, float]:
     }
 
 
-def get_clustering_profile() -> dict[str, float]:
+def get_clustering_profile(conn=None) -> dict[str, float]:
     """Return the persisted multi-dimensional clustering profile.
 
     Older databases only contain ``cluster_distance_threshold`` and therefore
     transparently receive safe derived defaults until auto-tuning stores the
     individual profile values.
     """
-    threshold = get_cluster_distance_threshold()
+    own_connection = conn is None
+    if own_connection:
+        threshold = get_cluster_distance_threshold()
+        conn = get_conn()
+    else:
+        threshold = _read_cluster_distance_threshold(conn)
     profile = _derive_clustering_profile(threshold)
-    conn = get_conn()
     try:
         rows = conn.execute(
             """
@@ -314,7 +326,8 @@ def get_clustering_profile() -> dict[str, float]:
     except sqlite3.OperationalError:
         rows = []
     finally:
-        conn.close()
+        if own_connection:
+            conn.close()
     key_map = {
         "cluster_cohesion_threshold": "cohesion_threshold",
         "cluster_person_anchor_threshold": "person_anchor_threshold",
@@ -850,6 +863,9 @@ def _extract_trailing_person_names(
                 return []
             if position >= len(stripped_suffix):
                 return suffix_names
+            if not joiner or stripped_suffix[position : position + len(joiner)].casefold() == joiner.casefold():
+                position += len(joiner)
+                continue
             separator_match = separator_pattern.match(stripped_suffix, position)
             if separator_match is None:
                 return []
@@ -889,6 +905,9 @@ def build_person_filename_preview(
     joiner = DEFAULT_FILENAME_PERSON_JOINER if joiner is None else joiner
 
     stem, extension = os.path.splitext(filename)
+    names_text = joiner.join(ordered_names)
+    if not block_separator and stem.endswith(names_text):
+        return None
     root_stem, current_suffix_names = _extract_trailing_person_names(
         stem,
         ordered_names,
@@ -898,7 +917,6 @@ def build_person_filename_preview(
     if not root_stem:
         root_stem = stem
 
-    names_text = joiner.join(ordered_names)
     next_stem = f"{root_stem}{block_separator}{names_text}".strip()
     next_filename = f"{next_stem}{extension}"
 
@@ -1663,7 +1681,7 @@ def normalize_face_status_filters(face_statuses):
     return sorted({str(status) for status in face_statuses} & allowed)
 
 
-def _matching_images_cte(folders=None, persons=None, face_statuses=None):
+def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_photos=False):
     """Build the common CTE used for image pagination queries."""
     folders = folders or []
     persons = _normalize_person_filters(persons)
@@ -1671,11 +1689,16 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None):
     conditions, params = _descendant_filter(folders)
     location_where = f"WHERE {' OR '.join(conditions)}" if conditions else ""
 
-    # Archived faces are hidden by default. Filtering for them has to widen the
-    # relevance test as well, otherwise an image whose faces were *all* archived
-    # would drop out before the filter could ever match it.
-    visible_statuses = [FACE_REVIEW_STATUS_ACTIVE, *face_statuses]
-    visible_placeholders = ",".join("?" for _ in visible_statuses)
+    face_clause = ""
+    face_params = []
+    if not all_photos and not persons and not face_statuses:
+        face_clause = """
+        AND EXISTS (
+            SELECT 1 FROM face f
+            WHERE f.image_id = i.id AND f.review_status = ?
+        )
+        """
+        face_params = [FACE_REVIEW_STATUS_ACTIVE]
 
     person_clause = ""
     person_params = []
@@ -1736,16 +1759,13 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None):
         FROM image i
         JOIN ranked_locations location
             ON location.image_id = i.id AND location.location_rank = 1
-        WHERE EXISTS (
-            SELECT 1
-            FROM face f
-            WHERE f.image_id = i.id AND f.review_status IN ({visible_placeholders})
-        )
+        WHERE 1 = 1
+        {face_clause}
         {person_clause}
         {status_clause}
     )
     """
-    return sql, [*params, *visible_statuses, *person_params, *status_params]
+    return sql, [*params, *face_params, *person_params, *status_params]
 
 
 def _image_order_by(prefix: str, sort_by: str, sort_direction: str):
@@ -1808,6 +1828,8 @@ def list_images_page(
     limit: int = 40,
     offset: int = 0,
     face_statuses=None,
+    *,
+    all_photos: bool = False,
 ):
     """List one page of images with clustered faces and preferred locations."""
     folders = folders or []
@@ -1830,11 +1852,12 @@ def list_images_page(
         sort_direction,
         limit,
         offset,
+        all_photos,
     )
 
     def load_page():
         cte, params = _matching_images_cte(
-            folders=folders, persons=persons, face_statuses=face_statuses
+            folders=folders, persons=persons, face_statuses=face_statuses, all_photos=all_photos,
         )
         matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
         paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
@@ -1880,10 +1903,10 @@ def list_images_page(
                 f.review_status
             FROM paged_images
             JOIN image i ON i.id = paged_images.image_id
-            JOIN face f ON f.image_id = paged_images.image_id
+            LEFT JOIN face f ON f.image_id = paged_images.image_id
+                AND f.review_status IN ({visible_placeholders})
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
-            WHERE f.review_status IN ({visible_placeholders})
             ORDER BY {paged_order}, f.id
             """,
             [*params, limit, offset, *visible_statuses],
@@ -2416,256 +2439,253 @@ def load_all_embeddings() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     )
 
 
-def refresh_person_suggestions(cur=None) -> int:
-    """Rebuild conservative person proposals from confirmed assignments.
+_person_suggestion_epoch_lock = Lock()
+_person_suggestion_epoch = uuid4().hex
+_PERSON_SUGGESTION_PREVIEW_LIMIT = 6
 
-    Confirmed person clusters are treated as trusted reference modes. Unknown
-    clusters remain unknown: this function only records a proposal when several
-    faces independently agree on the same person with a clear runner-up margin.
-    """
-    owns_connection = cur is None
-    conn = get_conn() if owns_connection else None
-    cursor = conn.cursor() if conn is not None else cur
 
-    suggestion_table = cursor.execute(
-        """
-        SELECT 1 FROM sqlite_master
-        WHERE type = 'table' AND name = 'cluster_person_suggestion'
-        """
-    ).fetchone()
-    if suggestion_table is None:
-        if owns_connection:
-            conn.close()
-        return 0
+class StalePersonSuggestionError(ValueError):
+    """A proposal changed after it was shown to the user."""
 
-    assigned_rows = cursor.execute(
-        """
-        SELECT f.embedding, f.cluster_id, c.person_id
-        FROM face f
-        JOIN cluster c ON c.id = f.cluster_id
-        WHERE f.review_status = ?
-          AND f.embedding IS NOT NULL
-          AND c.person_id IS NOT NULL
-        ORDER BY c.person_id, f.cluster_id, f.id
-        """,
+    def __init__(self):
+        super().__init__("Mindestens ein Personenvorschlag hat sich geändert. Prüfe die aktualisierte Liste.")
+
+
+def invalidate_person_suggestion_epoch() -> None:
+    """Invalidate issued tokens and in-flight work before replacing a library."""
+    global _person_suggestion_epoch
+    with _person_suggestion_epoch_lock:
+        _person_suggestion_epoch = uuid4().hex
+
+
+def get_person_suggestion_epoch() -> str:
+    """Return the active library epoch for other snapshot-aware endpoints."""
+    with _person_suggestion_epoch_lock:
+        return _person_suggestion_epoch
+
+
+def is_person_suggestion_epoch_current(proposal_token: str) -> bool:
+    """Check the library part of a token without asserting proposal validity."""
+    if not isinstance(proposal_token, str):
+        return False
+    epoch, _, snapshot = proposal_token.partition(".")
+    with _person_suggestion_epoch_lock:
+        return bool(snapshot) and epoch == _person_suggestion_epoch
+
+
+def _proposal_vectors(rows, can_continue):
+    ids, image_ids, vectors = [], [], []
+    for index, row in enumerate(rows):
+        if index % 512 == 0 and not can_continue():
+            return None
+        blob = row["embedding"]
+        if not isinstance(blob, bytes) or len(blob) != 512 * 4:
+            continue
+        embedding = np.frombuffer(blob, dtype=np.float32)
+        norm = np.linalg.norm(embedding)
+        if not np.isfinite(norm) or norm <= 1e-12:
+            continue
+        ids.append(int(row["id"]))
+        image_ids.append(int(row["image_id"]))
+        vectors.append(embedding / norm)
+    matrix = np.vstack(vectors) if vectors else np.empty((0, 512), dtype=np.float32)
+    return ids, np.asarray(image_ids, dtype=np.int64), matrix
+
+
+def _load_person_proposal_references(conn, can_continue):
+    modes = defaultdict(list)
+    examples = defaultdict(dict)
+    rows = conn.execute(
+        """SELECT f.id, f.image_id, f.embedding, f.cluster_id, c.person_id
+           FROM face f JOIN cluster c ON c.id = f.cluster_id
+           WHERE f.review_status = ? AND c.person_id IS NOT NULL AND f.embedding IS NOT NULL
+           ORDER BY c.person_id, f.cluster_id, f.id""",
         (FACE_REVIEW_STATUS_ACTIVE,),
-    ).fetchall()
-    unknown_rows = cursor.execute(
-        """
-        SELECT f.id, f.embedding, f.cluster_id
-        FROM face f
-        JOIN cluster c ON c.id = f.cluster_id
-        WHERE f.review_status = ?
-          AND f.embedding IS NOT NULL
-          AND c.person_id IS NULL
-        ORDER BY f.cluster_id, f.id
-        """,
-        (FACE_REVIEW_STATUS_ACTIVE,),
-    ).fetchall()
-
-    # Pending proposals are derived data. Explicit dismissals survive ordinary
-    # refreshes for as long as that exact cluster continues to exist.
-    cursor.execute(
-        """
-        DELETE FROM cluster_person_suggestion
-        WHERE status = 'pending'
-           OR cluster_id IN (SELECT id FROM cluster WHERE person_id IS NOT NULL)
-        """
     )
-    if not assigned_rows or not unknown_rows:
-        if owns_connection:
-            conn.commit()
-            conn.close()
-        return 0
+    for (person_id, _), group in groupby(rows, lambda row: (row["person_id"], row["cluster_id"])):
+        prepared = _proposal_vectors(group, can_continue)
+        if prepared is None:
+            return None
+        face_ids, image_ids, vectors = prepared
+        if not face_ids:
+            continue
+        centers = FaceClustering._select_prototypes(vectors, max_prototypes=3)
+        modes[person_id].append(centers)
+        for center in centers:
+            distances = 1.0 - vectors @ center
+            closest = int(np.argmin(distances))
+            selected = [closest]
+            other_images = image_ids != image_ids[closest]
+            if other_images.any():
+                selected.append(int(np.argmin(np.where(other_images, distances, np.inf))))
+            for position in selected:
+                examples[person_id][face_ids[position]] = (int(image_ids[position]), vectors[position].copy())
+    return {person_id: np.vstack(groups) for person_id, groups in modes.items()}, examples
 
-    by_person_cluster: defaultdict[tuple[int, int], list[np.ndarray]] = defaultdict(list)
-    for row in assigned_rows:
-        embedding = np.frombuffer(row["embedding"], dtype=np.float32)
-        if embedding.size == 512:
-            by_person_cluster[(int(row["person_id"]), int(row["cluster_id"]))].append(
-                embedding
-            )
 
-    person_prototypes: defaultdict[int, list[np.ndarray]] = defaultdict(list)
-    for (person_id, _cluster_id), embeddings in by_person_cluster.items():
-        values = np.vstack(embeddings).astype(np.float32)
-        values /= np.linalg.norm(values, axis=1, keepdims=True) + 1e-12
-        person_prototypes[person_id].append(
-            FaceClustering._select_prototypes(values, max_prototypes=3)
-        )
-    prototypes = {
-        person_id: np.vstack(groups)
-        for person_id, groups in person_prototypes.items()
-        if groups
-    }
-    person_ids = sorted(prototypes)
-    if not person_ids:
-        if owns_connection:
-            conn.commit()
-            conn.close()
-        return 0
+def _best_proposal_matches(vectors, prototypes, can_continue):
+    """Keep only each face's two best identities, using bounded score matrices."""
+    best = np.full(len(vectors), np.inf, dtype=np.float32)
+    second = best.copy()
+    winners = np.zeros(len(vectors), dtype=np.int64)
+    for person_id, modes in prototypes.items():
+        distances = np.full(len(vectors), np.inf, dtype=np.float32)
+        for start in range(0, len(vectors), 512):
+            if not can_continue():
+                return None
+            part = vectors[start : start + 512]
+            nearest = distances[start : start + len(part)]
+            for offset in range(0, len(modes), 64):
+                local = 1.0 - np.max(part @ modes[offset : offset + 64].T, axis=1)
+                np.minimum(nearest, local, out=nearest)
+        better = distances < best
+        second = np.where(better, best, np.minimum(second, distances))
+        np.minimum(best, distances, out=best)
+        winners[better] = person_id
+    return winners, best, second
 
-    by_unknown_cluster: defaultdict[int, list[tuple[int, np.ndarray]]] = defaultdict(list)
-    for row in unknown_rows:
-        embedding = np.frombuffer(row["embedding"], dtype=np.float32)
-        if embedding.size == 512:
-            by_unknown_cluster[int(row["cluster_id"])].append(
-                (int(row["id"]), embedding)
-            )
 
-    profile = get_clustering_profile()
+def _reference_face_ids(examples, supported_vectors):
+    # Representative reference faces come from distinct indexed photos.
+    center = np.mean(supported_vectors, axis=0)
+    ranked = sorted(examples, key=lambda face_id: (-float(examples[face_id][1] @ center), face_id))
+    result = []
+    photos = set()
+    for face_id in ranked:
+        image_id, _ = examples[face_id]
+        if image_id not in photos:
+            result.append(face_id)
+            photos.add(image_id)
+        if len(result) == 2:
+            break
+    return result
+
+
+def _collect_person_proposals(conn, can_continue):
+    """Score one proposal per original group without changing any assignment."""
+    references = _load_person_proposal_references(conn, can_continue)
+    if references is None:
+        return None
+    prototypes, examples = references
+    if not prototypes:
+        return []
+    profile = get_clustering_profile(conn)
     anchor_limit = profile["person_anchor_threshold"]
     required_margin = profile["ambiguity_margin"]
-    inserted = 0
-
-    def store_suggestion(
-        target_cluster_id: int,
-        winner_index: int,
-        winner_mask: np.ndarray,
-        best_distances: np.ndarray,
-        margins: np.ndarray,
-        target_face_count: int,
-    ) -> bool:
-        support_count = int(np.sum(winner_mask))
-        if support_count < 3:
-            return False
-        support_ratio = support_count / target_face_count
-        supported_distances = best_distances[winner_mask]
-        supported_margins = margins[winner_mask]
-        best_distance = float(np.median(supported_distances))
-        runner_up_margin = float(np.median(supported_margins))
-        distance_quality = float(
-            np.clip((anchor_limit - best_distance) / max(0.12, anchor_limit - 0.18), 0, 1)
-        )
-        margin_quality = float(np.clip(runner_up_margin / 0.16, 0, 1))
-        confidence = float(
-            np.clip(
-                0.40 * support_ratio
-                + 0.25 * distance_quality
-                + 0.35 * margin_quality,
-                0,
-                1,
-            )
-        )
-        dismissed = cursor.execute(
-            """
-            SELECT 1 FROM cluster_person_suggestion
-            WHERE cluster_id = ? AND status = 'dismissed'
-            """,
-            (target_cluster_id,),
-        ).fetchone()
-        if dismissed:
-            return False
-        cursor.execute(
-            """
-            INSERT INTO cluster_person_suggestion(
-                cluster_id, person_id, confidence, best_distance,
-                runner_up_margin, support_count, face_count, support_ratio,
-                status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)
-            """,
-            (
-                target_cluster_id,
-                person_ids[winner_index],
-                confidence,
-                best_distance,
-                runner_up_margin,
-                support_count,
-                target_face_count,
-                support_ratio,
-            ),
-        )
-        return True
-
-    for cluster_id, face_rows in by_unknown_cluster.items():
-        values = np.vstack([embedding for _, embedding in face_rows]).astype(np.float32)
-        values /= np.linalg.norm(values, axis=1, keepdims=True) + 1e-12
-        distance_columns = [
-            np.min(1.0 - values @ prototypes[person_id].T, axis=1)
-            for person_id in person_ids
-        ]
-        distances = np.column_stack(distance_columns)
-        order = np.argsort(distances, axis=1)
-        best_indexes = order[:, 0]
-        best_distances = distances[np.arange(values.shape[0]), best_indexes]
-        if len(person_ids) > 1:
-            runner_distances = distances[np.arange(values.shape[0]), order[:, 1]]
-            margins = runner_distances - best_distances
-            anchor_mask = (best_distances <= anchor_limit) & (margins >= required_margin)
+    rows = conn.execute(
+        """SELECT f.id, f.image_id, f.embedding, f.cluster_id
+           FROM face f JOIN cluster c ON c.id = f.cluster_id
+           WHERE f.review_status = ? AND c.person_id IS NULL
+           ORDER BY f.cluster_id, f.id""",
+        (FACE_REVIEW_STATUS_ACTIVE,),
+    )
+    proposals = []
+    for cluster_id, group in groupby(rows, lambda row: row["cluster_id"]):
+        if not can_continue():
+            return None
+        group_rows = list(group)
+        if len(group_rows) < 3:
+            continue
+        prepared = _proposal_vectors(group_rows, can_continue)
+        if prepared is None:
+            return None
+        face_ids, image_ids, vectors = prepared
+        if len(face_ids) < 3:
+            continue
+        matches = _best_proposal_matches(vectors, prototypes, can_continue)
+        if matches is None:
+            return None
+        winners, distances, runner_distances = matches
+        if len(prototypes) > 1:
+            margins = runner_distances - distances
+            anchor = (distances <= anchor_limit) & (margins >= required_margin)
         else:
-            # The first confirmed person is already useful training data. With
-            # no runner-up identity available, compensate by demanding a much
-            # closer match; the cluster-consensus check below still applies.
-            single_person_limit = min(anchor_limit, 0.34)
-            margins = np.full(values.shape[0], 0.12, dtype=np.float32)
-            anchor_mask = best_distances <= single_person_limit
-        if not np.any(anchor_mask):
+            margins = np.zeros(len(vectors), dtype=np.float32)
+            anchor = distances <= min(anchor_limit, 0.34)
+        people, counts = np.unique(winners[anchor], return_counts=True)
+        qualified = []
+        for person_id, count in zip(people, counts):
+            if count < 3:
+                continue
+            distinct_photos = len(np.unique(image_ids[anchor & (winners == person_id)]))
+            if distinct_photos >= 3:
+                qualified.append((-distinct_photos, -int(count), int(person_id)))
+        if not qualified:
             continue
+        _, _, winner = min(qualified)
+        supported = anchor & (winners == winner)
+        eligible = [face_ids[index] for index in np.flatnonzero(supported)]
+        ratio = len(eligible) / len(group_rows)
+        distance = float(np.median(distances[supported]))
+        margin = float(np.median(margins[supported]))
+        distance_quality = np.clip((anchor_limit - distance) / max(0.12, anchor_limit - 0.18), 0, 1)
+        margin_quality = np.clip(margin / 0.16, 0, 1)
+        if len(prototypes) > 1:
+            score = float(0.40 * ratio + 0.25 * distance_quality + 0.35 * margin_quality)
+        else:
+            score = float(0.50 * ratio + 0.50 * distance_quality)
+        reference_ids = _reference_face_ids(examples[winner], vectors[supported])
+        proposals.append((cluster_id, winner, score, distance, margin, len(eligible), len(group_rows), ratio,
+                          json.dumps(eligible), json.dumps(reference_ids)))
+    return proposals
 
-        winning_indexes = best_indexes[anchor_mask]
-        winner_counts = np.bincount(winning_indexes, minlength=len(person_ids))
-        winner_index = int(np.argmax(winner_counts))
-        winner_mask = anchor_mask & (best_indexes == winner_index)
-        support_count = int(np.sum(winner_mask))
-        face_count = int(values.shape[0])
-        support_ratio = support_count / face_count
-        # Assigning a proposal confirms the entire cluster, so whole-cluster
-        # proposals require near-unanimous evidence. Otherwise only the strong
-        # anchors are peeled out and uncertain faces remain in the inbox.
-        minimum_ratio = profile["cluster_support_ratio"]
-        qualified_winners = [
-            index for index, count in enumerate(winner_counts) if int(count) >= 3
-        ]
 
-        # A mixed cluster must never become a person proposal as a whole. Peel
-        # only the independently high-confidence anchors into dedicated,
-        # reviewable proposal clusters. Uncertain bridge faces stay untouched.
-        should_peel = (
-            len(qualified_winners) > 1
-            or (support_count >= 3 and support_ratio < minimum_ratio)
-        )
-        if should_peel:
-            for qualified_index in qualified_winners:
-                qualified_mask = anchor_mask & (best_indexes == qualified_index)
-                qualified_face_ids = [
-                    face_rows[index][0]
-                    for index in np.flatnonzero(qualified_mask)
-                ]
-                if len(qualified_face_ids) < 3:
-                    continue
-                proposal_cluster_id = _create_cluster_for_faces(
-                    cursor,
-                    qualified_face_ids,
+def refresh_pending_person_suggestions(can_publish=None) -> bool:
+    """Publish one coherent generation when it is still current after scoring."""
+    next_check = 0.0
+
+    def can_continue():
+        nonlocal next_check
+        if can_publish is None:
+            return True
+        current = monotonic()
+        if current < next_check:
+            return True
+        next_check = current + 0.05
+        return can_publish()
+
+    with _person_suggestion_epoch_lock:
+        if can_publish is not None and not can_publish():
+            return False
+        epoch = _person_suggestion_epoch
+    with closing(get_conn()) as read:
+        read.execute("BEGIN")
+        state = read.execute("SELECT generation, processed_generation FROM person_suggestion_state WHERE id = 1").fetchone()
+        if state is None or state["processed_generation"] >= state["generation"]:
+            return False
+        generation = int(state["generation"])
+        proposals = _collect_person_proposals(read, can_continue)
+        if proposals is None:
+            return False
+
+    with _person_suggestion_epoch_lock:
+        if epoch != _person_suggestion_epoch or (can_publish is not None and not can_publish()):
+            return False
+        with closing(get_conn()) as write, write:
+            write.execute("BEGIN IMMEDIATE")
+            claimed = write.execute(
+                """UPDATE person_suggestion_state SET processed_generation = ?
+                   WHERE id = 1 AND generation = ? AND processed_generation < ?""",
+                (generation, generation, generation),
+            )
+            if claimed.rowcount != 1:
+                return False
+            dismissed = {
+                row["cluster_id"]: (row["person_id"], row["eligible_face_ids"])
+                for row in write.execute(
+                    "SELECT cluster_id, person_id, eligible_face_ids FROM cluster_person_suggestion WHERE status = 'dismissed'"
                 )
-                if store_suggestion(
-                    proposal_cluster_id,
-                    qualified_index,
-                    qualified_mask,
-                    best_distances,
-                    margins,
-                    len(qualified_face_ids),
-                ):
-                    inserted += 1
-            continue
-
-        if support_count >= 3 and support_ratio >= minimum_ratio:
-            if store_suggestion(
-                cluster_id,
-                winner_index,
-                winner_mask,
-                best_distances,
-                margins,
-                face_count,
-            ):
-                inserted += 1
-
-    _delete_empty_clusters(cursor)
-
-    if owns_connection:
-        conn.commit()
-        conn.close()
-        invalidate_image_query_cache()
-    return inserted
+            }
+            write.execute("DELETE FROM cluster_person_suggestion WHERE status = 'pending'")
+            write.executemany(
+                """INSERT OR REPLACE INTO cluster_person_suggestion(
+                       cluster_id, person_id, confidence, best_distance, runner_up_margin, support_count,
+                       face_count, support_ratio, eligible_face_ids, reference_face_ids, generation, snapshot_token
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ((*proposal, generation, uuid4().hex) for proposal in proposals
+                 if dismissed.get(proposal[0]) != (proposal[1], proposal[8])),
+            )
+    return True
 
 
 def refresh_review_suggestions(cur=None) -> int:
@@ -2834,12 +2854,19 @@ def list_review_suggestions() -> list[dict]:
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT cluster_id, review_status, confidence, best_distance,
-               support_count, face_count, support_ratio
-        FROM cluster_review_suggestion
-        WHERE status = 'pending'
-        ORDER BY confidence DESC, face_count DESC
-        """
+        SELECT s.cluster_id, s.review_status, s.confidence, s.best_distance,
+               s.support_count, s.face_count, s.support_ratio,
+               (SELECT COUNT(*) FROM face f WHERE f.cluster_id = s.cluster_id
+                AND f.review_status = ?) AS current_face_count
+        FROM cluster_review_suggestion s
+        JOIN cluster c ON c.id = s.cluster_id AND c.person_id IS NULL
+        WHERE s.status = 'pending'
+          AND EXISTS (
+              SELECT 1 FROM face f WHERE f.cluster_id = s.cluster_id AND f.review_status = ?
+          )
+        ORDER BY s.confidence DESC, s.face_count DESC
+        """,
+        (FACE_REVIEW_STATUS_ACTIVE, FACE_REVIEW_STATUS_ACTIVE),
     ).fetchall()
     result = []
     for row in rows:
@@ -2854,7 +2881,7 @@ def list_review_suggestions() -> list[dict]:
                 "confidence": float(row["confidence"]),
                 "best_distance": float(row["best_distance"]),
                 "support_count": int(row["support_count"]),
-                "face_count": int(row["face_count"]),
+                "face_count": int(row["current_face_count"]),
                 "support_ratio": float(row["support_ratio"]),
                 "recommended": float(row["confidence"]) >= 0.80,
                 "preview_face_ids": [int(item["id"]) for item in previews],
@@ -2864,7 +2891,7 @@ def list_review_suggestions() -> list[dict]:
     return result
 
 
-def dismiss_review_suggestion(cluster_id: int) -> None:
+def dismiss_review_suggestion(cluster_id: int, expected_status: str | None = None) -> None:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
@@ -2872,8 +2899,9 @@ def dismiss_review_suggestion(cluster_id: int) -> None:
         UPDATE cluster_review_suggestion
         SET status = 'dismissed', updated_at = CURRENT_TIMESTAMP
         WHERE cluster_id = ? AND status = 'pending'
+          AND (? IS NULL OR review_status = ?)
         """,
-        (int(cluster_id),),
+        (int(cluster_id), expected_status, expected_status),
     )
     if cur.rowcount == 0:
         conn.close()
@@ -2882,24 +2910,67 @@ def dismiss_review_suggestion(cluster_id: int) -> None:
     conn.close()
 
 
-def accept_review_suggestions(cluster_ids: list[int]) -> int:
+def accept_review_suggestions(
+    cluster_ids: list[int],
+    expected_statuses: dict[str, str] | None = None,
+    expected_face_ids: dict[str, list[int]] | None = None,
+) -> int:
     normalized_ids = sorted({int(value) for value in cluster_ids if int(value) > 0})
     if not normalized_ids:
         raise ValueError("No cluster_ids supplied")
+    if expected_statuses is not None and (
+        expected_statuses.keys() != {str(cluster_id) for cluster_id in normalized_ids}
+        or any(
+            status not in (FACE_REVIEW_STATUS_UNKNOWN_PERSON, FACE_REVIEW_STATUS_NOT_FACE)
+            for status in expected_statuses.values()
+        )
+    ):
+        raise ValueError("Die Aussortierkategorien sind ungültig.")
+    if expected_face_ids is not None and (
+        not isinstance(expected_face_ids, dict)
+        or expected_face_ids.keys() != {str(cluster_id) for cluster_id in normalized_ids}
+        or any(
+            not isinstance(ids, list) or not ids or not all(map(_valid_proposal_id, ids))
+            or len(ids) != len(set(ids))
+            for ids in expected_face_ids.values()
+        )
+    ):
+        raise ValueError("Die geprüfte Gesichtsauswahl ist ungültig.")
     placeholders = ",".join("?" for _ in normalized_ids)
     conn = get_conn()
     cur = conn.cursor()
     try:
+        # Keep the eligibility check and the move in the same writer transaction.
+        # A person assignment may have won since the archive proposal was shown.
+        cur.execute("BEGIN IMMEDIATE")
         rows = cur.execute(
             f"""
-            SELECT cluster_id, review_status
-            FROM cluster_review_suggestion
-            WHERE status = 'pending' AND cluster_id IN ({placeholders})
+            SELECT s.cluster_id, s.review_status
+            FROM cluster_review_suggestion s
+            JOIN cluster c ON c.id = s.cluster_id AND c.person_id IS NULL
+            WHERE s.status = 'pending' AND s.cluster_id IN ({placeholders})
+              AND EXISTS (
+                  SELECT 1 FROM face f WHERE f.cluster_id = s.cluster_id AND f.review_status = ?
+              )
             """,
-            normalized_ids,
+            (*normalized_ids, FACE_REVIEW_STATUS_ACTIVE),
         ).fetchall()
-        if len(rows) != len(normalized_ids):
-            raise ValueError("One or more review suggestions are stale")
+        if len(rows) != len(normalized_ids) or (
+            expected_statuses is not None
+            and any(expected_statuses[str(row["cluster_id"])] != row["review_status"] for row in rows)
+        ):
+            raise ValueError("Mindestens ein Aussortiervorschlag hat sich geändert. Prüfe die aktualisierte Liste.")
+        if expected_face_ids is not None:
+            for cluster_id in normalized_ids:
+                current = [
+                    int(face["id"])
+                    for face in cur.execute(
+                        "SELECT id FROM face WHERE cluster_id = ? AND review_status = ? ORDER BY id",
+                        (cluster_id, FACE_REVIEW_STATUS_ACTIVE),
+                    )
+                ]
+                if current != sorted(expected_face_ids[str(cluster_id)]):
+                    raise ValueError("Mindestens ein Aussortiervorschlag hat sich geändert. Prüfe die aktualisierte Liste.")
         for row in rows:
             cur.execute(
                 "UPDATE face SET cluster_id = NULL, review_status = ? WHERE cluster_id = ? AND review_status = ?",
@@ -2920,33 +2991,33 @@ def accept_review_suggestions(cluster_ids: list[int]) -> int:
     return len(normalized_ids)
 
 
+_CURRENT_PERSON_SUGGESTIONS = """
+    SELECT s.*, p.name AS person_name
+    FROM cluster_person_suggestion s
+    JOIN cluster c ON c.id = s.cluster_id AND c.person_id IS NULL
+    JOIN person p ON p.id = s.person_id
+    JOIN person_suggestion_state state ON state.id = 1
+        AND s.generation = state.generation AND s.generation = state.processed_generation
+    WHERE s.status = 'pending' AND s.snapshot_token IS NOT NULL
+        AND s.eligible_face_ids IS NOT NULL AND s.reference_face_ids IS NOT NULL
+"""
+
+
+def _proposal_token(row) -> str:
+    return f"{_person_suggestion_epoch}.{row['snapshot_token']}"
+
+
 def list_person_suggestions() -> list[dict]:
-    """Return pending proposals grouped by person in the frontend."""
-    conn = get_conn()
-    rows = conn.execute(
-        """
-        SELECT s.cluster_id, s.person_id, p.name AS person_name,
-               s.confidence, s.best_distance, s.runner_up_margin,
-               s.support_count, s.face_count, s.support_ratio
-        FROM cluster_person_suggestion s
-        JOIN cluster c ON c.id = s.cluster_id AND c.person_id IS NULL
-        JOIN person p ON p.id = s.person_id
-        WHERE s.status = 'pending'
-        ORDER BY p.name COLLATE NOCASE, s.confidence DESC, s.face_count DESC
-        """
-    ).fetchall()
-    result = []
-    for row in rows:
-        preview_rows = conn.execute(
-            """
-            SELECT id FROM face
-            WHERE cluster_id = ? AND review_status = ?
-            ORDER BY id LIMIT 6
-            """,
-            (row["cluster_id"], FACE_REVIEW_STATUS_ACTIVE),
-        ).fetchall()
-        result.append(
-            {
+    """Return current snapshots without presenting other cluster faces as evidence."""
+    with _person_suggestion_epoch_lock, closing(get_conn()) as conn:
+        rows = conn.execute(
+            f"""{_CURRENT_PERSON_SUGGESTIONS}
+                ORDER BY p.name COLLATE NOCASE, s.confidence DESC, s.face_count DESC, s.cluster_id"""
+        )
+        result = []
+        for row in rows:
+            face_ids = json.loads(row["eligible_face_ids"])
+            result.append({
                 "cluster_id": int(row["cluster_id"]),
                 "person_id": int(row["person_id"]),
                 "person_name": row["person_name"],
@@ -2957,98 +3028,106 @@ def list_person_suggestions() -> list[dict]:
                 "face_count": int(row["face_count"]),
                 "support_ratio": float(row["support_ratio"]),
                 "recommended": float(row["confidence"]) >= 0.72,
-                "preview_face_ids": [int(item["id"]) for item in preview_rows],
-            }
-        )
-    conn.close()
+                "proposal_token": _proposal_token(row),
+                "face_ids": face_ids,
+                "preview_face_ids": face_ids[:_PERSON_SUGGESTION_PREVIEW_LIMIT],
+                "reference_face_ids": json.loads(row["reference_face_ids"]),
+            })
     return result
 
 
-def dismiss_person_suggestion(cluster_id: int) -> None:
-    """Hide one proposal without changing any face assignment."""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE cluster_person_suggestion
-        SET status = 'dismissed', updated_at = CURRENT_TIMESTAMP
-        WHERE cluster_id = ? AND status = 'pending'
-        """,
-        (int(cluster_id),),
-    )
-    if cur.rowcount == 0:
-        conn.close()
-        raise LookupError("Person suggestion not found")
-    conn.commit()
-    conn.close()
+def _require_person_suggestion(cur, cluster_id: int, proposal_token: str):
+    row = cur.execute(
+        f"{_CURRENT_PERSON_SUGGESTIONS} AND s.cluster_id = ?", (cluster_id,)
+    ).fetchone()
+    if row is None or proposal_token != _proposal_token(row):
+        raise StalePersonSuggestionError()
+    return row
+
+
+def dismiss_person_suggestion(cluster_id: int, proposal_token: str | None = None) -> None:
+    """Dismiss the exact proposal the client reviewed."""
+    if not proposal_token:
+        raise StalePersonSuggestionError()
+    with _person_suggestion_epoch_lock, closing(get_conn()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _require_person_suggestion(conn, cluster_id, proposal_token)
+        conn.execute(
+            """UPDATE cluster_person_suggestion SET status = 'dismissed', updated_at = CURRENT_TIMESTAMP
+               WHERE cluster_id = ?""",
+            (cluster_id,),
+        )
     invalidate_image_query_cache()
 
 
 def accept_person_suggestions(person_id: int, cluster_ids: list[int]) -> int:
-    """Confirm selected proposals atomically after validating their person."""
-    return accept_person_suggestion_assignments(
-        [{"person_id": person_id, "cluster_ids": cluster_ids}]
-    )
+    """Reject legacy whole-cluster confirmation without an evidence snapshot."""
+    raise StalePersonSuggestionError()
+
+
+def _valid_proposal_id(value):
+    return type(value) is int and 0 < value <= 2**63 - 1
 
 
 def accept_person_suggestion_assignments(assignments: list[dict]) -> int:
-    """Confirm proposal groups for several people in one atomic operation."""
-    normalized_assignments: list[tuple[int, list[int]]] = []
-    seen_cluster_ids: set[int] = set()
-    for assignment in assignments or []:
-        person_id = int(assignment.get("person_id"))
-        cluster_ids = sorted(
-            {int(value) for value in assignment.get("cluster_ids", []) if int(value) > 0}
-        )
-        if not cluster_ids:
-            continue
-        if seen_cluster_ids.intersection(cluster_ids):
-            raise ValueError("A cluster may only be accepted once")
-        seen_cluster_ids.update(cluster_ids)
-        normalized_assignments.append((person_id, cluster_ids))
-    if not normalized_assignments:
-        raise ValueError("No cluster_ids supplied")
+    """Assign only the explicitly confirmed faces from current proposals."""
+    if not isinstance(assignments, list) or not assignments:
+        raise ValueError("Wähle mindestens einen Personenvorschlag aus.")
+    normalized = []
+    seen_clusters = set()
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise ValueError("Die Auswahl der Personenvorschläge ist ungültig.")
+        person_id = assignment.get("person_id")
+        cluster_id = assignment.get("cluster_id")
+        token = assignment.get("proposal_token")
+        scope = assignment.get("scope")
+        face_ids = assignment.get("face_ids")
+        if (not _valid_proposal_id(person_id) or not _valid_proposal_id(cluster_id)
+                or not isinstance(token, str) or not token or scope not in ("preview", "detail")
+                or not isinstance(face_ids, list) or not face_ids or not all(map(_valid_proposal_id, face_ids))):
+            raise ValueError("Bestätige eine konkrete Auswahl geprüfter Gesichter.")
+        if cluster_id in seen_clusters or len(face_ids) != len(set(face_ids)):
+            raise ValueError("Jedes Gesicht und jeder Vorschlag darf nur einmal bestätigt werden.")
+        seen_clusters.add(cluster_id)
+        normalized.append((person_id, cluster_id, token, scope, face_ids))
 
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        for person_id, cluster_ids in normalized_assignments:
-            placeholders = ",".join("?" for _ in cluster_ids)
-            rows = cur.execute(
-                f"""
-                SELECT cluster_id FROM cluster_person_suggestion
-                WHERE person_id = ? AND status = 'pending'
-                  AND cluster_id IN ({placeholders})
-                """,
-                (person_id, *cluster_ids),
-            ).fetchall()
-            if len(rows) != len(cluster_ids):
-                raise ValueError(
-                    "One or more suggestions are stale or belong to another person"
-                )
-        for person_id, cluster_ids in normalized_assignments:
-            placeholders = ",".join("?" for _ in cluster_ids)
-            cur.execute(
-                f"""
-                UPDATE cluster SET person_id = ?
-                WHERE id IN ({placeholders}) AND person_id IS NULL
-                """,
-                (person_id, *cluster_ids),
-            )
-            if int(cur.rowcount) != len(cluster_ids):
-                raise ValueError("One or more suggestion clusters are no longer unassigned")
-            cur.execute(
-                f"DELETE FROM cluster_person_suggestion WHERE cluster_id IN ({placeholders})",
-                cluster_ids,
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
+    with _person_suggestion_epoch_lock, closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        # Validate every selection before changing any assignment or generation.
+        for person_id, cluster_id, token, scope, face_ids in normalized:
+            row = _require_person_suggestion(cur, cluster_id, token)
+            eligible = json.loads(row["eligible_face_ids"])
+            if scope == "preview":
+                eligible = eligible[:_PERSON_SUGGESTION_PREVIEW_LIMIT]
+            if row["person_id"] != person_id or not set(face_ids).issubset(eligible):
+                raise StalePersonSuggestionError()
+            current_count = cur.execute(
+                "SELECT COUNT(*) FROM face WHERE cluster_id = ? AND review_status = ?",
+                (cluster_id, FACE_REVIEW_STATUS_ACTIVE),
+            ).fetchone()[0]
+            if current_count != row["face_count"]:
+                raise StalePersonSuggestionError()
+            for batch in _id_batches(face_ids):
+                placeholders = ",".join("?" for _ in batch)
+                count = cur.execute(
+                    f"""SELECT COUNT(*) FROM face WHERE cluster_id = ? AND review_status = ?
+                        AND id IN ({placeholders})""",
+                    (cluster_id, FACE_REVIEW_STATUS_ACTIVE, *batch),
+                ).fetchone()[0]
+                if count != len(batch):
+                    raise StalePersonSuggestionError()
+
+        for person_id, cluster_id, _token, _scope, face_ids in normalized:
+            _create_cluster_for_faces(cur, face_ids, person_id=person_id)
+            cur.execute("DELETE FROM cluster_person_suggestion WHERE cluster_id = ?", (cluster_id,))
+            cur.execute("DELETE FROM cluster_review_suggestion WHERE cluster_id = ?", (cluster_id,))
+        _delete_empty_clusters(cur)
+        mark_persons_dirty_for_recluster(cur, [person_id for person_id, *_ in normalized])
+
     invalidate_image_query_cache()
-    return len(seen_cluster_ids)
+    return len(normalized)
 
 
 def assign_cluster_to_person(cluster_id: int, person_name: str):
@@ -3679,7 +3758,6 @@ def recluster_unassigned_faces(progress_callback=None) -> int:
         progress_callback=progress_callback,
     )
     _delete_empty_clusters(cur)
-    refresh_person_suggestions(cur)
     refresh_review_suggestions(cur)
     conn.commit()
     conn.close()
@@ -3876,7 +3954,6 @@ def recluster_all_active_faces(
         cur.execute("BEGIN IMMEDIATE")
         try:
             _delete_empty_clusters(cur)
-            refresh_person_suggestions(cur)
             refresh_review_suggestions(cur)
             cur.execute("COMMIT")
         except Exception:
@@ -4351,10 +4428,17 @@ def rename_image_locations_to_match_people(
     renamed = []
     skipped = []
     errors = []
+    forbidden_chars = "/\\\x00"
+    if os.name == "nt":
+        forbidden_chars += '<>:"|?*'
 
     for candidate in target_candidates:
         source_path = candidate["path"]
-        target_path = candidate["proposed_path"]
+        filename = candidate["proposed_filename"]
+        if not filename or filename in {".", ".."} or any(char in forbidden_chars for char in filename):
+            skipped.append({"path": source_path, "reason": "invalid_filename"})
+            continue
+        target_path = os.path.join(os.path.dirname(source_path), filename)
         if source_path == target_path:
             skipped.append({"path": source_path, "reason": "already_matches"})
             continue
@@ -4363,7 +4447,7 @@ def rename_image_locations_to_match_people(
         if not os.path.isfile(source_filesystem_path):
             skipped.append({"path": source_path, "reason": "missing_source"})
             continue
-        if os.path.exists(target_filesystem_path):
+        if os.path.lexists(target_filesystem_path):
             skipped.append({"path": source_path, "reason": "target_exists"})
             continue
 

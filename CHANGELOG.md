@@ -13,6 +13,25 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.13.0] - 2026-11-24
+
+### Neu
+
+- Mehrere Bilderordner lassen sich in einem Schritt auswählen. Falls ein Ordner nicht hinzugefügt werden konnte, kannst du ihn einzeln oder zusammen mit weiteren ausstehenden Ordnern erneut versuchen.
+
+### Verbessert
+
+- Bilder und Personen sind auch auf schmalen Bildschirmen direkt erreichbar. Die Bibliothek zeigt beim Einstieg, wie Fotos gesammelt und Gesichter zugeordnet werden.
+- Bei Personenvorschlägen kannst du Vergleichsfotos ansehen, einzelne Gesichter auswählen oder mehrere geprüfte Vorschläge gemeinsam bestätigen. Die Ansicht passt sich auch an schmale Fenster an.
+- Vor dem Umbenennen kannst du prüfen, welche Dateien betroffen sind. Anschließend siehst du, welche Änderungen gelungen sind und welche Dateien übersprungen wurden.
+
+### Behoben
+
+- In der Bibliothek erscheinen auch Fotos ohne erkannte Gesichter. Die Originale bleiben an ihren Speicherorten.
+- Dateinamen bleiben beim erneuten Prüfen korrekt. Ein ungeeigneter Personenname oder Trenner verschiebt keine Fotos in andere Ordner.
+- Auf kleinen Bildschirmen bleibt das Foto sichtbar, auch wenn es viele Kopien an verschiedenen Orten gibt. Auf der Karte lässt sich die Ansicht auch über einer Markierung ziehen.
+- Nach einem Import oder einer Bestätigung werden passende Vorschläge weiter vorbereitet. Eine veraltete Vorschlagskarte kann inzwischen hinzugekommene Gesichter nicht mit zuordnen.
+
 ## [0.12.3] - 2026-11-24
 
 ### Verbessert

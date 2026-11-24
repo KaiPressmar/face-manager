@@ -90,7 +90,7 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
       : { top: `calc(${top}% - ${leaderLength}px)` }),
   };
 
-  const handleNavigate = (event: React.MouseEvent | React.KeyboardEvent) => {
+  const handleNavigate = (event: React.MouseEvent) => {
     event.stopPropagation();
     if (face.cluster_id === null) return;
     // Pass the person along so the review page can open the right work
@@ -103,8 +103,7 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
       className={`hologram-overlay${canNavigate ? " hologram-overlay--interactive" : ""}${highlighted ? " hologram-overlay--highlighted" : ""}`}
       style={{ "--face-color": faceColor } as React.CSSProperties}
     >
-      <button
-        type="button"
+      <span
         className={`hologram-box${canNavigate ? " hologram-box--interactive" : ""}`}
         style={{
           top: `${top}%`,
@@ -112,15 +111,9 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
           width: `${width}%`,
           height: `${height}%`,
         }}
-        onClick={handleNavigate}
-        onKeyDown={(event) => event.stopPropagation()}
-        disabled={!canNavigate}
+        onClick={canNavigate ? handleNavigate : undefined}
         title={canNavigate ? `Gesichtsgruppe ${face.cluster_id} ansehen` : undefined}
-        aria-label={
-          canNavigate
-            ? `${detailText} unter „Gesichter prüfen“ anzeigen`
-            : `${detailText} ist keiner Gesichtsgruppe zugeordnet`
-        }
+        aria-hidden="true"
       />
 
       <span className="hologram-leader" style={leaderPosition} aria-hidden="true" />
@@ -130,11 +123,11 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
         className={`hologram-label${canNavigate ? " hologram-label--interactive" : ""}`}
         style={labelPosition}
         onClick={handleNavigate}
-        onKeyDown={(event) => event.stopPropagation()}
         disabled={!canNavigate}
+        aria-label={canNavigate ? `${labelText} unter „Personen“ öffnen` : labelText}
         title={
           canNavigate
-            ? `${detailText} – unter „Gesichter prüfen“ öffnen`
+            ? `${detailText} – unter „Personen“ öffnen`
             : `${detailText} – noch keiner Gesichtsgruppe zugeordnet`
         }
       >

@@ -1,13 +1,3 @@
-@keyframes pulseGlow {
-  0%,
-  100% {
-    box-shadow: 0 0 6px color-mix(in srgb, var(--face-color, #00e5ff) 55%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 15px color-mix(in srgb, var(--face-color, #00e5ff) 80%, transparent);
-  }
-}
-
 .hologram-overlay {
   position: static;
 }
@@ -15,16 +5,11 @@
 .hologram-box {
   position: absolute;
   border: 2px solid var(--face-color, var(--neon-cyan));
-  animation: pulseGlow 2.4s infinite ease-in-out;
   pointer-events: auto;
   z-index: 50;
   background: transparent;
   padding: 0;
   border-radius: 0;
-}
-
-.hologram-box:disabled {
-  cursor: default;
 }
 
 .hologram-box--interactive {

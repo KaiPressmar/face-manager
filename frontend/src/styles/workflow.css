@@ -1,0 +1,270 @@
+.workflow-sidebar {
+  width: clamp(220px, 22vw, 280px);
+  flex-shrink: 0;
+}
+
+.workflow-sidebar__nav .workflow-sidebar__more {
+  display: none;
+}
+
+.workflow-sidebar__additional {
+  display: grid;
+  gap: 10px;
+}
+
+.people-page-heading {
+  margin-bottom: 14px;
+}
+
+.collection-start {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  align-items: start;
+  gap: clamp(18px, 4vw, 48px);
+  padding: clamp(20px, 4vw, 42px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: linear-gradient(140deg, var(--accent-soft), var(--surface-1) 45%);
+}
+
+.collection-start h2 {
+  margin: 0 0 10px;
+  font-size: clamp(23px, 3.3vw, 36px);
+  letter-spacing: -0.035em;
+}
+
+.collection-start p,
+.collection-start__steps span,
+.collection-next p {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.collection-start p {
+  margin: 0 0 18px;
+  max-width: 38ch;
+}
+
+.collection-start__steps {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.collection-start__steps li {
+  display: grid;
+  gap: 3px;
+  padding: 0 0 12px 15px;
+  border-inline-start: 2px solid var(--accent-border);
+  border-bottom: 1px solid var(--border);
+}
+
+.collection-start__steps li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.collection-start__steps strong {
+  color: var(--text-strong);
+  font-size: 14px;
+}
+
+.collection-start .neon-button,
+.collection-next button {
+  min-height: 44px;
+}
+
+.collection-start .collection-start__notice {
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text-strong);
+}
+
+.collection-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+}
+
+.collection-next p {
+  flex: 1 1 260px;
+  margin: 0;
+}
+
+.filter-bar__controls {
+  align-items: start;
+}
+
+.filter-bar__result {
+  align-self: center;
+}
+
+.filter-bar__view summary {
+  display: list-item;
+  padding-block: 8px;
+  white-space: nowrap;
+}
+
+.filter-bar__view[open] {
+  flex: 1 1 100%;
+}
+
+.filter-bar__view[open] > div {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.filter-bar__archive summary {
+  width: fit-content;
+  padding-block: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-bar__archive .filter-bar__categories {
+  border-top: 0;
+  padding-top: 6px;
+}
+
+.workflow-sidebar .sidebar__brand-mark {
+  z-index: auto;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .app-main { min-height: 0; }
+
+  .workflow-sidebar {
+    width: 100%;
+    flex: 0 0 auto;
+    gap: 6px;
+    padding: 8px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .workflow-sidebar--expanded {
+    z-index: 10;
+  }
+
+  .workflow-sidebar .sidebar__header { gap: 8px; }
+  .workflow-sidebar .sidebar__brand-mark { width: 28px; height: 28px; flex-basis: 28px; }
+  .workflow-sidebar .sidebar__title { font-size: 16px; }
+  .workflow-sidebar .sidebar__subtitle,
+  .workflow-sidebar .sidebar__section-label { display: none; }
+  .workflow-sidebar .sidebar__brand-meta { display: flex; }
+
+  .workflow-sidebar__nav {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 5px;
+    overflow: visible;
+    padding: 0;
+  }
+
+  .workflow-sidebar__nav .neon-card {
+    min-height: 44px;
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    margin: 0;
+    padding: 6px 3px;
+    text-align: center;
+  }
+
+  .workflow-sidebar__nav .neon-card strong {
+    font-size: 12px;
+  }
+
+  .workflow-sidebar__nav .neon-card small {
+    display: none;
+  }
+
+  .workflow-sidebar__nav .workflow-sidebar__more {
+    display: flex;
+  }
+
+  .workflow-sidebar__additional {
+    position: absolute;
+    display: none;
+    inset-inline-end: 0;
+    top: calc(100% + 5px);
+    width: min(235px, 100%);
+    padding: 7px;
+    gap: 5px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg);
+    background: var(--panel-solid);
+    box-shadow: var(--shadow-dialog);
+  }
+
+  .workflow-sidebar--expanded .workflow-sidebar__additional {
+    display: grid;
+  }
+
+  .workflow-sidebar__additional .neon-card {
+    justify-content: flex-start;
+    padding-inline: 12px;
+    text-align: left;
+  }
+}
+
+@media (max-width: 670px) {
+  .collection-start { grid-template-columns: 1fr; }
+
+  .topbar .topbar-import-button {
+    width: auto;
+    min-height: 44px;
+    padding-inline: 9px;
+  }
+
+  .topbar .topbar-import-button__label { display: inline; }
+
+  .filter-bar__tools {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-start;
+  }
+
+  .filter-bar__tool-group { width: auto; }
+  .filter-bar__tool-group-controls > * { flex: initial; }
+  .filter-bar__tool-group-controls .filter-bar__search { flex: 1 1 145px; }
+  .filter-bar__view[open] > div > * { flex: 1 1 190px; }
+  .filter-bar__chips button { min-height: 34px; }
+}
+
+@media (max-width: 360px) {
+  .workflow-sidebar__nav > .neon-card,
+  .workflow-sidebar__nav .workflow-sidebar__more {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .workflow-sidebar__nav .neon-card > span:first-child {
+    font-size: 12px;
+    line-height: 1;
+  }
+
+  .filter-bar__tools .filter-bar__control { padding-inline: 8px; }
+  .filter-bar__tools .folder-icon { display: none; }
+}

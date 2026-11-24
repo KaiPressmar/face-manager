@@ -68,6 +68,7 @@ from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.image_path_cleanup import ImagePathCleanup
+from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
 from .services.update_manager import (
     UpdateError,
@@ -82,9 +83,9 @@ from .services.storage import (
     DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
     DEFAULT_FILENAME_PERSON_JOINER,
     DEFAULT_UI_THEME,
+    StalePersonSuggestionError,
     _safe_float,
     assign_cluster_to_person,
-    accept_person_suggestions,
     accept_person_suggestion_assignments,
     build_filename_person_format_summary,
     build_folder_tree,
@@ -97,6 +98,9 @@ from .services.storage import (
     get_image_detail_rows,
     get_available_image_path,
     invalidate_image_query_cache,
+    invalidate_person_suggestion_epoch,
+    get_person_suggestion_epoch,
+    is_person_suggestion_epoch_current,
     get_cluster_faces,
     get_cluster_overview,
     get_cluster_summary,
@@ -136,6 +140,7 @@ from .services.storage import (
     count_reclusterable_faces,
     count_scoped_reclusterable_faces,
     recluster_all_active_faces,
+    refresh_pending_person_suggestions,
     set_cluster_distance_threshold,
     set_clustering_strictness,
     set_applied_clustering_version,
@@ -295,6 +300,7 @@ def _end_import_finalization() -> None:
         _imports_finalizing = max(0, _imports_finalizing - 1)
     # Finalization no longer blocks the writer; start any deferred clustering.
     auto_cluster_queue.notify_ready()
+    person_suggestion_worker.wake()
 
 
 def notify_clusters_changed(reason: str) -> None:
@@ -587,9 +593,25 @@ idle_recluster_scheduler = IdleReclusterScheduler(
 )
 
 
+def _person_suggestion_work_ready() -> bool:
+    return (
+        not _database_restore_in_progress
+        and not _imports_finalizing
+        and is_backend_idle_for_reclustering()
+    )
+
+
+person_suggestion_worker = PersonSuggestionWorker(
+    _person_suggestion_work_ready,
+    lambda: refresh_pending_person_suggestions(can_publish=_person_suggestion_work_ready),
+    lambda: event_hub.publish("person-suggestions", {}),
+)
+
+
 def mark_cluster_assignments_dirty(reason: str) -> None:
     """Request one debounced reclustering run after assignment mutations."""
     idle_recluster_scheduler.mark_dirty(reason)
+    person_suggestion_worker.wake()
 
 
 @asynccontextmanager
@@ -612,6 +634,7 @@ async def lifespan(_app: FastAPI):
             if not schedule_version_clustering_upgrade():
                 run_startup_repairs()
             face_thumbnail_warmup_queue.start()
+            person_suggestion_worker.start()
             geo_backfill.start()
             image_path_cleanup.resume()
             image_path_cleanup.schedule("startup", delay_seconds=60.0)
@@ -620,6 +643,7 @@ async def lifespan(_app: FastAPI):
             raise
         yield
     finally:
+        person_suggestion_worker.stop()
         idle_recluster_scheduler.stop()
         clustering_shutdown_error = None
         try:
@@ -1274,7 +1298,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
     current = Path(DB_PATH)
     upload = backup = rollback_copy = None
     backup_ready = replaced = library_ready = False
-    restore_gate = drain_started = geo_stopped = False
+    restore_gate = drain_started = geo_stopped = suggestion_worker_stopped = False
 
     try:
         current.parent.mkdir(parents=True, exist_ok=True)
@@ -1290,6 +1314,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             raise HTTPException(
                 status_code=409, detail="Hintergrundarbeiten werden noch beendet. Bitte versuche es erneut."
             )
+        suggestion_worker_stopped = person_suggestion_worker.stop()
         drain_started = True
         if not image_path_cleanup.stop():
             raise HTTPException(status_code=409, detail="Die Pfadprüfung läuft noch. Bitte versuche es erneut.")
@@ -1302,6 +1327,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             validate_database_file(backup)
             backup_ready = True
 
+        invalidate_person_suggestion_epoch()
         os.replace(upload, current)
         replaced = True
         remove_database_sidecars(current)
@@ -1333,6 +1359,8 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         raise HTTPException(status_code=500, detail=detail) from exc
     finally:
         if restore_gate:
+            if replaced:
+                invalidate_person_suggestion_epoch()
             _database_restore_in_progress = False
         disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
         for path in (upload, rollback_copy, disposable_backup):
@@ -1342,6 +1370,8 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 except OSError:
                     logger.warning("Could not remove database restore work file %s", path, exc_info=True)
         if not replaced or library_ready:
+            if suggestion_worker_stopped:
+                person_suggestion_worker.start()
             if drain_started:
                 image_path_cleanup.resume()
             if geo_stopped:
@@ -1353,6 +1383,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
                 auto_cluster_queue.notify_ready()
         if library_ready:
             notify_clusters_changed("database_import")
+            person_suggestion_worker.wake()
             try:
                 if not schedule_version_clustering_upgrade():
                     run_startup_repairs("database_import")
@@ -1594,7 +1625,8 @@ def api_clusters_overview():
 @app.get("/api/person-suggestions")
 def api_person_suggestions():
     """List conservative, reviewable matches for existing people."""
-    return list_person_suggestions()
+    with _cluster_operation_lock:
+        return list_person_suggestions()
 
 
 @app.post("/api/person-suggestions/accept")
@@ -1602,25 +1634,21 @@ def api_person_suggestions():
 def api_accept_person_suggestions(data: dict = Body(...)):
     """Confirm one or several proposals in a single user action."""
     assignments = data.get("assignments")
-    if isinstance(assignments, list):
-        try:
-            updated = accept_person_suggestion_assignments(assignments)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        reset_import_resources()
-        mark_cluster_assignments_dirty("accept_person_suggestions")
-        notify_clusters_changed("accept_person_suggestions")
-        return {"status": "ok", "accepted_count": updated}
-
-    person_id = data.get("person_id") or data.get("personId")
-    cluster_ids = data.get("cluster_ids") or data.get("clusterIds")
-    if person_id is None or not isinstance(cluster_ids, list):
+    if not isinstance(assignments, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("proposal_token"), str)
+        for item in assignments
+    ):
         raise HTTPException(
-            status_code=400,
-            detail="Wähle eine Person und mindestens eine Gesichtsgruppe aus.",
+            status_code=409,
+            detail="Lade die Vorschläge neu und wähle die Gesichter erneut aus.",
         )
     try:
-        updated = accept_person_suggestions(int(person_id), cluster_ids)
+        updated = accept_person_suggestion_assignments(assignments)
+    except StalePersonSuggestionError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Der Vorschlag hat sich geändert. Lade ihn neu und prüfe die Auswahl erneut.",
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reset_import_resources()
@@ -1631,12 +1659,15 @@ def api_accept_person_suggestions(data: dict = Body(...)):
 
 @app.post("/api/person-suggestions/{cluster_id}/dismiss")
 @safe_cluster_mutation
-def api_dismiss_person_suggestion(cluster_id: int):
+def api_dismiss_person_suggestion(cluster_id: int, data: dict | None = Body(default=None)):
     """Dismiss a proposal while leaving its cluster unassigned."""
+    token = (data or {}).get("proposal_token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=409, detail="Lade die Vorschläge neu und versuche es erneut.")
     try:
-        dismiss_person_suggestion(cluster_id)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        dismiss_person_suggestion(cluster_id, token)
+    except StalePersonSuggestionError as exc:
+        raise HTTPException(status_code=409, detail="Der Vorschlag hat sich geändert. Lade ihn neu.") from exc
     notify_clusters_changed("dismiss_person_suggestion")
     return {"status": "ok"}
 
@@ -1644,16 +1675,26 @@ def api_dismiss_person_suggestion(cluster_id: int):
 @app.get("/api/review-suggestions")
 def api_review_suggestions():
     """List conservative proposals learned from explicit review decisions."""
-    return list_review_suggestions()
+    with _cluster_operation_lock:
+        library_id = get_person_suggestion_epoch()
+        return [dict(item, library_id=library_id) for item in list_review_suggestions()]
 
 
 @app.post("/api/review-suggestions/accept")
 @safe_cluster_mutation
 def api_accept_review_suggestions(data: dict = Body(...)):
     cluster_ids = data.get("cluster_ids") or data.get("clusterIds") or []
+    expected_statuses = data.get("expected_review_statuses")
+    expected_face_ids = data.get("expected_face_ids")
+    if (
+        data.get("library_id") != get_person_suggestion_epoch()
+        or not isinstance(expected_statuses, dict)
+        or not isinstance(expected_face_ids, dict)
+    ):
+        raise HTTPException(status_code=409, detail="Lade die Vorschläge neu und prüfe die Gesichter erneut.")
     try:
-        updated = accept_review_suggestions(cluster_ids)
-    except ValueError as exc:
+        updated = accept_review_suggestions(cluster_ids, expected_statuses, expected_face_ids)
+    except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     reset_import_resources()
     mark_cluster_assignments_dirty("accept_review_suggestions")
@@ -1663,9 +1704,13 @@ def api_accept_review_suggestions(data: dict = Body(...)):
 
 @app.post("/api/review-suggestions/{cluster_id}/dismiss")
 @safe_cluster_mutation
-def api_dismiss_review_suggestion(cluster_id: int):
+def api_dismiss_review_suggestion(cluster_id: int, data: dict | None = Body(default=None)):
+    payload = data or {}
+    category = payload.get("review_status")
+    if payload.get("library_id") != get_person_suggestion_epoch() or category not in ("unknown_person", "not_face"):
+        raise HTTPException(status_code=409, detail="Lade die Aussortiervorschläge neu und versuche es erneut.")
     try:
-        dismiss_review_suggestion(cluster_id)
+        dismiss_review_suggestion(cluster_id, category)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     notify_clusters_changed("dismiss_review_suggestion")
@@ -2121,17 +2166,16 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
                 "faces": [],
             }
 
-        # A detail lookup can return a canonical image with no active faces.
-        # Keep the image and its locations while leaving faces empty.
+        # A photo without visible faces still belongs to the library.
         if r["face_id"] is None:
+            continue
+        raw_bbox = (r["bbox_x"], r["bbox_y"], r["bbox_w"], r["bbox_h"])
+        if None in raw_bbox:
             continue
 
         bbox_x, bbox_y, bbox_w, bbox_h = correct_bbox_for_orientation(
             geometry_by_id[image_id],
-            _safe_float(r["bbox_x"]),
-            _safe_float(r["bbox_y"]),
-            _safe_float(r["bbox_w"]),
-            _safe_float(r["bbox_h"]),
+            *(_safe_float(value) for value in raw_bbox),
         )
 
         review_status = (
@@ -2165,14 +2209,26 @@ def api_image_detail(request: Request, image_id: int):
     if not rows:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     display_platform = get_display_platform(request)
-    items = _group_image_rows(rows, display_platform)
+    return _group_image_rows(rows, display_platform)[0]
 
-    locations_by_image = list_image_locations([image_id])
-    for image in items:
-        locations = locations_by_image.get(image["id"], [])
-        image["locations"] = serialize_image_locations(locations, display_platform)
-        image["location_count"] = len(locations)
-    return items[0]
+
+@app.get("/api/faces/{face_id}/image")
+def api_face_image(request: Request, face_id: int, proposal_token: str | None = None):
+    """Resolve a face used in a proposal to its original photo context."""
+    with _cluster_operation_lock:
+        if proposal_token is not None and not is_person_suggestion_epoch_current(proposal_token):
+            raise HTTPException(status_code=409, detail="Die Bibliothek hat sich geändert. Lade den Vorschlag neu.")
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT image_id FROM face WHERE id = ?", (face_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Das Gesicht wurde nicht gefunden.")
+        image = api_image_detail(request, int(row["image_id"]))
+        if not any(face["id"] == face_id for face in image["faces"]):
+            raise HTTPException(status_code=404, detail="Das Gesicht wurde nicht gefunden.")
+        return image
 
 
 def _validate_map_bounds(west, east, south, north, from_date, to_date):
@@ -2234,6 +2290,7 @@ def get_images(
     limit: int = Query(default=40, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     face_statuses: List[str] = Query(default=[]),
+    all_photos: bool = False,
 ):
     """List images and oriented face boxes.
 
@@ -2258,6 +2315,7 @@ def get_images(
         sort_direction=sort_direction,
         limit=limit,
         offset=offset,
+        all_photos=all_photos,
     )
     items = _group_image_rows(rows, display_platform)
     return {

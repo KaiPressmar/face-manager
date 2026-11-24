@@ -1,0 +1,28 @@
+.image-gallery-card__open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.image-gallery-card__open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.image-gallery-card .hologram-box:not(.hologram-box--interactive),
+.image-gallery-card .hologram-label:disabled {
+  pointer-events: none;
+}
+
+.image-gallery-card .hologram-label {
+  backdrop-filter: none;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .image-gallery-card .image-file-actions { display: none; }
+}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { fetchRuntimeInfo, type ImportQueueState, type RuntimeInfo } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
@@ -25,7 +25,11 @@ const Topbar: React.FC = () => {
   // lives here and is reachable from every view instead of behind a page.
   const [showImport, setShowImport] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [openImportsRequest, setOpenImportsRequest] = useState(0);
+  const importNoticeTimer = useRef<number>();
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
+
+  useEffect(() => () => window.clearTimeout(importNoticeTimer.current), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -101,12 +105,12 @@ const Topbar: React.FC = () => {
             className="topbar-import-button"
             aria-label="Bilder hinzufügen"
             onClick={() => setShowImport(true)}
-            title="Einen Ordner mit Bildern zur Erkennung hinzufügen"
+            title="Bilder aus einem oder mehreren Ordnern hinzufügen"
           >
             <span className="topbar-import-button__icon" aria-hidden="true">＋</span>
             <span className="topbar-import-button__label">Bilder hinzufügen</span>
           </button>
-          <BackgroundTasksStatus />
+          <BackgroundTasksStatus openImportsRequest={openImportsRequest} />
           {importNotice && (
             <span className="topbar-import-notice" role="status">
               {importNotice}
@@ -140,8 +144,10 @@ const Topbar: React.FC = () => {
           onClose={(started) => {
             setShowImport(false);
             if (started) {
-              setImportNotice("Ordner hinzugefügt");
-              window.setTimeout(() => setImportNotice(null), 6000);
+              setOpenImportsRequest((current) => current + 1);
+              setImportNotice("Import eingereiht");
+              window.clearTimeout(importNoticeTimer.current);
+              importNoticeTimer.current = window.setTimeout(() => setImportNotice(null), 6000);
             }
           }}
         />

@@ -10,6 +10,7 @@ import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import "./FullscreenImageGallery.css";
 
 interface GalleryFace {
   id: number;
@@ -258,11 +259,11 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             <span aria-hidden="true">⧉</span>
             Bild kopieren
           </button>
-          <button type="button" onClick={() => void copyImagePath()} title="Vollständigen Dateipfad kopieren">
+          <button type="button" className={image.locations.length ? "gallery-action--in-locations" : undefined} onClick={() => void copyImagePath()} title="Vollständigen Dateipfad kopieren">
             <span aria-hidden="true">⌘</span>
             Pfad kopieren
           </button>
-          <button type="button" onClick={revealImage} title="Datei im Explorer oder Dateimanager anzeigen">
+          <button type="button" className={image.locations.length ? "gallery-action--in-locations" : undefined} onClick={revealImage} title="Datei im Explorer oder Dateimanager anzeigen">
             <span aria-hidden="true">↗</span>
             Speicherort öffnen
           </button>
