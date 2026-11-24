@@ -405,11 +405,13 @@ async function liveWorkflowFlow(browser, errors) {
       await route.fulfill({ response, json: data });
     });
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await page.locator('[data-image-id="987654321"]').waitFor();
+    const syntheticPhoto = page.locator('[data-image-id="987654321"]');
+    await syntheticPhoto.waitFor();
     assert.equal(await galleryTitle.textContent(), originalTitle, 'Live refresh changed the active gallery photo');
     await page.unroute('**/api/images?**');
     await publishLibraryChange('database_import');
     await gallery.waitFor({ state: 'hidden' });
+    await syntheticPhoto.waitFor({ state: 'detached' });
     await firstPhoto.click();
     await gallery.waitFor();
 
