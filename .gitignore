@@ -17,3 +17,6 @@ __pycache__
 *.sqlite-*
 *.db
 backend/db/thumbnails/*
+backend/db/preview-cache-policy.json
+backend/db/.preview-cache-policy.lock
+backend/db/.preview-cache-policy-*

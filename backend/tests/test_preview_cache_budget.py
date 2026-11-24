@@ -1,6 +1,9 @@
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
+from threading import Event, Thread
 import time
 import unittest
 from unittest.mock import patch
@@ -14,6 +17,23 @@ def write_preview(root, name, size, timestamp):
     path.write_bytes(b"x" * size)
     os.utime(path, (timestamp, timestamp))
     return path
+
+
+def update_in_another_process(data, limit):
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; from backend.services import preview_cache_budget as b; "
+            "b._schedule_locked = lambda *a, **k: None; "
+            "b.set_preview_cache_limit_mib(json.loads(sys.argv[1]))",
+            str(limit) if limit is not None else "null",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "FACE_MANAGER_DATA_DIR": str(data)},
+        check=True,
+        timeout=10,
+    )
 
 
 class PreviewCacheBudgetTest(unittest.TestCase):
@@ -104,9 +124,9 @@ class PreviewCacheBudgetTest(unittest.TestCase):
                     budget.note_preview_written(root / "images/0000/1.jpg")
                     budget.note_preview_written(root / "faces/0000/1.jpg")
                     timer.assert_called_once()
-                    self.assertEqual(timer.call_args.kwargs["args"], (root,))
+                    self.assertEqual(timer.call_args.kwargs["args"][0], root)
                 finally:
-                    budget._scheduled.discard(root)
+                    budget._scheduled.pop(root, None)
 
     @unittest.skipIf(os.name == "nt", "Directory descriptor test requires POSIX")
     def test_entry_swap_cannot_touch_a_linked_original(self):
@@ -153,11 +173,146 @@ class PreviewCacheBudgetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "thumbnails"
             with patch.object(budget, "prune_preview_cache", return_value=(0, budget.MAX_PREVIEW_BYTES + 1)):
-                with patch.object(budget, "schedule_preview_cache_cleanup") as schedule:
+                with patch.object(budget, "_schedule_locked") as schedule:
                     budget._sweep(root)
                     schedule.assert_called_once_with(root)
             budget._last_completed.pop(root, None)
             budget._under_pressure.pop(root, None)
+
+    def test_limit_persists_and_unlimited_skips_even_age_sweeps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            expired_at = time.time() - budget.MAX_PREVIEW_AGE_SECONDS - 1
+            photo = write_preview(root, "images/0000/1-" + "a" * 20 + ".jpg", 4, expired_at)
+            face = write_preview(root, "faces/0000/1.jpg", 4, expired_at)
+            with patch.object(budget, "get_data_root", return_value=data), patch.object(budget, "Timer") as timer:
+                self.assertEqual(budget.get_preview_cache_policy(), (768, False))
+                budget.set_preview_cache_limit_mib(None)
+                budget._policies.pop(root)
+                self.assertEqual(budget.get_preview_cache_policy(), (None, False))
+                budget.note_preview_written(photo)
+                with patch.object(budget, "_managed_previews") as scan:
+                    budget._sweep(root)
+                    self.assertEqual(budget.prune_preview_cache(root, max_bytes=0), (0, 0))
+                    scan.assert_not_called()
+                timer.assert_not_called()
+                self.assertTrue(photo.exists())
+                self.assertTrue(face.exists())
+
+                budget._last_completed[root] = time.monotonic()
+                budget.set_preview_cache_limit_mib(128)
+                timer.assert_called_once()
+                self.assertEqual(timer.call_args.args[0], 0.0)
+                budget._policies.pop(root)
+                self.assertEqual(budget.get_preview_cache_policy(), (128, False))
+                budget._sweep(*timer.call_args.kwargs["args"])
+                self.assertFalse(photo.exists())
+                self.assertFalse(face.exists())
+
+    def test_unreadable_policy_suspends_cleanup_until_repaired(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            policy = data / budget._POLICY_FILENAME
+            policy.write_text("{invalid", encoding="utf-8")
+            with patch.object(budget, "get_data_root", return_value=data):
+                self.assertEqual(budget.get_preview_cache_policy(), (None, True))
+                with patch.object(budget, "_managed_previews") as scan:
+                    budget.prune_preview_cache(root)
+                    scan.assert_not_called()
+                budget.set_preview_cache_limit_mib(None)
+                budget._policies.pop(root)
+                self.assertEqual(budget.get_preview_cache_policy(), (None, False))
+
+    def test_limit_change_supersedes_a_delayed_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            budget._last_completed[root] = time.monotonic()
+            with patch.object(budget, "get_data_root", return_value=data), patch.object(budget, "Timer") as timer:
+                budget.schedule_preview_cache_cleanup(root)
+                delayed = timer.call_args
+                self.assertGreater(delayed.args[0], 0)
+                budget.set_preview_cache_limit_mib(256)
+                timer.return_value.cancel.assert_called_once()
+                self.assertEqual(timer.call_args.args[0], 0)
+                with patch.object(budget, "_managed_previews") as scan:
+                    budget._sweep(*delayed.kwargs["args"])
+                    scan.assert_not_called()
+                budget.set_preview_cache_limit_mib(None)
+                self.assertNotIn(root, budget._scheduled)
+
+    def test_failed_persistence_retains_current_policy_and_pressure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            with patch.object(budget, "get_data_root", return_value=data), patch.object(budget, "Timer"):
+                budget.set_preview_cache_limit_mib(768)
+                budget._under_pressure[root] = True
+                try:
+                    with patch.object(budget.os, "replace", side_effect=OSError("read only")):
+                        with self.assertRaises(OSError):
+                            budget.set_preview_cache_limit_mib(None)
+                    self.assertEqual(budget.get_preview_cache_policy(), (768, False))
+                    self.assertFalse(budget.cache_warmup_has_room())
+                    budget._policies.pop(root)
+                    self.assertEqual(budget.get_preview_cache_policy(), (768, False))
+                    self.assertEqual(
+                        {path.name for path in data.iterdir()},
+                        {budget._POLICY_FILENAME, budget._POLICY_LOCK_FILENAME},
+                    )
+                finally:
+                    budget._under_pressure.pop(root, None)
+                    budget._scheduled.pop(root, None)
+
+    def test_policy_change_stops_running_sweep_before_its_next_delete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            old = time.time() - budget.MAX_PREVIEW_AGE_SECONDS - 1
+            previews = [write_preview(root, f"faces/0000/{i}.jpg", 4, old) for i in (1, 2)]
+            scanned, release = Event(), Event()
+            discover = budget._managed_previews
+
+            def managed_files(cache_root):
+                yield from discover(cache_root)
+                scanned.set()
+                if not release.wait(15):
+                    raise TimeoutError("test did not release the sweep")
+
+            with (
+                patch.object(budget, "get_data_root", return_value=data),
+                patch.object(budget, "_managed_previews", side_effect=managed_files),
+                patch.object(budget, "_unlink_unchanged", wraps=budget._unlink_unchanged) as delete,
+            ):
+                worker = Thread(target=budget._sweep, args=(root,))
+                worker.start()
+                try:
+                    self.assertTrue(scanned.wait(1))
+                    update_in_another_process(data, None)
+                finally:
+                    release.set()
+                    worker.join(2)
+                self.assertFalse(worker.is_alive())
+                delete.assert_not_called()
+                self.assertTrue(all(path.exists() for path in previews))
+                self.assertTrue(budget.cache_warmup_has_room())
+                self.assertNotIn(root, budget._scheduled)
+
+    def test_local_write_observes_finite_policy_saved_by_another_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            root = data / "thumbnails"
+            with patch.object(budget, "get_data_root", return_value=data), patch.object(budget, "Timer") as timer:
+                budget.set_preview_cache_limit_mib(None)
+                self.assertEqual(budget.get_preview_cache_policy(), (None, False))
+                update_in_another_process(data, 512)
+                budget.note_preview_written(root / "faces/0000/1.jpg")
+                timer.assert_called_once()
+                self.assertEqual(timer.call_args.args[0], 0)
+                self.assertEqual(budget.get_preview_cache_policy(), (512, False))
+                budget._scheduled.pop(root, None)
 
 
 if __name__ == "__main__":
