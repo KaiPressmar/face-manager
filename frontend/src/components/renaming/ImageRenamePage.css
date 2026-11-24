@@ -1,0 +1,102 @@
+.rename-file-names,
+.rename-row__meta.rename-file-names {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px 14px;
+}
+
+.rename-file-names > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rename-file-names small,
+.rename-file-names__arrow {
+  color: var(--text-muted);
+}
+
+.rename-file-names strong {
+  color: var(--text-strong);
+}
+
+.rename-file-names__arrow {
+  align-self: center;
+}
+
+.rename-review-example {
+  margin-top: 4px;
+}
+
+.rename-row__unavailable,
+.rename-outcome__details p {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.rename-list-card.rename-list-card--empty {
+  min-height: 0;
+}
+
+.rename-outcome__header,
+.rename-outcome__counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.rename-outcome__header {
+  justify-content: space-between;
+}
+
+.rename-outcome__header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.rename-outcome__counts,
+.rename-outcome__details ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rename-outcome__counts li {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.rename-outcome__details summary {
+  cursor: pointer;
+}
+
+.rename-outcome__details ul {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
+.rename-outcome__details li {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--surface-1);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .rename-file-names,
+  .rename-row__meta.rename-file-names {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rename-file-names__arrow {
+    display: none;
+  }
+}

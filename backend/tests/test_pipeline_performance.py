@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -11,6 +12,8 @@ import numpy as np
 from PIL import Image
 
 from backend.db import schema
+from backend.services import storage
+from backend.services.person_suggestion_worker import PersonSuggestionWorker
 from backend.services.pipeline import (
     ImagePreparer,
     ImportCancelled,
@@ -134,6 +137,49 @@ class HashedImageIteratorTest(unittest.TestCase):
 
 
 class ParallelImportIntegrationTest(unittest.TestCase):
+    def test_committed_import_triggers_person_suggestions_without_reclustering(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            embedding = np.zeros(512, dtype=np.float32)
+            embedding[0] = 1
+            for index in range(3):
+                Image.new("RGB", (16, 16), color=(index + 1, 24, 28)).save(root / f"new-{index}.png")
+
+            resources = Mock()
+            resources.get_model.return_value.detect_and_embed.return_value = [
+                {"embedding": embedding, "bbox": (0, 0, 8, 8)}
+            ]
+            resources.get_clusterer.return_value.add_and_assign.return_value = ([2], None)
+
+            with patch.object(schema, "DB_PATH", str(root / "library.sqlite")):
+                schema.init_db()
+                with closing(schema.get_conn()) as conn, conn:
+                    conn.execute("INSERT INTO person(id, name) VALUES (1, 'Anna')")
+                    conn.execute("INSERT INTO cluster(id, person_id) VALUES (1, 1), (2, NULL)")
+                    conn.execute(
+                        "INSERT INTO image(id, path, filename, directory) VALUES (1, ?, 'reference.png', ?)",
+                        (str(root / "reference.png"), str(root)),
+                    )
+                    conn.execute("INSERT INTO face(image_id, cluster_id, embedding) VALUES (1, 1, ?)",
+                                 (embedding.tobytes(),))
+                self.assertTrue(storage.refresh_pending_person_suggestions())
+                self.assertEqual(storage.list_person_suggestions(), [])
+
+                ImportProcessor(resources).process(str(root), lambda _: None, threading.Event())
+                self.assertEqual(storage.count_scoped_reclusterable_faces(), 0)
+                published = threading.Event()
+                worker = PersonSuggestionWorker(
+                    lambda: True, storage.refresh_pending_person_suggestions, published.set
+                )
+                worker.start()
+                try:
+                    self.assertTrue(published.wait(timeout=5))
+                    [suggestion] = storage.list_person_suggestions()
+                    self.assertEqual(suggestion["person_name"], "Anna")
+                    self.assertEqual(suggestion["support_count"], 3)
+                finally:
+                    worker.stop()
+
     def test_file_with_image_extension_but_invalid_content_is_skipped(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

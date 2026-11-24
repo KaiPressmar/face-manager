@@ -4,6 +4,16 @@ from backend.services.storage import build_person_filename_preview
 
 
 class FilenameRenamePreviewTest(unittest.TestCase):
+    def test_formatted_names_are_recognized_on_the_next_rename(self):
+        for separator, joiner in (("_", " und "), ("_", ""), ("", " und ")):
+            with self.subTest(separator=separator, joiner=joiner):
+                preview = build_person_filename_preview(
+                    "Sommerurlaub.jpg", ["Kai", "Regina"], block_separator=separator, joiner=joiner,
+                )
+                self.assertIsNone(build_person_filename_preview(
+                    preview["proposed_filename"], ["Kai", "Regina"], block_separator=separator, joiner=joiner,
+                ))
+
     def test_parenthesis_in_base_filename_is_preserved(self):
         preview = build_person_filename_preview(
             "Test (1) Kai.jpg",

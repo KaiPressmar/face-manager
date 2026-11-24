@@ -300,6 +300,17 @@ export interface PersonSuggestion {
   support_ratio: number;
   recommended: boolean;
   preview_face_ids: number[];
+  proposal_token: string;
+  face_ids: number[];
+  reference_face_ids: number[];
+}
+
+export interface PersonSuggestionDecision {
+  cluster_id: number;
+  person_id: number;
+  proposal_token: string;
+  face_ids: number[];
+  scope: "preview" | "detail";
 }
 
 export interface ReviewSuggestion {
@@ -312,6 +323,7 @@ export interface ReviewSuggestion {
   support_ratio: number;
   recommended: boolean;
   preview_face_ids: number[];
+  library_id?: string;
 }
 
 export type FaceReviewStatus = "active" | "unknown_person" | "not_face";
@@ -658,6 +670,15 @@ export async function fetchImageDetail(imageId: number, signal?: AbortSignal): P
   return await res.json();
 }
 
+export async function fetchFaceImage(faceId: number, proposalToken: string, signal: AbortSignal): Promise<FaceImage> {
+  const query = new URLSearchParams({ proposal_token: proposalToken });
+  const res = await apiFetch(`${API_BASE}/faces/${faceId}/image?${query}`, { signal });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Das Foto konnte nicht geöffnet werden."));
+  }
+  return await res.json();
+}
+
 export async function fetchImages({
   folders = [],
   persons = [],
@@ -675,6 +696,7 @@ export async function fetchImages({
   params.set("sort_direction", sortDirection);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
+  params.set("all_photos", "true");
   const query = params.toString();
   const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
   if (!res.ok) {
@@ -935,17 +957,18 @@ export async function fetchPersonSuggestions(): Promise<PersonSuggestion[]> {
     throw new Error("Die Personenvorschläge konnten nicht geladen werden.");
   }
   const payload = await res.json();
-  return Array.isArray(payload) ? payload : [];
+  return Array.isArray(payload)
+    ? payload.filter((item) => typeof item?.proposal_token === "string" && Array.isArray(item.face_ids))
+    : [];
 }
 
 export async function acceptPersonSuggestions(
-  personId: number,
-  clusterIds: number[],
+  assignments: PersonSuggestionDecision[],
 ): Promise<number> {
   const res = await apiFetch(`${API_BASE}/person-suggestions/accept`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ person_id: personId, cluster_ids: clusterIds }),
+    body: JSON.stringify({ assignments }),
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Vorschläge konnten nicht übernommen werden."));
@@ -955,25 +978,11 @@ export async function acceptPersonSuggestions(
   return Number(payload?.accepted_count || 0);
 }
 
-export async function acceptPersonSuggestionBatches(
-  assignments: { person_id: number; cluster_ids: number[] }[],
-): Promise<number> {
-  const res = await apiFetch(`${API_BASE}/person-suggestions/accept`, {
+export async function dismissPersonSuggestion(item: PersonSuggestion): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/person-suggestions/${item.cluster_id}/dismiss`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ assignments }),
-  });
-  if (!res.ok) {
-    throw new Error(await readApiError(res, "Die sicheren Vorschläge konnten nicht übernommen werden."));
-  }
-  invalidatePersonsCache();
-  const payload = await res.json();
-  return Number(payload?.accepted_count || 0);
-}
-
-export async function dismissPersonSuggestion(clusterId: number): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/person-suggestions/${clusterId}/dismiss`, {
-    method: "POST",
+    body: JSON.stringify({ proposal_token: item.proposal_token }),
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Der Vorschlag konnte nicht verworfen werden."));
@@ -989,11 +998,26 @@ export async function fetchReviewSuggestions(): Promise<ReviewSuggestion[]> {
   return Array.isArray(payload) ? payload : [];
 }
 
-export async function acceptReviewSuggestions(clusterIds: number[]): Promise<number> {
+export async function acceptReviewSuggestions(
+  suggestions: ReviewSuggestion[],
+): Promise<number> {
+  const libraryId = suggestions[0]?.library_id;
+  if (!libraryId || suggestions.some((item) => item.library_id !== libraryId)) {
+    throw new Error("Lade die Aussortiervorschläge neu und prüfe die Gesichter erneut.");
+  }
   const res = await apiFetch(`${API_BASE}/review-suggestions/accept`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cluster_ids: clusterIds }),
+    body: JSON.stringify({
+      library_id: libraryId,
+      cluster_ids: suggestions.map((item) => item.cluster_id),
+      expected_review_statuses: Object.fromEntries(
+        suggestions.map((item) => [item.cluster_id, item.review_status]),
+      ),
+      expected_face_ids: Object.fromEntries(
+        suggestions.map((item) => [item.cluster_id, item.preview_face_ids]),
+      ),
+    }),
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Vorschläge konnten nicht übernommen werden."));
@@ -1002,9 +1026,11 @@ export async function acceptReviewSuggestions(clusterIds: number[]): Promise<num
   return Number(payload?.accepted_count || 0);
 }
 
-export async function dismissReviewSuggestion(clusterId: number): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/review-suggestions/${clusterId}/dismiss`, {
+export async function dismissReviewSuggestion(item: ReviewSuggestion): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/review-suggestions/${item.cluster_id}/dismiss`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ library_id: item.library_id, review_status: item.review_status }),
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Der Vorschlag konnte nicht verworfen werden."));
@@ -1081,21 +1107,21 @@ export async function listPersons() {
   if (personsRequest) {
     return personsRequest;
   }
-  const res = await apiFetch(`${API_BASE}/persons`);
-  if (!res.ok) return [];
-  personsRequest = res.json().then((data) => {
+  const request = apiFetch(`${API_BASE}/persons`).then(async (res) => {
+    if (!res.ok) {
+      throw new Error(await readApiError(res, "Die Personenliste konnte nicht geladen werden."));
+    }
+    const data = await res.json();
     const normalized = Array.isArray(data) ? data : [];
-    personsCache = {
-      data: normalized,
-      expiresAt: Date.now() + PERSONS_CACHE_TTL_MS,
-    };
-    personsRequest = null;
+    if (personsRequest === request) {
+      personsCache = { data: normalized, expiresAt: Date.now() + PERSONS_CACHE_TTL_MS };
+    }
     return normalized;
-  }).catch((error) => {
-    personsRequest = null;
-    throw error;
+  }).finally(() => {
+    if (personsRequest === request) personsRequest = null;
   });
-  return personsRequest;
+  personsRequest = request;
+  return request;
 }
 
 export async function processFolder(folderPath: string): Promise<ImportJob> {

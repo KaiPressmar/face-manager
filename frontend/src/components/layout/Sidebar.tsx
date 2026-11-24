@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { AppPage } from "../../App";
 
 interface NavItem {
@@ -8,42 +8,15 @@ interface NavItem {
   hint: string;
 }
 
-/**
- * The library is what the app is for and what stays relevant once everything
- * is imported. Setting up and correcting is a phase, so it stays easy to reach
- * without competing for the top spot.
- */
-const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
-  {
-    label: "Bibliothek",
-    items: [
-      { page: "people", icon: "▦", label: "Bilder", hint: "Fotos durchsuchen und filtern" },
-      { page: "map", icon: "◎", label: "Weltkarte", hint: "Fotos nach Ort und Zeitraum entdecken" },
-      {
-        page: "renaming",
-        icon: "Aa",
-        label: "Dateinamen",
-        hint: "Erkannte Personen ergänzen",
-      },
-    ],
-  },
-  {
-    label: "Verwalten",
-    items: [
-      {
-        page: "review",
-        icon: "◎",
-        label: "Gesichter prüfen",
-        hint: "Vorschläge prüfen und korrigieren",
-      },
-      {
-        page: "settings",
-        icon: "⚙",
-        label: "Einstellungen",
-        hint: "Face Manager verwalten",
-      },
-    ],
-  },
+const PRIMARY_ITEMS: NavItem[] = [
+  { page: "people", icon: "▦", label: "Bilder", hint: "Fotos durchsuchen" },
+  { page: "review", icon: "◉", label: "Personen", hint: "Gesichter prüfen und Namen zuordnen" },
+  { page: "map", icon: "◎", label: "Karte", hint: "Aufnahmeorte entdecken" },
+];
+
+const SECONDARY_ITEMS: NavItem[] = [
+  { page: "renaming", icon: "Aa", label: "Dateinamen", hint: "Personennamen ergänzen" },
+  { page: "settings", icon: "⚙", label: "Einstellungen", hint: "Face Manager verwalten" },
 ];
 
 const Sidebar: React.FC<{
@@ -52,8 +25,47 @@ const Sidebar: React.FC<{
   onShowReleaseNotes?: () => void;
   onShowUpdate?: () => void;
 }> = ({ page, onChangePage, onShowReleaseNotes, onShowUpdate }) => {
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLButtonElement>(null);
+  const secondaryRef = useRef<HTMLDivElement>(null);
+  const secondaryPage = SECONDARY_ITEMS.find((item) => item.page === page);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !secondaryRef.current?.contains(event.target)) {
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [moreOpen]);
+
+  const openPage = (item: NavItem) => {
+    if (moreOpen && SECONDARY_ITEMS.includes(item)) moreRef.current?.focus();
+    setMoreOpen(false);
+    onChangePage(item.page);
+  };
+
+  const renderItem = (item: NavItem) => (
+    <button
+      key={item.page}
+      type="button"
+      className={`neon-card${page === item.page ? " neon-card--active" : ""}`}
+      aria-current={page === item.page ? "page" : undefined}
+      aria-label={item.label}
+      onClick={() => openPage(item)}
+    >
+      <span aria-hidden="true">{item.icon}</span>
+      <span>
+        <strong>{item.label}</strong>
+        <small>{item.hint}</small>
+      </span>
+    </button>
+  );
+
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar workflow-sidebar${moreOpen ? " workflow-sidebar--expanded" : ""}`}>
       <div className="sidebar__header">
         <img
           className="sidebar__brand-mark"
@@ -82,7 +94,7 @@ const Sidebar: React.FC<{
             )}
           </div>
           <div className="sidebar__brand-meta">
-            <span className="sidebar__subtitle">Fotos nach Personen finden</span>
+            <span className="sidebar__subtitle">Fotos sammeln und wiederfinden</span>
             {onShowUpdate && (
               <button
                 type="button"
@@ -98,29 +110,35 @@ const Sidebar: React.FC<{
         </div>
       </div>
 
-      <nav className="sidebar__nav" aria-label="Hauptnavigation">
-        {NAV_GROUPS.map((group) => (
-          <React.Fragment key={group.label}>
-            <div className="sidebar__section-label">{group.label}</div>
-            {group.items.map((item) => (
-              <button
-                key={item.page}
-                type="button"
-                className={
-                  page === item.page ? "neon-card neon-card--active" : "neon-card"
-                }
-                aria-current={page === item.page ? "page" : undefined}
-                onClick={() => onChangePage(item.page)}
-              >
-                <span aria-hidden="true">{item.icon}</span>
-                <span>
-                  <strong>{item.label}</strong>
-                  <small>{item.hint}</small>
-                </span>
-              </button>
-            ))}
-          </React.Fragment>
-        ))}
+      <nav className="sidebar__nav workflow-sidebar__nav" aria-label="Hauptnavigation">
+        <div className="sidebar__section-label">Bibliothek</div>
+        {PRIMARY_ITEMS.map(renderItem)}
+        <div
+          className="workflow-sidebar__secondary"
+          ref={secondaryRef}
+          onKeyDown={(event) => {
+            if (!moreOpen || event.key !== "Escape") return;
+            event.preventDefault();
+            setMoreOpen(false);
+            moreRef.current?.focus();
+          }}
+        >
+          <button
+            ref={moreRef}
+            type="button"
+            className={`neon-card workflow-sidebar__more${secondaryPage ? " neon-card--active" : ""}`}
+            aria-expanded={moreOpen}
+            aria-controls="additional-navigation"
+            aria-label={secondaryPage ? `Mehr, aktuelle Ansicht: ${secondaryPage.label}` : "Mehr"}
+            onClick={() => setMoreOpen((open) => !open)}
+          >
+            <span aria-hidden="true">···</span><strong>Mehr</strong>
+          </button>
+          <div id="additional-navigation" className="workflow-sidebar__additional">
+            <div className="sidebar__section-label">Werkzeuge</div>
+            {SECONDARY_ITEMS.map(renderItem)}
+          </div>
+        </div>
       </nav>
     </aside>
   );

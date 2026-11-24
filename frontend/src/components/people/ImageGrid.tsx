@@ -11,6 +11,7 @@ import {
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import "./ImageGrid.css";
 
 /** Which face markers to draw on a picture. */
 export type FaceOverlayMode = "all" | "assigned" | "none";
@@ -181,7 +182,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
     const confirmed = window.confirm(
-      `„${filename}“ aus Face Manager entfernen?\n\nDie Originaldatei bleibt auf deinem Gerät erhalten.`,
+      `„${filename}“ aus Face Manager entfernen?\n\nDadurch werden auch seine Personenzuordnungen entfernt. Deine Originaldateien findest du weiterhin an ihren Speicherorten.`,
     );
     if (!confirmed) return false;
 
@@ -307,16 +308,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                 key={img.id}
                 data-image-id={img.id}
                 className="image-gallery-card"
-                role="button"
-                tabIndex={0}
-                aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-                onClick={() => setGalleryImageId(img.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    setGalleryImageId(img.id);
-                  }
-                }}
                 style={{
                   position: "relative",
                   width: "100%",
@@ -354,6 +345,13 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   />
                 )}
 
+                <button
+                  type="button"
+                  className="image-gallery-card__open"
+                  aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
+                  onClick={() => setGalleryImageId(img.id)}
+                />
+
                 <div className="image-file-actions">
                   <button
                     type="button"
@@ -374,21 +372,6 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                     Ordner
                   </button>
                 </div>
-
-                <button
-                  type="button"
-                  className="image-delete-button"
-                  title="Bild aus Face Manager entfernen"
-                  aria-label={`${img.filename || "Bild"} aus Face Manager entfernen`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void removeImage(img);
-                  }}
-                  onKeyDown={(event) => event.stopPropagation()}
-                >
-                  <span aria-hidden="true">×</span>
-                  Entfernen
-                </button>
 
                 {img.location_count > 1 && (
                   <span

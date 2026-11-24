@@ -237,6 +237,7 @@ class ImportApiTest(unittest.TestCase):
             sort_direction="desc",
             limit=40,
             offset=0,
+            all_photos=False,
         )
         list_image_locations.assert_called_once_with([1])
         list_available_image_persons.assert_called_once_with(["/photos"])

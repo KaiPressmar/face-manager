@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,42 @@ from backend.services import storage
 
 
 class ImageDetailWithoutFacesTest(unittest.TestCase):
+    def test_photo_library_keeps_pictures_without_faces_and_respects_face_filters(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            schema, "DB_PATH", str(Path(temp_dir) / "images.sqlite")
+        ):
+            storage.app_cache.clear()
+            self.addCleanup(storage.app_cache.clear)
+            schema.init_db()
+            with closing(schema.get_conn()) as conn:
+                photos = [(1, "landscape.jpg"), (2, "portrait.jpg"), (3, "archived.jpg"), (4, "older.jpg")]
+                for image_id, filename in photos:
+                    path = str(Path(temp_dir) / filename)
+                    values = (image_id, path, temp_dir, filename)
+                    conn.execute("INSERT INTO image(id,path,directory,filename) VALUES (?,?,?,?)", values)
+                    conn.execute("INSERT INTO image_location(image_id,path,directory,filename) VALUES (?,?,?,?)", values)
+                conn.execute("INSERT INTO face(image_id,bbox_x,bbox_y,bbox_w,bbox_h) VALUES (2,1,2,3,4)")
+                conn.execute("INSERT INTO face(image_id,bbox_x,bbox_y,bbox_w,bbox_h,review_status) VALUES (3,1,2,3,4,'not_face')")
+                conn.execute("INSERT INTO face(image_id) VALUES (4)")
+                conn.commit()
+
+            request = SimpleNamespace(headers={})
+            library = app.get_images(request, folders=[], persons=[], limit=40, offset=0, all_photos=True)
+            self.assertEqual(library["total"], 4)
+            self.assertEqual({item["id"]: len(item["faces"]) for item in library["items"]}, {1: 0, 2: 1, 3: 0, 4: 0})
+            archived = app.get_images(
+                request, folders=[], persons=[], limit=40, offset=0, all_photos=True,
+                face_statuses=["not_face"],
+            )
+            self.assertEqual([item["id"] for item in archived["items"]], [3])
+            self.assertEqual(archived["items"][0]["faces"][0]["review_status"], "not_face")
+            portrait = app.api_face_image(request, 1)
+            self.assertEqual(portrait["id"], 2)
+            self.assertEqual(portrait["faces"][0]["id"], 1)
+            with self.assertRaises(HTTPException) as missing_face:
+                app.api_face_image(request, 999)
+            self.assertEqual(missing_face.exception.status_code, 404)
+
     def test_image_with_no_faces_keeps_locations_and_empty_faces(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "images.sqlite"

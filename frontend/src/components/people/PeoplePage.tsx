@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { FaceImage, fetchImages, ImagePage } from "../../utils/api";
+import { FaceImage, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
 import ImageGrid, {
@@ -56,14 +56,16 @@ function persistImageGridSize(size: ImageGridSize) {
 interface PeoplePageProps {
   active: boolean;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  onOpenPeople: () => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
   const [showFolderFilter, setShowFolderFilter] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [importPending, setImportPending] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
   // Archived faces are hidden unless explicitly filtered for.
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
@@ -349,7 +351,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     };
 
     const runRefresh = async (preserveViewport = true) => {
-      if (document.visibilityState !== "visible" || isLoadingMore || isFetchingFirstPageRef.current) return;
+      if (document.visibilityState !== "visible") return;
+      if (isLoadingMore || isFetchingFirstPageRef.current) {
+        scheduleRefresh(preserveViewport, USER_IDLE_DELAY_MS);
+        return;
+      }
       const idleIn = userBusyUntil - performance.now();
       if (idleIn > 0) {
         scheduleRefresh(preserveViewport, idleIn + 50);
@@ -514,6 +520,31 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
     !isLoading &&
     !loadError &&
     knownLibraryTotal === 0;
+
+  useEffect(() => {
+    if (!active || !libraryIsEmpty) return;
+    let live = true;
+    let receivedEvent = false;
+    const applyQueue = (queue: ImportQueueState) => {
+      setImportPending(queue.jobs.some((job) =>
+        ["queued", "running", "paused", "cancelling"].includes(job.status),
+      ));
+    };
+    const unsubscribe = subscribeToTopic<ImportQueueState>("imports", (queue) => {
+      receivedEvent = true;
+      applyQueue(queue);
+    });
+    void fetchImportQueue().then((queue) => {
+      if (live && !receivedEvent) applyQueue(queue);
+    }).catch(() => {
+      // The activity panel exposes connection and import errors.
+    });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, [active, libraryIsEmpty]);
+
   const imageGridSizeIndex = Math.max(
     0,
     IMAGE_GRID_SIZE_OPTIONS.findIndex((option) => option.value === imageGridSize),
@@ -521,32 +552,46 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
 
   const pageHeader = (
     <header ref={pageHeaderRef} className="people-page-heading">
-      <div>
-        <span>Bibliothek</span>
-        <h1>Bilder</h1>
-        <p>Durchsuche deine Fotos und filtere sie nach Personen, Ordnern oder Aufnahmedatum.</p>
-      </div>
+      <h1>Bilder</h1>
     </header>
   );
+
+  const importDialog = showImport && (
+    <FolderPickerModal onClose={(started) => {
+      if (started) setImportPending(true);
+      setShowImport(false);
+    }} />
+  );
+  const resetFilters = () => {
+    setSelectedPersons([]);
+    setSelectedFolders([]);
+    setFaceStatuses([]);
+  };
 
   if (libraryIsEmpty) {
     return (
       <>
         {pageHeader}
-        <section className="home-empty-state">
-          <div className="home-empty-state__visual" aria-hidden="true">◎</div>
-          <h2>Noch keine Bilder vorhanden</h2>
-          <p>
-            Füge zuerst einen Bilderordner hinzu. Gesichter werden automatisch erkannt,
-            danach kannst du deine Bilder hier nach Personen filtern.
-          </p>
-          <button className="neon-button" onClick={() => setShowImport(true)} type="button">
-            Ersten Bilderordner hinzufügen
-          </button>
-          {showImport && (
-            <FolderPickerModal onClose={() => setShowImport(false)} />
-          )}
+        <section className="collection-start" aria-labelledby="collection-start-title">
+          <div className="collection-start__intro">
+            <h2 id="collection-start-title">Deine Fotos an einem Ort</h2>
+            <p>Wähle Bilderordner von deinem Gerät oder einem verbundenen Laufwerk. Face Manager erfasst auch ihre Unterordner.</p>
+            {importPending && (
+              <p className="collection-start__notice" role="status">
+                Deine Quellen stehen unter „Aktivitäten“. Sobald Fotos eingelesen sind, erscheinen sie hier.
+              </p>
+            )}
+            <button className="neon-button" onClick={() => setShowImport(true)} type="button">
+              {importPending ? "Weitere Ordner hinzufügen" : "Bilderordner auswählen"}
+            </button>
+          </div>
+          <ul className="collection-start__steps">
+            <li><strong>Doppelte Fotos zusammenfassen</strong><span>Identische Dateien erscheinen einmal. Alle Speicherorte bleiben erhalten.</span></li>
+            <li><strong>Ähnliche Gesichter gruppieren</strong><span>Face Manager sucht passende Gruppen und schlägt bekannte Personen vor.</span></li>
+            <li><strong>Personen Namen geben</strong><span>Ein Name pro Gruppe genügt. Vorschläge prüfst du unter „Personen“.</span></li>
+          </ul>
         </section>
+        {importDialog}
       </>
     );
   }
@@ -554,6 +599,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
   return (
     <>
       {pageHeader}
+      {!isLoading && !loadError && !hasActiveFilters &&
+        availablePersons.length === 1 && availablePersons[0] === "Unbekannt" && (
+          <div className="collection-next">
+            <p>Deine ersten Gesichter sind bereit. Gib einer Gruppe einen Namen, um ihre Fotos zusammen zu finden.</p>
+            <button className="secondary-button" type="button" onClick={onOpenPeople}>Personen zuordnen</button>
+          </div>
+        )}
       <LibraryFilterBar
         persons={availablePersons}
         selectedPersons={selectedPersons}
@@ -566,11 +618,12 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         }}
         selectedFolderCount={selectedFolders.length}
         onOpenFolderFilter={() => setShowFolderFilter(true)}
-        resultCount={totalImages}
+        resultCount={isLoading || (loadError && !images.length) ? null : totalImages}
         totalCount={libraryTotal}
         resultNoun="Bilder"
         faceStatuses={faceStatuses}
         onFaceStatusesChange={setFaceStatuses}
+        onResetFilters={hasActiveFilters ? resetFilters : undefined}
       >
         <label
           className="filter-bar__grid-size"
@@ -688,11 +741,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
         hasActiveFilters={hasActiveFilters}
-        onResetFilters={() => {
-          setSelectedPersons([]);
-          setSelectedFolders([]);
-          setFaceStatuses([]);
-        }}
+        onResetFilters={resetFilters}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
           setTotalImages((current) => Math.max(0, current - 1));
@@ -713,6 +762,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster }) 
           }}
         />
       )}
+      {importDialog}
     </>
   );
 };

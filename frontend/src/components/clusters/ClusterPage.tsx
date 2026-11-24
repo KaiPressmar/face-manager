@@ -3,7 +3,6 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { ClusterNavigationTarget } from "../../App";
 import {
   acceptPersonSuggestions,
-  acceptPersonSuggestionBatches,
   acceptReviewSuggestions,
   batchUpdateFaces,
   ClusterDetails,
@@ -22,10 +21,12 @@ import {
   fetchClusters,
   fetchFaceReviewGroupFaces,
   fetchFaceReviewGroups,
+  fetchFaceImage,
   fetchPersonSuggestions,
   fetchReviewSuggestions,
   listPersons,
   PersonSuggestion,
+  PersonSuggestionDecision,
   ReviewSuggestion,
   renameCluster,
   renamePerson,
@@ -35,14 +36,10 @@ import ClusterFacesGrid from "./ClusterFacesGrid";
 import FaceGroupGallery from "./FaceGroupGallery";
 import ClusterList from "./ClusterList";
 import ReviewInbox from "./ReviewInbox";
+import PersonAssignment, { type PersonOption } from "./PersonAssignment";
 import { useModalFocus } from "../../hooks/useModalFocus";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
-
-interface PersonOption {
-  id: number;
-  name: string;
-}
 
 interface ClusterPageProps {
   navigationTarget: ClusterNavigationTarget | null;
@@ -75,6 +72,7 @@ interface FaceGalleryContext {
   initialImage: FaceImage;
   contextLabel: string;
   groupLabel: string;
+  opener?: HTMLButtonElement;
 }
 
 /** How many stacked groups render before the "show more" step. */
@@ -152,8 +150,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const [reviewGroupDetails, setReviewGroupDetails] =
     useState<FaceReviewGroupDetails | null>(null);
   const [persons, setPersons] = useState<PersonOption[]>([]);
+  const [peopleStatus, setPeopleStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [personSuggestions, setPersonSuggestions] = useState<PersonSuggestion[]>([]);
   const [reviewSuggestions, setReviewSuggestions] = useState<ReviewSuggestion[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(true);
+  const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
+  const [workflowFeedback, setWorkflowFeedback] = useState<{ kind: "error" | "success"; message: string } | null>(null);
   // Opening the page through a jump must not flash the suggestions inbox first:
   // derive the work area from the destination right away.
   const [workspaceView, setWorkspaceView] = useState<ReviewWorkspaceView>(() => {
@@ -165,14 +167,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     }
     return "suggestions";
   });
-  const [assignQuery, setAssignQuery] = useState("");
-  const [assignMenuOpen, setAssignMenuOpen] = useState(false);
+  const [assignmentRevision, setAssignmentRevision] = useState(0);
   const [activeArchiveSectionKey, setActiveArchiveSectionKey] = useState<string | null>(null);
   const [visibleSectionCount, setVisibleSectionCount] = useState(SECTION_BATCH_SIZE);
   // Groups to continue with when the current one disappears after a mutation.
   const workflowFallbackRef = useRef<number[]>([]);
   // Full picture behind a face crop, so a crop can be judged in its context.
   const [faceGallery, setFaceGallery] = useState<FaceGalleryContext | null>(null);
+  const suggestionPhotoRequest = useRef<AbortController | null>(null);
   const [clusterLabelInput, setClusterLabelInput] = useState("");
   const [personNameInput, setPersonNameInput] = useState("");
   const [personDeleteTarget, setPersonDeleteTarget] = useState<
@@ -190,6 +192,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const [clusterDetailsMap, setClusterDetailsMap] = useState<Record<number, ClusterDetails>>({});
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
   const listRequestIdRef = useRef(0);
+  const suggestionRequestIdRef = useRef(0);
   const detailsRequestIdRef = useRef(0);
   const appliedNavigationTokenRef = useRef<number | null>(null);
   const pendingNavigationClusterIdRef = useRef<number | null>(null);
@@ -434,7 +437,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   );
 
   // Compact shape for the sidebar, which lists the archive sub-groups the same
-  // way "Neue Gesichter" and "Personen korrigieren" list their clusters.
+  // way the other work areas list their clusters.
   const archiveSectionSummaries = useMemo(
     () =>
       reviewGroupSections.map((section) => ({
@@ -548,28 +551,47 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     [mergeClusterDetails, normalizeClusterDetails, updateLoadingClusterIds],
   );
 
-  // The person list is only needed inside the assign/manage modals, so it is
-  // fetched on first modal open instead of on page enter to keep the initial
-  // load lean.
   const personsLoadedRef = useRef(false);
-  const ensurePersonsLoaded = React.useCallback(() => {
-    if (personsLoadedRef.current) {
-      return;
-    }
-    personsLoadedRef.current = true;
-    listPersons()
-      .then((data) => setPersons(data))
+  const personsLoadingRef = useRef(false);
+  const ensurePersonsLoaded = React.useCallback((refresh = false) => {
+    if (personsLoadingRef.current || (personsLoadedRef.current && !refresh)) return;
+    personsLoadingRef.current = true;
+    setPeopleStatus("loading");
+    void listPersons()
+      .then((data) => {
+        personsLoadedRef.current = true;
+        setPersons(data);
+        setPeopleStatus("ready");
+      })
       .catch((error) => {
         personsLoadedRef.current = false;
+        setPeopleStatus("error");
         console.error("Fehler beim Laden der Personenliste:", error);
-      });
+      })
+      .finally(() => { personsLoadingRef.current = false; });
   }, []);
 
   useEffect(() => {
-    if (detailModal) {
-      ensurePersonsLoaded();
+    if (active && (workspaceView !== "suggestions" || detailModal)) ensurePersonsLoaded();
+  }, [active, workspaceView, detailModal, ensurePersonsLoaded]);
+
+  const loadSuggestions = React.useCallback(async () => {
+    const requestId = ++suggestionRequestIdRef.current;
+    setSuggestionsLoading(true);
+    setSuggestionsError(null);
+    try {
+      const [people, reviews] = await Promise.all([fetchPersonSuggestions(), fetchReviewSuggestions()]);
+      if (suggestionRequestIdRef.current !== requestId) return;
+      setPersonSuggestions(people);
+      setReviewSuggestions(reviews);
+    } catch {
+      if (suggestionRequestIdRef.current === requestId) {
+        setSuggestionsError("Die Vorschläge konnten nicht geladen werden.");
+      }
+    } finally {
+      if (suggestionRequestIdRef.current === requestId) setSuggestionsLoading(false);
     }
-  }, [detailModal, ensurePersonsLoaded]);
+  }, []);
 
   const cancelPendingNavigation = React.useCallback(() => {
     pendingNavigationClusterIdRef.current = null;
@@ -596,11 +618,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     }
 
     try {
-      const [clusterData, reviewGroupData, suggestionData, reviewSuggestionData] = await Promise.all([
+      const [clusterData, reviewGroupData] = await Promise.all([
         fetchClusters(),
         fetchFaceReviewGroups(),
-        fetchPersonSuggestions(),
-        fetchReviewSuggestions(),
+        loadSuggestions(),
       ]);
       if (listRequestIdRef.current !== requestId) {
         return;
@@ -614,8 +635,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       resolvePendingNavigation(safeClusters);
       setClusters(safeClusters);
       setReviewGroups(mergedGroups);
-      setPersonSuggestions(Array.isArray(suggestionData) ? suggestionData : []);
-      setReviewSuggestions(Array.isArray(reviewSuggestionData) ? reviewSuggestionData : []);
       setSelectedTarget((current) =>
         resolveSelectedTarget(
           current,
@@ -631,7 +650,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         setIsListLoading(false);
       }
     }
-  }, [resolvePendingNavigation]);
+  }, [resolvePendingNavigation, loadSuggestions]);
 
   const loadTargetDetails = React.useCallback((target: SelectionTarget | null) => {
     if (!target) {
@@ -789,20 +808,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           setIsListLoading(false);
         }
       });
-    void fetchPersonSuggestions()
-      .then((items) => {
-        if (!cancelled) setPersonSuggestions(items);
-      })
-      .catch((error) => console.error("Fehler beim Laden der Personenvorschläge:", error));
-    void fetchReviewSuggestions()
-      .then((items) => {
-        if (!cancelled) setReviewSuggestions(items);
-      })
-      .catch((error) => console.error("Fehler beim Laden der Aussortier-Vorschläge:", error));
+    void loadSuggestions();
     return () => {
       cancelled = true;
     };
-  }, [loadSidebarData, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
+  }, [loadSidebarData, loadSuggestions, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
 
   useEffect(() => {
     // Pause background polling while the cluster page is not the visible one so
@@ -891,6 +901,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
       (update) => {
+        if (update?.reason === "database_import") {
+          suggestionPhotoRequest.current?.abort();
+          setFaceGallery(null);
+        }
         needsCatchUpRefreshRef.current = true;
         const isBackgroundCheckpoint = update?.reason === "background_progress";
         maybeRefreshVisibleData(
@@ -929,6 +943,17 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     restoreDetailAnchor,
     selectedTarget,
   ]);
+
+  useEffect(() => {
+    if (!active) return;
+    return subscribeToTopic("person-suggestions", () => {
+      if (document.visibilityState === "visible") void loadSuggestions();
+    });
+  }, [active, loadSuggestions]);
+
+  useEffect(() => {
+    return () => suggestionPhotoRequest.current?.abort();
+  }, [active, workspaceView]);
 
   // Reconcile cached faces with a refreshed cluster list. A background rebuild
   // touches only some groups, so anything whose face count still matches is
@@ -1229,79 +1254,69 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     loadTargetDetails(selectedTarget);
   }, [loadSidebarData, loadTargetDetails, selectedTarget]);
 
-  const handleAcceptSuggestions = async (personId: number, clusterIds: number[]) => {
-    if (isMutating || clusterIds.length === 0) return;
+  const runSuggestionAction = async (save: () => Promise<string>) => {
+    if (isMutating || suggestionsLoading || suggestionsError) return false;
     setIsMutating(true);
+    setWorkflowFeedback(null);
     try {
-      await acceptPersonSuggestions(personId, clusterIds);
-      setClusterDetailsMap({});
-      clusterDetailsMapRef.current = {};
+      const message = await save();
+      setWorkflowFeedback({ kind: "success", message });
       await loadSidebarData(true);
+      return true;
     } catch (error) {
-      console.error("Fehler beim Übernehmen der Personenvorschläge:", error);
+      const detail = error instanceof Error ? error.message : "";
+      const message = /stale|no longer|not found/i.test(detail)
+        ? "Mindestens ein Vorschlag hat sich geändert. Prüfe die aktualisierte Liste."
+        : detail || "Die Änderung konnte nicht gespeichert werden.";
+      setWorkflowFeedback({ kind: "error", message });
+      await loadSuggestions();
+      return false;
     } finally {
       setIsMutating(false);
     }
   };
 
-  const handleAcceptAllRecommended = async (
-    assignments: { person_id: number; cluster_ids: number[] }[],
-  ) => {
-    if (isMutating || assignments.length === 0) return;
-    setIsMutating(true);
-    try {
-      await acceptPersonSuggestionBatches(assignments);
-      setClusterDetailsMap({});
-      clusterDetailsMapRef.current = {};
-      await loadSidebarData(true);
-    } catch (error) {
-      console.error("Fehler beim Sammelübernehmen sicherer Vorschläge:", error);
-    } finally {
-      setIsMutating(false);
-    }
+  const removeAcceptedSuggestions = (clusterIds: number[]) => {
+    const ids = new Set(clusterIds);
+    setPersonSuggestions((current) => current.filter((item) => !ids.has(item.cluster_id)));
+    setReviewSuggestions((current) => current.filter((item) => !ids.has(item.cluster_id)));
+    clusterDetailsMapRef.current = {};
+    setClusterDetailsMap({});
   };
 
-  const handleDismissSuggestion = async (clusterId: number) => {
-    if (isMutating) return;
-    setIsMutating(true);
-    try {
-      await dismissPersonSuggestion(clusterId);
-      setPersonSuggestions((items) =>
-        items.filter((item) => item.cluster_id !== clusterId),
-      );
-    } catch (error) {
-      console.error("Fehler beim Verwerfen des Personenvorschlags:", error);
-    } finally {
-      setIsMutating(false);
-    }
+  const handleAcceptSelectedPeople = (assignments: PersonSuggestionDecision[]) => {
+    return runSuggestionAction(async () => {
+      await acceptPersonSuggestions(assignments);
+      removeAcceptedSuggestions(assignments.map((item) => item.cluster_id));
+      const count = assignments.reduce((total, item) => total + item.face_ids.length, 0);
+      return count === 1 ? "Ein Gesicht wurde zugeordnet." : `${count} Gesichter wurden zugeordnet.`;
+    });
   };
 
-  const handleAcceptReviewSuggestions = async (clusterIds: number[]) => {
-    if (isMutating || clusterIds.length === 0) return;
-    setIsMutating(true);
-    try {
-      await acceptReviewSuggestions(clusterIds);
-      clusterDetailsMapRef.current = {};
-      setClusterDetailsMap({});
-      await loadSidebarData(true);
-    } catch (error) {
-      console.error("Fehler beim Übernehmen der Aussortier-Vorschläge:", error);
-    } finally {
-      setIsMutating(false);
-    }
+  const handleDismissSuggestion = (item: PersonSuggestion) => {
+    void runSuggestionAction(async () => {
+      await dismissPersonSuggestion(item);
+      setPersonSuggestions((items) => items.filter((current) => current.proposal_token !== item.proposal_token));
+      return "Vorschlag verworfen. Die Gruppe bleibt unter „Ohne Namen“.";
+    });
   };
 
-  const handleDismissReviewSuggestion = async (clusterId: number) => {
-    if (isMutating) return;
-    setIsMutating(true);
-    try {
-      await dismissReviewSuggestion(clusterId);
-      await loadSidebarData(true);
-    } catch (error) {
-      console.error("Fehler beim Verwerfen des Aussortier-Vorschlags:", error);
-    } finally {
-      setIsMutating(false);
-    }
+  const handleAcceptReviewSuggestions = (suggestions: ReviewSuggestion[]) => {
+    void runSuggestionAction(async () => {
+      const accepted = await acceptReviewSuggestions(suggestions);
+      if (accepted === suggestions.length) {
+        removeAcceptedSuggestions(suggestions.map((item) => item.cluster_id));
+      }
+      return accepted === 1 ? "Eine Gruppe wurde aussortiert." : accepted + " Gruppen wurden aussortiert.";
+    });
+  };
+
+  const handleDismissReviewSuggestion = (item: ReviewSuggestion) => {
+    void runSuggestionAction(async () => {
+      await dismissReviewSuggestion(item);
+      setReviewSuggestions((items) => items.filter((current) => current.cluster_id !== item.cluster_id));
+      return "Vorschlag verworfen. Die Gruppe bleibt unter „Ohne Namen“.";
+    });
   };
 
   const toggleFaceSelection = (faceId: number) => {
@@ -1351,6 +1366,34 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     [],
   );
 
+  const openSuggestionPhoto = async (faceId: number, token: string, opener: HTMLButtonElement) => {
+    suggestionPhotoRequest.current?.abort();
+    const request = new AbortController();
+    suggestionPhotoRequest.current = request;
+    try {
+      const initialImage = await fetchFaceImage(faceId, token, request.signal);
+      if (request.signal.aborted || !opener.isConnected || !opener.getClientRects().length) return;
+      const face = initialImage.faces.find((item) => item.id === faceId);
+      if (!face) throw new Error("Das Gesicht wurde im Foto nicht gefunden.");
+      setFaceGallery({
+        faces: [{ ...face, image_id: initialImage.id }],
+        initialFaceId: faceId,
+        initialImage,
+        groupLabel: "",
+        contextLabel: "Vorschlag prüfen",
+        opener,
+      });
+    } catch (error) {
+      if (request.signal.aborted || !opener.isConnected || !opener.getClientRects().length) return;
+      setWorkflowFeedback({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Das Foto konnte nicht geöffnet werden.",
+      });
+    } finally {
+      if (suggestionPhotoRequest.current === request) suggestionPhotoRequest.current = null;
+    }
+  };
+
   /** Mark or unmark every face of one archive section at once. */
   const setFaceGroupSelection = (faceIds: number[], selected: boolean) => {
     setSelectedFaceIds((current) => {
@@ -1358,11 +1401,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       faceIds.forEach((id) => (selected ? next.add(id) : next.delete(id)));
       return Array.from(next);
     });
-  };
-
-  const resetAssignmentInputs = () => {
-    setAssignQuery("");
-    setAssignMenuOpen(false);
   };
 
   const handleBatchAction = async (
@@ -1406,6 +1444,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     }
 
     setIsMutating(true);
+    setWorkflowFeedback(null);
     try {
       // Assigning must not pull the view out of the current work area: the new
       // cluster belongs to a person, so selecting it while reviewing new faces
@@ -1413,18 +1452,23 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       // and only move on if the current group is gone — then to the *next* one.
       workflowFallbackRef.current = remainingScopeAfterSelection();
       await batchUpdateFaces(payload);
-      resetAssignmentInputs();
+      setAssignmentRevision((value) => value + 1);
       setSelectedFaceIds([]);
       setDetailModal(null);
+      if (action === "assign_person") {
+        setWorkflowFeedback({ kind: "success", message: faceIds.length === 1
+          ? "Ein Gesicht wurde „" + payload.person_name + "“ zugewiesen."
+          : faceIds.length + " Gesichter wurden „" + payload.person_name + "“ zugewiesen." });
+        ensurePersonsLoaded(true);
+      }
       await loadSidebarData(true);
       loadTargetDetails(selectedTarget);
-
-      if (action === "assign_person") {
-        const nextPersons = await listPersons();
-        setPersons(nextPersons);
-      }
     } catch (error) {
-      console.error("Fehler bei der Batch-Aktion:", error);
+      workflowFallbackRef.current = [];
+      setWorkflowFeedback({
+        kind: "error",
+        message: error instanceof Error ? error.message : "Die Änderung konnte nicht gespeichert werden.",
+      });
     } finally {
       setIsMutating(false);
     }
@@ -1434,33 +1478,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   // marked — so assigning a full cluster to a person is just pick + confirm.
   const hasFaceSelection = selectedFaceIds.length > 0;
   const targetFaceIds = hasFaceSelection ? selectedFaceIds : allVisibleFaceIds;
-  const assignQueryTrimmed = assignQuery.trim();
-  const filteredPersons = useMemo(() => {
-    const query = assignQueryTrimmed.toLocaleLowerCase("de");
-    const list = query
-      ? persons.filter((person) => person.name.toLocaleLowerCase("de").includes(query))
-      : persons;
-    return list.slice(0, 8);
-  }, [persons, assignQueryTrimmed]);
-  const exactPersonMatch = useMemo(
-    () =>
-      persons.find(
-        (person) =>
-          person.name.toLocaleLowerCase("de") === assignQueryTrimmed.toLocaleLowerCase("de"),
-      ) ?? null,
-    [persons, assignQueryTrimmed],
-  );
-  const canAssign = targetFaceIds.length > 0 && assignQueryTrimmed.length > 0;
-
-  const assignToPerson = (name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed || targetFaceIds.length === 0 || isMutating) {
-      return;
-    }
-    setAssignMenuOpen(false);
-    void handleBatchAction("assign_person", targetFaceIds, trimmed);
-  };
-
   const runQuickAction = (action: BatchActionType) => {
     void handleBatchAction(action, targetFaceIds);
   };
@@ -1595,7 +1612,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       actions.push({
         action: "restore_to_manual_review",
         label: "Erneut prüfen",
-        description: "Legt die Gesichter erneut unter „Neue Gesichter“ zur Prüfung vor.",
+        description: "Legt die Gesichter erneut unter „Ohne Namen“ zur Prüfung vor.",
       });
     }
 
@@ -1662,13 +1679,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
       <nav className="review-page-tabs" aria-label="Prüfbereiche">
         {([
-          ["suggestions", "Vorschläge", "Automatisch erkannte Treffer", suggestionCount],
-          ["open", "Neue Gesichter", "Benennen oder aussortieren", openClusters.length],
+          ["suggestions", "Vorschläge", "Mögliche Zuordnungen prüfen", suggestionCount],
+          ["open", "Ohne Namen", "Benennen oder aussortieren", openClusters.length],
           ["people", "Personen korrigieren", "Bestätigte Zuordnungen", assignedPersonCount],
           ["archive", "Aussortiert", "Unbekannt und Fehl-Erkennungen", archivedFaceCount],
         ] as const).map(([view, label, description, count]) => (
           <button
             className={workspaceView === view ? "review-page-tab review-page-tab--active" : "review-page-tab"}
+            aria-current={workspaceView === view ? "true" : undefined}
             key={view}
             onClick={() => selectWorkspaceView(view)}
             type="button"
@@ -1679,23 +1697,37 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         ))}
       </nav>
 
-      {workspaceView === "suggestions" ? (
+      {workflowFeedback && (
+        <p
+          className="review-workflow-feedback"
+          role={workflowFeedback.kind === "error" ? "alert" : "status"}
+        >
+          {workflowFeedback.message}
+        </p>
+      )}
+
+      <div hidden={workspaceView !== "suggestions"}>
         <ReviewInbox
           personSuggestions={personSuggestions}
           reviewSuggestions={reviewSuggestions}
           busy={isMutating}
+          loading={suggestionsLoading}
+          error={suggestionsError}
+          onRetry={() => void loadSuggestions()}
           onOpenCluster={(clusterId) => {
             setWorkspaceView("open");
             selectCluster(clusterId, { scrollToCluster: true, source: "explicit" });
           }}
-          onAcceptPerson={handleAcceptSuggestions}
-          onAcceptAllPeople={handleAcceptAllRecommended}
+          onOpenFace={(faceId, token, opener) => void openSuggestionPhoto(faceId, token, opener)}
+          onAcceptPerson={(decision) => handleAcceptSelectedPeople([decision])}
+          onAcceptSelectedPeople={handleAcceptSelectedPeople}
           onDismissPerson={handleDismissSuggestion}
           onAcceptReview={handleAcceptReviewSuggestions}
           onDismissReview={handleDismissReviewSuggestion}
           onOpenNewFaces={() => selectWorkspaceView("open")}
         />
-      ) : (
+      </div>
+      {workspaceView !== "suggestions" && (
       <div className="cluster-workspace">
       <aside className="cluster-workspace__sidebar">
         <ClusterList
@@ -1778,72 +1810,16 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
               </div>
 
-              <div className="cluster-assign-bar">
-                <div className="cluster-person-combobox">
-                  <input
-                    type="text"
-                    className="cluster-person-combobox__input"
-                    placeholder="Person suchen oder neu anlegen…"
-                    value={assignQuery}
-                    disabled={isMutating || targetFaceIds.length === 0}
-                    onChange={(event) => {
-                      setAssignQuery(event.target.value);
-                      setAssignMenuOpen(true);
-                    }}
-                    onFocus={() => setAssignMenuOpen(true)}
-                    onBlur={() => window.setTimeout(() => setAssignMenuOpen(false), 120)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && canAssign) {
-                        event.preventDefault();
-                        assignToPerson(assignQueryTrimmed);
-                      } else if (event.key === "Escape") {
-                        setAssignMenuOpen(false);
-                      }
-                    }}
-                  />
-                  {assignMenuOpen &&
-                    (filteredPersons.length > 0 || (assignQueryTrimmed !== "" && !exactPersonMatch)) && (
-                      <ul className="cluster-person-combobox__menu" role="listbox">
-                        {assignQueryTrimmed !== "" && !exactPersonMatch && (
-                          <li>
-                            <button
-                              type="button"
-                              className="cluster-person-combobox__option cluster-person-combobox__option--create"
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => assignToPerson(assignQueryTrimmed)}
-                            >
-                              ＋ Neue Person „{assignQueryTrimmed}“ anlegen
-                            </button>
-                          </li>
-                        )}
-                        {filteredPersons.map((person) => (
-                          <li key={person.id}>
-                            <button
-                              type="button"
-                              className="cluster-person-combobox__option"
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => assignToPerson(person.name)}
-                            >
-                              {person.name}
-                            </button>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                </div>
-
-                <button
-                  className="cluster-action-button cluster-action-button--primary"
-                  type="button"
-                  disabled={!canAssign || isMutating}
-                  onClick={() => assignToPerson(assignQueryTrimmed)}
-                >
-                  {hasFaceSelection
-                    ? `${selectedFaceIds.length} Gesichter zuweisen`
-                    : "Gesichtsgruppe zuweisen"}
-                </button>
-
-              </div>
+              <PersonAssignment
+                key={(selectedClusterId ?? selectedReviewGroupKey) + "-" + assignmentRevision}
+                people={persons}
+                peopleStatus={peopleStatus}
+                busy={isMutating}
+                faceCount={targetFaceIds.length}
+                wholeGroup={!hasFaceSelection}
+                onRetry={() => ensurePersonsLoaded(true)}
+                onAssign={(name) => void handleBatchAction("assign_person", targetFaceIds, name)}
+              />
 
               <div className="cluster-detail-toolbar">
                 <div className="cluster-detail-toolbar__selection">
@@ -2136,7 +2112,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                   }
                   disabled={isMutating}
                 >
-                  <option value="unassigned">Zu „Neue Gesichter“ verschieben</option>
+                  <option value="unassigned">Zu „Ohne Namen“ verschieben</option>
                   <option value="unknown_person">Als „Unbekannte Person“ ablegen</option>
                   <option value="not_face">Als „Kein Gesicht“ ablegen</option>
                 </select>
@@ -2161,7 +2137,15 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           initialImage={faceGallery.initialImage}
           contextLabel={faceGallery.contextLabel}
           groupLabel={faceGallery.groupLabel}
-          onClose={() => setFaceGallery(null)}
+          onClose={() => {
+            setFaceGallery(null);
+            if (faceGallery.opener) {
+              const opener = faceGallery.opener;
+              window.requestAnimationFrame(() => {
+                if (opener.isConnected && opener.getClientRects().length) opener.focus();
+              });
+            }
+          }}
           onNavigateToCluster={(clusterId) => {
             setFaceGallery(null);
             selectCluster(clusterId, { scrollToCluster: true, source: "explicit" });

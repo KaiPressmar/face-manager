@@ -8,6 +8,7 @@ import "./styles/global.css";
 import "./styles/neon.css";
 import "./styles/hologram.css";
 import "./styles/responsive.css";
+import "./styles/workflow.css";
 
 // Apply any explicitly pinned theme before the first paint so a Light/Dark
 // choice never flashes the wrong theme. "system" resolves via CSS media query.

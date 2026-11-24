@@ -40,6 +40,33 @@ class ClusterApiTest(unittest.TestCase):
         self.assertEqual(result[0]["cluster_id"], 7)
         self.assertEqual(result[0]["face_count"], 12)
 
+    @patch("backend.app.accept_person_suggestion_assignments")
+    def test_person_suggestions_reject_both_legacy_acceptance_formats(self, accept):
+        for data in (
+            {"personId": 3, "clusterIds": [9]},
+            {"assignments": [{"person_id": 3, "cluster_ids": [9]}]},
+        ):
+            with self.subTest(data=data):
+                with self.assertRaises(HTTPException) as error:
+                    app.api_accept_person_suggestions(data)
+                self.assertEqual(error.exception.status_code, 409)
+        accept.assert_not_called()
+
+    @patch("backend.app.accept_person_suggestion_assignments")
+    def test_person_suggestions_report_snapshot_conflicts(self, accept):
+        accept.side_effect = app.StalePersonSuggestionError()
+        decision = {
+            "cluster_id": 9,
+            "person_id": 3,
+            "proposal_token": "reviewed-token",
+            "face_ids": [22],
+            "scope": "preview",
+        }
+        with self.assertRaises(HTTPException) as error:
+            app.api_accept_person_suggestions({"assignments": [decision]})
+        self.assertEqual(error.exception.status_code, 409)
+        accept.assert_called_once_with([decision])
+
     @patch("backend.app.idle_recluster_scheduler")
     @patch("backend.app.auto_cluster_queue")
     @patch("backend.app.schedule_full_recluster")

@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  type ApplyImageRenamePayload,
+  type ApplyImageRenameResult,
   ImageRenameCandidate,
   applyImageRenames,
   fetchImageRenameCandidateCount,
@@ -11,6 +13,8 @@ import { copyTextToClipboard } from "../../utils/clipboard";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import { subscribeToTopic } from "../../utils/events";
+import { useModalFocus } from "../../hooks/useModalFocus";
+import "./ImageRenamePage.css";
 
 const DEFAULT_PAGE_SIZE = 25;
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 200];
@@ -20,6 +24,31 @@ const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
 type ImageGroupingMode = "date" | "folder";
 type SortDirection = "desc" | "asc";
+
+interface RenameReview {
+  payload: ApplyImageRenamePayload;
+  count: number;
+  example?: ImageRenameCandidate;
+}
+
+interface RenameReport {
+  result: ApplyImageRenameResult;
+  unreported: number;
+}
+
+function skipLabel(reason: string) {
+  switch (reason) {
+    case "already_matches": return "Bereits passend benannt";
+    case "target_exists": return "Zielname bereits belegt";
+    case "missing_source": return "Datei nicht erreichbar";
+    case "invalid_filename": return "Vorgeschlagener Name nicht zulässig";
+    default: return "Übersprungen";
+  }
+}
+
+function isSelectable(item: ImageRenameCandidate) {
+  return item.current_filename !== item.proposed_filename && !/[/\\\u0000]/.test(item.proposed_filename);
+}
 
 const ImageRenamePage: React.FC<{
   active: boolean;
@@ -44,6 +73,8 @@ const ImageRenamePage: React.FC<{
   const [selectionMode, setSelectionMode] = useState<"manual" | "all">("manual");
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
+  const [renameReview, setRenameReview] = useState<RenameReview | null>(null);
+  const [renameReport, setRenameReport] = useState<RenameReport | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -55,6 +86,20 @@ const ImageRenamePage: React.FC<{
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
+  const reviewDialogRef = useRef<HTMLElement>(null);
+  const reportRef = useRef<HTMLElement>(null);
+  const submittingRef = useRef(false);
+  const reviewOpenRef = useRef(false);
+  reviewOpenRef.current = renameReview !== null;
+  useModalFocus(reviewDialogRef, () => setRenameReview(null), !isSubmitting, active && renameReview !== null);
+
+  useEffect(() => {
+    if (!active) setRenameReview(null);
+  }, [active]);
+
+  useEffect(() => {
+    if (active && renameReport) reportRef.current?.focus();
+  }, [renameReport]);
 
   const loadTotalCount = async () => {
     const controller = new AbortController();
@@ -184,6 +229,8 @@ const ImageRenamePage: React.FC<{
     selectionMode === "all"
       ? !excludedPaths.has(path)
       : selectedPaths.has(path);
+  const selectableItems = items.filter(isSelectable);
+  const canReview = selectedCount > 0 && !isLoading && !loadError && !isSubmitting;
 
   const toggleItem = (path: string) => {
     setMessage(null);
@@ -215,7 +262,10 @@ const ImageRenamePage: React.FC<{
   const handleSelectPage = () => {
     setSelectionMode("manual");
     setExcludedPaths(new Set());
-    setSelectedPaths(new Set(items.map((item) => item.path)));
+    setSelectedPaths((current) => new Set([
+      ...current,
+      ...selectableItems.map((item) => item.path),
+    ]));
   };
 
   const handleSelectAll = () => {
@@ -254,6 +304,10 @@ const ImageRenamePage: React.FC<{
 
     const refreshVisibleData = async () => {
       if (document.visibilityState !== "visible") return;
+      if (reviewOpenRef.current || submittingRef.current) {
+        scheduleRefresh();
+        return;
+      }
       const idleIn = userBusyUntil - performance.now();
       if (idleIn > 0) {
         scheduleRefresh(idleIn + 50);
@@ -336,47 +390,49 @@ const ImageRenamePage: React.FC<{
     };
   }, [active, groupingMode, offset, pageSize, selectedFolders, selectedPersons, sortDirection]);
 
-  const handleSubmit = async () => {
-    if (selectedCount === 0) {
-      setActionError("Wähle mindestens eine Datei aus.");
-      return;
-    }
+  const openRenameReview = () => {
+    if (!canReview) return;
+    setActionError(null);
+    setRenameReview({
+      count: selectedCount,
+      example: selectableItems.find((item) => isSelected(item.path)),
+      payload: {
+        ...(selectionMode === "all"
+          ? { rename_all: true, excluded_paths: Array.from(excludedPaths) }
+          : { selected_paths: Array.from(selectedPaths) }),
+        folders: selectedFolders,
+        persons: selectedPersons,
+        sort_by: groupingMode,
+        sort_direction: sortDirection,
+      },
+    });
+  };
 
+  const handleSubmit = async () => {
+    if (!renameReview || submittingRef.current || !active) return;
+    submittingRef.current = true;
     setIsSubmitting(true);
     setActionError(null);
     setMessage(null);
+    setRenameReport(null);
     try {
-      const result = await applyImageRenames(
-        selectionMode === "all"
-          ? {
-              rename_all: true,
-              excluded_paths: Array.from(excludedPaths),
-              folders: selectedFolders,
-              persons: selectedPersons,
-              sort_by: groupingMode,
-              sort_direction: sortDirection,
-            }
-          : {
-              selected_paths: Array.from(selectedPaths),
-              folders: selectedFolders,
-              persons: selectedPersons,
-              sort_by: groupingMode,
-              sort_direction: sortDirection,
-            },
-      );
-      setMessage(
-        `${result.renamed_count} Dateinamen aktualisiert, ${result.skipped_count} übersprungen, ${result.error_count} nicht geändert.`,
-      );
+      const result = await applyImageRenames(renameReview.payload);
+      const reported = result.renamed_count + result.skipped_count + result.error_count;
+      setRenameReport({
+        result,
+        unreported: renameReview.payload.rename_all ? 0 : Math.max(0, renameReview.count - reported),
+      });
       handleClearSelection();
-      setMutationRefresh((value) => value + 1);
     } catch (submitError) {
-      setActionError(
-        submitError instanceof Error
-          ? submitError.message
-          : "Die Dateinamen konnten nicht aktualisiert werden.",
-      );
+      const detail = submitError instanceof Error
+        ? submitError.message
+        : "Die Rückmeldung zum Umbenennen fehlt.";
+      setActionError(`${detail} Prüfe die aktualisierte Vorschau vor einem erneuten Versuch.`);
     } finally {
+      submittingRef.current = false;
       setIsSubmitting(false);
+      setRenameReview(null);
+      setMutationRefresh((value) => value + 1);
     }
   };
 
@@ -560,6 +616,62 @@ const ImageRenamePage: React.FC<{
     </div>
   );
 
+  const renderRenameReport = () => {
+    if (!renameReport) return null;
+    const { result, unreported } = renameReport;
+    const skipped = result.skipped ?? [];
+    const errors = result.errors ?? [];
+    const renamed = result.renamed ?? [];
+    const skippedByReason = new Map<string, number>();
+    for (const item of skipped) {
+      const label = skipLabel(item.reason);
+      skippedByReason.set(label, (skippedByReason.get(label) ?? 0) + 1);
+    }
+    if (result.skipped_count > skipped.length) {
+      const label = "Übersprungen";
+      skippedByReason.set(label, (skippedByReason.get(label) ?? 0) + result.skipped_count - skipped.length);
+    }
+    const details: { path: string; label: string; description?: string; destination?: string }[] = [
+      ...errors.slice(0, 12).map((item) => ({ path: item.path, label: "Fehler", description: item.reason })),
+      ...skipped.slice(0, 12).map((item) => ({ path: item.path, label: skipLabel(item.reason) })),
+      ...renamed.slice(0, 12).map((item) => ({ path: item.from_path, label: "Umbenannt", destination: item.to_path })),
+    ];
+    const entryCount = errors.length + skipped.length + renamed.length;
+
+    return (
+      <section ref={reportRef} className="settings-card rename-outcome" tabIndex={-1} aria-labelledby="rename-outcome-title">
+        <div className="rename-outcome__header">
+          <h2 id="rename-outcome-title">Ergebnis der Umbenennung</h2>
+          <button className="neon-card" type="button" onClick={() => setRenameReport(null)}>Schließen</button>
+        </div>
+        <ul className="rename-outcome__counts" role="status">
+          <li><strong>{result.renamed_count}</strong> umbenannt</li>
+          {Array.from(skippedByReason, ([label, count]) => (
+            <li key={label}><strong>{count}</strong> {label}</li>
+          ))}
+          {result.error_count > 0 && <li><strong>{result.error_count}</strong> mit Fehlern</li>}
+          {unreported > 0 && <li><strong>{unreported}</strong> ohne Rückmeldung</li>}
+        </ul>
+        {details.length > 0 && (
+          <details className="rename-outcome__details">
+            <summary>Meldungen zu den Dateien</summary>
+            {details.length < entryCount && <p>Die Liste zeigt {details.length} von {entryCount} Meldungen.</p>}
+            <ul>
+              {details.map((item, index) => (
+                <li key={`${item.path}-${index}`}>
+                  <strong>{item.label}</strong>
+                  <code>{item.path}</code>
+                  {item.destination && <code aria-label={`Neuer Pfad ${item.destination}`}>→ {item.destination}</code>}
+                  {item.description && <span>{item.description}</span>}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </section>
+    );
+  };
+
   return (
     <div className="settings-page">
       <div className="settings-page__header rename-page-header">
@@ -567,8 +679,8 @@ const ImageRenamePage: React.FC<{
           <div className="settings-page__eyebrow">Bibliothek</div>
           <h1 className="settings-page__title">Dateinamen</h1>
           <p className="settings-page__copy">
-            Ergänze erkannte Personen im Dateinamen. Du siehst vor jeder Änderung
-            den bisherigen und den vorgeschlagenen Namen.
+            Ergänze auf Wunsch die Namen zugeordneter Personen. Prüfe die Vorschläge
+            und wähle die Fotos, deren Dateien du umbenennen möchtest.
           </p>
         </div>
         <button
@@ -632,36 +744,43 @@ const ImageRenamePage: React.FC<{
 
       <section className="settings-card rename-toolbar">
         <div className="rename-toolbar__heading">
-          <strong>Dateien auswählen und aktualisieren</strong>
-          <span>Wähle einzelne Dateien, die aktuelle Seite oder alle Treffer.</span>
+          <strong>Dateien zur Prüfung auswählen</strong>
+          <span>Markiere einzelne Dateien, diese Seite oder alle Treffer des Filters.</span>
         </div>
         <div className="rename-toolbar__controls">
           <div className="settings-actions">
-            <button className="neon-card" onClick={handleSelectPage} disabled={items.length === 0}>
-              Seite wählen ({items.length})
+            <button className="neon-card" onClick={handleSelectPage} disabled={selectableItems.length === 0 || isLoading || isSubmitting}>
+              Seite wählen ({selectableItems.length})
             </button>
             <button
               className="neon-card"
               onClick={handleSelectAll}
-              disabled={total === null || total === 0 || isTotalLoading}
+              disabled={total === null || total === 0 || isTotalLoading || isLoading || isSubmitting}
             >
               Alle wählen ({total ?? "…"})
             </button>
-            <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0}>
+            <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0 || isSubmitting}>
               Auswahl aufheben
             </button>
           </div>
           <button
             className="neon-button rename-toolbar__apply"
-            onClick={handleSubmit}
-            disabled={isSubmitting || selectedCount === 0}
+            onClick={openRenameReview}
+            disabled={!canReview}
           >
             {isSubmitting ? "Dateinamen werden aktualisiert…" : `${selectedCount} Dateinamen aktualisieren`}
           </button>
         </div>
       </section>
 
-      <section className="settings-card rename-list-card">
+      {renderRenameReport()}
+      {(message || actionError) && (
+        <div role={actionError ? "alert" : "status"} className={actionError ? "settings-feedback settings-feedback--error" : "settings-feedback"}>
+          {actionError || message}
+        </div>
+      )}
+
+      <section className={`settings-card rename-list-card${!isLoading && items.length === 0 ? " rename-list-card--empty" : ""}`}>
         <div className="rename-list-status">
           <div className="rename-list-status__pill">
             Ausgewählt: <strong>{selectionMode === "all" && total === null ? "…" : selectedCount}</strong>
@@ -681,7 +800,9 @@ const ImageRenamePage: React.FC<{
         ) : items.length === 0 ? (
           !loadError && !pageOutOfRange && (
             <div className="rename-empty-state">
-              Alle Dateinamen entsprechen bereits deinem Benennungsschema.
+              {selectedFolders.length > 0 || selectedPersons.length > 0
+                ? "Für diese Auswahl gibt es keine Vorschläge. Passe den Filter an, um weitere Fotos zu sehen."
+                : "Es gibt gerade keine Vorschläge. Face Manager schlägt Änderungen für Fotos mit zugeordneten Personen vor."}
             </div>
           )
         ) : (
@@ -692,16 +813,21 @@ const ImageRenamePage: React.FC<{
                 <div className="rename-row" key={item.path}>
                   <input
                     type="checkbox"
-                    checked={isSelected(item.path)}
+                    checked={isSelectable(item) && isSelected(item.path)}
                     onChange={() => toggleItem(item.path)}
+                    disabled={!isSelectable(item) || isLoading || isSubmitting}
                     aria-label={`${item.current_filename} auswählen`}
                   />
                   <div className="rename-row__content">
-                    <div className="rename-row__path">{item.path}</div>
-                    <div className="rename-row__meta">
-                      <span>Aktuell: {item.current_filename}</span>
-                      <span>Neu: {item.proposed_filename}</span>
+                    <div className="rename-row__meta rename-file-names">
+                      <div><small>Aktueller Name</small><code>{item.current_filename}</code></div>
+                      <span className="rename-file-names__arrow" aria-hidden="true">→</span>
+                      <div><small>Vorgeschlagener Name</small><strong>{item.proposed_filename}</strong></div>
                     </div>
+                    <div className="rename-row__path">{item.directory ?? item.path}</div>
+                    {!isSelectable(item) && <span className="rename-row__unavailable">
+                      {item.current_filename === item.proposed_filename ? "Bereits passend benannt" : "Der vorgeschlagene Name enthält ein unzulässiges Zeichen."}
+                    </span>}
                     <div className="rename-row__people">
                       Personen: {item.detected_person_names.join(", ")}
                     </div>
@@ -733,16 +859,43 @@ const ImageRenamePage: React.FC<{
         {renderPaginationControls("bottom")}
       </section>
 
-      {(message || actionError) && (
-        <div
-          role={actionError ? "alert" : "status"}
-          className={
-            actionError
-              ? "settings-feedback settings-feedback--error"
-              : "settings-feedback"
-          }
-        >
-          {actionError || message}
+      {renameReview && active && (
+        <div className="modal-backdrop">
+          <section
+            ref={reviewDialogRef}
+            className="cluster-action-modal cluster-action-modal--narrow"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-review-title"
+            aria-describedby="rename-review-scope"
+            aria-busy={isSubmitting}
+          >
+            <header className="cluster-action-modal__header">
+              <h2 id="rename-review-title">Dateinamen prüfen</h2>
+            </header>
+            <div className="cluster-action-modal__confirmation" id="rename-review-scope">
+              <strong>{renameReview.count} ausgewählte {renameReview.count === 1 ? "Datei" : "Dateien"}</strong>
+              <p>Face Manager benennt die Dateien am jeweiligen Speicherort um.</p>
+              {renameReview.payload.rename_all && (
+                <p>Die Auswahl gilt für alle Treffer des aktuellen Filters, auch auf anderen Seiten. Face Manager prüft die Treffer beim Umbenennen erneut.</p>
+              )}
+              {renameReview.example && (
+                <div className="rename-file-names rename-review-example">
+                  <div><small>{renameReview.count > 1 ? "Beispiel" : "Aktueller Name"}</small><code>{renameReview.example.current_filename}</code></div>
+                  <span className="rename-file-names__arrow" aria-hidden="true">→</span>
+                  <div><small>Vorgeschlagener Name</small><strong>{renameReview.example.proposed_filename}</strong></div>
+                </div>
+              )}
+            </div>
+            <footer className="cluster-action-modal__footer">
+              <button className="neon-card" type="button" data-initial-focus onClick={() => setRenameReview(null)} disabled={isSubmitting}>
+                Abbrechen
+              </button>
+              <button className="neon-button" type="button" onClick={() => void handleSubmit()} disabled={isSubmitting}>
+                {isSubmitting ? "Dateien werden umbenannt…" : "Dateien jetzt umbenennen"}
+              </button>
+            </footer>
+          </section>
         </div>
       )}
 

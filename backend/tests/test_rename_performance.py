@@ -27,7 +27,7 @@ class RenamePerformanceTest(unittest.TestCase):
     @patch("backend.services.storage._refresh_canonical_image_location")
     @patch("backend.services.storage.get_conn")
     @patch("backend.services.storage.os.rename")
-    @patch("backend.services.storage.os.path.exists", return_value=False)
+    @patch("backend.services.storage.os.path.lexists", return_value=False)
     @patch("backend.services.storage.os.path.isfile", return_value=True)
     @patch("backend.services.storage.list_all_filename_rename_candidates")
     @patch("backend.services.storage.list_filename_rename_candidates_for_paths")
@@ -72,7 +72,7 @@ class RenamePerformanceTest(unittest.TestCase):
     @patch("backend.services.storage._refresh_canonical_image_location")
     @patch("backend.services.storage.get_conn")
     @patch("backend.services.storage.os.rename")
-    @patch("backend.services.storage.os.path.exists", return_value=False)
+    @patch("backend.services.storage.os.path.lexists", return_value=False)
     @patch("backend.services.storage.os.path.isfile", return_value=True)
     @patch("backend.services.storage.list_all_filename_rename_candidates")
     @patch("backend.services.storage.list_filename_rename_candidates_for_paths")
@@ -189,6 +189,24 @@ class RenameCandidateQueryTest(unittest.TestCase):
         page, _ = storage.list_filename_rename_candidates(limit=2)
         self.assertEqual([item["path"] for item in page], [named])
         self.assertEqual(storage.count_filename_rename_candidates(), 1)
+
+    def test_proposed_filename_with_separator_cannot_move_a_photo(self):
+        with closing(schema.get_conn()) as conn:
+            person = self._cluster(conn, "Kai/Regina")
+            _, source = self._photo(conn, "Family/photo.jpg", [person])
+            conn.commit()
+
+        candidates, _ = storage.list_filename_rename_candidates()
+        proposed_path = Path(candidates[0]["proposed_path"])
+        proposed_path.parent.mkdir(parents=True)
+
+        for selection in ({"selected_paths": [source]}, {"rename_all": True}):
+            with self.subTest(selection=selection):
+                result = storage.rename_image_locations_to_match_people(**selection)
+                self.assertEqual(result["renamed_count"], 0)
+                self.assertEqual(result["skipped"], [{"path": source, "reason": "invalid_filename"}])
+                self.assertTrue(Path(source).is_file())
+                self.assertFalse(proposed_path.exists())
 
     def test_person_filters_casefold_names_and_preserve_multi_person_and_unknown(self):
         with closing(schema.get_conn()) as conn:

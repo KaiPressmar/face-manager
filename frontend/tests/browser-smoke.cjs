@@ -69,7 +69,7 @@ async function previewFlow(browser, errors) {
     await page.waitForFunction(() => Array.from(document.querySelectorAll('[data-image-id] img'))
       .some((image) => image.naturalWidth > 0 && image.src.includes('/thumbnail')));
     assert.deepEqual(originals, [], 'The library fetched full-size photos before opening a viewer');
-    await tile.click();
+    await tile.locator('.image-gallery-card__open').press('Enter');
     await page.locator('img.gallery-image').waitFor();
     await page.waitForFunction(() => document.querySelector('img.gallery-image').naturalWidth > 0);
     assert.ok(originals.length > 0, 'The fullscreen viewer must still request the original');
@@ -82,6 +82,47 @@ async function previewFlow(browser, errors) {
     await page.keyboard.press('Escape');
     await page.getByRole('dialog', { name: 'Bildansicht' }).waitFor({ state: 'hidden' });
     console.log('PASS photo previews: lazy thumbnails in the grid and originals in the viewer');
+  } finally {
+    await page.close();
+  }
+}
+
+async function collectSourcesFlow(browser, errors) {
+  const page = await newPage(browser, 390, 844, errors);
+  const queuedPaths = [];
+  try {
+    await page.route('**/api/images?**', (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      return route.fulfill({ json: {
+        items: [], total: 0, offset: Number(query.get('offset')), limit: Number(query.get('limit')),
+        has_more: false, available_persons: [],
+      } });
+    });
+    await page.route('**/api/imports', (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const path = route.request().postDataJSON().folder_path;
+      queuedPaths.push(path);
+      if (path === '/fixtures/usb' && queuedPaths.length === 2) {
+        return route.fulfill({ status: 422, json: { detail: 'Das Testlaufwerk fehlt.' } });
+      }
+      return route.fulfill({ status: 202, json: { id: path, status: 'queued' } });
+    });
+    await page.goto(`${webBase}/#/bilder`);
+    await page.getByRole('heading', { name: 'Deine Fotos an einem Ort' }).waitFor();
+    await page.getByRole('button', { name: 'Bilderordner auswählen' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Bilderordner hinzufügen' });
+    const pathInput = dialog.getByRole('textbox', { name: 'Pfad zum Bilderordner' });
+    await pathInput.fill('/fixtures/fotos');
+    await pathInput.press('Enter');
+    await pathInput.fill('/fixtures/usb');
+    await pathInput.press('Enter');
+    await dialog.getByRole('button', { name: '2 Ordner importieren' }).click();
+    await dialog.getByText('Das Testlaufwerk fehlt.').waitFor();
+    assert.equal(await dialog.getByText('/fixtures/fotos', { exact: true }).count(), 0);
+    await dialog.getByRole('button', { name: 'Ausstehende Ordner erneut versuchen' }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.deepEqual(queuedPaths, ['/fixtures/fotos', '/fixtures/usb', '/fixtures/usb']);
+    console.log('PASS collecting photos: onboarding, two sources, partial import retry');
   } finally {
     await page.close();
   }
@@ -314,8 +355,8 @@ async function existingFlow(browser, errors) {
     await page.getByRole('button', { name: 'Auswahl aufheben', exact: true }).click();
     await page.getByRole('button', { name: /Benennungsschema ändern/ }).click();
     await page.waitForURL('**/einstellungen/dateinamen');
-    await page.getByRole('button', { name: /Gesichter prüfen/ }).click();
-    await page.getByRole('button', { name: /Neue Gesichter.*Benennen/ }).click();
+    await page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Personen' }).click();
+    await page.getByRole('button', { name: /Ohne Namen.*Benennen/ }).click();
     await page.getByRole('button', { name: /Personen korrigieren.*Bestätigte/ }).click();
     const cards = page.locator('.page-pane--active .cluster-person-browser__cluster-card[role="button"]');
     await cards.first().waitFor();
@@ -387,24 +428,33 @@ async function liveWorkflowFlow(browser, errors) {
       };
     });
     await page.goto(`${webBase}/#/bilder`);
-    const firstPhoto = page.locator('.image-gallery-card').first();
-    await firstPhoto.click();
+    const firstPhoto = page.locator('.image-gallery-card__open').first();
+    await firstPhoto.press('Enter');
     const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
     const galleryTitle = gallery.locator('.gallery-title strong');
     await galleryTitle.waitFor();
     const originalTitle = await galleryTitle.textContent();
+    const isVisiblePageRefresh = (url) => {
+      const request = new URL(url);
+      return request.pathname === '/api/images' && request.searchParams.get('offset') === '0'
+        && request.searchParams.get('limit') !== '1';
+    };
     await page.route('**/api/images?**', async (route) => {
-      const query = new URL(route.request().url()).searchParams;
-      if (query.get('offset') !== '0' || query.get('limit') === '1') return route.continue();
+      if (!isVisiblePageRefresh(route.request().url())) return route.continue();
       const response = await route.fetch();
       const data = await response.json();
       data.items = [
         { ...data.items[0], id: 987654321, filename: 'Live neu importiert.jpg' },
         ...data.items.slice(0, -1),
       ];
-      await route.fulfill({ response, json: data });
+      await route.fulfill({ json: data, headers: { 'x-test-library-refresh': '1' } });
     });
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.bringToFront();
+    const refreshed = page.waitForResponse((response) =>
+      isVisiblePageRefresh(response.url()) && response.headers()['x-test-library-refresh'] === '1',
+    );
+    await publishLibraryChange('import_completed');
+    await refreshed;
     const syntheticPhoto = page.locator('[data-image-id="987654321"]');
     await syntheticPhoto.waitFor();
     assert.equal(await galleryTitle.textContent(), originalTitle, 'Live refresh changed the active gallery photo');
@@ -412,7 +462,7 @@ async function liveWorkflowFlow(browser, errors) {
     await publishLibraryChange('database_import');
     await gallery.waitFor({ state: 'hidden' });
     await syntheticPhoto.waitFor({ state: 'detached' });
-    await firstPhoto.click();
+    await firstPhoto.press('Enter');
     await gallery.waitFor();
 
     await page.goto(`${webBase}/#/weltkarte`);
@@ -480,6 +530,8 @@ async function liveWorkflowFlow(browser, errors) {
     await pagination.getByRole('button', { name: 'Weiter' }).click();
     await page.getByRole('button', { name: 'Seite wählen (1)' }).click();
     await page.getByRole('button', { name: '1 Dateinamen aktualisieren', exact: true }).click();
+    const confirmRename = page.getByRole('dialog', { name: 'Dateinamen prüfen' });
+    await confirmRename.getByRole('button', { name: 'Dateien jetzt umbenennen' }).click();
     await pagination.getByText('Seite 1 von 1').waitFor();
     assert.equal(await page.locator('.rename-row').count(), 25);
     console.log('PASS live workflows: stable gallery, map refresh, missing review link, rename page correction');
@@ -556,6 +608,25 @@ async function assertMarkerTouchSize(page, context) {
 async function responsiveFlow(browser, errors) {
   const page = await newPage(browser, 390, 844, errors);
   try {
+    await page.setViewportSize({ width: 320, height: 568 });
+    await page.goto(`${webBase}/#/bilder`);
+    await page.locator('[data-image-id]').first().waitFor();
+    await page.getByText('85', { exact: true }).first().waitFor();
+    const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
+    assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
+    await page.locator('.topbar-import-button__label').waitFor();
+    await nav.getByRole('button', { name: 'Personen' }).click();
+    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    const more = nav.getByRole('button', { name: /^Mehr/ });
+    await more.press('Enter');
+    await nav.getByRole('button', { name: 'Dateinamen' }).waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await more.getAttribute('aria-expanded'), 'false');
+    await more.press('Enter');
+    await nav.getByRole('button', { name: 'Dateinamen' }).click();
+    await page.getByRole('heading', { name: 'Dateinamen', exact: true }).waitFor();
+    await page.setViewportSize({ width: 390, height: 844 });
+
     for (const route of ['weltkarte', 'bilder', 'dateinamen', 'gesichter-pruefen', 'einstellungen']) {
       await page.goto(`${webBase}/#/${route}`);
       await page.locator('.page-pane--active').waitFor();
@@ -578,16 +649,171 @@ async function responsiveFlow(browser, errors) {
   }
 }
 
+async function assertReviewFits(page, regions, context) {
+  const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  const { width } = page.viewportSize();
+  assert.ok(documentWidth <= width + 1, `${context}: ${documentWidth}px document overflows ${width}px viewport`);
+  for (const region of regions) {
+    const { content, inner, left, right } = await region.evaluate((element) => {
+      const { left, right } = element.getBoundingClientRect();
+      return { content: element.scrollWidth, inner: element.clientWidth, left, right };
+    });
+    assert.ok(content <= inner + 1 && left >= -1 && right <= width + 1,
+      `${context}: region has ${content}px content, ${inner}px inner width, bounds ${left}–${right}px`);
+  }
+}
+
+function gate() {
+  let release;
+  const ready = new Promise((resolve) => { release = resolve; });
+  return { ready, release };
+}
+
+async function reviewInboxFlow(browser, errors) {
+  const page = await newPage(browser, 390, 844, errors);
+  const initialListing = gate();
+  const previewCrop = gate();
+  const detailCrops = gate();
+  const proposal = {
+    cluster_id: 3, person_id: 1, person_name: 'Anna Beispiel',
+    confidence: 0.91, best_distance: 0.15, runner_up_margin: 0.35,
+    support_count: 5, face_count: 6, support_ratio: 5 / 6, recommended: true,
+    proposal_token: 'first-snapshot', face_ids: [601, 602, 603, 604, 605],
+    preview_face_ids: [601, 602], reference_face_ids: [701, 702],
+  };
+  const updated = {
+    ...proposal, proposal_token: 'current-snapshot',
+    face_ids: [601, 602, 603, 604, 606], preview_face_ids: [601, 606],
+  };
+  const acceptRequests = [];
+  let listing = [proposal];
+  try {
+    await page.route('**/api/person-suggestions', async (route) => {
+      await initialListing.ready;
+      await route.fulfill({ json: listing });
+    });
+    await page.route('**/api/review-suggestions', (route) => route.fulfill({ json: [] }));
+    await page.route(/\/api\/faces\/(?:60[1-6]|70[12])\/crop\?/, async (route) => {
+      if (/\/601\//.test(route.request().url())) await previewCrop.ready;
+      if (/\/60[3-5]\//.test(route.request().url())) await detailCrops.ready;
+      await route.fulfill({
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#456"/></svg>',
+      });
+    });
+    await page.route('**/api/person-suggestions/accept', async (route) => {
+      const request = route.request().postDataJSON();
+      acceptRequests.push(request);
+      if (request.assignments?.[0]?.proposal_token !== updated.proposal_token) {
+        listing = [updated];
+        await route.fulfill({ status: 409, json: {
+          detail: 'Der Vorschlag hat sich geändert. Lade ihn neu und prüfe die Auswahl erneut.',
+        } });
+        return;
+      }
+      listing = [];
+      await route.fulfill({ json: { status: 'ok', accepted_count: 1 } });
+    });
+
+    await page.goto(`${webBase}/#/gesichter-pruefen`);
+    const inbox = page.locator('.review-inbox');
+    await inbox.getByRole('status').filter({ hasText: /Vorschläge werden geladen/ }).waitFor();
+    assert.equal(await inbox.getByRole('article').count(), 0);
+    assert.equal(await inbox.getByRole('button', { name: /bestätigen|zuordnen/i }).count(), 0);
+    initialListing.release();
+
+    const card = inbox.getByRole('article', { name: 'Personenvorschlag für Anna Beispiel' });
+    const open = card.getByRole('button', { name: 'Gruppe prüfen', exact: true });
+    await open.waitFor();
+    assert.ok(await card.getByRole('button', { name: 'Auswahl zuordnen', exact: true }).isDisabled(),
+      'Inbox allowed submission while a preview crop was still loading');
+    previewCrop.release();
+    const viewports = [[320, 568], [390, 844], [768, 1024], [1280, 800]];
+    for (const [width, height] of viewports) {
+      await page.setViewportSize({ width, height });
+      await assertReviewFits(page, [inbox, card], `Review inbox at ${width}×${height}`);
+    }
+
+    await open.press('Enter');
+    const dialog = page.getByRole('dialog', { name: 'Gruppe prüfen', exact: true });
+    const apply = dialog.getByRole('button', { name: 'Auswahl zuordnen', exact: true });
+    const faceBoxes = dialog.getByRole('checkbox', { name: /^Gesicht \d+ auswählen$/ });
+    await faceBoxes.nth(4).waitFor();
+    assert.equal(await faceBoxes.count(), proposal.face_ids.length, 'Detail omitted faces from the current proposal snapshot');
+    await dialog.getByText('6 in der Gruppe · 5 im Vorschlag', { exact: true }).waitFor();
+    assert.ok(await apply.isDisabled(), 'Detail allowed submission while crop images were still loading');
+    assert.deepEqual(acceptRequests, []);
+    detailCrops.release();
+    await apply.and(dialog.locator('button:enabled')).waitFor();
+
+    for (const [width, height] of [...viewports, [390, 360]]) {
+      await page.setViewportSize({ width, height });
+      await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
+    }
+    await apply.scrollIntoViewIfNeeded();
+    const bounds = await apply.boundingBox();
+    assert.ok(bounds && bounds.y >= -1 && bounds.y + bounds.height <= 361,
+      `Detail action is unreachable at keyboard-height viewport: ${JSON.stringify(bounds)}`);
+    assert.ok(await apply.evaluate((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+    }), 'Another element covers the detail action at keyboard-height viewport');
+    await assertFocusInDialog(page, dialog);
+    await assertTabTrap(page, dialog);
+    await page.keyboard.press('Escape');
+    await dialog.waitFor({ state: 'hidden' });
+    await open.and(page.locator(':focus')).waitFor();
+
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await open.click();
+    await selectReviewFaces(dialog, proposal, []);
+    assert.ok(await apply.isDisabled(), 'Empty selection could be submitted');
+    await selectReviewFaces(dialog, proposal, [1, 3]);
+    await apply.click();
+    await dialog.getByText(/Der Vorschlag hat sich geändert/).waitFor();
+    assert.deepEqual(acceptRequests, [{
+      assignments: [{ person_id: 1, cluster_id: 3, proposal_token: proposal.proposal_token, face_ids: [601, 603], scope: 'detail' }],
+    }]);
+    assert.ok(await apply.isDisabled(), 'Stale proposal could be sent again without being reloaded');
+
+    await dialog.getByRole('button', { name: 'Aktuellen Vorschlag laden' }).click();
+    await selectReviewFaces(dialog, updated, [5]);
+    await apply.click();
+    await inbox.getByRole('heading', { name: 'Keine Vorschläge offen' }).waitFor();
+    assert.deepEqual(acceptRequests[1], {
+      assignments: [{ person_id: 1, cluster_id: 3, proposal_token: updated.proposal_token, face_ids: [606], scope: 'detail' }],
+    });
+    assert.equal(acceptRequests.length, 2, 'Refreshing a stale proposal sent an unexpected mutation');
+    console.log('PASS review inbox: 320/390/768/1280px, short viewport, snapshot, subset, load guard, stale retry, keyboard focus');
+  } finally {
+    initialListing.release();
+    previewCrop.release();
+    detailCrops.release();
+    await page.close();
+  }
+}
+
+async function selectReviewFaces(dialog, proposal, selection) {
+  for (let number = 1; number <= proposal.face_ids.length; number += 1) {
+    const checkbox = dialog.getByRole('checkbox', { name: `Gesicht ${number} auswählen`, exact: true });
+    await checkbox.and(dialog.locator('input:enabled')).waitFor();
+    await checkbox.setChecked(selection.includes(number));
+  }
+  await dialog.getByText(`${selection.length} von ${proposal.face_count} Gesichtern ausgewählt`, { exact: true }).waitFor();
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
     await previewFlow(browser, errors);
+    await collectSourcesFlow(browser, errors);
     await mapFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);
     await responsiveFlow(browser, errors);
+    await reviewInboxFlow(browser, errors);
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);
     console.log('PASS browser smoke: no uncaught page errors');
   } finally {

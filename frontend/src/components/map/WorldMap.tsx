@@ -28,6 +28,7 @@ interface MapSize {
 const WIDTH = 1000;
 const HEIGHT = 500;
 const MIN_SELECTION_PIXELS = 8;
+const MIN_PAN_PIXELS = 6;
 const MARKER_HIT_RADIUS = 22;
 const MARKER_CELL_PADDING = MARKER_HIT_RADIUS + 1;
 const MIN_CELL_SIZE = MARKER_CELL_PADDING * 2;
@@ -118,10 +119,12 @@ function projectBounds(bounds: MapBounds) {
 
 interface Gesture {
   pointerId: number;
+  captureTarget: Element;
   start: Point;
   bounds: MapBounds;
   view: MapView;
   selecting: boolean;
+  dragging: boolean;
 }
 
 function pointerPosition(event: React.PointerEvent<SVGSVGElement>) {
@@ -130,6 +133,14 @@ function pointerPosition(event: React.PointerEvent<SVGSVGElement>) {
     position: { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height },
     rect,
   };
+}
+
+function viewAfterPan(gesture: Gesture, position: Point) {
+  return normalizedView({
+    ...gesture.view,
+    longitude: gesture.view.longitude - (position.x - gesture.start.x) * (360 / gesture.view.zoom),
+    latitude: gesture.view.latitude + (position.y - gesture.start.y) * (180 / gesture.view.zoom),
+  });
 }
 
 interface Props {
@@ -174,12 +185,15 @@ const WorldMap: React.FC<Props> = ({
     return () => observer.disconnect();
   }, [onGridChange]);
   const gestureRef = useRef<Gesture | null>(null);
+  const suppressMarkerClick = useRef(false);
   const [dragBounds, setDragBounds] = useState<MapBounds | null>(null);
+  const [previewView, setPreviewView] = useState<MapView | null>(null);
   const bounds = useMemo(() => boundsForView(view), [view]);
-  const vb = projectBounds(bounds);
+  const markerViewBox = projectBounds(bounds);
+  const vb = previewView ? projectBounds(boundsForView(previewView)) : markerViewBox;
   // Marker geometry is in CSS pixels, independent of zoom and screen size.
-  const scaleX = vb.width / viewportSize.width;
-  const scaleY = vb.height / viewportSize.height;
+  const scaleX = markerViewBox.width / viewportSize.width;
+  const scaleY = markerViewBox.height / viewportSize.height;
 
   useLayoutEffect(() => {
     const marker = focusedMarkerRef.current;
@@ -193,50 +207,63 @@ const WorldMap: React.FC<Props> = ({
 
   useLayoutEffect(() => {
     const gesture = gestureRef.current;
-    if (!gesture || gesture.selecting === selectionMode) return;
-    const svg = svgRef.current;
+    if (!gesture || (gesture.selecting === selectionMode && gesture.view === view && gesture.captureTarget.isConnected)) return;
     gestureRef.current = null;
-    if (svg?.hasPointerCapture(gesture.pointerId)) svg.releasePointerCapture(gesture.pointerId);
+    if (gesture.captureTarget.hasPointerCapture(gesture.pointerId)) {
+      gesture.captureTarget.releasePointerCapture(gesture.pointerId);
+    }
     setDragBounds(null);
-  }, [selectionMode]);
+    setPreviewView(null);
+  }, [selectionMode, view, points]);
 
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0 || gestureRef.current) return;
-    if (!selectionMode && (event.target as Element).closest(".gps-map__marker")) return;
+    const target = event.target as Element;
+    // Keep marker taps on the element the pointer originally hit.
+    const captureTarget = !selectionMode && target.closest(".gps-map__marker") ? target : event.currentTarget;
     const { position } = pointerPosition(event);
-    gestureRef.current = { pointerId: event.pointerId, start: position, bounds, view, selecting: selectionMode };
-    event.currentTarget.setPointerCapture(event.pointerId);
+    suppressMarkerClick.current = false;
+    gestureRef.current = {
+      pointerId: event.pointerId, captureTarget, start: position, bounds, view,
+      selecting: selectionMode, dragging: false,
+    };
+    captureTarget.setPointerCapture(event.pointerId);
     if (selectionMode) setDragBounds(boundsForDrag(bounds, position, position));
   };
 
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
     const gesture = gestureRef.current;
     if (gesture?.pointerId !== event.pointerId) return;
-    const { position } = pointerPosition(event);
+    const { position, rect } = pointerPosition(event);
     if (gesture.selecting) {
       setDragBounds(boundsForDrag(gesture.bounds, gesture.start, position));
       return;
     }
-    onViewChange(normalizedView({
-      ...gesture.view,
-      longitude: gesture.view.longitude - (position.x - gesture.start.x) * (360 / gesture.view.zoom),
-      latitude: gesture.view.latitude + (position.y - gesture.start.y) * (180 / gesture.view.zoom),
-    }));
+    const distance = Math.hypot((position.x - gesture.start.x) * rect.width, (position.y - gesture.start.y) * rect.height);
+    if (!gesture.dragging && distance < MIN_PAN_PIXELS) return;
+    gesture.dragging = true;
+    suppressMarkerClick.current = true;
+    setPreviewView(viewAfterPan(gesture, position));
   };
 
-  const finishGesture = (svg: SVGSVGElement, pointerId: number) => {
+  const finishGesture = (pointerId: number) => {
     const gesture = gestureRef.current;
     if (gesture?.pointerId !== pointerId) return;
     gestureRef.current = null;
-    if (svg.hasPointerCapture(pointerId)) svg.releasePointerCapture(pointerId);
+    if (gesture.captureTarget.hasPointerCapture(pointerId)) gesture.captureTarget.releasePointerCapture(pointerId);
     setDragBounds(null);
+    setPreviewView(null);
     return gesture;
   };
 
   const handlePointerUp = (event: React.PointerEvent<SVGSVGElement>) => {
-    const gesture = finishGesture(event.currentTarget, event.pointerId);
-    if (!gesture?.selecting || !selectionMode) return;
+    const gesture = finishGesture(event.pointerId);
+    if (!gesture || gesture.selecting !== selectionMode) return;
     const { position, rect } = pointerPosition(event);
+    if (!gesture.selecting) {
+      if (gesture.dragging) onViewChange(viewAfterPan(gesture, position));
+      return;
+    }
     const width = Math.abs(clamp(position.x, 0, 1) - gesture.start.x) * rect.width;
     const height = Math.abs(clamp(position.y, 0, 1) - gesture.start.y) * rect.height;
     if (width < MIN_SELECTION_PIXELS || height < MIN_SELECTION_PIXELS) return;
@@ -244,7 +271,7 @@ const WorldMap: React.FC<Props> = ({
   };
 
   const cancelGesture = (event: React.PointerEvent<SVGSVGElement>) => {
-    finishGesture(event.currentTarget, event.pointerId);
+    finishGesture(event.pointerId);
   };
 
   const pan = (dx: number, dy: number) => onViewChange(normalizedView({
@@ -293,7 +320,10 @@ const WorldMap: React.FC<Props> = ({
           }
         }}
         onPointerDown={handlePointerDown} onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp} onPointerCancel={cancelGesture} onLostPointerCapture={cancelGesture}>
+        onPointerUp={handlePointerUp} onPointerCancel={cancelGesture}
+        onLostPointerCapture={(event) => {
+          if (event.target === gestureRef.current?.captureTarget) cancelGesture(event);
+        }}>
         <desc id="gps-map-keyboard-hint">{selectionMode
           ? "Mit den Pfeiltasten verschieben, mit Plus und Minus zoomen. Enter übernimmt den sichtbaren Bereich, Escape beendet die Auswahl."
           : "Mit den Pfeiltasten verschieben, mit Plus und Minus zoomen. Mit Tab einen Fotostandort wählen und mit Enter öffnen."}</desc>
@@ -305,8 +335,8 @@ const WorldMap: React.FC<Props> = ({
         {activeRect && <rect {...activeRect} className="gps-map__selection gps-map__selection--drag" />}
         {grid && points.map((marker) => {
           const position = markerPixelPosition(marker, bounds, viewportSize, grid);
-          const x = vb.x + position.x * scaleX;
-          const y = vb.y + position.y * scaleY;
+          const x = markerViewBox.x + position.x * scaleX;
+          const y = markerViewBox.y + position.y * scaleY;
           const radius = clamp(11 + Math.log10(marker.count + 1) * 3, 12, 18);
           const photoCount = `${marker.count} Foto${marker.count === 1 ? "" : "s"}`;
           return <g key={`${grid.columns}:${grid.rows}:${marker.x}:${marker.y}`} className="gps-map__marker"
@@ -314,7 +344,17 @@ const WorldMap: React.FC<Props> = ({
             aria-hidden={selectionMode || undefined}
             aria-pressed={!!selection && marker.west === selection.west && marker.east === selection.east && marker.south === selection.south && marker.north === selection.north}
             aria-label={`${photoCount} anzeigen, Breitengrad ${coordinates.format(marker.latitude)}, Längengrad ${coordinates.format(marker.longitude)}`}
-            onClick={() => { if (!selectionMode) onMarkerClick(marker); }} onKeyDown={(event) => {
+            onPointerUp={(event) => {
+              const gesture = gestureRef.current;
+              if (event.pointerType !== "touch" || selectionMode || gesture?.pointerId !== event.pointerId ||
+                gesture.dragging || !event.currentTarget.contains(gesture.captureTarget)) return;
+              // A browser can skip its synthetic click after a touch pan.
+              suppressMarkerClick.current = true;
+              onMarkerClick(marker);
+            }}
+            onClick={(event) => {
+              if (!selectionMode && (event.detail === 0 || !suppressMarkerClick.current)) onMarkerClick(marker);
+            }} onKeyDown={(event) => {
               if (selectionMode || event.repeat) return;
               if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onMarkerClick(marker); }
             }}>
