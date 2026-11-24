@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Face Manager
+Comment=Organize a local photo library by the people in it
+Comment[de]=Lokale Fotos nach Personen organisieren
+Exec=/usr/bin/face-manager
+Icon=face-manager
+Terminal=false
+Categories=Graphics;Photography;

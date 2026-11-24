@@ -21,9 +21,13 @@ cd "${PROJECT_ROOT}"
 repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 
 printf 'Configuring %s...\n' "${repository}"
-gh repo edit "${repository}" --default-branch develop
+gh repo edit "${repository}" \
+  --default-branch main \
+  --description 'Local photo organizer with face clustering and duplicate detection for Windows 11 and Ubuntu 26.04.' \
+  --homepage "https://github.com/${repository}/releases/latest" \
+  --add-topic photo-management,photo-organizer,face-clustering,face-recognition,duplicate-detection,privacy,desktop-app,ubuntu,linux,windows,onnx-runtime,openvino,cuda
 
 printf '%s\n' \
-  'Default branch set to develop.' \
+  'Default branch, project description, release link and topics configured.' \
   'Apply the protection rules documented in CONTRIBUTING.md under:' \
   '  Settings > Rules > Rulesets'

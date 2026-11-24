@@ -1,0 +1,51 @@
+name: Report a bug
+description: Tell us what went wrong in Face Manager.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Please keep personal photos, people’s names,
+        library databases, and private file paths out of the report.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 11 x64
+        - Ubuntu 26.04 amd64
+        - Android
+        - Source checkout or another platform
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Face Manager version
+      description: Use the version displayed in the app or the source commit.
+      placeholder: "0.13.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: compute
+    attributes:
+      label: Processing mode
+      description: Include this if the issue concerns importing or face processing.
+      options:
+        - NVIDIA CUDA
+        - Intel GPU
+        - CPU
+        - Unknown
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe what you expected and what you saw. Quote any relevant error message after removing private details.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the actions that lead to the problem. If it happens intermittently, mention how often.
+    validations:
+      required: true

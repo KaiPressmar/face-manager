@@ -1,21 +1,74 @@
 # Face Manager
 
-<p align="center">
-  <strong>Turn a folder full of photos into a browsable, searchable people library — locally.</strong>
-</p>
+Face Manager is a local photo organizer with face clustering for Windows and
+Ubuntu Linux. It scans your existing photo folders, groups similar faces, and
+lets you review and name people across your library. Browse photos by person,
+folder, or GPS location.
+Face Manager references your original files in place and keeps its library on
+your device.
 
-<p align="center">
-  Face detection · Similarity clustering · Person assignment · Folder-aware browsing
-</p>
+## Download and install
 
-Face Manager scans your existing photo folders, detects faces, groups similar faces,
-and gives you a visual interface for assigning those groups to people. Your photos
-stay where they are: the application stores only paths, thumbnails, face metadata,
-and embeddings in a local SQLite database.
+Download the file for your system under **Assets** on the
+[latest GitHub release](https://github.com/KaiPressmar/face-manager/releases/latest).
+
+| System | Installer | How to install |
+| --- | --- | --- |
+| **Windows 11 x64** | `FaceManager-Setup-X.Y.Z.exe` | Open the downloaded installer. |
+| **Ubuntu 26.04 amd64** | `face-manager_X.Y.Z_amd64.deb` | Install the package with APT. |
+
+On Ubuntu, open a terminal in the download folder and replace `X.Y.Z` with the
+version in the filename:
+
+```bash
+sudo apt install ./face-manager_X.Y.Z_amd64.deb
+```
+
+Open **Face Manager** from the applications menu after installation. On Ubuntu,
+you can also run `face-manager` in a terminal. The first desktop face-processing
+run needs internet access if the InsightFace model is not already cached.
+To update on Ubuntu, download the newer `.deb` and run the same APT command with
+the new filename.
+
+The shared Windows installer and the Ubuntu package are available once the
+release includes their listed assets. Older releases may show separate Windows
+CPU and GPU installers. To upgrade from the old `-GPU` installer, download the
+shared `.exe` and choose to keep your data when prompted.
+
+### Desktop acceleration
+
+Each desktop installer works on CPU and can use a supported GPU with the
+appropriate driver. Face Manager tries NVIDIA CUDA first, then an available
+Intel GPU through OpenVINO, then CPU. On Ubuntu, an Intel GPU also requires an
+OpenCL compute driver. Windows SmartScreen may warn about the unsigned
+installer. The release provides a SHA-256 checksum for each desktop package.
+
+### Android
+
+The separate Android app processes photos on the phone and includes its face
+models. A release offers an Android download when its signed
+`FaceManager-Android-X.Y.Z.apk` appears under **Assets**.
+[Android installation and build instructions](android/README.md).
 
 > [!IMPORTANT]
 > Face Manager is designed for trusted, local use. Images and face data are not
 > uploaded to a hosted service.
+
+## Screenshots
+
+Screenshots of Face Manager using a synthetic demo library.
+
+### Photo library
+
+![Photo library with person and folder filters, face labels, and a grid of portraits and travel photos](docs/screenshots/photo-library.webp)
+
+### People review
+
+![Two suggested person assignments with selected face previews and confirmed reference photos](docs/screenshots/people-review.webp)
+
+### Photo map
+
+![Offline world map with clustered photo locations, date filters, and the photos in the visible region](docs/screenshots/photo-map.webp)
 
 ## Why Face Manager?
 
@@ -29,8 +82,6 @@ original files.
   folder selections from one interface.
 - **Avoid duplicate processing** — content hashes identify identical images even when
   they appear at multiple locations.
-- **Run on your own hardware** — CPU processing works out of the box, with optional
-  NVIDIA GPU acceleration for larger libraries.
 - **Stay in control** — assignments, clusters, embeddings, and library metadata remain
   in your local SQLite database.
 
@@ -42,19 +93,19 @@ original files.
 | Clustering | Groups similar faces incrementally using cosine distance and an HNSW neighbor index |
 | People | Assigns clusters to named people and uses those assignments as conservative matching guidance |
 | Photo browser | Displays a masonry gallery, face overlays, and full-screen navigation |
+| Photo map | Shows geotagged photos on an offline map with location and date filters |
 | Folder filtering | Searches and selects multiple nested folders at any discovered level |
 | Import pipeline | Queues imports, resumes interrupted jobs, and skips already processed content |
 | Storage | Persists library metadata in SQLite while leaving source images untouched |
-| Acceleration | Uses CPU by default and CUDA automatically when a supported provider is available |
 
 ## Tech Stack
 
 - **Backend:** Python, FastAPI, SQLite, InsightFace, ONNX Runtime, hnswlib
 - **Frontend:** React, TypeScript, Vite
-- **Desktop packaging:** PyInstaller and Inno Setup
-- **Automation:** GitHub Actions for validation and Windows releases
+- **Desktop packaging:** PyInstaller and Inno Setup for Windows, Debian packages for Ubuntu
+- **Automation:** GitHub Actions for validation and desktop releases
 
-## Quick Start
+## Run from source
 
 ### Ubuntu 22.04+ or WSL2
 
@@ -127,7 +178,7 @@ from all descendants.
 
 ### Explore photos on the world map
 
-Open **Weltkarte** in the library sidebar to explore photos by their GPS capture
+Open **Karte** in the library sidebar to explore photos by their GPS capture
 location. Map and matching photos appear side by side on larger screens. Zoom
 and pan to explore clusters, select a rectangular region, and combine it with
 an inclusive capture-date range or a date shortcut. Remove individual filter
@@ -166,7 +217,7 @@ Queued jobs can be removed immediately. Running jobs stop safely after the curre
 image. If the backend restarts, unfinished jobs return to the queue in FIFO order and
 already committed images are skipped.
 
-## Optional NVIDIA GPU Support
+## Optional NVIDIA GPU setup from source
 
 Verify that the NVIDIA driver is available:
 
@@ -269,6 +320,10 @@ Windows desktop installations store the database under:
 %LOCALAPPDATA%\FaceManager\database.sqlite
 ```
 
+The Ubuntu package uses `$XDG_DATA_HOME/face-manager` or
+`~/.local/share/face-manager` when `XDG_DATA_HOME` is unset. If that location
+has no database, the launcher reuses an existing `~/.face-manager` library.
+
 ## Validation
 
 Run the local equivalent of the GitHub Actions checks:
@@ -299,40 +354,21 @@ NODE_PATH=/tmp/face-manager-ui-tools/node_modules PLAYWRIGHT_BROWSERS_PATH=/tmp/
 Optional: set `UI_SMOKE_SCREENSHOT_DIR` to retain screenshots, or override
 `UI_SMOKE_API_PORT` / `UI_SMOKE_WEB_PORT` if the default ports 8194 / 5194 are in use.
 
-## Android Releases
+## Build desktop installers
 
-An independent Android edition is available as `FaceManager-Android-X.Y.Z.apk`.
-It processes selected photos locally on the phone and includes its offline face
-models. See [Android installation, features and validation](android/README.md)
-for Samsung Galaxy S22 installation and the Android build/signing process.
-
-## Windows Desktop Releases
-
-A tested release on `main` produces CPU and GPU installer variants:
-
-```text
-FaceManager-Setup-X.Y.Z.exe
-FaceManager-Setup-GPU-X.Y.Z.exe
-```
-
-The desktop bundle starts the backend automatically and opens Face Manager in a native
-window. The first face-processing run still requires internet access to download the
-InsightFace model when it is not already cached.
-
-> [!NOTE]
-> Current Windows installers are not Authenticode-signed. Published SHA-256 checksums
-> and GitHub build-provenance attestations help verify origin and integrity, but
-> Windows SmartScreen may still show a warning.
-
-To build an installer manually on Windows with Python 3.10+, Node.js 20+, and Inno
-Setup 6:
+Build the installer on Windows with CPython 3.12 x64, Node.js 20+, and Inno Setup 6:
 
 ```powershell
-python -m pip install -r backend/requirements.txt -r backend/requirements-desktop.txt "onnxruntime>=1.21,<2"
 ./packaging/windows/build-release.ps1
+```
 
-# GPU variant
-./packaging/windows/build-release.ps1 -Variant gpu
+Build and check the `.deb` on an Ubuntu 26.04 amd64 build host with Python 3.14 headers
+and venv, build tools, GTK 3 and WebKitGTK 4.1 introspection, `desktop-file-utils`, and
+Node.js 20+:
+
+```bash
+./scripts/package-linux.sh
+./scripts/package-linux.sh --check "dist/face-manager_$(cat VERSION)_amd64.deb"
 ```
 
 ## Project Structure
@@ -349,8 +385,9 @@ frontend/
   package.json           Frontend scripts and dependencies
 .github/workflows/
   ci.yml                 Pull request and branch validation
-  release.yml            Release and Windows artifact publication
-packaging/windows/       Desktop bundle and installer configuration
+  release.yml            Release and desktop artifact publication
+packaging/windows/       Windows bundle and installer configuration
+packaging/linux/         Ubuntu package and runtime launcher
 scripts/                 Setup, validation, and release helpers
 CHANGELOG.md             Curated user-facing release notes
 CONTRIBUTING.md          Development and release workflow
@@ -381,6 +418,12 @@ See [CHANGELOG.md](CHANGELOG.md) for user-facing changes and
 
 ## Troubleshooting
 
+### Start the Ubuntu package in CPU mode
+
+```bash
+FACE_MANAGER_CPU_ONLY=1 face-manager
+```
+
 ### `hnswlib` fails to install
 
 ```bash
@@ -394,7 +437,7 @@ python -m pip install --upgrade pip setuptools wheel
 sudo apt install -y libgl1 libglib2.0-0
 ```
 
-### Processing uses the CPU despite an NVIDIA GPU
+### Source installation uses the CPU despite an NVIDIA GPU
 
 Check `nvidia-smi`, then inspect the available providers:
 
@@ -455,8 +498,8 @@ canvas. InsightFace returns a bounding box for every detected face:
 ```
 
 The bounding box is stored with the image record and is used for face overlays and
-thumbnails. Detection and embedding inference run through ONNX Runtime. CUDA is used
-when `CUDAExecutionProvider` is available; otherwise the same model runs on the CPU.
+thumbnails. Detection and embedding inference run through ONNX Runtime. On desktop,
+the same models can run through NVIDIA CUDA, Intel GPU with OpenVINO, or CPU.
 
 ### 3. Face embeddings
 

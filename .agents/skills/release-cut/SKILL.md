@@ -20,7 +20,7 @@ published version.
 - Never push directly to `develop` or `main`. Both hops go through PRs.
 - Never `git tag` or `gh release create`. On a merge to `main`, CI runs, and on
   success `.github/workflows/release.yml` creates the annotated tag `vX.Y.Z`, the
-  GitHub Release (notes rendered from `CHANGELOG.md`), and the Windows installers.
+  GitHub Release (notes rendered from `CHANGELOG.md`), and the desktop installers.
   Doing any of this by hand corrupts the release.
 - Let `scripts/release-version.sh` do all version/changelog edits — do not hand-edit
   `VERSION`, `frontend/package.json`, `frontend/package-lock.json`, or move the
@@ -137,9 +137,10 @@ gh run view <run-id> --json status,conclusion,jobs \
 gh release view "v$(cat VERSION)" --json url,tagName,targetCommitish,assets
 ```
 
-The publish job creates the GitHub Release before the CPU and GPU bundles finish.
-An initially empty `assets` array is therefore expected, not a failure. Keep
-monitoring until the complete publish workflow finishes.
+The release workflow prepares a draft, builds and checks the Windows and Ubuntu
+installers, and publishes after the build jobs succeed and both installer and
+checksum pairs are present. Keep monitoring until `Publish verified release`
+finishes and `isDraft` is `false`.
 
 If an installer job fails, inspect its failed log before changing code. Retry the
 failed jobs once only when the log proves a transient infrastructure problem such
@@ -154,9 +155,9 @@ gh run watch <run-id> --exit-status
 For deterministic build, test, signing, or upload failures, fix the cause through
 the normal PR flow and cut a newer version; never mutate an existing tag.
 
-After a successful workflow, require exactly the four expected deliverables:
+After a successful workflow, require the four desktop deliverables:
 `FaceManager-Setup-X.Y.Z.exe`, `FaceManager-Setup-X.Y.Z.exe.sha256`,
-`FaceManager-Setup-GPU-X.Y.Z.exe`, and its `.sha256`. Verify that each asset has a
+`face-manager_X.Y.Z_amd64.deb`, and `face-manager_X.Y.Z_amd64.deb.sha256`. Verify that each asset has a
 non-zero size, URL, and digest; report both installer sizes and SHA-256 digests.
 If CI failed before publishing, report that instead — never fill the gap by
 tagging or creating the release manually.

@@ -65,14 +65,15 @@ def get_changelog_path() -> Path:
 
 
 def get_build_variant() -> str:
-    """Return the installer flavor embedded by the Windows release build."""
+    """Return the update channel embedded in the application package."""
+    variants = {"cpu", "gpu", "android", "windows", "linux"}
     override = os.environ.get("FACE_MANAGER_BUILD_VARIANT", "").strip().lower()
-    if override in {"cpu", "gpu", "android"}:
+    if override in variants:
         return override
     variant_path = get_project_root() / "BUILD_VARIANT"
     if variant_path.is_file():
         variant = variant_path.read_text(encoding="utf-8").strip().lower()
-        if variant in {"cpu", "gpu"}:
+        if variant in variants:
             return variant
     return "cpu"
 
