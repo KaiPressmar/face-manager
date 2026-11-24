@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay from "./FaceOverlay";
 import { assignLabelLanes } from "../../utils/faceLabels";
@@ -24,6 +24,7 @@ interface ImageGridProps {
   isLoadingMore: boolean;
   faceOverlayMode: FaceOverlayMode;
   gridSize: ImageGridSize;
+  galleryRevision: number;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onLoadMore: () => void;
   hasActiveFilters: boolean;
@@ -73,13 +74,16 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   isLoadingMore,
   faceOverlayMode,
   gridSize,
+  galleryRevision,
   onNavigateToCluster,
   onLoadMore,
   hasActiveFilters,
   onResetFilters,
   onImageDeleted,
 }) => {
-  const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
+  const [galleryImageId, setGalleryImageId] = useState<number | null>(null);
+  const galleryIndex = galleryImageId === null ? -1 : images.findIndex((image) => image.id === galleryImageId);
+  const currentImagesRef = useRef(images);
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const fileActionTimerRef = useRef<number | null>(null);
   const [imageDimensions, setImageDimensions] = useState<
@@ -184,13 +188,14 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     });
   }, [images, imageDimensions, isLoading]);
 
-  useEffect(() => {
-    setGalleryIndex((current) => {
-      if (current === null) return null;
-      if (current >= images.length) return null;
-      return current;
-    });
-  }, [images.length]);
+  useLayoutEffect(() => {
+    currentImagesRef.current = images;
+    if (galleryImageId !== null && galleryIndex < 0) setGalleryImageId(null);
+  }, [images, galleryIndex, galleryImageId]);
+
+  useLayoutEffect(() => {
+    setGalleryImageId(null);
+  }, [galleryRevision]);
 
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
@@ -201,12 +206,11 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
     try {
       await deleteImage(image.id);
+      const currentImages = currentImagesRef.current;
+      const deletedIndex = currentImages.findIndex((item) => item.id === image.id);
+      const adjacent = deletedIndex < 0 ? null : currentImages[deletedIndex + 1] ?? currentImages[deletedIndex - 1];
+      setGalleryImageId((current) => current === image.id ? adjacent?.id ?? null : current);
       onImageDeleted(image.id);
-      setGalleryIndex((current) => {
-        if (current === null) return null;
-        if (images.length <= 1) return null;
-        return Math.min(current, images.length - 2);
-      });
       return true;
     } catch (error) {
       window.alert(
@@ -319,11 +323,11 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                 role="button"
                 tabIndex={0}
                 aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-                onClick={() => setGalleryIndex(images.findIndex((item) => item.id === img.id))}
+                onClick={() => setGalleryImageId(img.id)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
-                    setGalleryIndex(images.findIndex((item) => item.id === img.id));
+                    setGalleryImageId(img.id);
                   }
                 }}
                 style={{
@@ -435,13 +439,13 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
       {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
 
-      {galleryIndex !== null && images[galleryIndex] && (
+      {galleryIndex >= 0 && (
         <FullscreenImageGallery
           images={images}
           activeIndex={galleryIndex}
           onNavigateToCluster={onNavigateToCluster}
-          onChange={setGalleryIndex}
-          onClose={() => setGalleryIndex(null)}
+          onChange={(index) => setGalleryImageId(images[index]?.id ?? null)}
+          onClose={() => setGalleryImageId(null)}
           onDelete={(image) => removeImage(image as FaceImage)}
         />
       )}

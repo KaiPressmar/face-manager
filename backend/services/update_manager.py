@@ -208,7 +208,7 @@ class UpdateManager:
 
         with self._download_lock:
             if self._download_state.get("status") == "downloading":
-                return dict(self._download_state)
+                return self._public_download_state()
             if (
                 self._download_state.get("status") == "ready"
                 and self._download_state.get("version") == version
@@ -223,20 +223,32 @@ class UpdateManager:
                 "total_bytes": None,
             }
 
-        thread = threading.Thread(
-            target=self._download,
-            args=(candidate, target_directory),
-            daemon=True,
-            name="face-manager-update-download",
-        )
-        thread.start()
-        return self._public_download_state()
+            try:
+                threading.Thread(
+                    target=self._download,
+                    args=(candidate, target_directory),
+                    daemon=True,
+                    name="face-manager-update-download",
+                ).start()
+            except Exception as exc:
+                logger.exception("Could not start Face Manager update download")
+                self._set_download_error(candidate, exc)
+            return self._public_download_state()
+
+    def _set_download_error(self, candidate: dict[str, str], error: Exception) -> None:
+        with self._download_lock:
+            self._download_state = {
+                "status": "error",
+                "version": candidate["version"],
+                "installer_name": candidate["installer_name"],
+                "error": str(error),
+            }
 
     def _download(self, candidate: dict[str, str], target_directory: Path) -> None:
-        target_directory.mkdir(parents=True, exist_ok=True)
         final_path = target_directory / candidate["installer_name"]
         partial_path = final_path.with_suffix(final_path.suffix + ".part")
         try:
+            target_directory.mkdir(parents=True, exist_ok=True)
             expected_checksum = self._fetch_checksum(candidate)
             digest = hashlib.sha256()
             with self._request(candidate["installer_url"], timeout=60.0) as response:
@@ -271,15 +283,13 @@ class UpdateManager:
                     "sha256": actual_checksum,
                 }
         except Exception as exc:
-            partial_path.unlink(missing_ok=True)
             logger.exception("Face Manager update download failed")
-            with self._download_lock:
-                self._download_state = {
-                    "status": "error",
-                    "version": candidate["version"],
-                    "installer_name": candidate["installer_name"],
-                    "error": str(exc),
-                }
+            try:
+                partial_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove partial update download", exc_info=True)
+            finally:
+                self._set_download_error(candidate, exc)
 
     def _fetch_checksum(self, candidate: dict[str, str]) -> str:
         with self._request(candidate["checksum_url"]) as response:

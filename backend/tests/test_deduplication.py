@@ -126,6 +126,58 @@ class DeduplicationMigrationTest(unittest.TestCase):
                 self.assertEqual(counts[str(second_dir)], 1)
                 self.assertEqual(counts[str(root)], 1)
 
+    def test_duplicate_migration_preserves_confirmed_conflicting_and_distinct_faces(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first, second = root / "first.jpg", root / "second.jpg"
+            first.write_bytes(b"identical image contents")
+            second.write_bytes(first.read_bytes())
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                for name in ("Anna", "Bert"):
+                    person_id = conn.execute("INSERT INTO person(name) VALUES (?)", (name,)).lastrowid
+                    conn.execute("INSERT INTO cluster(person_id) VALUES (?)", (person_id,))
+                for photo in (first, second):
+                    conn.execute(
+                        "INSERT INTO image(path, directory, filename, processed_at) VALUES (?, ?, ?, 'done')",
+                        (str(photo), str(root), photo.name),
+                    )
+                conn.execute(
+                    "UPDATE image SET latitude = 52, longitude = 13, captured_at = '2024-01-01T10:00:00', "
+                    "metadata_scanned_at = 'done' WHERE id = 2"
+                )
+                conn.executemany(
+                    """INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, cluster_id, review_status)
+                       VALUES (?, ?, 1, 3, 3, ?, ?)""",
+                    [
+                        (1, 1, None, "active"),
+                        (1, 5, 1, "active"),
+                        (2, 1, 1, "active"),
+                        (2, 5, 2, "active"),
+                        (2, 9, None, "unknown_person"),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                schema.init_db()
+                conn = schema.get_conn()
+                images = conn.execute(
+                    "SELECT id, latitude, longitude, captured_at, metadata_scanned_at FROM image"
+                ).fetchall()
+                self.assertEqual([tuple(row) for row in images], [(1, 52, 13, "2024-01-01T10:00:00", "done")])
+                merged = conn.execute(
+                    "SELECT id, image_id, cluster_id, review_status FROM face ORDER BY id"
+                ).fetchall()
+                conn.close()
+                self.assertEqual([tuple(row) for row in merged], [
+                    (1, 1, 1, "active"),
+                    (2, 1, 1, "active"),
+                    (4, 1, 2, "active"),
+                    (5, 1, None, "unknown_person"),
+                ])
+
     def test_list_images_page_supports_filters_and_pagination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

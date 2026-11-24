@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import math
 import os
 import shutil
 import sqlite3
@@ -369,6 +370,79 @@ def _ensure_content_hash_column(cur):
         cur.execute("ALTER TABLE image ADD COLUMN content_hash TEXT")
 
 
+def _face_box(face):
+    box = tuple(face[column] for column in ("bbox_x", "bbox_y", "bbox_w", "bbox_h"))
+    if all(isinstance(value, (int, float)) and math.isfinite(value) for value in box):
+        if box[2] > 0 and box[3] > 0:
+            return box
+    return None
+
+
+def _merge_duplicate_image_faces(cur, canonical_id, duplicate_id):
+    """Keep distinct or conflicting face records when collapsing image aliases."""
+    faces = cur.execute(
+        """SELECT f.id, f.image_id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+                  f.review_status, f.embedding, c.id AS cluster_id, c.person_id, c.label
+           FROM face f LEFT JOIN cluster c ON c.id = f.cluster_id
+           WHERE f.image_id IN (?, ?) ORDER BY f.id""",
+        (canonical_id, duplicate_id),
+    ).fetchall()
+    canonical_by_box = {}
+    for face in faces:
+        if face["image_id"] == canonical_id and (box := _face_box(face)) is not None:
+            canonical_by_box.setdefault(box, []).append(face)
+
+    default_annotation = (FACE_REVIEW_STATUS_ACTIVE, None, None)
+    paired = set()
+    for face in faces:
+        if face["image_id"] != duplicate_id:
+            continue
+        matches = canonical_by_box.get(_face_box(face), ())
+        if len(matches) == 1 and matches[0]["id"] not in paired:
+            canonical = matches[0]
+            existing = (canonical["review_status"], canonical["person_id"], canonical["label"])
+            incoming = (face["review_status"], face["person_id"], face["label"])
+            if existing == incoming or default_annotation in (existing, incoming):
+                if existing == default_annotation and incoming != existing:
+                    cur.execute(
+                        "UPDATE face SET cluster_id = ?, review_status = ? WHERE id = ?",
+                        (face["cluster_id"], face["review_status"], canonical["id"]),
+                    )
+                if canonical["embedding"] is None and face["embedding"] is not None:
+                    cur.execute(
+                        "UPDATE face SET embedding = ? WHERE id = ?",
+                        (face["embedding"], canonical["id"]),
+                    )
+                paired.add(canonical["id"])
+                cur.execute("DELETE FROM face WHERE id = ?", (face["id"],))
+                continue
+        cur.execute("UPDATE face SET image_id = ? WHERE id = ?", (canonical_id, face["id"]))
+
+
+def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
+    rows = cur.execute(
+        """SELECT id, latitude, longitude, captured_at, metadata_scanned_at
+           FROM image WHERE id IN (?, ?)""",
+        (canonical_id, duplicate_id),
+    ).fetchall()
+    by_id = {row["id"]: row for row in rows}
+    canonical, duplicate = by_id[canonical_id], by_id[duplicate_id]
+    latitude, longitude = canonical["latitude"], canonical["longitude"]
+    if (latitude is None or longitude is None) and (
+        duplicate["latitude"] is not None and duplicate["longitude"] is not None
+    ):
+        latitude, longitude = duplicate["latitude"], duplicate["longitude"]
+    captured_at = canonical["captured_at"] or duplicate["captured_at"]
+    scanned_at = canonical["metadata_scanned_at"]
+    if scanned_at in (None, "missing") and duplicate["metadata_scanned_at"] not in (None, "missing"):
+        scanned_at = duplicate["metadata_scanned_at"]
+    cur.execute(
+        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?, metadata_scanned_at = ?
+           WHERE id = ?""",
+        (latitude, longitude, captured_at, scanned_at, canonical_id),
+    )
+
+
 def _migrate_image_locations(conn):
     """Migrate legacy image paths and merge duplicate content.
 
@@ -436,6 +510,8 @@ def _migrate_image_locations(conn):
         ]
         canonical_id, duplicate_ids = image_ids[0], image_ids[1:]
         for duplicate_id in duplicate_ids:
+            _merge_duplicate_image_faces(cur, canonical_id, duplicate_id)
+            _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id)
             cur.execute(
                 "UPDATE image_location SET image_id = ? WHERE image_id = ?",
                 (canonical_id, duplicate_id),
@@ -765,7 +841,7 @@ def _initialize_schema(conn):
     conn.commit()
 
 
-def init_db():
+def init_db(*, recover: bool = True):
     """Create and migrate the application database schema."""
     conn = None
     try:
@@ -775,7 +851,7 @@ def init_db():
         if conn is not None:
             conn.close()
             conn = None
-        if not _is_recoverable_database_error(exc):
+        if not recover or not _is_recoverable_database_error(exc):
             raise
         recover_database(exc, "database initialization")
         conn = _open_connection()

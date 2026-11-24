@@ -174,6 +174,12 @@ class ChangelogTest(unittest.TestCase):
         persist.assert_called_once_with("1.2.0")
         self.assertEqual(response, {"version": "1.2.0", "seen": True})
 
+    def test_full_changelog_file_failure_is_retryable(self):
+        with patch.object(app_module, "load_changelog", side_effect=OSError("temporarily unavailable")):
+            with self.assertRaises(app_module.HTTPException) as raised:
+                app_module.api_full_changelog()
+        self.assertEqual(raised.exception.status_code, 503)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,11 +75,15 @@ class AutoClusterQueueTest(unittest.TestCase):
         self.assertIsNotNone(queue.start("restarted", repair_callable=lambda progress_callback=None: 1))
 
     def test_shutdown_cancels_deferred_task(self):
-        queue = self._new_queue(count_callable=lambda: 1, ready_gate=lambda: False)
-        queue.start("deferred")
-        queue.stop(timeout=1)
-        queue.notify_ready()
-        self.assertEqual(self._status(queue), "cancelled")
+        for pause_before_start in (False, True):
+            with self.subTest(pause_before_start=pause_before_start):
+                queue = self._new_queue(count_callable=lambda: 1, ready_gate=lambda: False)
+                task = queue.start("deferred")
+                if pause_before_start:
+                    self.assertEqual(queue.pause(task["id"])["status"], "paused")
+                queue.stop(timeout=1)
+                queue.notify_ready()
+                self.assertEqual(self._status(queue), "cancelled")
 
     def test_noncooperative_worker_blocks_restart_after_shutdown_timeout(self):
         entered = threading.Event()
@@ -206,6 +210,43 @@ class AutoClusterQueueTest(unittest.TestCase):
 
         release_first.set()
         self.assertTrue(second_ran.wait(2.0))
+
+    def test_terminal_dismissal_does_not_strand_the_pending_request(self):
+        for terminal in ("completed", "failed", "cancelled"):
+            with self.subTest(terminal=terminal):
+                entered, release, ran = threading.Event(), threading.Event(), threading.Event()
+                dismissed = []
+                calls = []
+
+                def first(progress_callback=None):
+                    entered.set()
+                    release.wait(2)
+                    if terminal == "failed":
+                        raise RuntimeError("test repair failure")
+                    return 1
+
+                def second(progress_callback=None):
+                    calls.append("second")
+                    ran.set()
+                    return 1
+
+                def on_change():
+                    task = queue.snapshot()["task"]
+                    if task and task["reason"] == "first" and task["status"] == terminal:
+                        dismissed.append(queue.dismiss(task["id"]))
+
+                queue = self._new_queue(count_callable=lambda: 1, on_change=on_change)
+                task = queue.start("first", repair_callable=first)
+                self.assertTrue(entered.wait(2))
+                first_worker = queue._thread
+                queue.start("second", repair_callable=second)
+                if terminal == "cancelled":
+                    self.assertEqual(queue.cancel(task["id"])["status"], "cancelling")
+                release.set()
+                self.assertTrue(ran.wait(2))
+                first_worker.join(2)
+                self.assertEqual(dismissed, [True])
+                self.assertEqual(calls, ["second"])
 
     def test_running_task_can_pause_resume_cancel_and_be_dismissed(self):
         started = threading.Event()

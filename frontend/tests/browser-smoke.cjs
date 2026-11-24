@@ -242,11 +242,16 @@ async function existingFlow(browser, errors) {
     await importDialog.waitFor({ state: 'hidden' });
     assert.ok(await importTrigger.evaluate((element) => element === document.activeElement), 'Import dialog did not restore its trigger');
     const changelogTrigger = page.getByTitle('Änderungsprotokoll anzeigen');
+    await page.route('**/api/changelog', (route) => route.fulfill({ status: 503, json: {} }));
     await changelogTrigger.click();
     const changelog = page.getByRole('dialog', { name: 'Änderungsprotokoll' });
     await changelog.waitFor();
+    await changelog.getByRole('alert').waitFor();
     await assertFocusInDialog(page, changelog);
     await assertTabTrap(page, changelog);
+    await page.unroute('**/api/changelog');
+    await changelog.getByRole('button', { name: 'Erneut versuchen' }).click();
+    await changelog.locator('.whats-new-release').first().waitFor();
     await page.keyboard.press('Escape');
     await changelog.waitFor({ state: 'hidden' });
     assert.ok(await changelogTrigger.evaluate((element) => element === document.activeElement), 'Changelog did not restore its trigger');
@@ -307,6 +312,124 @@ async function existingFlow(browser, errors) {
     await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
     await screenshot(page, 'existing-flows');
     console.log('PASS existing flows: library/folder retry, person filter, import, rename, settings, review tabs');
+  } finally {
+    await page.close();
+  }
+}
+
+async function liveWorkflowFlow(browser, errors) {
+  const page = await newPage(browser, 1440, 1000, errors);
+  const publishLibraryChange = (reason) => page.evaluate((reason) => {
+    window.workflowTestEvents.dispatchEvent(new MessageEvent('clusters', {
+      data: JSON.stringify({ reason }),
+    }));
+  }, reason);
+  try {
+    await page.addInitScript(() => {
+      window.EventSource = class TestEventSource extends EventTarget {
+        constructor() {
+          super();
+          window.workflowTestEvents = this;
+          queueMicrotask(() => this.onopen?.(new Event('open')));
+        }
+        close() {}
+      };
+    });
+    await page.goto(`${webBase}/#/bilder`);
+    const firstPhoto = page.locator('.image-gallery-card').first();
+    await firstPhoto.click();
+    const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
+    const galleryTitle = gallery.locator('.gallery-title strong');
+    await galleryTitle.waitFor();
+    const originalTitle = await galleryTitle.textContent();
+    await page.route('**/api/images?**', async (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      if (query.get('offset') !== '0' || query.get('limit') === '1') return route.continue();
+      const response = await route.fetch();
+      const data = await response.json();
+      data.items = [
+        { ...data.items[0], id: 987654321, filename: 'Live neu importiert.jpg' },
+        ...data.items.slice(0, -1),
+      ];
+      await route.fulfill({ response, json: data });
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.locator('[data-image-id="987654321"]').waitFor();
+    assert.equal(await galleryTitle.textContent(), originalTitle, 'Live refresh changed the active gallery photo');
+    await page.unroute('**/api/images?**');
+    await publishLibraryChange('database_import');
+    await gallery.waitFor({ state: 'hidden' });
+    await firstPhoto.click();
+    await gallery.waitFor();
+
+    await page.goto(`${webBase}/#/weltkarte`);
+    await page.getByRole('status').filter({ hasText: /^85 Fotos$/ }).waitFor();
+    await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.gps-page__photo').length === 72);
+    await page.locator('.gps-page__photo').nth(36).click();
+    await gallery.waitFor();
+    await page.route('**/api/map/images?**', async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...await response.json(), total: 84 } });
+    });
+    await publishLibraryChange('delete_image');
+    await page.getByRole('status').filter({ hasText: /^84 Fotos$/ }).waitFor();
+    assert.equal(await page.locator('.gps-page__photo').count(), 36, 'Old pages survived a library change');
+    assert.ok(await gallery.isVisible(), 'Library refresh closed the open map gallery');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => document.activeElement?.id === 'gps-map-results');
+    await page.unroute('**/api/map/images?**');
+    await page.locator('.gps-page__photo').first().click();
+    await gallery.waitFor();
+    await publishLibraryChange('database_import');
+    await gallery.waitFor({ state: 'hidden' });
+    await page.goto(`${webBase}/#/bilder`);
+    await firstPhoto.waitFor();
+    assert.equal(await gallery.count(), 0, 'A hidden library gallery reopened after restore');
+
+    const reviewClusters = [
+      { cluster_id: 1, cluster_label: 'Benannte Gruppe', person_name: 'Anna', face_count: 4 },
+      { cluster_id: 3, cluster_label: 'Offene Gruppe', person_name: null, face_count: 4 },
+    ];
+    await page.route('**/api/clusters-overview', (route) => route.fulfill({ json: {
+      clusters: reviewClusters, review_groups: [], first_cluster: null,
+    } }));
+    await page.route('**/api/clusters', (route) => route.fulfill({ json: reviewClusters }));
+    await page.goto(`${webBase}/#/gesichter-pruefen/gruppe/987654321`);
+    await page.locator('.cluster-detail-topbar__entity--secondary').getByText('Offene Gruppe', { exact: true }).waitFor();
+    const groupRequest = page.waitForRequest('**/api/face-review-groups/unknown_person/faces');
+    await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
+    await groupRequest;
+
+    let total = 26;
+    const candidates = Array.from({ length: 26 }, (_, index) => ({
+      image_id: index + 1, location_id: index + 1, path: `/fixture/foto-${index + 1}.jpg`,
+      current_filename: `foto-${index + 1}.jpg`, proposed_filename: `foto-${index + 1} Anna.jpg`,
+      detected_person_names: ['Anna'], current_suffix_person_names: [],
+    }));
+    await page.route('**/api/image-renames/count?**', (route) => route.fulfill({ json: { total } }));
+    await page.route('**/api/image-renames?**', (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const offset = Number(query.get('offset'));
+      const limit = Number(query.get('limit'));
+      return route.fulfill({ json: {
+        items: candidates.slice(0, total).slice(offset, offset + limit),
+        offset, limit, total: null, has_more: offset + limit < total, available_persons: ['Anna'],
+      } });
+    });
+    await page.route('**/api/image-renames/apply', (route) => {
+      total = 25;
+      return route.fulfill({ json: { renamed_count: 1, skipped_count: 0, error_count: 0 } });
+    });
+    await page.goto(`${webBase}/#/dateinamen`);
+    const pagination = page.locator('.rename-pagination--top');
+    await pagination.getByText('Seite 1 von 2').waitFor();
+    await pagination.getByRole('button', { name: 'Weiter' }).click();
+    await page.getByRole('button', { name: 'Seite wählen (1)' }).click();
+    await page.getByRole('button', { name: '1 Dateinamen aktualisieren', exact: true }).click();
+    await pagination.getByText('Seite 1 von 1').waitFor();
+    assert.equal(await page.locator('.rename-row').count(), 25);
+    console.log('PASS live workflows: stable gallery, map refresh, missing review link, rename page correction');
   } finally {
     await page.close();
   }
@@ -403,6 +526,7 @@ async function responsiveFlow(browser, errors) {
   const errors = [];
   try {
     await mapFlow(browser, errors);
+    await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);
     await responsiveFlow(browser, errors);

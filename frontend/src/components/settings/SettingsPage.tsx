@@ -519,6 +519,9 @@ const SettingsPage: React.FC<{
   };
 
   const handleImagePathCleanup = async () => {
+    if (!window.confirm(
+      "Fehlende Dateien aus der Bibliothek entfernen? Wenn ein Bild keinen weiteren Speicherort hat, gehen auch seine Gesichtszuordnungen verloren. Schließe vorher alle Fotolaufwerke an.",
+    )) return;
     setError(null);
     setMessage(null);
     try {
@@ -539,7 +542,7 @@ const SettingsPage: React.FC<{
       : pathCleanup.status === "running"
         ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft…`
         : pathCleanup.status === "completed"
-          ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft, ${pathCleanup.removed_paths.toLocaleString("de-DE")} ungültige Speicherorte und ${pathCleanup.removed_images.toLocaleString("de-DE")} nicht mehr verfügbare Bilder entfernt.`
+          ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${pathCleanup.removed_paths.toLocaleString("de-DE")} Speicherorte und ${pathCleanup.removed_images.toLocaleString("de-DE")} Bilder entfernt.`
           : pathCleanup.status === "failed"
             ? "Die letzte Pfadprüfung konnte nicht abgeschlossen werden."
             : "Noch keine Pfadprüfung in dieser Sitzung ausgeführt."
@@ -1043,9 +1046,9 @@ const SettingsPage: React.FC<{
             <section className="settings-card">
               <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
               <p className="settings-card__copy">
-                Prüft alle gespeicherten Bildpfade und entfernt Einträge für Dateien,
-                die nicht mehr vorhanden sind. Die automatische Prüfung läuft mit
-                niedriger Priorität, wenn Face Manager gerade nichts Wichtigeres tut.
+                Die automatische Prüfung meldet fehlende Bilder. Bei einer manuellen
+                Bereinigung lassen sich Einträge für fehlende Dateien an erreichbaren
+                Speicherorten entfernen.
               </p>
               <div className="settings-maintenance-status" aria-live="polite">
                 {cleanupSummary}
@@ -1057,7 +1060,7 @@ const SettingsPage: React.FC<{
                   onClick={() => void handleImagePathCleanup()}
                   disabled={pathCleanupIsActive}
                 >
-                  {pathCleanupIsActive ? "Pfadprüfung läuft…" : "Jetzt Pfade prüfen"}
+                  {pathCleanupIsActive ? "Pfadprüfung läuft…" : "Fehlende Bildpfade bereinigen"}
                 </button>
               </div>
             </section>
