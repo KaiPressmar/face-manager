@@ -8,11 +8,12 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from concurrent.futures import Future
 from functools import partial, wraps
 from contextlib import asynccontextmanager
 from datetime import date
-from functools import lru_cache
 from pathlib import Path
+from queue import Full, Queue
 from typing import List
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -25,6 +26,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
+from starlette.concurrency import run_in_threadpool
 
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
@@ -52,8 +54,10 @@ from .services.desktop import (
     pick_folder,
     to_display_path,
 )
-from .services.face_thumbnails import ensure_face_thumbnail
-from .services.image_thumbnails import ensure_image_thumbnail, prune_image_thumbnails
+from .services.face_thumbnails import ensure_face_thumbnail, get_cached_face_thumbnail, write_face_thumbnail
+from .services.image_thumbnails import ensure_image_thumbnail, get_cached_image_thumbnail, write_image_thumbnail
+from .services.preview_cache import decode_verified_preview
+from .services.preview_cache_budget import read_preview_bytes, schedule_preview_cache_cleanup
 from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
@@ -95,7 +99,9 @@ from .services.storage import (
     assign_faces_to_person,
     auto_tune_cluster_distance_threshold,
     get_faces_for_review_group,
+    get_face_preview_source,
     get_image_detail_rows,
+    get_image_preview_source,
     get_available_image_path,
     invalidate_image_query_cache,
     invalidate_person_suggestion_epoch,
@@ -136,6 +142,7 @@ from .services.storage import (
     delete_person,
     rename_image_locations_to_match_people,
     restore_faces_to_manual_review,
+    save_missing_image_geometry,
     remove_faces_from_cluster,
     count_reclusterable_faces,
     count_scoped_reclusterable_faces,
@@ -158,7 +165,7 @@ configure_error_logging()
 install_global_exception_hooks()
 logger = logging.getLogger("face_manager.api")
 
-init_db()
+init_db(scan_sources=False)
 
 _import_activity_lock = threading.Lock()
 _import_was_busy = False
@@ -168,6 +175,8 @@ _version_clustering_pending = False
 _cluster_operation_lock = threading.RLock()
 _imports_finalizing = 0
 _database_restore_in_progress = False
+_media_library_lock = threading.Lock()
+_media_library_generation = 0
 
 
 def _describe_background_activity() -> str | None:
@@ -380,6 +389,8 @@ auto_cluster_queue = AutoClusterQueue(
 
 def is_backend_idle_for_thumbnail_warmup() -> bool:
     """Return whether low-priority thumbnail warming may run."""
+    if _database_restore_in_progress:
+        return False
     import_snapshot = import_queue.snapshot()
     if import_snapshot.get("running_count", 0) > 0:
         return False
@@ -405,8 +416,11 @@ def is_backend_idle_for_path_cleanup() -> bool:
     """Keep filesystem validation behind all user-facing background work."""
     if not is_backend_idle_for_thumbnail_warmup():
         return False
-    thumbnail_task = face_thumbnail_warmup_queue.snapshot()
-    return thumbnail_task.get("status") not in {"queued", "running"}
+    thumbnail_task = face_thumbnail_warmup_queue.snapshot().get("task") or {}
+    return (
+        thumbnail_task.get("status") not in {"queued", "running"}
+        and not face_thumbnail_warmup_queue.has_active_batch()
+    )
 
 
 def _publish_image_path_cleanup(snapshot: dict) -> None:
@@ -627,7 +641,7 @@ async def lifespan(_app: FastAPI):
     try:
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
-            prune_image_thumbnails()
+            schedule_preview_cache_cleanup()
             auto_cluster_queue.resume_after_shutdown()
             idle_recluster_scheduler.start()
             import_queue.start()
@@ -1281,7 +1295,7 @@ def _restore_work_file(db_path: Path, purpose: str) -> Path:
 
 
 def _initialize_restored_library() -> None:
-    init_db(recover=False)
+    init_db(recover=False, scan_sources=False)
     reset_import_resources()
     invalidate_image_query_cache()
     app_cache.clear()
@@ -1291,7 +1305,7 @@ def _initialize_restored_library() -> None:
 @safe_cluster_mutation
 def api_import_database(payload: bytes = Body(..., media_type="application/octet-stream")):
     """Replace the active library, keeping its snapshot until recovery is verified."""
-    global _database_restore_in_progress
+    global _database_restore_in_progress, _media_library_generation
     ensure_database_is_idle()
     if not payload:
         raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
@@ -1307,7 +1321,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         upload.write_bytes(payload)
         validate_database_file(upload)
 
-        _database_restore_in_progress = restore_gate = True
+        with _media_library_lock:
+            _database_restore_in_progress = restore_gate = True
+            _media_library_generation += 1
+        face_thumbnail_warmup_queue.invalidate_library()
         clustering_task = auto_cluster_queue.snapshot().get("task")
         if _imports_finalizing or (
             clustering_task and clustering_task["status"] in {"running", "paused", "cancelling"}
@@ -1362,7 +1379,11 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         if restore_gate:
             if replaced:
                 invalidate_person_suggestion_epoch()
-            _database_restore_in_progress = False
+            face_thumbnail_warmup_queue.invalidate_library()
+            with _media_library_lock:
+                _database_restore_in_progress = False
+                _media_library_generation += 1
+            face_thumbnail_warmup_queue.wake()
         disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
         for path in (upload, rollback_copy, disposable_backup):
             if path is not None:
@@ -1950,8 +1971,75 @@ def api_delete_person(person_id: int, reassignment_group: str = Query(...)):
 # -----------------------------
 
 
+_SOURCE_WORKER_COUNT = 3
+_SOURCE_TIMEOUT_SECONDS = 8
+_source_work_lock = threading.Lock()
+_source_work_queue: Queue = Queue(maxsize=8)
+_source_workers_started = False
+
+
+def _source_worker() -> None:
+    """Keep potentially blocked source I/O out of the shared HTTP worker pool."""
+    while True:
+        future, operation = _source_work_queue.get()
+        if not future.set_running_or_notify_cancel():
+            continue
+        try:
+            future.set_result(operation())
+        except Exception as exc:
+            future.set_exception(exc)
+
+
+async def _run_source_work(operation):
+    global _source_workers_started
+    with _source_work_lock:
+        if not _source_workers_started:
+            for worker in range(_SOURCE_WORKER_COUNT):
+                threading.Thread(
+                    target=_source_worker, name=f"image-source-{worker}", daemon=True,
+                ).start()
+            _source_workers_started = True
+        future: Future = Future()
+        try:
+            _source_work_queue.put_nowait((future, operation))
+        except Full as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Die Fotoquellen sind gerade ausgelastet. Bitte versuche es erneut.",
+                headers={"Retry-After": "2"},
+            ) from exc
+    pending = asyncio.wrap_future(future)
+    try:
+        return await asyncio.wait_for(asyncio.shield(pending), timeout=_SOURCE_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError) as exc:
+        # Python 3.10 uses a distinct asyncio timeout exception.
+        # A cancelled await cannot interrupt an OS file operation. Running reads
+        # retain their worker; queued requests are skipped when dequeued.
+        future.cancel()
+        pending.add_done_callback(lambda result: None if result.cancelled() else result.exception())
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise HTTPException(
+            status_code=503,
+            detail="Die Fotoquelle antwortet nicht. Bitte versuche es erneut.",
+            headers={"Retry-After": "2"},
+        ) from exc
+
+
+def _get_media_library_generation(expected: int | None = None) -> int:
+    with _media_library_lock:
+        if _database_restore_in_progress or (
+            expected is not None and expected != _media_library_generation
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Die Bibliothek wird gewechselt. Bitte versuche es erneut.",
+            )
+        return _media_library_generation
+
+
 @app.get("/api/images/{image_id}/file")
-def get_image(image_id: int):
+async def get_image(image_id: int):
     """Serve an image from an available filesystem location.
 
     Args:
@@ -1963,13 +2051,15 @@ def get_image(image_id: int):
     Raises:
         HTTPException: If no image location exists.
     """
-    path = get_available_image_path(image_id)
+    generation = _get_media_library_generation()
+    path = await _run_source_work(partial(get_available_image_path, image_id))
+    _get_media_library_generation(generation)
     if not path:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     return FileResponse(filesystem_path(path))
 
 
-def _thumbnail_response(thumbnail_path: str, request: Request) -> Response:
+def _thumbnail_response(thumbnail_path: str | Path, request: Request) -> Response:
     # The cached filename includes the source version and, for crops, the box.
     digest = hashlib.sha256(Path(thumbnail_path).name.encode("utf-8")).hexdigest()
     etag = f'"{digest}"'
@@ -1977,22 +2067,119 @@ def _thumbnail_response(thumbnail_path: str, request: Request) -> Response:
     validators = request.headers.get("if-none-match", "").split(",")
     if any(value.strip().removeprefix("W/") in {etag, "*"} for value in validators):
         return Response(status_code=304, headers=headers)
-    return FileResponse(thumbnail_path, media_type="image/jpeg", headers=headers)
+    # Read the small JPEG before ASGI starts sending headers. Cache eviction
+    # cannot remove bytes already loaded for this response.
+    body = read_preview_bytes(Path(thumbnail_path), 2 * 1024 * 1024 + 1)
+    if not body or len(body) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="Das Vorschaubild konnte nicht gelesen werden.")
+    return Response(body, media_type="image/jpeg", headers=headers)
+
+
+def _cached_registered_preview(preview_id: int, content_hash: str, bbox):
+    if bbox is not None:
+        return get_cached_face_thumbnail(preview_id, content_hash, bbox)
+    return get_cached_image_thumbnail(preview_id, content_hash)
+
+
+def _registered_preview(preview_id: int, face: bool):
+    row = get_face_preview_source(preview_id) if face else get_image_preview_source(preview_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    bbox = (
+        tuple(int(_safe_float(row[key])) for key in ("bbox_x", "bbox_y", "bbox_w", "bbox_h"))
+        if face else None
+    )
+    content_hash = row["content_hash"]
+    cached = _cached_registered_preview(preview_id, content_hash, bbox) if content_hash else None
+    return int(row["image_id"]), content_hash, bbox, cached
+
+
+def _render_registered_preview(
+    preview_id: int, image_id: int, content_hash: str | None,
+    bbox: tuple[int, int, int, int] | None, generation: int,
+) -> Path:
+    _get_media_library_generation(generation)
+    if content_hash:
+        cached = _cached_registered_preview(preview_id, content_hash, bbox)
+        if cached is not None:
+            return cached
+    locations = list_image_locations([image_id]).get(image_id, ())
+    failed = False
+    for location in locations:
+        _get_media_library_generation(generation)
+        source = location["path"]
+        try:
+            if not content_hash:
+                # Older backups still work through the original file-identity cache.
+                return (
+                    ensure_face_thumbnail(preview_id, source, bbox)
+                    if bbox is not None else Path(ensure_image_thumbnail(preview_id, source))
+                )
+            image, geometry = decode_verified_preview(source, content_hash)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, Image.DecompressionBombError):
+            failed = True
+            continue
+
+        with image:
+            _get_media_library_generation(generation)
+            try:
+                thumbnail = (
+                    write_face_thumbnail(preview_id, content_hash, bbox, image, geometry[0])
+                    if bbox is not None else write_image_thumbnail(preview_id, content_hash, image, geometry[0])
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden.",
+                ) from exc
+        with _media_library_lock:
+            if not _database_restore_in_progress and generation == _media_library_generation:
+                try:
+                    save_missing_image_geometry(image_id, content_hash, geometry)
+                except sqlite3.Error:
+                    logger.warning("Could not store photo dimensions", exc_info=True)
+        return thumbnail
+
+    if failed:
+        raise HTTPException(status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden.")
+    raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+
+
+async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = False) -> Response:
+    generation = _get_media_library_generation()
+    image_id, content_hash, bbox, thumbnail = await run_in_threadpool(_registered_preview, preview_id, face)
+    _get_media_library_generation(generation)
+    if thumbnail is not None:
+        try:
+            response = await run_in_threadpool(_thumbnail_response, thumbnail, request)
+        except OSError:
+            # It may have been evicted between the cached lookup and read.
+            pass
+        else:
+            _get_media_library_generation(generation)
+            return response
+    thumbnail = await _run_source_work(
+        partial(_render_registered_preview, preview_id, image_id, content_hash, bbox, generation),
+    )
+    _get_media_library_generation(generation)
+    try:
+        response = await run_in_threadpool(_thumbnail_response, thumbnail, request)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Das Vorschaubild ist nicht verfügbar. Bitte versuche es erneut.",
+            headers={"Retry-After": "2"},
+        ) from exc
+    else:
+        _get_media_library_generation(generation)
+        return response
 
 
 @app.get("/api/images/{image_id}/thumbnail")
-def get_image_thumbnail(image_id: int, request: Request):
+async def get_image_thumbnail(image_id: int, request: Request):
     """Serve a cached, upright, size-limited image thumbnail."""
-    path = get_available_image_path(image_id)
-    if not path:
-        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    try:
-        thumbnail_path = ensure_image_thumbnail(image_id, path)
-    except (OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise HTTPException(
-            status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden."
-        ) from exc
-    return _thumbnail_response(thumbnail_path, request)
+    return await _serve_thumbnail(image_id, request)
 
 
 @app.delete("/api/images/{image_id}")
@@ -2053,28 +2240,6 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
             detail="Der Explorer oder Dateimanager konnte nicht geöffnet werden.",
         ) from exc
     return {"status": "opened"}
-
-
-@lru_cache(maxsize=2048)
-def _read_image_orientation(source, signature):
-    """Read orientation for this version of the source file."""
-    try:
-        with Image.open(source) as image:
-            return image.getexif().get(274, 1), image.width, image.height
-    except (OSError, ValueError, Image.DecompressionBombError):
-        return 1, 0, 0
-
-
-def get_image_orientation(path):
-    """Return raw dimensions and EXIF orientation, or zero dimensions."""
-    source = filesystem_path(path)
-    try:
-        info = os.stat(source)
-    except (OSError, ValueError):
-        return 1, 0, 0
-    return _read_image_orientation(
-        source, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    )
 
 
 def correct_bbox_for_orientation(geometry, x, y, w, h):
@@ -2139,11 +2304,12 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
         path = r["image_path"]
 
         if image_id not in images:
-            geometry = get_image_orientation(path)
-            if not geometry[1]:
-                alternate = get_available_image_path(image_id)
-                if alternate and alternate != path:
-                    geometry = get_image_orientation(alternate)
+            orientation, width, height = r["exif_orientation"], r["raw_width"], r["raw_height"]
+            geometry = (
+                (orientation, width, height)
+                if orientation in range(1, 9) and width and height and width > 0 and height > 0
+                else (1, 0, 0)
+            )
             geometry_by_id[image_id] = geometry
             orientation, width, height = geometry
             if orientation in {5, 6, 7, 8}:
@@ -2206,11 +2372,14 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
 @app.get("/api/images/{image_id}/detail")
 def api_image_detail(request: Request, image_id: int):
     """Return one image with its faces so a face crop can be shown in context."""
+    generation = _get_media_library_generation()
     rows = get_image_detail_rows(image_id)
     if not rows:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     display_platform = get_display_platform(request)
-    return _group_image_rows(rows, display_platform)[0]
+    image = _group_image_rows(rows, display_platform)[0]
+    _get_media_library_generation(generation)
+    return image
 
 
 @app.get("/api/faces/{face_id}/image")
@@ -2306,6 +2475,7 @@ def get_images(
     Returns:
         Paginated image dictionaries containing nested face data.
     """
+    generation = _get_media_library_generation()
     display_platform = get_display_platform(request)
     normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
     rows, total = list_images_page(
@@ -2319,13 +2489,15 @@ def get_images(
         all_photos=all_photos,
     )
     items = _group_image_rows(rows, display_platform)
+    available_persons = list_available_image_persons(normalized_folders)
+    _get_media_library_generation(generation)
     return {
         "items": items,
         "total": total,
         "offset": offset,
         "limit": limit,
         "has_more": offset + len(items) < total,
-        "available_persons": list_available_image_persons(normalized_folders),
+        "available_persons": available_persons,
     }
 
 
@@ -2455,7 +2627,7 @@ def api_apply_image_rename_candidates(data: dict = Body(...)):
 
 
 @app.get("/api/faces/{face_id}/crop")
-def api_face_crop(face_id: int, request: Request):
+async def api_face_crop(face_id: int, request: Request):
     """Return a JPEG crop for one detected face.
 
     Args:
@@ -2467,30 +2639,7 @@ def api_face_crop(face_id: int, request: Request):
     Raises:
         HTTPException: If the face image cannot be found.
     """
-    conn = get_conn()
-    row = conn.execute(
-        """
-        SELECT f.image_id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
-        FROM face f
-        WHERE f.id = ?
-        """,
-        (face_id,),
-    ).fetchone()
-    conn.close()
-    path = get_available_image_path(row["image_id"]) if row else None
-    if not path:
-        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-
-    x = int(_safe_float(row["bbox_x"]))
-    y = int(_safe_float(row["bbox_y"]))
-    w = int(_safe_float(row["bbox_w"]))
-    h = int(_safe_float(row["bbox_h"]))
-    try:
-        thumbnail_path = ensure_face_thumbnail(face_id, path, (x, y, w, h))
-    except (OSError, ValueError) as exc:
-        logger.exception("Could not create face crop thumbnail for face %s", face_id)
-        raise HTTPException(status_code=404, detail="Der Gesichtsausschnitt wurde nicht gefunden.") from exc
-    return _thumbnail_response(thumbnail_path, request)
+    return await _serve_thumbnail(face_id, request, face=True)
 
 
 frontend_dist_dir = get_frontend_dist_dir()

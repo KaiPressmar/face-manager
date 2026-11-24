@@ -348,17 +348,32 @@ class GeoMetadataTest(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             conn.execute("""CREATE TABLE image (id INTEGER PRIMARY KEY, path TEXT UNIQUE,
                          directory TEXT, filename TEXT, content_hash TEXT, processed_at TEXT)""")
+            conn.execute(
+                "INSERT INTO image VALUES (1, '/nas/legacy.jpg', '/nas', 'legacy.jpg', NULL, 'done')",
+            )
             conn.commit()
             conn.close()
-            with patch.object(schema, "DB_PATH", str(db_path)):
-                schema.init_db()
+            with (
+                patch.object(schema, "DB_PATH", str(db_path)),
+                patch.object(schema, "calculate_file_hash", side_effect=AssertionError("source was hashed")),
+                patch.object(schema, "get_file_created_at", side_effect=AssertionError("source was probed")),
+            ):
+                schema.init_db(scan_sources=False)
+                schema.init_db(scan_sources=False)
                 conn = schema.get_conn()
                 columns = {row["name"] for row in conn.execute("PRAGMA table_info(image)")}
+                location_columns = {row["name"] for row in conn.execute("PRAGMA table_info(image_location)")}
+                self.assertEqual(
+                    tuple(conn.execute("SELECT id, content_hash, raw_width FROM image").fetchone()),
+                    (1, None, None),
+                )
                 conn.close()
             self.assertTrue({"latitude", "longitude", "captured_at", "metadata_scanned_at"} <= columns)
+            self.assertTrue({"raw_width", "raw_height", "exif_orientation"} <= columns)
+            self.assertTrue({"file_device", "file_inode", "file_changed_at_ns"} <= location_columns)
 
 
-class GeoApiTest(unittest.TestCase):
+class GeoApiTest(unittest.IsolatedAsyncioTestCase):
     def test_cursor_rejects_conflicting_parameters(self):
         from backend import app
 
@@ -370,23 +385,45 @@ class GeoApiTest(unittest.TestCase):
                 app.get_map_images(-180, 180, -90, 90, limit=2, **params)
             self.assertEqual(raised.exception.status_code, 422)
 
-    @patch("backend.app.ensure_image_thumbnail", return_value="/tmp/thumb.jpg")
-    @patch("backend.app.get_available_image_path", return_value="/photos/a.jpg")
-    def test_thumbnail_endpoint_returns_jpeg(self, _available, ensure):
+    @patch("backend.app.get_cached_image_thumbnail")
+    @patch("backend.app.get_image_preview_source", return_value={"image_id": 7, "content_hash": "registered"})
+    async def test_thumbnail_endpoint_returns_jpeg(self, _source, cached):
         from backend import app
-        response = app.get_image_thumbnail(7, Mock(headers={}))
-        self.assertEqual(response.media_type, "image/jpeg")
-        self.assertEqual(response.headers["cache-control"], "private, no-cache")
-        ensure.assert_called_once_with(7, "/photos/a.jpg")
-        validated = app.get_image_thumbnail(7, Mock(headers={"if-none-match": response.headers["etag"]}))
-        self.assertEqual(validated.status_code, 304)
+        with tempfile.TemporaryDirectory() as folder:
+            thumbnail = Path(folder) / "thumbnails/images/0000/7-00000000000000000001.jpg"
+            thumbnail.parent.mkdir(parents=True)
+            thumbnail.write_bytes(b"preview")
+            cached.return_value = thumbnail
+            response = await app.get_image_thumbnail(7, Mock(headers={}))
+            self.assertEqual(response.media_type, "image/jpeg")
+            self.assertEqual(response.headers["cache-control"], "private, no-cache")
+            cached.assert_called_once_with(7, "registered")
+            validated = await app.get_image_thumbnail(7, Mock(headers={"if-none-match": response.headers["etag"]}))
+            self.assertEqual(validated.status_code, 304)
 
-    @patch("backend.app.get_available_image_path", return_value=None)
-    def test_thumbnail_endpoint_reports_missing_image(self, _available):
+    @patch("backend.app.get_image_preview_source", return_value=None)
+    async def test_thumbnail_endpoint_reports_missing_image(self, _source):
         from backend import app
         with self.assertRaises(HTTPException) as raised:
-            app.get_image_thumbnail(7, Mock(headers={}))
+            await app.get_image_thumbnail(7, Mock(headers={}))
         self.assertEqual(raised.exception.status_code, 404)
+
+    @patch("backend.app.get_image_preview_source", return_value={"image_id": 7, "content_hash": "registered"})
+    async def test_evicted_preview_is_recreated_before_sending_headers(self, _source):
+        from backend import app
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "thumbnails/images/0000"
+            root.mkdir(parents=True)
+            evicted = root / "7-00000000000000000001.jpg"
+            recreated = root / "7-00000000000000000002.jpg"
+            recreated.write_bytes(b"preview")
+            with (
+                patch.object(app, "get_cached_image_thumbnail", return_value=evicted),
+                patch.object(app, "_render_registered_preview", return_value=recreated) as render,
+            ):
+                response = await app.get_image_thumbnail(7, Mock(headers={}))
+            self.assertEqual(response.body, b"preview")
+            render.assert_called_once()
 
 
 if __name__ == "__main__":

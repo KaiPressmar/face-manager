@@ -165,7 +165,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (typeof navigationTarget?.clusterId === "number") {
       return navigationTarget.personName ? "people" : "open";
     }
-    return "suggestions";
+    return navigationTarget?.reviewView ?? "suggestions";
   });
   const [assignmentRevision, setAssignmentRevision] = useState(0);
   const [activeArchiveSectionKey, setActiveArchiveSectionKey] = useState<string | null>(null);
@@ -1089,6 +1089,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       return;
     }
     appliedNavigationTokenRef.current = navigationTarget.token;
+    if (navigationTarget.reviewView) {
+      cancelPendingNavigation();
+      setWorkspaceView(navigationTarget.reviewView);
+      return;
+    }
     if (navigationTarget.groupKey) {
       cancelPendingNavigation();
       setWorkspaceView("archive");

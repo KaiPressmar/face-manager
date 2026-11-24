@@ -1,6 +1,6 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
-import { processFolder, selectImportFolder } from "../../utils/api";
+import { fetchRuntimeInfo, processFolder, selectImportFolder } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import "../import/import-sources.css";
 
@@ -23,12 +23,22 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
   const [startingPath, setStartingPath] = useState("");
   const [queuedCount, setQueuedCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [browseCancelled, setBrowseCancelled] = useState(false);
+  const [showLinuxPath, setShowLinuxPath] = useState(false);
   const queuedPaths = useRef(new Set<string>());
   const busyRef = useRef(false);
   const busy = isBrowsing || isStarting;
   const dialogRef = useRef<HTMLElement>(null);
   const close = () => onClose(queuedPaths.current.size > 0);
   useModalFocus(dialogRef, close, !busy);
+  useEffect(() => {
+    if (IS_DEVELOPMENT) return;
+    let current = true;
+    void fetchRuntimeInfo().then((runtime) => {
+      if (current) setShowLinuxPath(runtime.host_platform === "linux" && runtime.display_platform !== "windows");
+    }).catch(() => undefined);
+    return () => { current = false; };
+  }, []);
 
   const trimmedDraft = draftPath.trim();
   const hasSource = (path: string) => queuedPaths.current.has(path) || sources.some((source) => source.path === path);
@@ -46,6 +56,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
     setSources((current) => [...current, { path }]);
     setDraftPath("");
     setError(null);
+    setBrowseCancelled(false);
   };
 
   const browse = async () => {
@@ -53,9 +64,11 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
     busyRef.current = true;
     setIsBrowsing(true);
     setError(null);
+    setBrowseCancelled(false);
     try {
       const path = await selectImportFolder();
       if (path) addSource(path);
+      else setBrowseCancelled(true);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Der Ordnerdialog konnte nicht geöffnet werden.");
     } finally {
@@ -69,6 +82,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
     busyRef.current = true;
     setIsStarting(true);
     setError(null);
+    setBrowseCancelled(false);
     const pending = draftIsNew ? [...sources, { path: trimmedDraft }] : sources;
     const failed: ImportSource[] = [];
     setSources(pending);
@@ -124,7 +138,13 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
           }}
         >
           <div className="folder-picker-modal__content">
-            {IS_DEVELOPMENT ? (
+            {!IS_DEVELOPMENT && (
+              <button type="button" className="folder-picker-modal__browse" data-initial-focus onClick={() => void browse()} disabled={busy}>
+                <span className="folder-icon" aria-hidden="true" />
+                <span><strong>{isBrowsing ? "Ordnerauswahl wird geöffnet…" : sources.length > 0 ? "Weiteren Ordner auswählen" : "Ordner auswählen"}</strong></span>
+              </button>
+            )}
+            {(IS_DEVELOPMENT || showLinuxPath) && (
               <div className="folder-picker-modal__dev-input">
                 <label htmlFor="development-import-path">Pfad zum Bilderordner</label>
                 <div className="import-sources__path-entry">
@@ -133,21 +153,18 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
                     type="text"
                     value={draftPath}
                     onChange={(event) => { setDraftPath(event.target.value); setError(null); }}
-                    placeholder="/mnt/c/Users/Name/Pictures"
+                    placeholder={IS_DEVELOPMENT ? "/mnt/c/Users/Name/Pictures" : "/mnt/fotos"}
                     disabled={busy}
-                    data-initial-focus
+                    data-initial-focus={IS_DEVELOPMENT || undefined}
                     autoComplete="off"
                     spellCheck={false}
                   />
                   <button type="submit" className="secondary-button" disabled={!trimmedDraft || busy}>Zur Liste hinzufügen</button>
                 </div>
-                <p>Verwende einen Pfad, auf den der Entwicklungsserver zugreifen kann.</p>
+                <p>{IS_DEVELOPMENT
+                  ? "Verwende einen Pfad, auf den der Entwicklungsserver zugreifen kann."
+                  : "Du kannst auch den Pfad zu einem Ordner oder einem eingebundenen Netzlaufwerk eingeben."}</p>
               </div>
-            ) : (
-              <button type="button" className="folder-picker-modal__browse" data-initial-focus onClick={() => void browse()} disabled={busy}>
-                <span className="folder-icon" aria-hidden="true" />
-                <span><strong>{isBrowsing ? "Ordnerauswahl wird geöffnet…" : sources.length > 0 ? "Weiteren Ordner auswählen" : "Ordner auswählen"}</strong></span>
-              </button>
             )}
 
             {sources.length > 0 && (
@@ -177,6 +194,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
             )}
 
             {error && <p className="folder-picker-modal__error" role="alert">{error}</p>}
+            {browseCancelled && <p className="folder-picker-modal__status" role="status">Kein neuer Ordner ausgewählt.</p>}
             {(isStarting || queuedCount > 0) && (
               <p className="folder-picker-modal__status" role="status">
                 {queuedCount > 0 && (queuedCount === 1 ? "1 Ordner eingereiht. " : `${queuedCount} Ordner eingereiht. `)}

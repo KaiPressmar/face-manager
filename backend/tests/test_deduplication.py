@@ -210,7 +210,10 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     directory TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     content_hash TEXT,
-                    processed_at TEXT
+                    processed_at TEXT,
+                    raw_width INTEGER,
+                    raw_height INTEGER,
+                    exif_orientation INTEGER
                 );
                 CREATE TABLE image_location (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,7 +340,10 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     directory TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     content_hash TEXT,
-                    processed_at TEXT
+                    processed_at TEXT,
+                    raw_width INTEGER,
+                    raw_height INTEGER,
+                    exif_orientation INTEGER
                 );
                 CREATE TABLE image_location (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -474,7 +480,10 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     directory TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     content_hash TEXT,
-                    processed_at TEXT
+                    processed_at TEXT,
+                    raw_width INTEGER,
+                    raw_height INTEGER,
+                    exif_orientation INTEGER
                 );
                 CREATE TABLE image_location (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -573,7 +582,10 @@ class DeduplicationMigrationTest(unittest.TestCase):
                     directory TEXT NOT NULL,
                     filename TEXT NOT NULL,
                     content_hash TEXT,
-                    processed_at TEXT
+                    processed_at TEXT,
+                    raw_width INTEGER,
+                    raw_height INTEGER,
+                    exif_orientation INTEGER
                 );
                 CREATE TABLE image_location (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

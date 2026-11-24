@@ -13,6 +13,7 @@ test('all library pages survive reload via hash routes', () => {
 test('review and settings deep links preserve their targets', () => {
   for (const target of [
     { page: 'review', clusterId: 42 },
+    { page: 'review', reviewView: 'open' },
     { page: 'review', groupKey: 'unknown_person' },
     { page: 'review', groupKey: 'not_face' },
     { page: 'settings', settingsSection: 'dateinamen' },

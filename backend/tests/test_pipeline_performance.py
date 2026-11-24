@@ -13,6 +13,8 @@ from PIL import Image
 
 from backend.db import schema
 from backend.services import storage
+from backend.services.face_thumbnails import get_cached_face_thumbnail
+from backend.services.image_thumbnails import get_cached_image_thumbnail
 from backend.services.person_suggestion_worker import PersonSuggestionWorker
 from backend.services.pipeline import (
     ImagePreparer,
@@ -893,6 +895,71 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(locations, [str(moved)])
             self.assertEqual(canonical_path, str(moved))
 
+    def test_duplicate_preserves_offline_location_and_import_prewarms_committed_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_dir, copy_dir = root / "first", root / "copy"
+            first_dir.mkdir()
+            copy_dir.mkdir()
+            first, copy = first_dir / "photo.jpg", copy_dir / "photo.jpg"
+            exif = Image.Exif()
+            exif[274] = 6
+            Image.new("RGB", (64, 32), "teal").save(first, exif=exif)
+            copy.write_bytes(first.read_bytes())
+            bbox = (4, 5, 10, 12)
+            resources = Mock()
+            model = resources.get_model.return_value
+            model.detect_and_embed.return_value = [
+                {"bbox": bbox, "embedding": np.zeros(512, dtype=np.float32)}
+            ]
+            resources.get_clusterer.return_value.add_and_assign.return_value = (np.array([1]), None)
+            processor = ImportProcessor(resources)
+            with (
+                patch.object(schema, "DB_PATH", str(root / "db.sqlite")),
+                patch.dict(os.environ, {"FACE_MANAGER_DATA_DIR": str(root)}),
+            ):
+                schema.init_db()
+                processor.process(str(first_dir), lambda changes: None, threading.Event())
+                first_dir.rename(root / "offline-volume")
+                processor.process(str(copy_dir), lambda changes: None, threading.Event())
+                copy.unlink()
+                with closing(schema.get_conn()) as conn:
+                    image = conn.execute(
+                        "SELECT id, content_hash, raw_width, raw_height, exif_orientation FROM image"
+                    ).fetchone()
+                    face = conn.execute("SELECT id FROM face").fetchone()
+                    paths = {row[0] for row in conn.execute("SELECT path FROM image_location")}
+                self.assertEqual(paths, {str(first), str(copy)})
+                self.assertEqual(tuple(image)[2:], (64, 32, 6))
+                thumbnail = get_cached_image_thumbnail(image["id"], image["content_hash"])
+                self.assertIsNotNone(thumbnail)
+                with Image.open(thumbnail) as preview:
+                    self.assertEqual(preview.size, (32, 64))
+                self.assertIsNotNone(get_cached_face_thumbnail(face["id"], image["content_hash"], bbox))
+            self.assertEqual(model.detect_and_embed.call_count, 1)
+
+    def test_preview_failure_after_commit_does_not_undo_import(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            Image.new("RGB", (32, 32), "teal").save(root / "photo.jpg")
+            resources = Mock()
+            resources.get_model.return_value.detect_and_embed.return_value = []
+
+            def fail_write(*_):
+                with sqlite3.connect(root / "db.sqlite", timeout=0.1) as conn:
+                    conn.execute("INSERT INTO person(name) VALUES ('Interactive')")
+                raise OSError("cache is read-only")
+
+            with (
+                patch.object(schema, "DB_PATH", str(root / "db.sqlite")),
+                patch("backend.services.pipeline.write_image_thumbnail", side_effect=fail_write),
+            ):
+                schema.init_db()
+                ImportProcessor(resources).process(str(root), lambda changes: None, threading.Event())
+                with closing(schema.get_conn()) as conn:
+                    self.assertIsNotNone(conn.execute("SELECT processed_at FROM image").fetchone()[0])
+                    self.assertEqual(conn.execute("SELECT name FROM person").fetchone()[0], "Interactive")
+
     def test_new_location_removes_old_path_with_changed_content(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -952,6 +1019,8 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             photo_dir.mkdir()
             photo = photo_dir / "photo.jpg"
             Image.new("RGB", (32, 32), color=(10, 20, 30)).save(photo)
+            photo.write_bytes(photo.read_bytes().ljust(1024, b"\0"))
+            original = photo.stat()
 
             model = Mock(compute_mode="gpu")
             model.detect_and_embed.return_value = []
@@ -974,7 +1043,13 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                     lambda changes: None,
                     threading.Event(),
                 )
-                Image.new("RGB", (32, 32), color=(200, 20, 30)).save(photo)
+                replacement = root / "replacement.jpg"
+                Image.new("RGB", (32, 32), color=(200, 20, 30)).save(replacement)
+                replacement.write_bytes(replacement.read_bytes().ljust(1024, b"\0"))
+                os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+                replacement.replace(photo)
+                self.assertEqual(photo.stat().st_size, original.st_size)
+                self.assertEqual(photo.stat().st_mtime_ns, original.st_mtime_ns)
                 processor.process(
                     str(photo_dir),
                     lambda changes: None,

@@ -1,15 +1,23 @@
 import base64
+import json
+import logging
 import ntpath
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+from threading import Lock
 
 
 WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 WINDOWS_UNC_PATH = re.compile(r"^\\\\[^\\]+\\[^\\]+")
 WSL_DRIVE_PATH = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
+LINUX_PICKER_TIMEOUT_SECONDS = 180
+logger = logging.getLogger("face_manager.desktop")
+_linux_picker_lock = Lock()
+_linux_picker_process: subprocess.Popen[str] | None = None
+_linux_picker_stopped = False
 
 
 POWERSHELL_REVEAL_TYPE = r"""
@@ -161,6 +169,9 @@ def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
         selected = result.stdout.strip()
         return selected or None
 
+    if sys.platform == "linux":
+        return _pick_linux_folder()
+
     import tkinter as tk
     from tkinter import filedialog
 
@@ -172,6 +183,62 @@ def pick_folder(prefer_windows_dialog: bool = False) -> str | None:
         return selected or None
     finally:
         root.destroy()
+
+
+def start_native_folder_picker() -> None:
+    """Allow chooser requests for a new desktop session."""
+    global _linux_picker_stopped
+    with _linux_picker_lock:
+        _linux_picker_stopped = False
+
+
+def stop_native_folder_picker() -> None:
+    """Stop accepting chooser requests and close an open Linux dialog."""
+    global _linux_picker_stopped
+    with _linux_picker_lock:
+        _linux_picker_stopped = True
+        process = _linux_picker_process
+        if process is not None and process.poll() is None:
+            process.kill()
+
+
+def _pick_linux_folder() -> str | None:
+    """Run Tk's native loop without loading its libraries into the web server."""
+    global _linux_picker_process
+    helper = Path(__file__).with_name("linux_folder_picker.py").resolve()
+    command = [sys.executable, "-I", str(helper)]
+    with _linux_picker_lock:
+        if _linux_picker_stopped or _linux_picker_process is not None:
+            raise OSError("Linux folder picker is already open or shutting down")
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+        )
+        _linux_picker_process = process
+
+    try:
+        try:
+            stdout, stderr = process.communicate(timeout=LINUX_PICKER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            logger.warning("Linux folder picker timed out")
+            raise
+        if process.returncode:
+            if not _linux_picker_stopped:
+                logger.warning("Linux folder picker exited with status %s: %s", process.returncode, stderr.strip())
+            raise subprocess.CalledProcessError(process.returncode, command, stdout, stderr)
+        selected = json.loads(stdout)
+        if selected is not None and not isinstance(selected, str):
+            raise ValueError("Invalid Linux folder picker response")
+        return selected or None
+    finally:
+        with _linux_picker_lock:
+            _linux_picker_process = None
 
 
 def _reveal_with_windows_shell(path: str) -> None:

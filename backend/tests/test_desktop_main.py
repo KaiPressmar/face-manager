@@ -87,3 +87,21 @@ class DesktopStartupTests(unittest.TestCase):
 
         self.assertTrue(server.should_exit)
         thread.join.assert_called_once_with(timeout=10)
+
+    def test_native_window_can_reach_narrow_layout_and_stops_picker_before_server(self):
+        server = SimpleNamespace(should_exit=False)
+        thread = Mock()
+
+        def stop_picker():
+            self.assertFalse(server.should_exit)
+
+        with (
+            patch.object(self.desktop, "_start_server", return_value=(server, thread, 12345)),
+            patch.object(self.desktop, "stop_native_folder_picker", side_effect=stop_picker) as stop,
+        ):
+            self.desktop.main()
+
+        self.assertEqual(self.desktop.webview.create_window.call_args.kwargs["min_size"], (320, 400))
+        stop.assert_called_once_with()
+        self.assertTrue(server.should_exit)
+        thread.join.assert_called_once_with(timeout=10)

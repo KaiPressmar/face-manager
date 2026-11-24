@@ -11,7 +11,7 @@ from typing import Callable
 from ..db.schema import get_conn
 from .cache import app_cache
 from .face_thumbnails import delete_face_thumbnail
-from .filesystem_paths import filesystem_path
+from .filesystem_paths import filesystem_path, is_confirmed_missing
 from .storage import invalidate_image_query_cache
 
 logger = logging.getLogger("face_manager.image_path_cleanup")
@@ -19,18 +19,6 @@ logger = logging.getLogger("face_manager.image_path_cleanup")
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _confirmed_absent(path: str) -> bool:
-    """Only prune an absent entry in a directory that is still accessible."""
-    source = filesystem_path(path)
-    try:
-        os.stat(source, follow_symlinks=False)
-    except FileNotFoundError:
-        return os.path.isdir(os.path.dirname(source) or ".")
-    except OSError:
-        pass
-    return False
 
 
 class ImagePathCleanup:
@@ -218,7 +206,7 @@ class ImagePathCleanup:
                     return
                 if prune and missing_paths:
                     removed_paths, removed_images, face_ids = self._remove_missing(
-                        missing_paths
+                        missing_paths, self._stop_event
                     )
                     for face_id in face_ids:
                         delete_face_thumbnail(face_id)
@@ -258,26 +246,45 @@ class ImagePathCleanup:
                     self._stop_event.clear()
 
     @staticmethod
-    def _remove_missing(paths: list[str]) -> tuple[int, int, list[int]]:
+    def _remove_missing(
+        paths: list[str], stop_event: threading.Event | None = None
+    ) -> tuple[int, int, list[int]]:
         """Remove paths still missing and images left without any location."""
         conn = get_conn()
         try:
+            observed = []
+            for path in paths:
+                if stop_event is not None and stop_event.is_set():
+                    return 0, 0, []
+                row = conn.execute(
+                    """SELECT id, image_id, path, file_size, modified_at_ns,
+                              file_device, file_inode, file_changed_at_ns
+                       FROM image_location WHERE path = ?""",
+                    (path,),
+                ).fetchone()
+                if row is not None and is_confirmed_missing(path, row["file_device"]):
+                    observed.append(row)
+            if not observed or (stop_event is not None and stop_event.is_set()):
+                return 0, 0, []
+
+            # The network checks above can block for a while. Keep them out of
+            # SQLite's writer transaction and retain locations changed meanwhile.
             cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
             affected_image_ids: set[int] = set()
             removed_paths = 0
-            for path in paths:
-                # Recheck before touching SQLite. An unavailable mount, a
-                # permission error, or a source that returned is not a deletion.
-                if not _confirmed_absent(path):
-                    continue
-                row = cur.execute(
-                    "SELECT image_id FROM image_location WHERE path = ?", (path,)
-                ).fetchone()
-                if row is None:
-                    continue
-                affected_image_ids.add(int(row["image_id"]))
-                cur.execute("DELETE FROM image_location WHERE path = ?", (path,))
-                removed_paths += cur.rowcount
+            for row in observed:
+                cur.execute(
+                    """DELETE FROM image_location
+                       WHERE id = :id AND image_id = :image_id AND path = :path
+                         AND file_size IS :file_size AND modified_at_ns IS :modified_at_ns
+                         AND file_device IS :file_device AND file_inode IS :file_inode
+                         AND file_changed_at_ns IS :file_changed_at_ns""",
+                    dict(row),
+                )
+                if cur.rowcount:
+                    affected_image_ids.add(int(row["image_id"]))
+                    removed_paths += cur.rowcount
 
             removed_images = 0
             removed_face_ids: list[int] = []

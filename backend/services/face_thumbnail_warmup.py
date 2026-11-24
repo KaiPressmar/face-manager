@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from time import monotonic
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -12,6 +13,7 @@ from .face_thumbnails import (
     get_face_library_signature,
     warm_missing_face_thumbnails,
 )
+from .preview_cache_budget import cache_warmup_has_room
 
 logger = logging.getLogger("face_manager.face_thumbnail_warmup")
 
@@ -52,6 +54,7 @@ class FaceThumbnailWarmupQueue:
         idle_poll_seconds: float = 10.0,
         busy_poll_seconds: float = 3.0,
         batch_pause_seconds: float = 0.02,
+        retry_seconds: float = 60.0,
         on_change: Optional[Callable[[], None]] = None,
     ) -> None:
         self._is_idle = is_idle
@@ -61,10 +64,14 @@ class FaceThumbnailWarmupQueue:
         self._idle_poll_seconds = max(0.25, float(idle_poll_seconds))
         self._busy_poll_seconds = max(0.25, float(busy_poll_seconds))
         self._batch_pause_seconds = max(0.0, float(batch_pause_seconds))
+        self._retry_seconds = max(self._idle_poll_seconds, float(retry_seconds))
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._restart_on_exit = False
+        self._active_batch = False
+        self._generation = 0
         self._state = FaceThumbnailWarmupState()
         self._visible = True
         # Fingerprint of the library at the last completed full sweep. When the
@@ -73,33 +80,69 @@ class FaceThumbnailWarmupQueue:
         # added or removed.
         self._last_completed_signature: Optional[tuple[int, int]] = None
         self._fully_warm = False
+        self._retry_at = 0.0
+        self._retry_interval = self._retry_seconds
 
     def start(self) -> None:
         """Start the daemon worker if it is not already running."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                self._restart_on_exit = self._stop_event.is_set()
                 return
-            self._stop_event.clear()
-            self._wake_event.set()
-            self._state.status = "idle"
-            self._state.started_at = _utc_now()
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                name="face-thumbnail-warmup",
-                daemon=True,
-            )
-            self._thread.start()
+            self._start_locked()
 
-    def stop(self) -> None:
-        """Stop the daemon worker and wait briefly for shutdown."""
-        self._stop_event.set()
+    def _start_locked(self) -> None:
+        self._restart_on_exit = False
+        self._stop_event.clear()
         self._wake_event.set()
-        thread = self._thread
-        if thread is not None:
-            thread.join(timeout=5)
+        self._state.status = "paused" if self._state.user_paused else "idle"
+        self._state.started_at = _utc_now()
+        self._thread = threading.Thread(
+            target=self._run_worker, name="face-thumbnail-warmup", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 5) -> bool:
+        """Return whether the worker stopped, retaining blocked workers on timeout."""
         with self._lock:
-            self._state.status = "stopped"
-            self._thread = None
+            self._restart_on_exit = False
+            self._stop_event.set()
+            self._wake_event.set()
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+            return not thread.is_alive()
+        return True
+
+    def _run_worker(self) -> None:
+        try:
+            self._run_loop()
+        finally:
+            with self._lock:
+                self._active_batch = False
+                self._state.status = "stopped"
+                self._thread = None
+                if self._restart_on_exit:
+                    self._start_locked()
+
+    def has_active_batch(self) -> bool:
+        with self._lock:
+            return self._active_batch
+
+    def invalidate_library(self) -> None:
+        """Discard the previous library's cursor and warmup fingerprint."""
+        with self._lock:
+            self._generation += 1
+            paused = self._state.user_paused
+            self._state = FaceThumbnailWarmupState(
+                status="paused" if paused else "idle", user_paused=paused
+            )
+            self._last_completed_signature = None
+            self._fully_warm = False
+            self._retry_at = 0.0
+            self._retry_interval = self._retry_seconds
+            self._visible = True
+        self.wake()
 
     def wake(self) -> None:
         """Wake the worker so it can re-check idle state soon."""
@@ -124,6 +167,8 @@ class FaceThumbnailWarmupQueue:
             self._state.user_paused = False
             self._state.status = "idle"
             self._state.last_error = None
+            self._retry_at = 0.0
+            self._retry_interval = self._retry_seconds
             result = asdict(self._state)
         self._wake_event.set()
         self._notify_change()
@@ -181,14 +226,18 @@ class FaceThumbnailWarmupQueue:
 
     def _set_status(self, status: str, last_error: Optional[str] = None) -> None:
         with self._lock:
+            if self._state.user_paused or self._stop_event.is_set():
+                return
             if status in {"running", "failed"}:
                 self._visible = True
             self._state.status = status
             self._state.last_error = last_error
         self._notify_change()
 
-    def _record_batch(self, result) -> None:
+    def _record_batch(self, result, generation: int) -> bool:
         with self._lock:
+            if generation != self._generation or self._stop_event.is_set():
+                return False
             self._visible = True
             if not self._state.user_paused:
                 self._state.status = "running"
@@ -213,6 +262,7 @@ class FaceThumbnailWarmupQueue:
             self._state.eta_seconds = self._estimate_eta_locked()
             self._state.last_error = None
         self._notify_change()
+        return True
 
     def _estimate_eta_locked(self) -> Optional[float]:
         if not self._state.started_at or self._state.cycle_scanned_faces <= 0:
@@ -247,9 +297,7 @@ class FaceThumbnailWarmupQueue:
         self._wake_event.clear()
 
     def _run_loop(self) -> None:
-        # Thumbnails created during the current forward sweep. When a sweep
-        # finishes having created nothing, the cache is fully warm.
-        cycle_created = 0
+        cycle_unresolved = 0
         while not self._stop_event.is_set():
             try:
                 with self._lock:
@@ -261,37 +309,70 @@ class FaceThumbnailWarmupQueue:
                     self._set_status("paused")
                     self._wait(self._busy_poll_seconds)
                     continue
+                if not cache_warmup_has_room():
+                    with self._lock:
+                        self._state.cache_complete = False
+                        self._fully_warm = False
+                    self._set_status("idle")
+                    self._wait(self._idle_poll_seconds)
+                    continue
 
+                with self._lock:
+                    generation = self._generation
                 signature = get_face_library_signature()
-                if self._fully_warm and signature == self._last_completed_signature:
-                    # Nothing changed since the last full sweep — stay asleep and
-                    # only re-check the cheap fingerprint, no per-face stat storm.
+                with self._lock:
+                    if generation != self._generation:
+                        continue
+                    skip_sweep = signature == self._last_completed_signature and (
+                        self._fully_warm or monotonic() < self._retry_at
+                    )
+                if skip_sweep:
                     self._set_status("idle")
                     self._wait(self._idle_poll_seconds)
                     continue
 
                 if self._next_face_id() == 0:
-                    cycle_created = 0
+                    cycle_unresolved = 0
                 self._begin_cycle_if_needed()
-                self._set_status("running")
-                result = warm_missing_face_thumbnails(
-                    after_face_id=self._next_face_id(),
-                    max_created=self._batch_size,
-                    scan_limit=self._scan_limit,
-                    stop_event=self._stop_event,
-                )
-                cycle_created += result.created_thumbnails
-                self._record_batch(result)
+                with self._lock:
+                    if (generation != self._generation or self._state.user_paused
+                            or self._stop_event.is_set()):
+                        continue
+                    self._active_batch = True
+                try:
+                    self._set_status("running")
+                    result = warm_missing_face_thumbnails(
+                        after_face_id=self._next_face_id(),
+                        max_created=self._batch_size,
+                        scan_limit=self._scan_limit,
+                        stop_event=self._stop_event,
+                    )
+                    if not self._record_batch(result, generation):
+                        continue
+                finally:
+                    with self._lock:
+                        self._active_batch = False
+                cycle_unresolved += result.skipped_missing_source + result.failed_faces
 
                 if result.reached_end:
-                    self._last_completed_signature = signature
-                    self._fully_warm = cycle_created == 0
-                    cycle_created = 0
                     with self._lock:
+                        if generation != self._generation:
+                            continue
+                        if signature != self._last_completed_signature:
+                            self._retry_interval = self._retry_seconds
+                        self._last_completed_signature = signature
+                        self._fully_warm = cycle_unresolved == 0
+                        self._retry_at = monotonic() + self._retry_interval
+                        if not self._fully_warm:
+                            self._retry_interval = min(
+                                self._retry_interval * 2, max(900.0, self._retry_seconds)
+                            )
                         self._state.cycle_scanned_faces = 0
                         self._state.eta_seconds = None
                         self._state.cache_complete = self._fully_warm
-                    self._set_status("idle")
+                        if not self._state.user_paused:
+                            self._state.status = "idle"
+                    self._notify_change()
                     self._wait(self._idle_poll_seconds)
                 elif result.created_thumbnails > 0:
                     with self._lock:

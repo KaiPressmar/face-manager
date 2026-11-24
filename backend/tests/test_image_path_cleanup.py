@@ -222,6 +222,69 @@ class ImagePathCleanupTest(unittest.TestCase):
                 result = ImagePathCleanup._remove_missing([str(restored)])
                 self.assertEqual(result, (0, 0, []))
 
+    def test_empty_directory_on_replaced_device_does_not_remove_location(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = root / "empty-mount" / "photo.jpg"
+            path.parent.mkdir()
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                image_id = conn.execute(
+                    "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                    (str(path), str(path.parent), path.name),
+                ).lastrowid
+                conn.execute(
+                    """INSERT INTO image_location(image_id, path, directory, filename, file_device)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (image_id, str(path), str(path.parent), path.name, path.parent.stat().st_dev + 1),
+                )
+                conn.commit()
+                conn.close()
+
+                self.assertEqual(ImagePathCleanup._remove_missing([str(path)]), (0, 0, []))
+
+    def test_no_writer_during_checks_and_changed_location_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "moved.jpg"
+            second = root / "deleted.jpg"
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                for path in (first, second):
+                    image_id = conn.execute(
+                        "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                        (str(path), str(root), path.name),
+                    ).lastrowid
+                    conn.execute(
+                        """INSERT INTO image_location(image_id, path, directory, filename, modified_at_ns)
+                           VALUES (?, ?, ?, ?, 1)""",
+                        (image_id, str(path), str(root), path.name),
+                    )
+                conn.commit()
+                conn.close()
+
+                def check_path(value, _device):
+                    if value == str(second):
+                        writer = schema.get_conn()
+                        try:
+                            writer.execute("PRAGMA busy_timeout = 0")
+                            writer.execute(
+                                "UPDATE image_location SET modified_at_ns = 2 WHERE path = ?",
+                                (str(first),),
+                            )
+                            writer.commit()
+                        finally:
+                            writer.close()
+                    return True
+
+                with patch("backend.services.image_path_cleanup.is_confirmed_missing", side_effect=check_path):
+                    self.assertEqual(
+                        ImagePathCleanup._remove_missing([str(first), str(second)]),
+                        (1, 1, []),
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

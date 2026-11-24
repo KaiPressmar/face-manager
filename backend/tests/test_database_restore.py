@@ -70,7 +70,10 @@ class DatabaseRestoreTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 500)
             self.assertEqual(marker_at(current), "old")
             self.assertFalse(list(current.parent.glob("*.pre-import-backup-*.sqlite")))
-            self.assertTrue(all(call.kwargs == {"recover": False} for call in app.init_db.call_args_list))
+            self.assertTrue(all(
+                call.kwargs == {"recover": False, "scan_sources": False}
+                for call in app.init_db.call_args_list
+            ))
 
     def test_incomplete_snapshot_keeps_live_database_and_older_recovery_copy(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:

@@ -314,7 +314,10 @@ def _create_image_table(cur):
             directory TEXT NOT NULL,
             filename TEXT NOT NULL,
             content_hash TEXT,
-            processed_at TEXT
+            processed_at TEXT,
+            raw_width INTEGER,
+            raw_height INTEGER,
+            exif_orientation INTEGER
         )
         """
     )
@@ -337,6 +340,9 @@ def _create_image_location_table(cur):
             created_at TEXT,
             file_size INTEGER,
             modified_at_ns INTEGER,
+            file_device INTEGER,
+            file_inode INTEGER,
+            file_changed_at_ns INTEGER,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
         )
         """
@@ -423,7 +429,8 @@ def _merge_duplicate_image_faces(cur, canonical_id, duplicate_id):
 
 def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
     rows = cur.execute(
-        """SELECT id, latitude, longitude, captured_at, metadata_scanned_at
+        """SELECT id, latitude, longitude, captured_at, metadata_scanned_at,
+                  raw_width, raw_height, exif_orientation
            FROM image WHERE id IN (?, ?)""",
         (canonical_id, duplicate_id),
     ).fetchall()
@@ -438,14 +445,21 @@ def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
     scanned_at = canonical["metadata_scanned_at"]
     if scanned_at in (None, "missing") and duplicate["metadata_scanned_at"] not in (None, "missing"):
         scanned_at = duplicate["metadata_scanned_at"]
+    geometry_columns = ("raw_width", "raw_height", "exif_orientation")
+    geometry = tuple(canonical[column] for column in geometry_columns)
+    if any(value is None for value in geometry):
+        duplicate_geometry = tuple(duplicate[column] for column in geometry_columns)
+        if all(value is not None for value in duplicate_geometry):
+            geometry = duplicate_geometry
     cur.execute(
-        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?, metadata_scanned_at = ?
+        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?, metadata_scanned_at = ?,
+                            raw_width = ?, raw_height = ?, exif_orientation = ?
            WHERE id = ?""",
-        (latitude, longitude, captured_at, scanned_at, canonical_id),
+        (latitude, longitude, captured_at, scanned_at, *geometry, canonical_id),
     )
 
 
-def _migrate_image_locations(conn):
+def _migrate_image_locations(conn, *, scan_sources: bool):
     """Migrate legacy image paths and merge duplicate content.
 
     Args:
@@ -463,6 +477,9 @@ def _migrate_image_locations(conn):
         cur.execute("ALTER TABLE image_location ADD COLUMN file_size INTEGER")
     if "modified_at_ns" not in location_columns:
         cur.execute("ALTER TABLE image_location ADD COLUMN modified_at_ns INTEGER")
+    for name in ("file_device", "file_inode", "file_changed_at_ns"):
+        if name not in location_columns:
+            cur.execute(f"ALTER TABLE image_location ADD COLUMN {name} INTEGER")
     cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     cur.execute(
         """
@@ -473,20 +490,21 @@ def _migrate_image_locations(conn):
         """
     )
 
-    unhashed = cur.execute(
-        "SELECT id, path FROM image WHERE content_hash IS NULL"
-    ).fetchall()
-    for row in unhashed:
-        if not os.path.isfile(row["path"]):
-            continue
-        try:
-            content_hash = calculate_file_hash(row["path"])
-        except OSError:
-            continue
-        cur.execute(
-            "UPDATE image SET content_hash = ? WHERE id = ?",
-            (content_hash, row["id"]),
-        )
+    if scan_sources:
+        unhashed = cur.execute(
+            "SELECT id, path FROM image WHERE content_hash IS NULL"
+        ).fetchall()
+        for row in unhashed:
+            if not os.path.isfile(row["path"]):
+                continue
+            try:
+                content_hash = calculate_file_hash(row["path"])
+            except OSError:
+                continue
+            cur.execute(
+                "UPDATE image SET content_hash = ? WHERE id = ?",
+                (content_hash, row["id"]),
+            )
 
     duplicate_hashes = cur.execute(
         """
@@ -520,14 +538,15 @@ def _migrate_image_locations(conn):
             )
             cur.execute("DELETE FROM image WHERE id = ?", (duplicate_id,))
 
-    missing_created_at = cur.execute(
-        "SELECT id, path FROM image_location WHERE created_at IS NULL"
-    ).fetchall()
-    for row in missing_created_at:
-        cur.execute(
-            "UPDATE image_location SET created_at = ? WHERE id = ?",
-            (get_file_created_at(row["path"]), row["id"]),
-        )
+    if scan_sources:
+        missing_created_at = cur.execute(
+            "SELECT id, path FROM image_location WHERE created_at IS NULL"
+        ).fetchall()
+        for row in missing_created_at:
+            cur.execute(
+                "UPDATE image_location SET created_at = ? WHERE id = ?",
+                (get_file_created_at(row["path"]), row["id"]),
+            )
 
 
 def _create_face_table(cur, table_name="face"):
@@ -758,7 +777,7 @@ def _migrate_legacy_faces(conn):
     cur.execute("ALTER TABLE face_migrated RENAME TO face")
 
 
-def _initialize_schema(conn):
+def _initialize_schema(conn, *, scan_sources: bool):
     """Create and migrate the application database schema on one connection."""
     cur = conn.cursor()
 
@@ -824,6 +843,9 @@ def _initialize_schema(conn):
         ("longitude", "REAL"),
         ("captured_at", "TEXT"),
         ("metadata_scanned_at", "TEXT"),
+        ("raw_width", "INTEGER"),
+        ("raw_height", "INTEGER"),
+        ("exif_orientation", "INTEGER"),
     ):
         if name not in image_columns:
             cur.execute(f"ALTER TABLE image ADD COLUMN {name} {column_type}")
@@ -837,7 +859,7 @@ def _initialize_schema(conn):
         _create_face_table(cur)
     _ensure_face_review_columns(cur)
 
-    _migrate_image_locations(conn)
+    _migrate_image_locations(conn, scan_sources=scan_sources)
     _create_import_job_table(cur)
     _create_app_settings_table(cur)
     _create_recluster_dirty_person_table(cur)
@@ -899,12 +921,12 @@ def _initialize_schema(conn):
     conn.commit()
 
 
-def init_db(*, recover: bool = True):
+def init_db(*, recover: bool = True, scan_sources: bool = True):
     """Create and migrate the application database schema."""
     conn = None
     try:
         conn = _open_connection()
-        _initialize_schema(conn)
+        _initialize_schema(conn, scan_sources=scan_sources)
     except sqlite3.DatabaseError as exc:
         if conn is not None:
             conn.close()
@@ -913,7 +935,7 @@ def init_db(*, recover: bool = True):
             raise
         recover_database(exc, "database initialization")
         conn = _open_connection()
-        _initialize_schema(conn)
+        _initialize_schema(conn, scan_sources=scan_sources)
     finally:
         if conn is not None:
             conn.close()

@@ -328,7 +328,7 @@ class SettingsApiTest(unittest.TestCase):
         write_bytes.assert_called_once_with(b"sqlite")
         validate_database_file.assert_called_once()
         replace.assert_called_once_with(app.Path("/tmp/import.sqlite"), app.Path(app.DB_PATH))
-        init_db.assert_called_once_with(recover=False)
+        init_db.assert_called_once_with(recover=False, scan_sources=False)
         schedule_version_clustering_upgrade.assert_called_once_with()
         reset_import_resources.assert_called_once_with()
         self.assertEqual(result, {"status": "imported"})
