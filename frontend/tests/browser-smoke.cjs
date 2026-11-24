@@ -750,10 +750,14 @@ async function reviewInboxFlow(browser, errors) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
-    assert.ok(await page.locator('.sidebar__brand-mark').evaluate((brand) => {
+    // The entering page briefly transforms the fixed dialog's containing block.
+    // Check the actual paint order once the responsive layout has settled.
+    await page.waitForFunction(() => {
+      const brand = document.querySelector('.sidebar__brand-mark');
+      if (!brand) return false;
       const { x, y, width, height } = brand.getBoundingClientRect();
-      return document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop');
-    }), 'The sidebar logo is painted over the review dialog');
+      return Boolean(document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop'));
+    }, undefined, { timeout: 3000 });
     await apply.scrollIntoViewIfNeeded();
     const bounds = await apply.boundingBox();
     assert.ok(bounds && bounds.y >= -1 && bounds.y + bounds.height <= 361,
