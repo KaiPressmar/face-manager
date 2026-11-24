@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.14.1] - 2026-11-24
+
+### Verbessert
+
 - Die Fotoliste bleibt bei langsamen Laufwerken reaktionsfähig. Face Manager erstellt Vorschauen beim Import und zeigt vorhandene Vorschauen auch bei getrennter Quelle an.
 - Face Manager räumt ältere Foto- und Gesichtsvorschauen automatisch im Hintergrund auf, damit der lokale Zwischenspeicher begrenzt bleibt.
 - Abgebrochene Importe lassen sich aus dem Verlauf wiederholen. Beim Sichern und Wiederherstellen erscheint die Rückmeldung direkt bei der Aktion.
