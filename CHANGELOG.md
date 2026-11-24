@@ -9,6 +9,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Auf der Projektseite findest du eine bebilderte Tour durch alle Hauptansichten und ein kurzes Bedienvideo.
+
 ### Verbessert
 
 ### Behoben
