@@ -22,6 +22,7 @@ Requests, nicht in diese Versionshinweise.
 - Nach dem Wechsel der Bibliothek zeigt Face Manager die Gesichtsvorschauen der aktuellen Fotos.
 - Dialoge behalten den Tastaturfokus, und die Einstellungen lassen sich nach einem Ladefehler erneut abrufen.
 - Auf der Weltkarte lässt sich das Öffnen eines Fotos nach einem Ladefehler wiederholen.
+- Bildraster, Dialoge und Importanzeige funktionieren auch mit der älteren Android-12-WebView.
 - Der Windows-GPU-Installer enthält die benötigten Dateien für die Beschleunigung. Die Anzeige berücksichtigt, wenn die Erkennung auf den Prozessor zurückfällt.
 
 ## [0.12.2] - 2026-11-24

@@ -126,8 +126,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
           columnElements.length > 0
             ? Math.min(
                 ...columnElements.map((column) => {
-                  const cards = Array.from(column.children) as HTMLElement[];
-                  const lastCard = cards.at(-1);
+                  const lastCard = column.lastElementChild;
                   if (!lastCard) return Number.POSITIVE_INFINITY;
                   return lastCard.getBoundingClientRect().bottom - viewportBottom;
                 }),

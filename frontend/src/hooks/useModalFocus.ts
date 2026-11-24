@@ -8,9 +8,15 @@ const isVisible = (element: HTMLElement) =>
   getComputedStyle(element).visibility === "visible" &&
   !element.closest('[inert], [aria-hidden="true"]');
 
-const activeModal = () => Array.from(
-  document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
-).filter(isVisible).at(-1);
+const activeModal = () => {
+  const dialogs = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
+  );
+  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
+    if (isVisible(dialogs[index])) return dialogs[index];
+  }
+  return undefined;
+};
 
 const canFocus = (element: HTMLElement) => isVisible(element) && !element.matches(":disabled");
 

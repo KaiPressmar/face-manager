@@ -67,7 +67,7 @@ export function formatFriendlyDuration(seconds: number | null): string | null {
 
 function folderName(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.at(-1) ?? path;
+  return parts[parts.length - 1] ?? path;
 }
 
 function boundedProgress(current: number, total: number): number | null {

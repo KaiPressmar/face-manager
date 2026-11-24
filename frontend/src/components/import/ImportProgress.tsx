@@ -41,7 +41,7 @@ const stationStateLabels: Record<ImportStation["state"], string> = {
 
 function folderName(path: string) {
   const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.at(-1) ?? path;
+  return parts[parts.length - 1] ?? path;
 }
 
 function progressPercent(job: ImportJob) {
@@ -87,8 +87,7 @@ function formatEtaDuration(seconds: number | null) {
 }
 
 function currentItemName(path: string) {
-  const normalized = path.replace(/\\/g, "/");
-  return normalized.split("/").filter(Boolean).at(-1) ?? path;
+  return folderName(path);
 }
 
 function stationKeyLabel(station: ImportStation) {

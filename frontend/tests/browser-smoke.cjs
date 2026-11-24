@@ -27,6 +27,8 @@ async function newPage(browser, width, height, errors) {
   const page = await browser.newPage({ viewport: { width, height } });
   page.setDefaultTimeout(12000);
   page.on('pageerror', (error) => errors.push(error.message));
+  // Android 12's system WebView in CI lacks Array.prototype.at.
+  await page.addInitScript(() => Reflect.deleteProperty(Array.prototype, 'at'));
   return page;
 }
 
