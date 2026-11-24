@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.12.1] - 2026-11-24
+
+### Verbessert
+
 - Die Fotokarte gruppiert Standorte passend zur Bildschirmgröße, damit die Markierungen auch auf kleinen Bildschirmen einzeln antippbar bleiben.
 - Die Fotokarte lässt sich leichter per Tastatur bedienen. Der sichtbare Bereich kann direkt ausgewählt werden und die Fotoliste ist schneller erreichbar.
 
