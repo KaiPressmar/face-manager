@@ -13,6 +13,24 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.14.1] - 2026-11-24
+
+### Neu
+
+- In den Einstellungen lässt sich die Größe des lokalen Vorschau-Speichers ändern oder auf „Ohne Grenze“ setzen.
+
+### Verbessert
+
+- Die Fotoliste bleibt bei langsamen Laufwerken reaktionsfähig. Face Manager erstellt Vorschauen beim Import und zeigt vorhandene Vorschauen auch bei getrennter Quelle an.
+- Face Manager räumt ältere Foto- und Gesichtsvorschauen automatisch im Hintergrund auf, damit der lokale Zwischenspeicher begrenzt bleibt.
+- Abgebrochene Importe lassen sich aus dem Verlauf wiederholen. Beim Sichern und Wiederherstellen erscheint die Rückmeldung direkt bei der Aktion.
+
+### Behoben
+
+- Fotokacheln öffnen die Galerie per Maus und Touch. „Personen zuordnen“ führt direkt zu den noch unbenannten Gesichtern.
+- Eine kurzzeitig getrennte Fotoquelle bleibt als Speicherort in der Bibliothek erhalten.
+- Unter Ubuntu lässt sich das App-Fenster schmaler machen. Bei Problemen mit der Ordnerauswahl kannst du den Pfad eingeben.
+
 ## [0.14.0] - 2026-11-24
 
 ### Neu

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from backend import app
+from backend.services import preview_cache_budget as budget
 
 
 def make_database(path: Path, marker: str) -> None:
@@ -27,6 +28,24 @@ def marker_at(path: Path) -> str:
 
 
 class DatabaseRestoreTest(unittest.TestCase):
+    def test_database_restore_keeps_device_preview_policy(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            root = Path(folder)
+            current = root / "database.sqlite"
+            incoming = root / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "init_db"))
+            patches.enter_context(patch.object(budget, "get_data_root", return_value=root))
+            budget.set_preview_cache_limit_mib(None)
+
+            self.assertEqual(app.api_import_database(incoming.read_bytes()), {"status": "imported"})
+
+            self.assertEqual(marker_at(current), "new")
+            budget._policies.pop(root / "thumbnails")
+            self.assertEqual(budget.get_preview_cache_policy(), (None, False))
+
     def test_backup_includes_uncheckpointed_wal_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             source_path = Path(folder) / "source.sqlite"
@@ -70,7 +89,10 @@ class DatabaseRestoreTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 500)
             self.assertEqual(marker_at(current), "old")
             self.assertFalse(list(current.parent.glob("*.pre-import-backup-*.sqlite")))
-            self.assertTrue(all(call.kwargs == {"recover": False} for call in app.init_db.call_args_list))
+            self.assertTrue(all(
+                call.kwargs == {"recover": False, "scan_sources": False}
+                for call in app.init_db.call_args_list
+            ))
 
     def test_incomplete_snapshot_keeps_live_database_and_older_recovery_copy(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:

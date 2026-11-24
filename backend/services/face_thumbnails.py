@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import logging
 import os
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +17,8 @@ from PIL import Image, ImageOps
 from ..config import get_data_root
 from ..db.schema import get_conn
 from .filesystem_paths import filesystem_path
+from .preview_cache import decode_verified_preview, orient_image, write_preview_jpeg
+from .preview_cache_budget import delete_preview_file, preview_exists
 
 logger = logging.getLogger("face_manager.face_thumbnails")
 
@@ -24,7 +26,7 @@ FACE_THUMBNAIL_MAX_SIZE = 256
 FACE_THUMBNAIL_QUALITY = 86
 # JPEG encoding releases the GIL, so a small worker pool speeds up bulk warmup
 # without starving request handlers.
-FACE_THUMBNAIL_WARMUP_WORKERS = min(8, (os.cpu_count() or 4))
+FACE_THUMBNAIL_WARMUP_WORKERS = min(2, (os.cpu_count() or 2))
 _face_locks = tuple(Lock() for _ in range(64))
 
 FileIdentity = tuple[int, int, int, int, int]
@@ -63,6 +65,53 @@ def _thumbnail_target(face_id: int, source: str, identity: FileIdentity, bbox: F
     return _shard(face_id) / f"{face_id}-{digest}.jpg"
 
 
+def _registered_thumbnail_target(face_id: int, content_hash: str, bbox: FaceBox) -> Path:
+    digest = hashlib.sha256(repr(("registered-v1", content_hash, bbox)).encode()).hexdigest()[:24]
+    return _shard(face_id) / f"{face_id}-{digest}.jpg"
+
+
+def get_cached_face_thumbnail(
+    face_id: int, content_hash: str, bbox: FaceBox, *, touch: bool = True
+) -> Path | None:
+    """Look up a crop of registered content without touching the original."""
+    destination = _registered_thumbnail_target(face_id, content_hash, bbox)
+    return destination if preview_exists(destination, touch=touch) else None
+
+
+def write_face_thumbnail(
+    face_id: int, content_hash: str, bbox: FaceBox, image: Image.Image, orientation: int
+) -> Path:
+    """Write an oriented crop from already verified raw image pixels."""
+    return _write_registered_face_thumbnail(
+        face_id, content_hash, bbox, orient_image(image, orientation), orientation
+    )
+
+
+def _write_registered_face_thumbnail(
+    face_id: int, content_hash: str, bbox: FaceBox, oriented: Image.Image, orientation: int
+) -> Path:
+    with _face_locks[face_id % len(_face_locks)]:
+        destination = _registered_thumbnail_target(face_id, content_hash, bbox)
+        if not preview_exists(destination, touch=False):
+            crop = _crop_thumbnail(oriented, orientation, face_id, bbox)
+            write_preview_jpeg(crop, destination, FACE_THUMBNAIL_QUALITY)
+        return destination
+
+
+def write_face_thumbnails(
+    content_hash: str, faces: Iterable[tuple[int, FaceBox]], image: Image.Image, orientation: int
+) -> list[Path]:
+    """Write crops from a shared oriented image."""
+    results = []
+    oriented = orient_image(image, orientation)
+    for face_id, bbox in faces:
+        try:
+            results.append(_write_registered_face_thumbnail(face_id, content_hash, bbox, oriented, orientation))
+        except (OSError, ValueError):
+            logger.warning("Could not prepare preview for face %s", face_id, exc_info=True)
+    return results
+
+
 def get_face_thumbnail_path(face_id: int, image_path: str, bbox: FaceBox) -> Path:
     """Return the cache path for this face, photo version and crop rectangle."""
     source = filesystem_path(image_path)
@@ -77,7 +126,7 @@ def delete_face_thumbnail(face_id: int) -> None:
         candidates = [directory / f"{face_id}.jpg", *directory.glob(f"{face_id}-*.jpg")]
         for path in candidates:
             try:
-                path.unlink(missing_ok=True)
+                delete_preview_file(path)
             except OSError:
                 logger.warning("Could not remove cached thumbnail %s", path, exc_info=True)
 
@@ -109,29 +158,9 @@ def _transform_bbox(
     return x, y, w, h
 
 
-def _render_face_thumbnail(
-    oriented_image: Image.Image,
-    orientation: int,
-    face_id: int,
-    bbox: FaceBox,
-    thumbnail_path: Path,
-    source: str,
-    identity: FileIdentity,
-) -> Path:
-    """Crop, resize and atomically persist one face thumbnail.
-
-    Args:
-        oriented_image: Source image already rotated upright.
-        orientation: EXIF orientation flag applied to ``oriented_image``.
-        face_id: Face identifier used in diagnostics.
-        bbox: Face bounding box in raw (pre-orientation) image coordinates.
-        thumbnail_path: Cache destination for this crop and source version.
-        source: Original photo path, checked before publication.
-        identity: Original photo file identity at decode time.
-
-    Returns:
-        The path to the persisted thumbnail.
-    """
+def _crop_thumbnail(
+    oriented_image: Image.Image, orientation: int, face_id: int, bbox: FaceBox
+) -> Image.Image:
     x, y, w, h = _transform_bbox(
         orientation, oriented_image.width, oriented_image.height, *bbox
     )
@@ -147,30 +176,26 @@ def _render_face_thumbnail(
         (FACE_THUMBNAIL_MAX_SIZE, FACE_THUMBNAIL_MAX_SIZE),
         Image.Resampling.LANCZOS,
     )
+    return crop
 
-    thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f"{face_id}-",
-        suffix=".jpg",
-        dir=str(thumbnail_path.parent),
-    )
-    os.close(fd)
-    temp_path = Path(temp_name)
-    try:
-        crop.save(
-            temp_path,
-            format="JPEG",
-            quality=FACE_THUMBNAIL_QUALITY,
-            optimize=True,
-        )
+
+def _render_face_thumbnail(
+    oriented_image: Image.Image,
+    orientation: int,
+    face_id: int,
+    bbox: FaceBox,
+    thumbnail_path: Path,
+    source: str,
+    identity: FileIdentity,
+) -> Path:
+    crop = _crop_thumbnail(oriented_image, orientation, face_id, bbox)
+    def verify_source():
         if _file_identity(os.stat(source)) != identity:
             raise OSError("Source image changed while rendering face thumbnail")
-        os.replace(temp_path, thumbnail_path)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink(missing_ok=True)
 
-    return thumbnail_path
+    return write_preview_jpeg(
+        crop, thumbnail_path, FACE_THUMBNAIL_QUALITY, before_publish=verify_source
+    )
 
 
 def _decode_oriented(source: str, identity: FileIdentity) -> tuple[Image.Image, int]:
@@ -195,7 +220,7 @@ def ensure_face_thumbnail(face_id: int, image_path: str, bbox: FaceBox) -> Path:
     with _face_locks[face_id % len(_face_locks)]:
         identity = _file_identity(os.stat(source))
         destination = _thumbnail_target(face_id, source, identity, bbox)
-        if destination.is_file():
+        if preview_exists(destination):
             return destination
         image, orientation = _decode_oriented(source, identity)
         return _render_face_thumbnail(image, orientation, face_id, bbox, destination, source, identity)
@@ -213,7 +238,7 @@ def create_face_thumbnails_for_image(
             (face_id, bbox, _thumbnail_target(face_id, source, identity, bbox))
             for face_id, bbox in faces
         ]
-        pending = [entry for entry in pending if not entry[2].is_file()]
+        pending = [entry for entry in pending if not preview_exists(entry[2], touch=False)]
         if not pending:
             return
 
@@ -221,7 +246,7 @@ def create_face_thumbnails_for_image(
         for face_id, bbox, destination in pending:
             try:
                 with _face_locks[face_id % len(_face_locks)]:
-                    if not destination.is_file():
+                    if not preview_exists(destination, touch=False):
                         _render_face_thumbnail(
                             image, orientation, face_id, bbox, destination, source, identity
                         )
@@ -283,6 +308,38 @@ def _create_thumbnails_in_parallel(
     return created, failed
 
 
+def _warm_registered_groups(
+    groups: dict[tuple[str, tuple[str, ...]], list[tuple[int, FaceBox]]],
+    stop_event: Event | None,
+) -> tuple[int, int, int]:
+    if not groups:
+        return 0, 0, 0
+
+    def warm(item):
+        (content_hash, paths), faces = item
+        if stop_event is not None and stop_event.is_set():
+            return 0, 0, 0
+        for path in paths:
+            if stop_event is not None and stop_event.is_set():
+                return 0, 0, 0
+            try:
+                raw, (orientation, _, _) = decode_verified_preview(path, content_hash)
+            except (OSError, ValueError, Image.DecompressionBombError):
+                continue
+            with raw:
+                written = write_face_thumbnails(content_hash, faces, raw, orientation)
+            return len(written), 0, len(faces) - len(written)
+        return 0, len(faces), 0
+
+    with ThreadPoolExecutor(max_workers=min(FACE_THUMBNAIL_WARMUP_WORKERS, len(groups))) as pool:
+        totals = [0, 0, 0]
+        for created, missing, failed in pool.map(warm, groups.items()):
+            totals[0] += created
+            totals[1] += missing
+            totals[2] += failed
+        return tuple(totals)
+
+
 def warm_missing_face_thumbnails(
     *,
     after_face_id: int = 0,
@@ -306,6 +363,7 @@ def warm_missing_face_thumbnails(
     """
     conn = get_conn()
     try:
+        conn.execute("BEGIN")
         total_faces = int(
             conn.execute("SELECT COUNT(*) AS count FROM face").fetchone()["count"]
         )
@@ -313,20 +371,33 @@ def warm_missing_face_thumbnails(
             """
             SELECT
                 f.id,
+                f.image_id,
+                i.content_hash,
                 f.bbox_x,
                 f.bbox_y,
                 f.bbox_w,
-                f.bbox_h,
-                GROUP_CONCAT(location.path, char(10)) AS image_paths
+                f.bbox_h
             FROM face f
-            LEFT JOIN image_location location ON location.image_id = f.image_id
+            LEFT JOIN image i ON i.id = f.image_id
             WHERE f.id > ?
-            GROUP BY f.id
             ORDER BY f.id ASC
             LIMIT ?
             """,
             (int(after_face_id), int(scan_limit)),
         ).fetchall()
+        locations = defaultdict(list)
+        for row in conn.execute(
+            """
+            SELECT image_id, path
+            FROM image_location
+            WHERE image_id IN (
+                SELECT image_id FROM face WHERE id > ? ORDER BY id LIMIT ?
+            )
+            ORDER BY image_id, path
+            """,
+            (int(after_face_id), int(scan_limit)),
+        ):
+            locations[row["image_id"]].append(row["path"])
     finally:
         conn.close()
 
@@ -336,6 +407,8 @@ def warm_missing_face_thumbnails(
     highest_face_id = int(after_face_id)
     stopped_early = False
     pending: List[Tuple[int, str, Tuple[int, int, int, int]]] = []
+    registered_groups = defaultdict(list)
+    pending_count = 0
 
     for row in rows:
         if stop_event is not None and stop_event.is_set():
@@ -346,47 +419,57 @@ def warm_missing_face_thumbnails(
         highest_face_id = face_id
         scanned_faces += 1
 
-        image_paths = [
-            path for path in (row["image_paths"] or "").split("\n") if path
-        ]
-        image_path = next(
-            (path for path in image_paths if os.path.isfile(filesystem_path(path))),
-            None,
-        )
-        if image_path is None:
-            skipped_missing_source += 1
-            continue
-
         bbox = (
             int(float(row["bbox_x"] or 0)),
             int(float(row["bbox_y"] or 0)),
             int(float(row["bbox_w"] or 0)),
             int(float(row["bbox_h"] or 0)),
         )
-        try:
-            if get_face_thumbnail_path(face_id, image_path, bbox).is_file():
+        image_paths = locations[row["image_id"]]
+        if row["content_hash"]:
+            content_hash = row["content_hash"]
+            if get_cached_face_thumbnail(face_id, content_hash, bbox, touch=False) is not None:
                 skipped_existing += 1
                 continue
-        except OSError:
-            skipped_missing_source += 1
-            continue
-        pending.append((face_id, image_path, bbox))
+            registered_groups[(content_hash, tuple(image_paths))].append((face_id, bbox))
+        else:
+            image_path = next(
+                (path for path in image_paths if os.path.isfile(filesystem_path(path))),
+                None,
+            )
+            if image_path is None:
+                skipped_missing_source += 1
+                continue
+            try:
+                if preview_exists(
+                    get_face_thumbnail_path(face_id, image_path, bbox), touch=False
+                ):
+                    skipped_existing += 1
+                    continue
+            except OSError:
+                skipped_missing_source += 1
+                continue
+            pending.append((face_id, image_path, bbox))
 
-        if len(pending) >= max_created:
+        pending_count += 1
+        if pending_count >= max_created:
             stopped_early = True
             break
 
     created_thumbnails, failed_faces = _create_thumbnails_in_parallel(
         pending, stop_event
     )
+    registered_created, registered_missing, registered_failed = _warm_registered_groups(
+        registered_groups, stop_event
+    )
 
     return FaceThumbnailWarmupResult(
         total_faces=total_faces,
         scanned_faces=scanned_faces,
-        created_thumbnails=created_thumbnails,
+        created_thumbnails=created_thumbnails + registered_created,
         skipped_existing=skipped_existing,
-        skipped_missing_source=skipped_missing_source,
-        failed_faces=failed_faces,
+        skipped_missing_source=skipped_missing_source + registered_missing,
+        failed_faces=failed_faces + registered_failed,
         highest_face_id=highest_face_id,
         reached_end=(not stopped_early and len(rows) < scan_limit),
     )

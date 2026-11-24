@@ -1,3 +1,4 @@
+import hashlib
 import os
 import tempfile
 import time
@@ -10,9 +11,32 @@ from PIL import Image
 
 from backend.services import image_thumbnails
 from backend.services.image_thumbnails import ensure_image_thumbnail, prune_image_thumbnails
+from backend.services.preview_cache import decode_verified_preview
 
 
 class ImageThumbnailTest(unittest.TestCase):
+    def test_registered_preview_rejects_replacement_and_reuses_verified_bytes_offline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "photo.jpg"
+            exif = Image.Exif()
+            exif[274] = 6
+            Image.new("RGB", (100, 60), "red").save(source, exif=exif)
+            old_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            raw, (orientation, width, height) = decode_verified_preview(str(source), old_hash)
+            self.assertEqual((orientation, width, height), (6, 100, 60))
+            with raw, patch("backend.services.image_thumbnails.get_data_root", return_value=root):
+                old = image_thumbnails.write_image_thumbnail(1, old_hash, raw, orientation)
+                with Image.open(old) as image:
+                    self.assertEqual(image.size, (60, 100))
+                Image.new("RGB", (100, 60), "blue").save(source)
+                with self.assertRaises(OSError):
+                    decode_verified_preview(str(source), old_hash)
+                new_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+                self.assertIsNone(image_thumbnails.get_cached_image_thumbnail(1, new_hash))
+                source.unlink()
+                self.assertEqual(image_thumbnails.get_cached_image_thumbnail(1, old_hash), old)
+
     def test_orients_resizes_and_reuses_cached_jpeg(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

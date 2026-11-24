@@ -5,7 +5,7 @@ import React, {
   useState,
 } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
-import { imageFileUrl, openImageLocation } from "../../utils/api";
+import { imageFileUrl, imageThumbnailUrl, openImageLocation } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
 import { assignLabelLanes } from "../../utils/faceLabels";
@@ -29,11 +29,22 @@ interface GalleryLocation {
   directory: string;
 }
 
+interface GalleryMediaState {
+  url: string;
+  originalUnavailable?: boolean;
+  retryingOriginal?: boolean;
+  originalRetry?: number;
+  previewStatus?: "loaded" | "error";
+  previewRetry?: number;
+}
+
 export interface GalleryImage {
   id: number;
   image_path: string;
   filename?: string;
   directory?: string;
+  image_width?: number | null;
+  image_height?: number | null;
   location_count: number;
   locations: GalleryLocation[];
   faces: GalleryFace[];
@@ -95,14 +106,30 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 }) => {
   const [message, setMessage] = useState("");
   const [showFaces, setShowFaces] = useState(true);
-  const [failedImageId, setFailedImageId] = useState<number | null>(null);
-  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+  const [media, setMedia] = useState<GalleryMediaState | null>(null);
+  const [measuredImage, setMeasuredImage] = useState<{ url: string; width: number; height: number } | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
   const stageRef = useRef<HTMLElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalFocus(dialogRef, onClose, !isDeleting);
   const image = images[activeIndex];
+  const { image_width: imageWidth, image_height: imageHeight } = image;
+  const originalUrl = imageFileUrl(image.id);
+  const activeMedia = media?.url === originalUrl ? media : null;
+  const originalUnavailable = activeMedia?.originalUnavailable ?? false;
+  const originalSrc = imageFileUrl(image.id, activeMedia?.originalRetry);
+  const previewSrc = imageThumbnailUrl(image.id, activeMedia?.previewRetry);
+  const naturalSize = measuredImage?.url === originalUrl ? measuredImage : { width: 0, height: 0 };
+  const updateMedia = (change: Omit<GalleryMediaState, "url">) => {
+    setMedia((current) => ({
+      ...(current?.url === originalUrl ? current : { url: originalUrl }),
+      ...change,
+    }));
+  };
+  const measureImage = (element: HTMLImageElement) => {
+    setMeasuredImage({ url: originalUrl, width: element.naturalWidth, height: element.naturalHeight });
+  };
   const navigationIndex = sequence?.activeIndex ?? activeIndex;
   const navigationLength = sequence?.length ?? images.length;
 
@@ -142,10 +169,6 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
     observer.observe(stage);
     return () => observer.disconnect();
   }, []);
-
-  useEffect(() => {
-    setNaturalSize({ width: 0, height: 0 });
-  }, [image.id]);
 
   const scale =
     naturalSize.width && naturalSize.height
@@ -255,7 +278,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             <span aria-hidden="true">⌗</span>
             Gesichter
           </button>
-          <button type="button" onClick={copyImage} title="Bildinhalt in die Zwischenablage kopieren">
+          <button type="button" onClick={copyImage} disabled={originalUnavailable} title="Bildinhalt in die Zwischenablage kopieren">
             <span aria-hidden="true">⧉</span>
             Bild kopieren
           </button>
@@ -320,35 +343,47 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           }}
         >
           <img
-            key={image.id}
+            key={originalSrc}
             className="gallery-image"
-            src={imageFileUrl(image.id)}
+            src={originalSrc}
+            style={originalUnavailable ? { display: "none" } : undefined}
             alt={image.filename || ""}
             draggable={false}
             onLoad={(event) => {
-              setFailedImageId(null);
-              setNaturalSize({
-                width: event.currentTarget.naturalWidth,
-                height: event.currentTarget.naturalHeight,
-              });
+              updateMedia({ originalUnavailable: false, retryingOriginal: false });
+              measureImage(event.currentTarget);
             }}
-            onError={() => setFailedImageId(image.id)}
+            onError={() => updateMedia({ originalUnavailable: true, retryingOriginal: false })}
           />
-          {showFaces && !isDeleting &&
-            naturalSize.width > 0 &&
+          {originalUnavailable && activeMedia?.previewStatus !== "error" && (
+            <img
+              key={previewSrc}
+              className="gallery-image gallery-image--preview"
+              src={previewSrc}
+              alt={`Vorschau von ${image.filename || "Foto"}`}
+              draggable={false}
+              onLoad={(event) => {
+                updateMedia({ previewStatus: "loaded" });
+                measureImage(event.currentTarget);
+              }}
+              onError={() => updateMedia({ previewStatus: "error" })}
+            />
+          )}
+          {showFaces && !isDeleting && naturalSize.width > 0 &&
+            imageWidth && imageHeight &&
             (() => {
               const visibleFaces = sequence?.highlightedFaceId
                 ? image.faces.filter(
                     (face) => face.id === sequence.highlightedFaceId,
                   )
                 : image.faces;
-              const lanes = assignLabelLanes(visibleFaces, naturalSize.width);
+              const lanes = assignLabelLanes(visibleFaces, imageWidth);
               return visibleFaces.map((face) => (
                 <FaceOverlay
                   key={face.id}
                   face={face}
-                  naturalWidth={naturalSize.width}
-                  naturalHeight={naturalSize.height}
+                  naturalWidth={imageWidth}
+                  naturalHeight={imageHeight}
                   stackIndex={lanes.get(face.id) ?? 0}
                   highlighted={face.id === sequence?.highlightedFaceId}
                   onNavigateToCluster={onNavigateToCluster}
@@ -374,7 +409,35 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
         )}
       </main>
 
-      <footer className="gallery-footer">
+      <footer className={`gallery-footer${originalUnavailable ? " gallery-footer--source-error" : ""}`}>
+        {originalUnavailable && (
+          <div className="gallery-source-feedback">
+            <p role={activeMedia?.retryingOriginal ? "status" : "alert"}>
+              {activeMedia?.retryingOriginal ? "Original wird erneut geladen …" : "Die Bilddatei konnte nicht geöffnet werden."}
+              {" "}
+              {activeMedia?.previewStatus === "loaded"
+                ? "Die lokale Vorschau wird angezeigt."
+                : activeMedia?.previewStatus === "error" ? "Auch die Vorschau ist nicht verfügbar." : "Vorschau wird geladen …"}
+            </p>
+            <button
+              type="button"
+              className="secondary-button"
+              aria-disabled={activeMedia?.retryingOriginal}
+              onClick={() => {
+                if (activeMedia?.retryingOriginal) return;
+                updateMedia({
+                  originalRetry: Math.max(Date.now(), (activeMedia?.originalRetry ?? 0) + 1),
+                  retryingOriginal: true,
+                });
+              }}
+            >Original erneut laden</button>
+            {activeMedia?.previewStatus === "error" && (
+              <button type="button" className="secondary-button" onClick={() => {
+                updateMedia({ previewRetry: Math.max(Date.now(), (activeMedia?.previewRetry ?? 0) + 1), previewStatus: undefined });
+              }}>Vorschau erneut laden</button>
+            )}
+          </div>
+        )}
         <div className="gallery-locations">
           {image.locations.map((location) => (
             <div className="gallery-location-row" key={location.path}>
@@ -417,9 +480,9 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           {message}
         </div>
       )}
-      {(sequence?.error || image.id === failedImageId) && (
+      {sequence?.error && (
         <div className="gallery-toast gallery-toast--error" role="alert">
-          {sequence?.error || "Die Bilddatei konnte nicht geöffnet werden."}
+          {sequence.error}
         </div>
       )}
     </div>

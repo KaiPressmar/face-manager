@@ -145,8 +145,8 @@ function importTask(job: ImportJob): BackgroundTaskView {
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
     summary: importSummary(job),
-    error: job.last_error,
-    retryFolder: job.status === "failed" || (job.status === "completed" && job.last_error)
+    error: readableImportError(job.last_error),
+    retryFolder: job.status === "failed" || job.status === "cancelled" || (job.status === "completed" && job.last_error)
       ? job.folder_path
       : undefined,
     tone: tone[job.status],
@@ -155,6 +155,14 @@ function importTask(job: ImportJob): BackgroundTaskView {
     elapsedSeconds: finiteDuration(job.elapsed_seconds),
     finishedAt: job.finished_at,
   };
+}
+
+function readableImportError(error: string | null | undefined) {
+  const fileError = error?.match(/(?:^|[\\/])([^\\/:\n]+\.(?:jpe?g|png)):\s*(.*)$/i);
+  if (fileError && /cannot identify image|image file is truncated|broken data stream/i.test(fileError[2])) {
+    return `„${fileError[1]}“ konnte nicht als Bild gelesen werden und wurde übersprungen.`;
+  }
+  return error;
 }
 
 function estimateAutoClusterEta(task: AutoClusterTask | null): number | null {
@@ -451,6 +459,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
   const parallelImports = queue?.running_count ?? queue?.active_job_ids?.length ?? 0;
   const open = isHovered || hasFocus || isPinned;
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const retryInFlight = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -458,7 +467,8 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
   }, [openImportsRequest]);
 
   const retryImport = async (task: BackgroundTaskView) => {
-    if (!task.retryFolder || busyTaskId !== null) return;
+    if (!task.retryFolder || busyTaskId !== null || retryInFlight.current) return;
+    retryInFlight.current = true;
     setBusyTaskId(task.id);
     setActionError(null);
     setActionNotice(null);
@@ -469,6 +479,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Der Ordner konnte nicht erneut eingereiht werden.");
     } finally {
+      retryInFlight.current = false;
       setBusyTaskId(null);
     }
   };
@@ -693,9 +704,9 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
                     task={task}
                     history
                     busy={busyTaskId === task.id}
-                  onRetry={task.retryFolder && !retriedImports.has(task.id) && !queue?.jobs.some((job) =>
-                    job.folder_path === task.retryFolder && !TERMINAL_IMPORT_STATUSES.has(job.status)
-                  ) ? () => void retryImport(task) : undefined}
+                    onRetry={task.retryFolder && !retriedImports.has(task.id) && !queue?.jobs.some((job) =>
+                      job.folder_path === task.retryFolder && !TERMINAL_IMPORT_STATUSES.has(job.status)
+                    ) ? () => void retryImport(task) : undefined}
                     onDelete={() => void deleteHistoryTask(task)}
                   />
                 ))}

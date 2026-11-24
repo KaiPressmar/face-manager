@@ -23,8 +23,8 @@ const screenshot = async (page, name) => {
   if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, `${name}.png`), fullPage: true });
 };
 
-async function newPage(browser, width, height, errors) {
-  const page = await browser.newPage({ viewport: { width, height } });
+async function newPage(browser, width, height, errors, options = {}) {
+  const page = await browser.newPage({ viewport: { width, height }, ...options });
   page.setDefaultTimeout(12000);
   page.on('pageerror', (error) => errors.push(error.message));
   // Android 12's system WebView in CI lacks Array.prototype.at.
@@ -57,10 +57,16 @@ async function previewFlow(browser, errors) {
   });
   try {
     let firstPreview = true;
+    let firstOriginalUnavailable = true;
     await page.route('**/api/images/*/thumbnail', (route) => {
       if (!firstPreview) return route.continue();
       firstPreview = false;
       return route.fulfill({ status: 422, body: 'Invalid preview fixture' });
+    });
+    await page.route(/\/api\/images\/\d+\/file(?:\?.*)?$/, (route) => {
+      if (!firstOriginalUnavailable) return route.continue();
+      firstOriginalUnavailable = false;
+      return route.fulfill({ status: 404, body: 'Original is offline' });
     });
     await page.goto(`${webBase}/#/bilder`);
     const tile = page.locator('[data-image-id]').first();
@@ -68,11 +74,25 @@ async function previewFlow(browser, errors) {
     await page.getByText('Vorschau nicht verfügbar', { exact: true }).waitFor();
     await page.waitForFunction(() => Array.from(document.querySelectorAll('[data-image-id] img'))
       .some((image) => image.naturalWidth > 0 && image.src.includes('/thumbnail')));
+    const failedTile = page.locator('[data-image-id]').filter({ hasText: 'Vorschau nicht verfügbar' });
+    await failedTile.getByRole('button', { name: /Vorschau von .* erneut laden/ }).click();
+    await page.locator('[data-image-id] img[src*="retry="]').waitFor();
+    await page.getByText('Vorschau nicht verfügbar', { exact: true }).waitFor({ state: 'hidden' });
     assert.deepEqual(originals, [], 'The library fetched full-size photos before opening a viewer');
-    await tile.locator('.image-gallery-card__open').press('Enter');
+    const opener = tile.locator('.image-gallery-card__open');
+    await opener.click();
+    const dialog = page.getByRole('dialog', { name: 'Bildansicht' });
+    await dialog.getByRole('alert').filter({ hasText: 'Die lokale Vorschau wird angezeigt.' }).waitFor();
+    await dialog.locator('img.gallery-image--preview').waitFor();
+    await dialog.getByRole('button', { name: 'Original erneut laden' }).click();
+    await page.waitForFunction(() => {
+      const image = document.querySelector('img.gallery-image[src*="/file?retry="]');
+      return image?.naturalWidth > 0 && image.getClientRects().length > 0;
+    });
     await page.locator('img.gallery-image').waitFor();
     await page.waitForFunction(() => document.querySelector('img.gallery-image').naturalWidth > 0);
-    assert.ok(originals.length > 0, 'The fullscreen viewer must still request the original');
+    assert.equal(originals.length, 2, 'Opening and retrying should request only the active original');
+    assert.equal(new URL(originals[0]).pathname, new URL(originals[1]).pathname, 'Retry changed the active photo');
     const firstOriginal = await page.locator('img.gallery-image').getAttribute('src');
     await page.keyboard.press('ArrowRight');
     await page.waitForFunction((src) => {
@@ -81,8 +101,124 @@ async function previewFlow(browser, errors) {
     }, firstOriginal);
     await page.keyboard.press('Escape');
     await page.getByRole('dialog', { name: 'Bildansicht' }).waitFor({ state: 'hidden' });
-    console.log('PASS photo previews: lazy thumbnails in the grid and originals in the viewer');
+    await opener.and(page.locator(':focus')).waitFor();
+    await opener.press('Enter');
+    await dialog.waitFor();
+    const touchPage = await newPage(browser, 390, 844, errors, { hasTouch: true, isMobile: true });
+    try {
+      await touchPage.goto(`${webBase}/#/bilder`);
+      await touchPage.locator('.image-gallery-card__open').first().tap();
+      await touchPage.getByRole('dialog', { name: 'Bildansicht' }).waitFor();
+    } finally {
+      await touchPage.close();
+    }
+    console.log('PASS photos: pointer/touch/keyboard opening, preview retry, offline preview, original retry and focus return');
   } finally {
+    await page.close();
+  }
+}
+
+async function firstAssignmentFlow(browser, errors) {
+  const page = await newPage(browser, 900, 680, errors);
+  const reviewHash = /#\/gesichter-pruefen\/ohne-namen$/;
+  try {
+    await page.route('**/api/images?**', async (route) => {
+      const response = await route.fetch();
+      const images = await response.json();
+      await route.fulfill({ response, json: { ...images, available_persons: ['Unbekannt'] } });
+    });
+    await page.goto(`${webBase}/#/bilder`);
+    const assign = page.getByRole('button', { name: 'Personen zuordnen', exact: true });
+    const openTab = page.getByRole('button', { name: /^Ohne Namen/ }).and(page.locator('[aria-current="true"]'));
+    await assign.click();
+    await page.waitForURL(reviewHash);
+    await openTab.waitFor();
+    await page.locator('.cluster-detail-topbar').waitFor();
+    await page.reload();
+    await openTab.waitFor();
+    await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
+    await page.goBack();
+    await assign.click();
+    await page.waitForURL(reviewHash);
+    await openTab.waitFor();
+    console.log('PASS first assignment: local route, refresh, back and already-mounted review page');
+  } finally {
+    await page.close();
+  }
+}
+
+async function localRecoveryFlow(browser, errors) {
+  const page = await newPage(browser, 390, 844, errors);
+  const firstBackup = gate();
+  const firstEnqueue = gate();
+  let restores = 0;
+  const retryPaths = [];
+  try {
+    await page.addInitScript(() => {
+      window.EventSource = class TestEventSource extends EventTarget {
+        constructor() {
+          super();
+          window.recoveryTestEvents = this;
+          queueMicrotask(() => this.onopen?.(new Event('open')));
+        }
+        close() {}
+      };
+    });
+    await page.route('**/api/database/import', async (route) => {
+      restores += 1;
+      if (restores === 1) {
+        await firstBackup.ready;
+        return route.fulfill({ status: 400, json: { detail: 'Die Testdatei ist keine gültige Sicherung.' } });
+      }
+      return route.fulfill({ status: 204 });
+    });
+    await page.route('**/api/imports', async (route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      retryPaths.push(route.request().postDataJSON().folder_path);
+      if (retryPaths.length === 1) {
+        await firstEnqueue.ready;
+        return route.fulfill({ status: 400, json: { detail: 'Der Testordner ist noch nicht erreichbar.' } });
+      }
+      return route.fulfill({ status: 202, json: { id: 'retry-job', status: 'queued' } });
+    });
+    await page.goto(`${webBase}/#/einstellungen/daten`);
+    const backupCard = page.locator('.settings-card').filter({ has: page.getByRole('heading', { name: 'Daten sichern und wiederherstellen' }) });
+    const fileField = backupCard.locator('input[type="file"]');
+    const upload = (body) => fileField.setInputFiles({ name: 'demo.sqlite', mimeType: 'application/octet-stream', buffer: Buffer.from(body) });
+    await upload('invalid');
+    await backupCard.getByRole('status').filter({ hasText: 'Die Sicherung wird geprüft und wiederhergestellt' }).waitFor();
+    assert.ok(await backupCard.getByRole('button', { name: 'Sicherung erstellen' }).isDisabled());
+    firstBackup.release();
+    await backupCard.getByRole('alert').filter({ hasText: 'Die Testdatei ist keine gültige Sicherung.' }).waitFor();
+    assert.ok(await backupCard.getByRole('button', { name: 'Sicherung wiederherstellen' }).isEnabled());
+    await upload('valid fixture');
+    await backupCard.getByRole('status').filter({ hasText: 'Die Sicherung wurde wiederhergestellt.' }).waitFor();
+    assert.equal(restores, 2);
+
+    await page.evaluate(() => {
+      window.recoveryTestEvents.dispatchEvent(new MessageEvent('imports', { data: JSON.stringify({
+        jobs: [{ id: 'cancelled-job', folder_path: '/fixtures/cancelled', status: 'cancelled', processed_images: 4,
+          total_images: 8, finished_at: '2026-01-21T12:00:00Z', last_error: '/fixtures/cancelled/kaputt.jpg: cannot identify image file' }],
+        running_count: 0, active_job_ids: [],
+      }) }));
+    });
+    await page.locator('.activity-center__trigger').click();
+    const historyJob = page.locator('article.activity-task').filter({ hasText: 'Abgebrochen' });
+    await historyJob.getByText('„kaputt.jpg“ konnte nicht als Bild gelesen werden und wurde übersprungen.').waitFor();
+    const retry = historyJob.getByRole('button', { name: 'Ordner erneut prüfen' });
+    await retry.evaluate((button) => { button.click(); button.click(); });
+    firstEnqueue.release();
+    await page.getByRole('alert').filter({ hasText: 'Der Testordner ist noch nicht erreichbar.' }).waitFor();
+    assert.deepEqual(retryPaths, ['/fixtures/cancelled']);
+    await retry.click();
+    await page.getByRole('status').filter({ hasText: 'Ordner erneut zur Prüfung eingereiht.' }).waitFor();
+    assert.deepEqual(retryPaths, ['/fixtures/cancelled', '/fixtures/cancelled']);
+    await historyJob.getByText('Abgebrochen', { exact: true }).waitFor();
+    await retry.waitFor({ state: 'hidden' });
+    console.log('PASS recovery feedback: backup pending/error/retry, cancelled job retry with double-click protection');
+  } finally {
+    firstBackup.release();
+    firstEnqueue.release();
     await page.close();
   }
 }
@@ -578,6 +714,100 @@ async function settingsFlow(browser, errors) {
   }
 }
 
+async function previewCacheSettingsFlow(browser, errors) {
+  const page = await newPage(browser, 320, 765, errors, { hasTouch: true, isMobile: true });
+  const firstWrite = gate();
+  const firstSave = gate();
+  const baseSettings = await (await page.request.get(`${apiBase}/settings`)).json();
+  const settings = {
+    ...baseSettings,
+    preview_cache_limit_mib: 768,
+    preview_cache_limit_mib_default: 768,
+    preview_cache_limit_error: false,
+  };
+  const writes = [];
+  try {
+    await page.route('**/api/settings', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const payload = route.request().postDataJSON();
+        writes.push(payload);
+        if (writes.length === 1) {
+          firstWrite.release();
+          await firstSave.ready;
+        }
+        settings.preview_cache_limit_mib = payload.preview_cache_limit_mib;
+        settings.preview_cache_limit_error = false;
+      }
+      await route.fulfill({ json: settings });
+    });
+    await page.goto(`${webBase}/#/einstellungen/daten`);
+    const card = page.getByRole('region', { name: 'Vorschau-Cache' });
+    const choice = card.getByRole('combobox', { name: 'Cache-Größe' });
+    const save = card.getByRole('button', { name: 'Cache-Einstellung speichern' });
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), '768');
+    assert.deepEqual(await choice.locator('option').allTextContents(),
+      ['Standard (768 MiB)', '2 GiB', '8 GiB', '32 GiB', 'Eigene Größe', 'Ohne Grenze']);
+    assert.ok(await save.isDisabled());
+    await choice.press('End');
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await card.getByText(/Cache kann auf diesem Gerät weiter wachsen/).waitFor();
+    assert.deepEqual(writes, []);
+    await save.press('Enter');
+    await card.getByRole('status').filter({ hasText: /wird gespeichert/ }).waitFor();
+    await firstWrite.ready;
+    assert.ok(await save.isDisabled());
+    assert.ok(await choice.isDisabled());
+    await save.evaluate((button) => button.form.requestSubmit());
+    assert.equal(writes.length, 1);
+    firstSave.release();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes, [{ preview_cache_limit_mib: null }]);
+
+    await page.reload();
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await choice.selectOption('custom');
+    await card.getByText(/nach 90 Tagen.*auch wenn noch Platz ist/).waitFor();
+    const size = card.getByRole('spinbutton', { name: 'Eigene Größe in MiB' });
+    for (const invalid of ['127', '128.5', '1048577', '']) {
+      await size.fill(invalid);
+      assert.equal(await size.getAttribute('aria-invalid'), 'true');
+      assert.ok(await save.isDisabled());
+    }
+    assert.equal(writes.length, 1);
+    await size.fill('1048576');
+    assert.equal(await size.getAttribute('aria-invalid'), 'false');
+    await size.fill('128');
+    await save.tap();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes[1], { preview_cache_limit_mib: 128 });
+    await page.reload();
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), 'custom');
+    assert.equal(await size.inputValue(), '128');
+    assert.ok(await card.evaluate((element) => {
+      const { right, left } = element.getBoundingClientRect();
+      return element.scrollWidth <= element.clientWidth + 1 && left >= 0 && right <= innerWidth + 1;
+    }));
+
+    settings.preview_cache_limit_mib = null;
+    settings.preview_cache_limit_error = true;
+    await page.reload();
+    await card.getByRole('alert').filter({ hasText: /automatische Bereinigung ist pausiert/ }).waitFor();
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await save.tap();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes[2], { preview_cache_limit_mib: null });
+    assert.equal(await card.getByRole('alert').count(), 0);
+    assert.ok(await save.isDisabled());
+    console.log('PASS preview cache: explicit save, no overlap, keyboard, 320px, custom limits, reload and repair');
+  } finally {
+    firstSave.release();
+    await page.close();
+  }
+}
+
 async function assertMarkerTouchSize(page, context) {
   const hit = page.locator('.gps-map__marker-hit').first();
   await hit.waitFor();
@@ -814,11 +1044,14 @@ async function selectReviewFaces(dialog, proposal, selection) {
   const errors = [];
   try {
     await previewFlow(browser, errors);
+    await firstAssignmentFlow(browser, errors);
     await collectSourcesFlow(browser, errors);
+    await localRecoveryFlow(browser, errors);
     await mapFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);
+    await previewCacheSettingsFlow(browser, errors);
     await responsiveFlow(browser, errors);
     await reviewInboxFlow(browser, errors);
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);

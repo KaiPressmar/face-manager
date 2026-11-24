@@ -81,17 +81,21 @@ export function invalidateLibraryMediaUrls() {
   libraryMediaRevision += 1;
 }
 
-function imageMediaUrl(imageId: number, endpoint: "file" | "thumbnail") {
+function imageMediaUrl(imageId: number, endpoint: "file" | "thumbnail", retryToken?: number) {
   const url = `${API_BASE}/images/${imageId}/${endpoint}`;
-  return libraryMediaRevision ? `${url}?library=${libraryMediaRevision}` : url;
+  if (!libraryMediaRevision && retryToken === undefined) return url;
+  const query = new URLSearchParams();
+  if (libraryMediaRevision) query.set("library", String(libraryMediaRevision));
+  if (retryToken !== undefined) query.set("retry", String(retryToken));
+  return `${url}?${query}`;
 }
 
-export function imageFileUrl(imageId: number) {
-  return imageMediaUrl(imageId, "file");
+export function imageFileUrl(imageId: number, retryToken?: number) {
+  return imageMediaUrl(imageId, "file", retryToken);
 }
 
-export function imageThumbnailUrl(imageId: number) {
-  return imageMediaUrl(imageId, "thumbnail");
+export function imageThumbnailUrl(imageId: number, retryToken?: number) {
+  return imageMediaUrl(imageId, "thumbnail", retryToken);
 }
 
 export function faceCropUrl(faceId: number) {
@@ -180,6 +184,9 @@ export interface AppSettings {
   ui_theme_default: ThemeMode;
   automatic_update_checks: boolean;
   automatic_update_checks_default: boolean;
+  preview_cache_limit_mib?: number | null;
+  preview_cache_limit_mib_default?: number;
+  preview_cache_limit_error?: boolean;
   database_path: string;
   error_log_path: string;
 }
@@ -205,6 +212,7 @@ export interface UpdateSettingsPayload {
   file_log_level?: "DEBUG" | "INFO" | "WARNING" | "ERROR";
   ui_theme?: ThemeMode;
   automatic_update_checks?: boolean;
+  preview_cache_limit_mib?: number | null;
 }
 
 export interface ClusteringProfile {
@@ -1144,7 +1152,7 @@ export async function selectImportFolder(): Promise<string | null> {
     method: "POST",
   });
   if (!res.ok) {
-    throw new Error("Der Ordnerdialog konnte nicht geöffnet werden.");
+    throw new Error(await readApiError(res, "Der Ordnerdialog konnte nicht geöffnet werden."));
   }
   const payload = (await res.json()) as { folder_path: string | null };
   return payload.folder_path;

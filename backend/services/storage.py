@@ -1640,6 +1640,7 @@ def get_image_detail_rows(image_id: int):
                 COALESCE(location.filename, i.filename) AS filename,
                 location.created_at AS created_at,
                 i.content_hash,
+                i.raw_width, i.raw_height, i.exif_orientation,
                 (
                     SELECT COUNT(*)
                     FROM image_location all_locations
@@ -1888,6 +1889,7 @@ def list_images_page(
                 paged_images.filename,
                 paged_images.created_at,
                 i.content_hash,
+                i.raw_width, i.raw_height, i.exif_orientation,
                 (
                     SELECT COUNT(*)
                     FROM image_location all_locations
@@ -1960,6 +1962,7 @@ def list_images(folders=None):
             location.directory,
             location.filename,
             i.content_hash,
+            i.raw_width, i.raw_height, i.exif_orientation,
             (
                 SELECT COUNT(*) FROM image_location all_locations
                 WHERE all_locations.image_id = i.id
@@ -2114,6 +2117,54 @@ def build_folder_tree():
             QUERY_CACHE_TAG_IMAGES,
         },
     )
+
+
+def get_image_preview_source(image_id: int):
+    """Return the registered image identity without consulting the source filesystem."""
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT id AS image_id, content_hash FROM image WHERE id = ?", (image_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def get_face_preview_source(face_id: int):
+    """Return the registered image identity and raw face rectangle for a crop."""
+    conn = get_conn()
+    try:
+        return conn.execute(
+            """
+            SELECT f.image_id, i.content_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+            FROM face f JOIN image i ON i.id = f.image_id
+            WHERE f.id = ?
+            """,
+            (face_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def save_missing_image_geometry(image_id: int, content_hash: str, geometry: tuple[int, int, int]) -> None:
+    """Publish geometry only to the registered content from which it was read."""
+    conn = get_conn()
+    try:
+        # Geometry can be rediscovered. A busy import writer takes priority.
+        conn.execute("PRAGMA busy_timeout = 0")
+        result = conn.execute(
+            """
+            UPDATE image SET exif_orientation = ?, raw_width = ?, raw_height = ?
+            WHERE id = ? AND content_hash = ?
+              AND (exif_orientation IS NULL OR raw_width IS NULL OR raw_height IS NULL)
+            """,
+            (*geometry, image_id, content_hash),
+        )
+        conn.commit()
+        if result.rowcount:
+            invalidate_image_query_cache()
+    finally:
+        conn.close()
 
 
 def get_available_image_path(

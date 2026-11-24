@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import stat
 import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -18,10 +19,13 @@ from PIL import Image, ImageFile
 from ..db.schema import HASH_CHUNK_SIZE, calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
-from .face_thumbnails import delete_face_thumbnail
+from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
+from .image_thumbnails import write_image_thumbnail
+from .preview_cache import get_image_geometry
 from .geo import extract_image_metadata, record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
+    is_confirmed_missing,
     stored_path as _stored_filesystem_path,
 )
 from .storage import (
@@ -115,6 +119,7 @@ class HashedImage:
     modified_at_ns: int
     identity: tuple[int, int, int, int, int]
     metadata: tuple[float | None, float | None, str | None]
+    geometry: tuple[int, int, int] | None = None
 
     def verify_current(self) -> None:
         source = _filesystem_path(self.normalized_path)
@@ -188,6 +193,8 @@ class ImagePreparer:
             if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
             with Image.open(source) as image:
+                if expected is not None:
+                    expected.geometry = get_image_geometry(image)
                 pixels = np.asarray(image.convert("RGB"))
             if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
@@ -607,7 +614,7 @@ class ImportProcessor:
         image_paths: list[Path],
         cancel_event: threading.Event,
     ) -> tuple[list[Path], list[Path]]:
-        """Skip hashing when a processed path has identical size and mtime."""
+        """Skip hashing when a processed location still has its imported identity."""
         paths_by_normalized = {
             os.path.normpath(str(path)): path for path in image_paths
         }
@@ -620,7 +627,8 @@ class ImportProcessor:
             rows = cursor.execute(
                 f"""
                 SELECT location.path, location.file_size,
-                       location.modified_at_ns, image.processed_at
+                       location.modified_at_ns, location.file_device, location.file_inode,
+                       location.file_changed_at_ns, image.processed_at, image.content_hash
                 FROM image_location location
                 JOIN image ON image.id = location.image_id
                 WHERE location.path IN ({placeholders})
@@ -637,8 +645,12 @@ class ImportProcessor:
             if (
                 known is None
                 or not known["processed_at"]
+                or not known["content_hash"]
                 or known["file_size"] is None
                 or known["modified_at_ns"] is None
+                or known["file_device"] is None
+                or known["file_inode"] is None
+                or known["file_changed_at_ns"] is None
             ):
                 needs_hash.append(path)
                 continue
@@ -647,10 +659,12 @@ class ImportProcessor:
             except OSError:
                 needs_hash.append(path)
                 continue
-            if (
-                int(known["file_size"]) == int(stat_result.st_size)
-                and int(known["modified_at_ns"]) == int(stat_result.st_mtime_ns)
-            ):
+            identity = (
+                int(known["file_device"]), int(known["file_inode"]),
+                int(known["file_size"]), int(known["modified_at_ns"]),
+                int(known["file_changed_at_ns"]),
+            )
+            if identity == _file_identity(stat_result):
                 unchanged.append(path)
             else:
                 needs_hash.append(path)
@@ -682,15 +696,29 @@ class ImportProcessor:
                     raise ImportFailed(f"Die Gesichtserkennung konnte nicht vorbereitet werden. {exc}") from exc
             if on_index_ready is not None:
                 on_index_ready()
-            existing_face_ids = self._commit_faces(
+            committed = self._commit_faces(
                 cursor, connection, image_id, faces, clusterer, distance_threshold, pending_source
             )
 
         invalidate_image_query_cache()
-        if existing_face_ids is None:
+        if committed is None:
             return
+        committed_image_id, existing_face_ids, thumbnail_faces = committed
         for face_id in existing_face_ids:
             delete_face_thumbnail(face_id)
+        if pending_source is not None and pending_source.geometry is not None:
+            try:
+                with Image.fromarray(image_np) as raw:
+                    orientation = pending_source.geometry[0]
+                    write_image_thumbnail(
+                        committed_image_id, pending_source.content_hash, raw, orientation
+                    )
+                    if thumbnail_faces:
+                        write_face_thumbnails(
+                            pending_source.content_hash, thumbnail_faces, raw, orientation
+                        )
+            except Exception:
+                logger.warning("Could not prepare previews for image %s", committed_image_id, exc_info=True)
         progress_callback(
             {
                 "total_faces_increment": len(faces),
@@ -707,7 +735,7 @@ class ImportProcessor:
         clusterer: FaceClustering,
         distance_threshold: float,
         pending_source: HashedImage | None,
-    ) -> list[int] | None:
+    ) -> tuple[int, list[int], list[tuple[int, tuple[int, int, int, int]]]] | None:
         """Persist prepared faces, or only attach the path for a raced duplicate."""
         index_dirty = False
         try:
@@ -731,6 +759,7 @@ class ImportProcessor:
             ]
             cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
             fallback_cluster_ids: dict[int, int] = {}
+            thumbnail_faces = []
             for face in faces:
                 embedding = face["embedding"]
                 index_dirty = True
@@ -763,6 +792,13 @@ class ImportProcessor:
                         embedding.astype("float32").tobytes(),
                     ),
                 )
+                thumbnail_faces.append((int(cursor.lastrowid), tuple(map(int, face["bbox"]))))
+            if pending_source is not None and pending_source.geometry is not None:
+                orientation, width, height = pending_source.geometry
+                cursor.execute(
+                    "UPDATE image SET raw_width = ?, raw_height = ?, exif_orientation = ? WHERE id = ?",
+                    (width, height, orientation, image_id),
+                )
             cursor.execute(
                 "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?", (image_id,)
             )
@@ -776,7 +812,7 @@ class ImportProcessor:
                 if index_dirty:
                     self.resources.reset_clusterer(clusterer)
             raise
-        return existing_face_ids
+        return int(image_id), existing_face_ids, thumbnail_faces
 
     @staticmethod
     def _resolve_import_cluster_id(
@@ -829,6 +865,8 @@ class ImportProcessor:
         Returns:
             Newly created canonical image identifier.
         """
+        if cls._legacy_processed_location(cursor, hashed.normalized_path) is not None:
+            raise SourceChangedError("Der Inhalt des älteren Bibliothekseintrags ist nicht sicher überprüfbar.")
         cls._detach_path(cursor, hashed.normalized_path)
         directory = os.path.dirname(hashed.normalized_path)
         filename = os.path.basename(hashed.normalized_path)
@@ -859,10 +897,22 @@ class ImportProcessor:
     def _attach_processed_content(cls, cursor, connection, hashed: HashedImage) -> bool:
         """Attach a duplicate only when its canonical image still exists."""
         matching = cls._find_content(cursor, hashed.content_hash)
-        if not matching or not matching["processed_at"]:
+        legacy_location = cls._legacy_processed_location(cursor, hashed.normalized_path)
+        if (not matching or not matching["processed_at"]) and legacy_location is None:
             return False
         cursor.execute("BEGIN IMMEDIATE")
         matching = cls._find_content(cursor, hashed.content_hash)
+        legacy_location = cls._legacy_processed_location(cursor, hashed.normalized_path)
+        if legacy_location is not None:
+            saved_identity = tuple(legacy_location)[1:]
+            if matching is not None or saved_identity != hashed.identity:
+                raise SourceChangedError("Der Inhalt des älteren Bibliothekseintrags ist nicht sicher überprüfbar.")
+            hashed.verify_current()
+            cursor.execute(
+                "UPDATE image SET content_hash = ? WHERE id = ?",
+                (hashed.content_hash, legacy_location["image_id"]),
+            )
+            matching = cls._find_content(cursor, hashed.content_hash)
         if not matching or not matching["processed_at"]:
             connection.rollback()
             return False
@@ -872,6 +922,19 @@ class ImportProcessor:
         connection.commit()
         invalidate_image_query_cache()
         return True
+
+    @staticmethod
+    def _legacy_processed_location(cursor, path: str):
+        return cursor.execute(
+            """
+            SELECT location.image_id, location.file_device, location.file_inode,
+                   location.file_size, location.modified_at_ns, location.file_changed_at_ns
+            FROM image_location location
+            JOIN image ON image.id = location.image_id
+            WHERE location.path = ? AND image.content_hash IS NULL AND image.processed_at IS NOT NULL
+            """,
+            (path,),
+        ).fetchone()
 
     @classmethod
     def _attach_location(
@@ -888,6 +951,12 @@ class ImportProcessor:
             hashed: Hashed path metadata to attach.
         """
         record_image_metadata(cursor, image_id, hashed.normalized_path, metadata=hashed.metadata)
+        device, inode, _, _, changed_at = hashed.identity
+        # A platform can expose unsigned or 128-bit file IDs. SQLite INTEGER
+        # parameters are signed 64-bit, so unsupported IDs are rehashed on import.
+        device = device if -(2**63) <= device < 2**63 else None
+        inode = inode if -(2**63) <= inode < 2**63 else None
+        identity_values = (hashed.file_size, hashed.modified_at_ns, device, inode, changed_at)
         existing = cursor.execute(
             "SELECT image_id FROM image_location WHERE path = ?",
             (hashed.normalized_path,),
@@ -896,27 +965,29 @@ class ImportProcessor:
             cursor.execute(
                 """
                 UPDATE image_location
-                SET created_at = ?, file_size = ?, modified_at_ns = ?
+                SET created_at = ?, file_size = ?, modified_at_ns = ?, file_device = ?,
+                    file_inode = ?, file_changed_at_ns = ?
                 WHERE path = ?
                 """,
                 (
                     hashed.created_at,
-                    hashed.file_size,
-                    hashed.modified_at_ns,
+                    *identity_values,
                     hashed.normalized_path,
                 ),
             )
             return
         if existing:
+            if cls._legacy_processed_location(cursor, hashed.normalized_path) is not None:
+                raise SourceChangedError("Der Inhalt des älteren Bibliothekseintrags ist nicht sicher überprüfbar.")
             cls._detach_path(cursor, hashed.normalized_path)
 
         cursor.execute(
             """
             INSERT INTO image_location(
                 image_id, path, directory, filename, created_at,
-                file_size, modified_at_ns
+                file_size, modified_at_ns, file_device, file_inode, file_changed_at_ns
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_id,
@@ -924,8 +995,7 @@ class ImportProcessor:
                 os.path.dirname(hashed.normalized_path),
                 os.path.basename(hashed.normalized_path),
                 hashed.created_at,
-                hashed.file_size,
-                hashed.modified_at_ns,
+                *identity_values,
             ),
         )
 
@@ -1016,27 +1086,60 @@ class ImportProcessor:
         """
         rows = cursor.execute(
             """
-            SELECT path
+            SELECT id, path, file_size, modified_at_ns, file_device, file_inode, file_changed_at_ns
             FROM image_location
             WHERE image_id = ?
             ORDER BY path
             """,
             (image_id,),
         ).fetchall()
+        stale_locations = []
         for row in rows:
             path = row["path"]
             if path in verified_paths:
                 continue
             try:
-                location_is_valid = (
-                    os.path.isfile(_filesystem_path(path))
-                    and calculate_file_hash(_filesystem_path(path)) == expected_hash
-                )
+                source = _filesystem_path(path)
+                before = os.stat(source)
+                if not stat.S_ISREG(before.st_mode):
+                    continue
+                changed = calculate_file_hash(source) != expected_hash
+                if changed and _file_identity(os.stat(source)) == _file_identity(before):
+                    stale_locations.append(row)
+            except FileNotFoundError:
+                if is_confirmed_missing(path, row["file_device"]):
+                    stale_locations.append(row)
             except OSError:
-                location_is_valid = False
-            if not location_is_valid:
-                cls._detach_path(cursor, path)
-        connection.commit()
+                continue
+        if not stale_locations:
+            return
+        cursor.execute("BEGIN IMMEDIATE")
+        removed = False
+        try:
+            for row in stale_locations:
+                current = cursor.execute(
+                    """
+                    SELECT location.id, location.path, location.file_size, location.modified_at_ns,
+                           location.file_device, location.file_inode, location.file_changed_at_ns
+                    FROM image_location location
+                    JOIN image ON image.id = location.image_id
+                    WHERE location.id = ? AND image.id = ? AND image.content_hash = ?
+                      AND EXISTS (
+                          SELECT 1 FROM image_location alternate
+                          WHERE alternate.image_id = image.id AND alternate.id != location.id
+                      )
+                    """,
+                    (row["id"], image_id, expected_hash),
+                ).fetchone()
+                if current is not None and tuple(current) == tuple(row):
+                    cls._detach_path(cursor, row["path"])
+                    removed = True
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        if removed:
+            invalidate_image_query_cache()
 
 
 def get_import_worker_count(

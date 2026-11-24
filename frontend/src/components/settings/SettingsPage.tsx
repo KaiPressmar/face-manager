@@ -15,6 +15,7 @@ import {
 import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
 import type { SettingsSection } from "../../utils/navigation";
+import PreviewCacheSettings from "./PreviewCacheSettings";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; description: string }[] = [
   {
@@ -125,6 +126,8 @@ const SettingsPage: React.FC<{
   const [isReclustering, setIsReclustering] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [backupFeedback, setBackupFeedback] = useState<{ text: string; error?: boolean } | null>(null);
+  const backupInFlight = useRef(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -470,13 +473,14 @@ const SettingsPage: React.FC<{
   };
 
   const handleExport = async () => {
+    if (backupInFlight.current) return;
+    backupInFlight.current = true;
     setIsExporting(true);
-    setError(null);
-    setMessage(null);
+    setBackupFeedback({ text: "Die Sicherung wird vorbereitet …" });
     try {
       if (window.AndroidExport) {
         window.AndroidExport.requestDatabaseExport();
-        setMessage("Wähle auf deinem Gerät den Speicherort für die Sicherung.");
+        setBackupFeedback({ text: "Wähle auf deinem Gerät den Speicherort für die Sicherung." });
         return;
       }
       const blob = await exportDatabase();
@@ -486,20 +490,22 @@ const SettingsPage: React.FC<{
       link.download = "face-manager-database.sqlite";
       link.click();
       URL.revokeObjectURL(url);
-      setMessage("Die Sicherung wurde erstellt.");
+      setBackupFeedback({ text: "Die Sicherung wurde erstellt." });
     } catch (exportError) {
-      setError(
-        exportError instanceof Error
+      setBackupFeedback({
+        error: true,
+        text: exportError instanceof Error
           ? exportError.message
           : "Die Sicherung konnte nicht erstellt werden.",
-      );
+      });
     } finally {
+      backupInFlight.current = false;
       setIsExporting(false);
     }
   };
 
   const handleImportClick = () => {
-    fileInputRef.current?.click();
+    if (!backupInFlight.current) fileInputRef.current?.click();
   };
 
   const handleImportChange = async (
@@ -507,11 +513,11 @@ const SettingsPage: React.FC<{
   ) => {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file) return;
+    if (!file || backupInFlight.current) return;
 
+    backupInFlight.current = true;
     setIsImporting(true);
-    setError(null);
-    setMessage(null);
+    setBackupFeedback({ text: "Die Sicherung wird geprüft und wiederhergestellt …" });
     try {
       await importDatabase(file);
       try {
@@ -521,17 +527,19 @@ const SettingsPage: React.FC<{
         setFilenameBlockSeparatorInput(next.filename_person_block_separator);
         setPersonJoinerInput(next.filename_person_joiner);
         setFileLogLevelInput(next.file_log_level);
-        setMessage("Die Sicherung wurde wiederhergestellt.");
+        setBackupFeedback({ text: "Die Sicherung wurde wiederhergestellt." });
       } catch {
-        setMessage("Die Sicherung wurde wiederhergestellt. Lade die Seite neu, um die Einstellungen anzuzeigen.");
+        setBackupFeedback({ text: "Die Sicherung wurde wiederhergestellt. Lade die Seite neu, um die Einstellungen anzuzeigen." });
       }
     } catch (importError) {
-      setError(
-        importError instanceof Error
+      setBackupFeedback({
+        error: true,
+        text: importError instanceof Error
           ? importError.message
           : "Die Sicherung konnte nicht wiederhergestellt werden.",
-      );
+      });
     } finally {
+      backupInFlight.current = false;
       setIsImporting(false);
     }
   };
@@ -1026,19 +1034,29 @@ const SettingsPage: React.FC<{
               <div className="settings-actions">
                 <button
                   className="neon-card"
+                  type="button"
                   onClick={handleExport}
-                  disabled={isExporting}
+                  disabled={isExporting || isImporting}
                 >
                   {isExporting ? "Sicherung wird erstellt…" : "Sicherung erstellen"}
                 </button>
                 <button
                   className="neon-card"
+                  type="button"
                   onClick={handleImportClick}
-                  disabled={isImporting}
+                  disabled={isExporting || isImporting}
                 >
                   {isImporting ? "Wird wiederhergestellt…" : "Sicherung wiederherstellen"}
                 </button>
               </div>
+              {backupFeedback && (
+                <p
+                  className={backupFeedback.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
+                  role={backupFeedback.error ? "alert" : "status"}
+                >
+                  {backupFeedback.text}
+                </p>
+              )}
 
               <input
                 ref={fileInputRef}
@@ -1109,6 +1127,7 @@ const SettingsPage: React.FC<{
                 </button>
               </div>
             </section>
+            {settings && <PreviewCacheSettings settings={settings} />}
             <section className="settings-card">
               <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
               <p className="settings-card__copy">

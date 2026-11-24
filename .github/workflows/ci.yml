@@ -131,6 +131,17 @@ jobs:
       - name: Check frontend
         run: npm --prefix frontend run check
 
+  windows-preview-cache:
+    name: Preview cache (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m unittest backend.tests.test_preview_cache_budget
+
   android:
     name: Android (API ${{ matrix.api }})
     runs-on: ubuntu-latest
