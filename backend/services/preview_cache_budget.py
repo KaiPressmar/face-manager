@@ -4,18 +4,26 @@ from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+import errno
+import json
 import logging
 import os
 import re
 import stat
+import tempfile
 from threading import Lock, Timer
 import time
+from uuid import uuid4
 
 from ..config import get_data_root
 from .filesystem_paths import filesystem_path
 
 logger = logging.getLogger("face_manager.preview_cache")
-MAX_PREVIEW_BYTES = 768 * 1024**2
+DEFAULT_PREVIEW_CACHE_LIMIT_MIB = 768
+_MIN_CACHE_LIMIT_MIB = 128
+_MAX_CACHE_LIMIT_MIB = 1048576
+_MIB = 1024**2
+MAX_PREVIEW_BYTES = DEFAULT_PREVIEW_CACHE_LIMIT_MIB * _MIB
 MAX_PREVIEW_AGE_SECONDS = 90 * 24 * 60 * 60
 _TOUCH_INTERVAL_SECONDS = 15 * 60
 _SWEEP_INTERVAL_SECONDS = 60
@@ -24,12 +32,163 @@ _MANAGED_FILENAMES = {
     "faces": re.compile(r"([1-9][0-9]*)(?:-[0-9a-f]{24})?\.jpg"),
 }
 _SHARD = re.compile(r"[0-9]{4,}")
+_POLICY_FILENAME = "preview-cache-policy.json"
+_POLICY_LOCK_FILENAME = ".preview-cache-policy.lock"
 _lock = Lock()
-_scheduled: set[Path] = set()
+_Policy = tuple[int | None, str | None, bool]
+_policies: dict[Path, _Policy] = {}
+_policy_stamps: dict[Path, tuple[int, ...] | None] = {}
+_scheduled: dict[Path, tuple[object, Timer]] = {}
 _last_completed: dict[Path, float] = {}
 _under_pressure: dict[Path, bool] = {}
 _writes_during_sweep: set[Path] = set()
 _running: set[Path] = set()
+
+
+def validate_preview_cache_limit_mib(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or not _MIN_CACHE_LIMIT_MIB <= value <= _MAX_CACHE_LIMIT_MIB:
+        raise ValueError(
+            f"Das Vorschau-Limit muss zwischen {_MIN_CACHE_LIMIT_MIB} und "
+            f"{_MAX_CACHE_LIMIT_MIB} MiB liegen oder unbegrenzt sein."
+        )
+    return value
+
+
+def _remember_policy_locked(root: Path, policy: _Policy, stamp: tuple[int, ...] | None) -> _Policy:
+    if root in _policies and _policies[root] != policy:
+        _under_pressure.pop(root, None)
+        _last_completed.pop(root, None)
+    _policies[root] = policy
+    _policy_stamps[root] = stamp
+    return policy
+
+
+def _unreadable_policy_locked(root: Path, filename: Path, stamp: tuple[int, ...] | None) -> _Policy:
+    policy = (None, None, True)
+    if _policies.get(root) != policy:
+        logger.warning("Could not read the preview cache policy from %s", filename, exc_info=True)
+    return _remember_policy_locked(root, policy, stamp)
+
+
+def _policy_locked(root: Path) -> _Policy:
+    filename = root.parent / _POLICY_FILENAME
+    try:
+        info = filename.stat()
+        stamp = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+    except FileNotFoundError:
+        return _remember_policy_locked(root, (DEFAULT_PREVIEW_CACHE_LIMIT_MIB, None, False), None)
+    except OSError:
+        # An inaccessible preference cannot authorize eviction.
+        return _unreadable_policy_locked(root, filename, None)
+
+    if root in _policies and _policy_stamps.get(root) == stamp:
+        return _policies[root]
+    try:
+        data = json.loads(filename.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            limit = validate_preview_cache_limit_mib(data["limit_mib"])
+            revision = data["revision"]
+            if not isinstance(revision, str) or not revision:
+                raise ValueError("Missing preview cache policy revision")
+        else:
+            limit = validate_preview_cache_limit_mib(data)
+            revision = None
+    except (OSError, ValueError, KeyError):
+        return _unreadable_policy_locked(root, filename, stamp)
+    return _remember_policy_locked(root, (limit, revision, False), stamp)
+
+
+def get_preview_cache_policy() -> tuple[int | None, bool]:
+    root = get_data_root() / "thumbnails"
+    with _lock:
+        limit, _, unreadable = _policy_locked(root)
+        return limit, unreadable
+
+
+@contextmanager
+def _device_policy_lock(root: Path, *, timeout: float):
+    """Take the platform lock on a stable sidecar, with a bounded wait."""
+    lock_file = root.parent / _POLICY_LOCK_FILENAME
+    fd = os.open(lock_file, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if not _is_preview_file(os.fstat(fd)):
+            raise OSError("Preview cache policy lock is unavailable or redirected")
+        if os.name == "nt":
+            import msvcrt
+
+            def acquire():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+            def release():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def acquire():
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                acquire()
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            try:
+                release()
+            except OSError:
+                logger.warning("Could not release the preview cache policy lock explicitly", exc_info=True)
+    finally:
+        os.close(fd)
+
+
+def _persist_limit(root: Path, value: int | None, revision: str) -> None:
+    filename = root.parent / _POLICY_FILENAME
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".preview-cache-policy-", dir=filename.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"limit_mib": value, "revision": revision}, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, filename)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def set_preview_cache_limit_mib(value: object) -> int | None:
+    limit = validate_preview_cache_limit_mib(value)
+    root = get_data_root() / "thumbnails"
+    with _lock:
+        root.parent.mkdir(parents=True, exist_ok=True)
+        with _device_policy_lock(root, timeout=0.5):
+            previous, revision, unreadable = _policy_locked(root)
+            if limit == previous and not unreadable and revision is not None:
+                return limit
+            _persist_limit(root, limit, uuid4().hex)
+            _policy_locked(root)
+        if limit is None:
+            pending = _scheduled.pop(root, None)
+            if pending is not None:
+                pending[1].cancel()
+            _writes_during_sweep.discard(root)
+        else:
+            _schedule_locked(root, immediate=True)
+    return limit
 
 
 def _is_directory(path: Path) -> bool:
@@ -253,9 +412,20 @@ def delete_preview_file(path: Path) -> None:
 
 
 def prune_preview_cache(
-    root: Path, *, max_bytes: int = MAX_PREVIEW_BYTES, now: float | None = None
+    root: Path,
+    *,
+    max_bytes: int | None = None,
+    now: float | None = None,
+    _expected_policy: _Policy | None = None,
 ) -> tuple[int, int]:
     """Remove expired and least recently used previews across both cache trees."""
+    with _lock:
+        policy = _policy_locked(root)
+    limit, _, _ = policy
+    if limit is None or (_expected_policy is not None and policy != _expected_policy):
+        return 0, 0
+    if max_bytes is None:
+        max_bytes = limit * _MIB
     cutoff = (time.time() if now is None else now) - MAX_PREVIEW_AGE_SECONDS
     entries = sorted(_managed_previews(root), key=lambda item: (item[1].st_mtime_ns, item[0]))
     total = sum(info.st_size for _, info in entries)
@@ -264,51 +434,86 @@ def prune_preview_cache(
         if total <= max_bytes and info.st_mtime >= cutoff:
             break
         try:
-            if _unlink_unchanged(path, info):
-                total -= info.st_size
-                removed += 1
-        except FileNotFoundError:
-            total -= info.st_size
-        except OSError:
-            continue
+            with _lock:
+                with _device_policy_lock(root, timeout=0):
+                    if _policy_locked(root) != policy:
+                        break
+                    try:
+                        if _unlink_unchanged(path, info):
+                            total -= info.st_size
+                            removed += 1
+                    except FileNotFoundError:
+                        total -= info.st_size
+                    except OSError:
+                        continue
+        except (OSError, ImportError):
+            break
     return removed, total
 
 
-def _sweep(root: Path) -> None:
+def _sweep(root: Path, token: object | None = None) -> None:
     with _lock:
+        if token is not None:
+            pending = _scheduled.get(root)
+            if pending is None or pending[0] is not token:
+                return
+            _scheduled.pop(root)
+        policy = _policy_locked(root)
+        limit, _, _ = policy
+        if limit is None or root in _running:
+            return
         _running.add(root)
     needs_followup = False
     try:
-        _, total = prune_preview_cache(root)
-        needs_followup = total > MAX_PREVIEW_BYTES
+        _, total = prune_preview_cache(root, _expected_policy=policy)
+        needs_followup = total > limit * _MIB
         with _lock:
-            _under_pressure[root] = total >= MAX_PREVIEW_BYTES * 0.9
+            if _policy_locked(root) == policy:
+                _under_pressure[root] = total >= limit * _MIB * 0.9
     except Exception:
         logger.exception("Could not prune the local preview cache")
     finally:
         with _lock:
             _running.discard(root)
-            _scheduled.discard(root)
             _last_completed[root] = time.monotonic()
             changed = root in _writes_during_sweep
             _writes_during_sweep.discard(root)
-        if changed or needs_followup:
-            schedule_preview_cache_cleanup(root)
+            current = _policy_locked(root)
+            if current != policy:
+                _schedule_locked(root, immediate=True)
+            elif changed or needs_followup:
+                _schedule_locked(root)
+
+
+def _schedule_locked(root: Path, *, immediate: bool = False) -> None:
+    if _policy_locked(root)[0] is None:
+        return
+    if root in _running:
+        _writes_during_sweep.add(root)
+        return
+    pending = _scheduled.get(root)
+    if pending is not None:
+        if not immediate:
+            return
+        pending[1].cancel()
+    previous = _last_completed.get(root, float("-inf"))
+    delay = 0.0 if immediate else max(0.0, previous + _SWEEP_INTERVAL_SECONDS - time.monotonic())
+    token = object()
+    timer = Timer(delay, _sweep, args=(root, token))
+    timer.daemon = True
+    _scheduled[root] = (token, timer)
+    try:
+        timer.start()
+    except RuntimeError:
+        _scheduled.pop(root, None)
+        logger.exception("Could not start preview cache cleanup")
 
 
 def schedule_preview_cache_cleanup(root: Path | None = None) -> None:
     """Coalesce cleanup after preview writes without blocking a request or import."""
     root = root if root is not None else get_data_root() / "thumbnails"
     with _lock:
-        if root in _scheduled:
-            if root in _running:
-                _writes_during_sweep.add(root)
-            return
-        _scheduled.add(root)
-        delay = max(0.0, _last_completed.get(root, float("-inf")) + _SWEEP_INTERVAL_SECONDS - time.monotonic())
-        timer = Timer(delay, _sweep, args=(root,))
-        timer.daemon = True
-        timer.start()
+        _schedule_locked(root)
 
 
 def note_preview_written(destination: Path) -> None:
@@ -322,5 +527,7 @@ def note_preview_written(destination: Path) -> None:
 
 def cache_warmup_has_room() -> bool:
     """Leave space for visible and newly imported photos before warming old faces."""
+    root = get_data_root() / "thumbnails"
     with _lock:
-        return not _under_pressure.get(get_data_root() / "thumbnails", False)
+        limit, _, _ = _policy_locked(root)
+        return limit is None or not _under_pressure.get(root, False)

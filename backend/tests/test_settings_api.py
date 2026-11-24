@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -6,11 +8,80 @@ from types import SimpleNamespace
 
 from backend import app
 from backend.services.cache import app_cache
+from backend.services import preview_cache_budget as budget
 
 
 class SettingsApiTest(unittest.TestCase):
     def setUp(self):
         app_cache.clear()
+
+    def test_preview_limit_defaults_and_updates_without_stopping_clustering(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(budget, "get_data_root") as data_root,
+            patch.object(budget, "Timer"),
+            patch.object(app.auto_cluster_queue, "request_cancel") as cancel,
+            patch.object(app.face_thumbnail_warmup_queue, "wake") as wake,
+        ):
+            data_root.return_value = Path(directory)
+            current = app.api_get_settings()
+            self.assertEqual(current["preview_cache_limit_mib"], 768)
+            self.assertEqual(current["preview_cache_limit_mib_default"], 768)
+            self.assertFalse(current["preview_cache_limit_error"])
+            for limit in (128, 1048576, None):
+                result = app.api_update_settings({"preview_cache_limit_mib": limit})
+                self.assertEqual(result["preview_cache_limit_mib"], limit)
+                self.assertEqual(result["preview_cache_limit_mib_default"], 768)
+                self.assertFalse(result["preview_cache_limit_error"])
+                self.assertEqual(app.api_get_settings()["preview_cache_limit_mib"], limit)
+            cancel.assert_not_called()
+            self.assertEqual(wake.call_count, 3)
+
+    def test_invalid_preview_limit_leaves_stored_value_untouched(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(budget, "get_data_root", return_value=Path(directory)),
+            patch.object(budget, "Timer"),
+        ):
+            app.api_update_settings({"preview_cache_limit_mib": 2048})
+            for limit in (127, 1048577, True, False, 128.0, "128", {}):
+                with self.subTest(limit=limit), self.assertRaises(HTTPException) as raised:
+                    app.api_update_settings({"preview_cache_limit_mib": limit})
+                self.assertEqual(raised.exception.status_code, 400)
+            self.assertEqual(app.api_get_settings()["preview_cache_limit_mib"], 2048)
+
+    def test_preview_limit_write_failure_is_reported_without_waking_warmup(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(budget, "get_data_root", return_value=Path(directory)),
+            patch.object(budget, "_persist_limit", side_effect=OSError("disk full")),
+            patch.object(app.face_thumbnail_warmup_queue, "wake") as wake,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                app.api_update_settings({"preview_cache_limit_mib": None})
+            self.assertEqual(raised.exception.status_code, 500)
+            self.assertEqual(app.api_get_settings()["preview_cache_limit_mib"], 768)
+            wake.assert_not_called()
+
+    def test_cache_only_put_loads_settings_before_committing(self):
+        with (
+            patch.object(app, "api_get_settings", side_effect=RuntimeError("SQLite unavailable")),
+            patch.object(app, "set_preview_cache_limit_mib") as save,
+        ):
+            with self.assertRaises(RuntimeError):
+                app.api_update_settings({"preview_cache_limit_mib": 128})
+            save.assert_not_called()
+
+    def test_mixed_cache_and_library_settings_are_rejected_before_writes(self):
+        with (
+            patch.object(app, "set_preview_cache_limit_mib") as save,
+            patch.object(app, "set_ui_theme") as set_theme,
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                app.api_update_settings({"preview_cache_limit_mib": 128, "ui_theme": "dark"})
+            self.assertEqual(raised.exception.status_code, 400)
+            save.assert_not_called()
+            set_theme.assert_not_called()
 
     @patch("backend.app.get_error_log_path", return_value="/tmp/face-manager/logs/error.log")
     @patch("backend.app.get_file_log_level", return_value="WARNING")

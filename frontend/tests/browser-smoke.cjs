@@ -714,6 +714,100 @@ async function settingsFlow(browser, errors) {
   }
 }
 
+async function previewCacheSettingsFlow(browser, errors) {
+  const page = await newPage(browser, 320, 765, errors, { hasTouch: true, isMobile: true });
+  const firstWrite = gate();
+  const firstSave = gate();
+  const baseSettings = await (await page.request.get(`${apiBase}/settings`)).json();
+  const settings = {
+    ...baseSettings,
+    preview_cache_limit_mib: 768,
+    preview_cache_limit_mib_default: 768,
+    preview_cache_limit_error: false,
+  };
+  const writes = [];
+  try {
+    await page.route('**/api/settings', async (route) => {
+      if (route.request().method() === 'PUT') {
+        const payload = route.request().postDataJSON();
+        writes.push(payload);
+        if (writes.length === 1) {
+          firstWrite.release();
+          await firstSave.ready;
+        }
+        settings.preview_cache_limit_mib = payload.preview_cache_limit_mib;
+        settings.preview_cache_limit_error = false;
+      }
+      await route.fulfill({ json: settings });
+    });
+    await page.goto(`${webBase}/#/einstellungen/daten`);
+    const card = page.getByRole('region', { name: 'Vorschau-Cache' });
+    const choice = card.getByRole('combobox', { name: 'Cache-Größe' });
+    const save = card.getByRole('button', { name: 'Cache-Einstellung speichern' });
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), '768');
+    assert.deepEqual(await choice.locator('option').allTextContents(),
+      ['Standard (768 MiB)', '2 GiB', '8 GiB', '32 GiB', 'Eigene Größe', 'Ohne Grenze']);
+    assert.ok(await save.isDisabled());
+    await choice.press('End');
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await card.getByText(/Cache kann auf diesem Gerät weiter wachsen/).waitFor();
+    assert.deepEqual(writes, []);
+    await save.press('Enter');
+    await card.getByRole('status').filter({ hasText: /wird gespeichert/ }).waitFor();
+    await firstWrite.ready;
+    assert.ok(await save.isDisabled());
+    assert.ok(await choice.isDisabled());
+    await save.evaluate((button) => button.form.requestSubmit());
+    assert.equal(writes.length, 1);
+    firstSave.release();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes, [{ preview_cache_limit_mib: null }]);
+
+    await page.reload();
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await choice.selectOption('custom');
+    await card.getByText(/nach 90 Tagen.*auch wenn noch Platz ist/).waitFor();
+    const size = card.getByRole('spinbutton', { name: 'Eigene Größe in MiB' });
+    for (const invalid of ['127', '128.5', '1048577', '']) {
+      await size.fill(invalid);
+      assert.equal(await size.getAttribute('aria-invalid'), 'true');
+      assert.ok(await save.isDisabled());
+    }
+    assert.equal(writes.length, 1);
+    await size.fill('1048576');
+    assert.equal(await size.getAttribute('aria-invalid'), 'false');
+    await size.fill('128');
+    await save.tap();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes[1], { preview_cache_limit_mib: 128 });
+    await page.reload();
+    await choice.waitFor();
+    assert.equal(await choice.inputValue(), 'custom');
+    assert.equal(await size.inputValue(), '128');
+    assert.ok(await card.evaluate((element) => {
+      const { right, left } = element.getBoundingClientRect();
+      return element.scrollWidth <= element.clientWidth + 1 && left >= 0 && right <= innerWidth + 1;
+    }));
+
+    settings.preview_cache_limit_mib = null;
+    settings.preview_cache_limit_error = true;
+    await page.reload();
+    await card.getByRole('alert').filter({ hasText: /automatische Bereinigung ist pausiert/ }).waitFor();
+    assert.equal(await choice.inputValue(), 'unlimited');
+    await save.tap();
+    await card.getByRole('status').filter({ hasText: /wurde gespeichert/ }).waitFor();
+    assert.deepEqual(writes[2], { preview_cache_limit_mib: null });
+    assert.equal(await card.getByRole('alert').count(), 0);
+    assert.ok(await save.isDisabled());
+    console.log('PASS preview cache: explicit save, no overlap, keyboard, 320px, custom limits, reload and repair');
+  } finally {
+    firstSave.release();
+    await page.close();
+  }
+}
+
 async function assertMarkerTouchSize(page, context) {
   const hit = page.locator('.gps-map__marker-hit').first();
   await hit.waitFor();
@@ -957,6 +1051,7 @@ async function selectReviewFaces(dialog, proposal, selection) {
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);
+    await previewCacheSettingsFlow(browser, errors);
     await responsiveFlow(browser, errors);
     await reviewInboxFlow(browser, errors);
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);

@@ -9,6 +9,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- In den Einstellungen lässt sich die Größe des lokalen Vorschau-Speichers ändern oder auf „Ohne Grenze“ setzen.
+
 ### Verbessert
 
 - Die Fotoliste bleibt bei langsamen Laufwerken reaktionsfähig. Face Manager erstellt Vorschauen beim Import und zeigt vorhandene Vorschauen auch bei getrennter Quelle an.

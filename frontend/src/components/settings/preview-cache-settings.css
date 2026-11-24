@@ -1,0 +1,28 @@
+.settings-preview-cache__form {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-preview-cache__form select {
+  appearance: auto;
+}
+
+.settings-preview-cache__form select,
+.settings-preview-cache__form input,
+.settings-preview-cache__form button {
+  min-height: 44px;
+  max-width: 100%;
+}
+
+.settings-preview-cache__form input {
+  width: 12rem;
+}
+
+.settings-preview-cache__form p {
+  margin: 0;
+}
+
+.settings-preview-cache__form [aria-invalid="true"] {
+  border-color: var(--danger);
+}

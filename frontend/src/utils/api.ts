@@ -184,6 +184,9 @@ export interface AppSettings {
   ui_theme_default: ThemeMode;
   automatic_update_checks: boolean;
   automatic_update_checks_default: boolean;
+  preview_cache_limit_mib?: number | null;
+  preview_cache_limit_mib_default?: number;
+  preview_cache_limit_error?: boolean;
   database_path: string;
   error_log_path: string;
 }
@@ -209,6 +212,7 @@ export interface UpdateSettingsPayload {
   file_log_level?: "DEBUG" | "INFO" | "WARNING" | "ERROR";
   ui_theme?: ThemeMode;
   automatic_update_checks?: boolean;
+  preview_cache_limit_mib?: number | null;
 }
 
 export interface ClusteringProfile {

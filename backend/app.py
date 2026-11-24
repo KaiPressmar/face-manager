@@ -57,7 +57,14 @@ from .services.desktop import (
 from .services.face_thumbnails import ensure_face_thumbnail, get_cached_face_thumbnail, write_face_thumbnail
 from .services.image_thumbnails import ensure_image_thumbnail, get_cached_image_thumbnail, write_image_thumbnail
 from .services.preview_cache import decode_verified_preview
-from .services.preview_cache_budget import read_preview_bytes, schedule_preview_cache_cleanup
+from .services.preview_cache_budget import (
+    DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
+    get_preview_cache_policy,
+    read_preview_bytes,
+    schedule_preview_cache_cleanup,
+    set_preview_cache_limit_mib,
+    validate_preview_cache_limit_mib,
+)
 from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
@@ -1102,6 +1109,19 @@ def api_select_folder(request: Request):
     }
 
 
+def _preview_cache_settings() -> dict:
+    limit, unreadable = get_preview_cache_policy()
+    return _preview_cache_fields(limit, unreadable)
+
+
+def _preview_cache_fields(limit: int | None, unreadable: bool) -> dict:
+    return {
+        "preview_cache_limit_mib": limit,
+        "preview_cache_limit_mib_default": DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
+        "preview_cache_limit_error": unreadable,
+    }
+
+
 @app.get("/api/settings")
 def api_get_settings():
     """Return persisted application settings used by the frontend."""
@@ -1137,18 +1157,49 @@ def api_get_settings():
             "error_log_path": str(get_error_log_path()),
         }
 
-    return app_cache.get_or_set(
+    settings = app_cache.get_or_set(
         ("api_settings",),
         load_settings,
         ttl_seconds=5.0,
         tags={"settings"},
     )
+    return {**settings, **_preview_cache_settings()}
 
 
 @app.put("/api/settings")
-@safe_cluster_mutation
 def api_update_settings(data: dict = Body(...)):
     """Persist mutable application settings."""
+    if "preview_cache_limit_mib" in data:
+        if len(data) != 1:
+            raise HTTPException(
+                status_code=400, detail="Das Vorschau-Limit muss separat gespeichert werden."
+            )
+        try:
+            limit = validate_preview_cache_limit_mib(data["preview_cache_limit_mib"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        settings = api_get_settings()
+        limit = _save_preview_cache_limit(limit)
+        return {**settings, **_preview_cache_fields(limit, False)}
+    return _update_library_settings(data)
+
+
+def _save_preview_cache_limit(value: object) -> int | None:
+    try:
+        limit = set_preview_cache_limit_mib(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OSError, ImportError) as exc:
+        logger.warning("Could not save the preview cache policy", exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="Das Vorschau-Limit konnte nicht gespeichert werden."
+        ) from exc
+    face_thumbnail_warmup_queue.wake()
+    return limit
+
+
+@safe_cluster_mutation
+def _update_library_settings(data: dict):
     threshold = get_cluster_distance_threshold()
     clustering_profile = get_clustering_profile()
     block_separator = get_filename_person_block_separator()
@@ -1236,6 +1287,7 @@ def api_update_settings(data: dict = Body(...)):
         "ui_theme_default": DEFAULT_UI_THEME,
         "automatic_update_checks": automatic_update_checks,
         "automatic_update_checks_default": DEFAULT_AUTOMATIC_UPDATE_CHECKS,
+        **_preview_cache_settings(),
         "database_path": DB_PATH,
         "error_log_path": str(get_error_log_path()),
     }
