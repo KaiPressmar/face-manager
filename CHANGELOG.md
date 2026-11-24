@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.14.1] - 2026-11-24
+
+### Neu
+
 - In den Einstellungen lässt sich die Größe des lokalen Vorschau-Speichers ändern oder auf „Ohne Grenze“ setzen.
 
 ### Verbessert
