@@ -94,6 +94,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 }) => {
   const [message, setMessage] = useState("");
   const [showFaces, setShowFaces] = useState(true);
+  const [failedImageId, setFailedImageId] = useState<number | null>(null);
   const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
@@ -339,12 +340,14 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             src={imageFileUrl(image.id)}
             alt={image.filename || ""}
             draggable={false}
-            onLoad={(event) =>
+            onLoad={(event) => {
+              setFailedImageId(null);
               setNaturalSize({
                 width: event.currentTarget.naturalWidth,
                 height: event.currentTarget.naturalHeight,
-              })
-            }
+              });
+            }}
+            onError={() => setFailedImageId(image.id)}
           />
           {showFaces &&
             naturalSize.width > 0 &&
@@ -420,7 +423,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           ))}
         </div>
         <small>
-          ← → {sequence ? "durch die Gruppe navigieren" : "navigieren"} · Esc schließen
+          ← → {sequence && sequence.itemLabel !== "Foto" ? "durch die Gruppe navigieren" : "navigieren"} · Esc schließen
         </small>
       </footer>
 
@@ -429,9 +432,9 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           {message}
         </div>
       )}
-      {sequence?.error && (
+      {(sequence?.error || image.id === failedImageId) && (
         <div className="gallery-toast gallery-toast--error" role="alert">
-          {sequence.error}
+          {sequence?.error || "Die Bilddatei konnte nicht geöffnet werden."}
         </div>
       )}
     </div>

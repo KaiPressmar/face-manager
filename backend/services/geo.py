@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime
-from pathlib import Path
 
 from PIL import Image
 
@@ -17,6 +19,7 @@ logger = logging.getLogger("face_manager.geo")
 _GPS_TAG = 34853
 _DATE_TAGS = (36867, 36868)  # Original, then digitized.
 _BATCH_SIZE = 32
+MAP_GRID_SIZE = 32
 
 
 def _degrees(value):
@@ -100,14 +103,6 @@ class GeoBackfill:
         if self.indexing:
             return
         self._stop.clear()
-        # Missing files are retried once each application run, including after
-        # a disconnected library volume becomes available again.
-        conn = get_conn()
-        try:
-            conn.execute("UPDATE image SET metadata_scanned_at = NULL WHERE metadata_scanned_at = 'missing'")
-            conn.commit()
-        finally:
-            conn.close()
         self._thread = threading.Thread(target=self._run, name="geo-backfill", daemon=True)
         self._thread.start()
 
@@ -117,52 +112,63 @@ class GeoBackfill:
             self._thread.join()
 
     def _run(self):
+        retry_missing = True
         while not self._stop.is_set():
-            conn = get_conn()
             try:
-                rows = conn.execute(
-                    """SELECT i.id, i.path FROM image i
-                       WHERE i.metadata_scanned_at IS NULL
-                       ORDER BY i.id LIMIT ?""",
-                    (_BATCH_SIZE,),
-                ).fetchall()
-                if not rows:
+                with closing(get_conn()) as conn:
+                    if retry_missing:
+                        # Retry unavailable files once each run, for example
+                        # after a disconnected library volume returns.
+                        conn.execute(
+                            "UPDATE image SET metadata_scanned_at = NULL WHERE metadata_scanned_at = 'missing'"
+                        )
+                        conn.commit()
+                        retry_missing = False
+                    if not self._scan_batch(conn):
+                        return
+            except sqlite3.OperationalError as exc:
+                # A competing writer can time out the background scan.
+                # Leave the current row pending so it can be retried.
+                code = getattr(exc, "sqlite_errorcode", None)
+                if code is None:  # Python 3.10 does not expose SQLite result codes.
+                    locked = "is locked" in str(exc) or str(exc) == "database is busy"
+                else:
+                    locked = (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                if not locked:
+                    logger.exception("Could not index photo metadata")
                     return
-                for row in rows:
-                    if self._stop.is_set():
-                        break
-                    try:
-                        # Read outside the write transaction so imports stay responsive.
-                        locations = conn.execute(
-                            "SELECT path FROM image_location WHERE image_id = ? ORDER BY id",
-                            (row["id"],),
-                        ).fetchall()
-                        candidates = [location["path"] for location in locations]
-                        candidates.append(row["path"])
-                        available = next(
-                            (path for path in candidates if Path(filesystem_path(path)).is_file()),
-                            None,
-                        )
-                        metadata = extract_image_metadata(available) if available else (None, None, None)
-                        conn.execute(
-                            """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?,
-                                      metadata_scanned_at = ?
-                               WHERE id = ? AND metadata_scanned_at IS NULL""",
-                            (*metadata, datetime.now().isoformat() if available else "missing", row["id"]),
-                        )
-                        conn.commit()
-                    except Exception:
-                        conn.rollback()
-                        logger.exception("Could not index metadata for image %s", row["id"])
-                        # Prevent one bad row from trapping the worker forever.
-                        conn.execute(
-                            "UPDATE image SET metadata_scanned_at = CURRENT_TIMESTAMP WHERE id = ?",
-                            (row["id"],),
-                        )
-                        conn.commit()
-            finally:
-                conn.close()
             self._stop.wait(0.1)
+
+    def _scan_batch(self, conn):
+        rows = conn.execute(
+            """SELECT id, path FROM image
+               WHERE metadata_scanned_at IS NULL
+               ORDER BY id LIMIT ?""",
+            (_BATCH_SIZE,),
+        ).fetchall()
+        for row in rows:
+            if self._stop.is_set():
+                break
+            # Resolve locations and read EXIF before taking the write lock.
+            locations = conn.execute(
+                "SELECT path FROM image_location WHERE image_id = ? ORDER BY id",
+                (row["id"],),
+            ).fetchall()
+            candidates = [location["path"] for location in locations]
+            candidates.append(row["path"])
+            available = next(
+                (path for path in candidates if os.path.isfile(filesystem_path(path))),
+                None,
+            )
+            metadata = extract_image_metadata(available) if available else (None, None, None)
+            conn.execute(
+                """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?,
+                          metadata_scanned_at = ?
+                   WHERE id = ? AND metadata_scanned_at IS NULL""",
+                (*metadata, datetime.now().isoformat() if available else "missing", row["id"]),
+            )
+            conn.commit()
+        return bool(rows)
 
 
 geo_backfill = GeoBackfill()
@@ -199,58 +205,94 @@ def _status(conn):
                 pending_total=pending_total, indexing=geo_backfill.indexing)
 
 
-def list_map_points(west, east, south, north, from_date=None, to_date=None, zoom=2):
-    """Aggregate a viewport into at most 32 by 32 cells in SQLite."""
+def list_map_points(
+    west, east, south, north, from_date=None, to_date=None, zoom=2,
+    grid_columns=MAP_GRID_SIZE, grid_rows=MAP_GRID_SIZE,
+):
+    """Aggregate a viewport into cells indexed from its southwest corner."""
     where, params = _filter_sql(west, east, south, north, from_date, to_date)
-    span_lon = east - west if east >= west else east + 360 - west
+    span_lon = east - west if east >= west else (180 - west) + (east + 180)
     span_lat = north - south
-    # Exact viewport cells let a clicked point query its contents without rounding.
-    cell_lon = max(span_lon / 32, 0.0000001)
-    cell_lat = max(span_lat / 32, 0.0000001)
+    cell_lon = span_lon / grid_columns or 1
+    cell_lat = span_lat / grid_rows or 1
     unwrapped = "(i.longitude + CASE WHEN i.longitude < ? THEN 360 ELSE 0 END)"
-    x_expr = f"MIN(31, CAST(({unwrapped} - ?) / ? AS INTEGER))"
-    y_expr = "MIN(31, CAST((i.latitude - ?) / ? AS INTEGER))"
+    distance_lon = """CASE WHEN i.longitude < ?
+                           THEN (180 - ?) + (i.longitude + 180)
+                           ELSE i.longitude - ? END"""
+    x_expr = f"MIN(?, CAST(({distance_lon}) / ? AS INTEGER))"
+    y_expr = "MIN(?, CAST((i.latitude - ?) / ? AS INTEGER))"
     conn = get_conn()
     try:
+        conn.execute("BEGIN")
+        # Keep stored longitudes for drill-down. Unwrapping can change their
+        # precision and makes both representations of the date line equal.
         rows = conn.execute(
             f"""SELECT {x_expr} AS x, {y_expr} AS y, COUNT(*) AS count,
                        AVG({unwrapped}) AS longitude, AVG(i.latitude) AS latitude,
-                       MIN({unwrapped}) AS west, MAX({unwrapped}) AS east,
+                       COALESCE(MIN(CASE WHEN i.longitude >= ? THEN i.longitude END),
+                                MIN(i.longitude)) AS west,
+                       COALESCE(MAX(CASE WHEN i.longitude < ? THEN i.longitude END),
+                                MAX(i.longitude)) AS east,
                        MIN(i.latitude) AS south, MAX(i.latitude) AS north
                 FROM image i WHERE {where} GROUP BY x, y ORDER BY y, x""",
-            (west, west, cell_lon, south, cell_lat, west, west, west, *params),
+            (
+                grid_columns - 1, west, west, west, cell_lon,
+                grid_rows - 1, south, cell_lat, west, west, west, *params,
+            ),
         ).fetchall()
         points = []
         for row in rows:
             longitude = row["longitude"]
             points.append(dict(
+                x=row["x"], y=row["y"],
                 latitude=row["latitude"],
                 longitude=longitude - 360 if longitude > 180 else longitude,
                 count=row["count"],
-                west=row["west"] - 360 if row["west"] > 180 else row["west"],
-                east=row["east"] - 360 if row["east"] > 180 else row["east"],
+                west=row["west"], east=row["east"],
                 south=row["south"], north=row["north"],
             ))
-        return dict(points=points, total=sum(point["count"] for point in points), **_status(conn))
+        return dict(
+            points=points, total=sum(point["count"] for point in points),
+            grid_columns=grid_columns, grid_rows=grid_rows, **_status(conn),
+        )
     finally:
         conn.close()
 
 
-def list_map_images(west, east, south, north, from_date=None, to_date=None, limit=40, offset=0):
-    """Return one stable page of canonical geotagged images."""
+def list_map_images(
+    west, east, south, north, from_date=None, to_date=None, limit=40, offset=0,
+    before_id=None, before_captured_at=None,
+):
+    """Return canonical geotagged images and a cursor for the next page."""
     where, params = _filter_sql(west, east, south, north, from_date, to_date)
+    page_where = where
+    page_params = list(params)
+    if before_id is not None:
+        if before_captured_at is None:
+            page_where += " AND i.captured_at IS NULL AND i.id < ?"
+            page_params.append(before_id)
+        else:
+            page_where += """ AND (i.captured_at < ? OR
+                            (i.captured_at = ? AND i.id < ?) OR i.captured_at IS NULL)"""
+            page_params.extend((before_captured_at, before_captured_at, before_id))
     conn = get_conn()
     try:
+        conn.execute("BEGIN")
         total = conn.execute(f"SELECT COUNT(*) FROM image i WHERE {where}", params).fetchone()[0]
         rows = conn.execute(
             f"""SELECT i.id, i.path AS image_path, i.latitude, i.longitude,
                        i.captured_at, i.filename,
                        (SELECT l.created_at FROM image_location l
                         WHERE l.image_id = i.id ORDER BY l.id LIMIT 1) AS created_at
-                FROM image i WHERE {where}
+                FROM image i WHERE {page_where}
                 ORDER BY i.captured_at DESC, i.id DESC LIMIT ? OFFSET ?""",
-            (*params, limit, offset),
+            (*page_params, limit + 1, offset),
         ).fetchall()
-        return dict(items=[dict(row) for row in rows], total=total, limit=limit, offset=offset)
+        items = [dict(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = items[-1]
+            next_cursor = dict(before_id=last["id"], before_captured_at=last["captured_at"])
+        return dict(items=items, total=total, limit=limit, offset=offset, next_cursor=next_cursor)
     finally:
         conn.close()

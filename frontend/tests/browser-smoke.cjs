@@ -26,7 +26,6 @@ const screenshot = async (page, name) => {
 async function newPage(browser, width, height, errors) {
   const page = await browser.newPage({ viewport: { width, height } });
   page.setDefaultTimeout(12000);
-  await page.addInitScript((base) => { window.FACE_MANAGER_API_BASE = base; }, apiBase);
   page.on('pageerror', (error) => errors.push(error.message));
   return page;
 }
@@ -54,7 +53,37 @@ async function mapFlow(browser, errors) {
   try {
     await page.goto(`${webBase}/#/weltkarte`);
     await waitForCount(85);
+    const markers = page.locator('.gps-map__marker');
+    await markers.first().waitFor();
     assert.equal(await page.locator('.gps-page__photo').count(), 36);
+
+    const selectArea = page.getByRole('button', { name: 'Bereich wählen', exact: true });
+    await selectArea.press('Enter');
+    await page.locator('.gps-map__svg').press('Escape');
+    await selectArea.waitFor();
+    await selectArea.press('Enter');
+    await page.getByRole('button', { name: 'Sichtbaren Bereich wählen' }).press('Enter');
+    await waitForCount(85);
+    await page.getByRole('button', { name: 'Zu den Fotos' }).press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'gps-map-results');
+    await page.getByRole('button', { name: 'Auswahl löschen', exact: true }).click();
+
+    const mapRequest = page.waitForRequest((request) => request.url().includes('/api/map/points?') && request.url().includes('from_date=2025'));
+    await page.route('**/api/map/points?**', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await route.continue().catch(() => {});
+    });
+    await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
+    await mapRequest;
+    assert.equal(await markers.count(), 0, 'Markers from the previous filter stayed active during loading');
+    await page.getByLabel('Bis', { exact: true }).fill('2024-12-31');
+    await page.getByRole('alert').filter({ hasText: 'Enddatum' }).waitFor();
+    assert.equal(await page.getByText('Karte wird aktualisiert …').count(), 0, 'Invalid dates left the map in a loading state');
+    assert.equal(await markers.count(), 0);
+    await page.unroute('**/api/map/points?**');
+    await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
+    await waitForCount(85);
+    await markers.first().waitFor();
     await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
     await page.waitForFunction(() => document.querySelectorAll('.gps-page__photo').length === 72);
 
@@ -80,14 +109,28 @@ async function mapFlow(browser, errors) {
     await page.getByRole('button', { name: 'Auswahl löschen', exact: true }).click();
     await waitForCount(85);
 
-    await page.locator('.gps-map__marker').filter({ hasText: '15' }).first().press('Enter');
-    await waitForCount(15);
+    await markers.first().waitFor();
+    const firstMarker = markers.first();
+    const markerLabel = await firstMarker.getAttribute('aria-label');
+    const markerCount = Number(markerLabel?.match(/^([\d.]+) Foto/)?.[1].replaceAll('.', ''));
+    assert.ok(markerCount > 1, 'Fixture marker needs multiple photos to test the viewer sequence');
+    await firstMarker.press('Enter');
+    await waitForCount(markerCount);
     const galleryTile = page.locator('.gps-page__photo').first();
     await galleryTile.click();
     const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
     await gallery.waitFor();
     await assertFocusInDialog(page, gallery);
     await assertTabTrap(page, gallery);
+    const resizedQuery = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/map/points' && url.searchParams.has('grid_columns');
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await resizedQuery;
+    await assertFocusInDialog(page, gallery);
+    await waitForCount(markerCount);
+    await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole('button', { name: 'Nächstes Bild', exact: true }).click();
     await page.keyboard.press('Escape');
     await gallery.waitFor({ state: 'hidden' });
@@ -110,11 +153,18 @@ async function mapFlow(browser, errors) {
     assert.equal(await page.getByRole('dialog', { name: 'Bildansicht' }).count(), 0, 'Cancelled detail request reopened the gallery');
     await page.unroute('**/api/images/*/detail');
 
+    await page.route('**/api/images/*/file', (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
+    await galleryTile.click();
+    await gallery.getByRole('alert').filter({ hasText: 'Die Bilddatei konnte nicht geöffnet werden.' }).waitFor();
+    await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
+    await page.unroute('**/api/images/*/file');
+
     await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
     await waitForCount(85);
     await page.route('**/api/map/points?**', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"Testfehler Karte"}' }));
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await page.getByRole('alert').filter({ hasText: 'Testfehler Karte' }).waitFor();
+    assert.equal(await markers.count(), 0, 'Failed marker request restored markers from another filter');
     await page.unroute('**/api/map/points?**');
     await page.getByRole('button', { name: 'Erneut versuchen', exact: true }).click();
     await waitForCount(29);
@@ -122,13 +172,21 @@ async function mapFlow(browser, errors) {
 
     await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
     await waitForCount(85);
+    await page.route('**/api/map/images?**', (route) => {
+      if (!new URL(route.request().url()).searchParams.has('before_id')) return route.continue();
+      return route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"Testfehler weitere Fotos"}' });
+    });
+    await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
+    await page.getByRole('alert').filter({ hasText: 'Testfehler weitere Fotos' }).waitFor();
+    assert.equal(await page.locator('.gps-page__photo').count(), 36);
+    await page.unroute('**/api/map/images?**');
     await page.route('**/api/map/images?**', async (route) => {
-      if (new URL(route.request().url()).searchParams.get('offset') === '36') {
+      if (new URL(route.request().url()).searchParams.has('before_id')) {
         await new Promise((resolve) => setTimeout(resolve, 800));
       }
       await route.continue().catch(() => {});
     });
-    await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
+    await page.getByRole('button', { name: 'Weitere Fotos erneut laden', exact: true }).click();
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await waitForCount(29);
     await page.waitForTimeout(900);
@@ -236,6 +294,16 @@ async function existingFlow(browser, errors) {
     await page.keyboard.press('Enter');
     await renameDialog.waitFor({ state: 'hidden' });
     await page.getByText('Smoke Gruppe', { exact: true }).first().waitFor();
+
+    await page.getByRole('button', { name: 'Person bearbeiten' }).click();
+    await personDialog.waitFor();
+    await personInput.fill('Neu Beispiel');
+    await page.route('**/api/persons', (route) => route.abort('failed'));
+    await personInput.press('Enter');
+    await personDialog.waitFor({ state: 'hidden' });
+    await page.getByText('Neu Beispiel', { exact: true }).first().waitFor();
+    await page.unroute('**/api/persons');
+
     await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
     await screenshot(page, 'existing-flows');
     console.log('PASS existing flows: library/folder retry, person filter, import, rename, settings, review tabs');
@@ -295,6 +363,14 @@ async function assertMarkerTouchSize(page, context) {
     `${context}: marker touch target is ${hitBox?.width.toFixed(1)}×${hitBox?.height.toFixed(1)}px (minimum 44×44px)`);
   assert.ok(coreBox && coreBox.width >= 23.9 && coreBox.height >= 23.9,
     `${context}: visible marker is ${coreBox?.width.toFixed(1)}×${coreBox?.height.toFixed(1)}px (minimum 24×24px)`);
+  const overlaps = await page.locator('.gps-map__marker-hit').evaluateAll((hits) => {
+    const boxes = hits.map((hit) => hit.getBoundingClientRect());
+    return boxes.some((box, index) => boxes.slice(index + 1).some((other) =>
+      box.left < other.right - 0.1 && other.left < box.right - 0.1 &&
+      box.top < other.bottom - 0.1 && other.top < box.bottom - 0.1,
+    ));
+  });
+  assert.equal(overlaps, false, `${context}: adjacent clusters have overlapping touch targets`);
 }
 
 async function responsiveFlow(browser, errors) {

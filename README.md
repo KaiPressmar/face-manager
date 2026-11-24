@@ -233,7 +233,8 @@ cd ..
 - Interactive API documentation: `http://localhost:8000/docs`
 - OpenAPI schema: `http://localhost:8000/openapi.json`
 
-Vite proxies `/api` to the FastAPI backend on port `8000`.
+Vite proxies `/api` to the FastAPI backend on port `8000`. Set
+`FACE_MANAGER_VITE_API_TARGET` before starting Vite to proxy to another backend URL.
 
 ## VS Code
 
@@ -416,9 +417,18 @@ the new location.
 
 ## Security and Privacy Scope
 
-Face Manager is configured for trusted local environments. CORS is open and the API
-has no authentication. Do not expose the backend directly to an untrusted network
-without adding authentication, access controls, and a restricted CORS policy.
+Face Manager is designed for trusted local environments. The packaged desktop app
+binds to localhost. The development backend script listens on `0.0.0.0` for WSL
+and remote development, which can make it reachable on the LAN. The desktop and
+development API have no authentication. Keep their ports on trusted networks and
+use an authenticated proxy before allowing access from an untrusted network.
+
+The bundled frontend and Vite proxy use same-origin requests by default. If a
+separate frontend deliberately sets `VITE_API_BASE`, set
+`FACE_MANAGER_ALLOWED_ORIGINS` on the backend to a comma-separated list of exact
+frontend origins, such as `http://localhost:5173,https://photos.example.com`.
+Include each scheme and any non-default port. The Android app limits browser
+access to its authenticated local WebView session.
 
 ## How Face Analysis and Clustering Work
 

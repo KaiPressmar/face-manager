@@ -45,8 +45,8 @@ const ImageRenamePage: React.FC<{
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [pageJumpInput, setPageJumpInput] = useState("1");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const activeRequestRef = useRef(0);
@@ -92,8 +92,7 @@ const ImageRenamePage: React.FC<{
     activeAbortRef.current = controller;
 
     setIsLoading(true);
-    setError(null);
-    setLoadError(false);
+    setLoadError(null);
     try {
       const renameData = await fetchImageRenameCandidates({
         folders: selectedFolders,
@@ -121,15 +120,13 @@ const ImageRenamePage: React.FC<{
       setOffset(renameData.offset);
       setHasMore(renameData.has_more);
       setHasLoadedOnce(true);
-      setLoadError(false);
-    } catch (loadError) {
+    } catch (error) {
       if (controller.signal.aborted) {
         return;
       }
-      setLoadError(true);
-      setError(
-        loadError instanceof Error
-          ? loadError.message
+      setLoadError(
+        error instanceof Error
+          ? error.message
           : "Die Umbenennungsvorschläge konnten nicht geladen werden.",
       );
     } finally {
@@ -172,7 +169,7 @@ const ImageRenamePage: React.FC<{
 
   const toggleItem = (path: string) => {
     setMessage(null);
-    setError(null);
+    setActionError(null);
     if (selectionMode === "all") {
       setExcludedPaths((current) => {
         const next = new Set(current);
@@ -319,12 +316,12 @@ const ImageRenamePage: React.FC<{
 
   const handleSubmit = async () => {
     if (selectedCount === 0) {
-      setError("Wähle mindestens eine Datei aus.");
+      setActionError("Wähle mindestens eine Datei aus.");
       return;
     }
 
     setIsSubmitting(true);
-    setError(null);
+    setActionError(null);
     setMessage(null);
     try {
       const result = await applyImageRenames(
@@ -352,7 +349,7 @@ const ImageRenamePage: React.FC<{
       await loadData(offset);
       await loadTotalCount();
     } catch (submitError) {
-      setError(
+      setActionError(
         submitError instanceof Error
           ? submitError.message
           : "Die Dateinamen konnten nicht aktualisiert werden.",
@@ -368,12 +365,12 @@ const ImageRenamePage: React.FC<{
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    setError(null);
+    setActionError(null);
     try {
       await copyTextToClipboard(path);
       setMessage("Dateipfad kopiert.");
     } catch (copyError) {
-      setError(
+      setActionError(
         copyError instanceof Error
           ? copyError.message
           : "Der Dateipfad konnte nicht kopiert werden.",
@@ -387,12 +384,12 @@ const ImageRenamePage: React.FC<{
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    setError(null);
+    setActionError(null);
     try {
       await openImageLocation(item.image_id, item.path);
       setMessage("Dateispeicherort geöffnet.");
     } catch (openError) {
-      setError(
+      setActionError(
         openError instanceof Error
           ? openError.message
           : "Der Dateispeicherort konnte nicht geöffnet werden.",
@@ -603,14 +600,12 @@ const ImageRenamePage: React.FC<{
         </div>
       )}
 
-      {(error || loadError) && (
+      {loadError && (
         <div className="rename-empty-state" role="alert">
-          {error || "Die Dateinamen konnten nicht geladen werden."}{" "}
-          {loadError && (
-            <button type="button" onClick={() => void loadData(pendingOffsetRef.current)}>
-              Erneut versuchen
-            </button>
-          )}
+          {loadError}{" "}
+          <button type="button" onClick={() => void loadData(pendingOffsetRef.current)}>
+            Erneut versuchen
+          </button>
         </div>
       )}
 
@@ -662,12 +657,12 @@ const ImageRenamePage: React.FC<{
 
         {showSkeletonRows ? (
           renderSkeletonRows()
-        ) : items.length === 0 && loadError ? (
-          <div className="rename-empty-state">Vorschläge sind momentan nicht verfügbar.</div>
         ) : items.length === 0 ? (
-          <div className="rename-empty-state">
-            Alle Dateinamen entsprechen bereits deinem Benennungsschema.
-          </div>
+          !loadError && (
+            <div className="rename-empty-state">
+              Alle Dateinamen entsprechen bereits deinem Benennungsschema.
+            </div>
+          )
         ) : (
           <div className="rename-list-shell">
             {showLoadingOverlay && <div className="rename-list-overlay" aria-hidden="true" />}
@@ -717,15 +712,16 @@ const ImageRenamePage: React.FC<{
         {renderPaginationControls("bottom")}
       </section>
 
-      {(message || error) && (
+      {(message || actionError) && (
         <div
+          role={actionError ? "alert" : "status"}
           className={
-            error
+            actionError
               ? "settings-feedback settings-feedback--error"
               : "settings-feedback"
           }
         >
-          {error || message}
+          {actionError || message}
         </div>
       )}
 
