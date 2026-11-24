@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -7,7 +8,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from backend.services.image_thumbnails import ensure_image_thumbnail
+from backend.services import image_thumbnails
+from backend.services.image_thumbnails import ensure_image_thumbnail, prune_image_thumbnails
 
 
 class ImageThumbnailTest(unittest.TestCase):
@@ -60,6 +62,77 @@ class ImageThumbnailTest(unittest.TestCase):
                 with Image.open(paths[0]) as image:
                     image.verify()
                 self.assertEqual(len(list((root / "thumbnails" / "images").rglob("*jpg"))), 1)
+
+    def test_prunes_expired_cache_entries_but_preserves_recently_used_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "photo.jpg"
+            Image.new("RGB", (8, 8), "green").save(source)
+            source_mtime = source.stat().st_mtime_ns
+            with patch.object(image_thumbnails, "get_data_root", return_value=root):
+                expired = Path(ensure_image_thumbnail(41, str(source)))
+                reused = Path(ensure_image_thumbnail(42, str(source)))
+                recent = Path(ensure_image_thumbnail(43, str(source)))
+                old_time = time.time() - image_thumbnails._MAX_CACHE_AGE - 60
+                for thumbnail in (expired, reused):
+                    os.utime(thumbnail, (old_time, old_time))
+                self.assertEqual(ensure_image_thumbnail(42, str(source)), str(reused))
+
+                self.assertEqual(prune_image_thumbnails(), 1)
+                self.assertFalse(expired.exists())
+                self.assertTrue(reused.is_file())
+                self.assertTrue(recent.is_file())
+                self.assertEqual(source.stat().st_mtime_ns, source_mtime)
+                self.assertEqual(ensure_image_thumbnail(41, str(source)), str(expired))
+                with Image.open(expired) as image:
+                    image.verify()
+
+    def test_pruning_respects_delete_budget_and_preserves_other_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            shard = root / "thumbnails" / "images" / "0000"
+            shard.mkdir(parents=True)
+            named_directory = shard / f"0-{'a' * 20}.jpg"
+            named_directory.mkdir()
+            old_time = time.time() - image_thumbnails._MAX_CACHE_AGE - 60
+            unrelated = [shard / "notes.jpg", shard / f"1000-{'c' * 20}.jpg"]
+            expired = [shard / f"{image_id}-{'b' * 20}.jpg" for image_id in (1, 2, 3)]
+            for path in unrelated + expired:
+                path.touch()
+                os.utime(path, (old_time, old_time))
+            with (
+                patch.object(image_thumbnails, "get_data_root", return_value=root),
+                patch.object(image_thumbnails, "_MAX_PRUNED_ENTRIES", 2),
+            ):
+                self.assertEqual(prune_image_thumbnails(), 2)
+                self.assertEqual(prune_image_thumbnails(), 1)
+            self.assertTrue(named_directory.is_dir())
+            self.assertTrue(all(path.is_file() for path in unrelated))
+
+    def test_pruning_does_not_follow_linked_directories_or_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache = root / "thumbnails" / "images"
+            shard = cache / "0000"
+            shard.mkdir(parents=True)
+            original_root = root / "originals"
+            original_root.mkdir()
+            original = original_root / f"1005-{'b' * 20}.jpg"
+            original.write_bytes(b"original")
+            old_time = time.time() - image_thumbnails._MAX_CACHE_AGE - 60
+            os.utime(original, (old_time, old_time))
+            file_link = shard / f"42-{'a' * 20}.jpg"
+            shard_link = cache / "0001"
+            try:
+                file_link.symlink_to(original)
+                shard_link.symlink_to(original_root, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"Symbolic links are unavailable: {exc}")
+            with patch.object(image_thumbnails, "get_data_root", return_value=root):
+                self.assertEqual(prune_image_thumbnails(), 0)
+            self.assertTrue(file_link.is_symlink())
+            self.assertTrue(shard_link.is_symlink())
+            self.assertEqual(original.read_bytes(), b"original")
 
 
 if __name__ == "__main__":

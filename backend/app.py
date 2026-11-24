@@ -51,7 +51,7 @@ from .services.desktop import (
     to_display_path,
 )
 from .services.face_thumbnails import ensure_face_thumbnail
-from .services.image_thumbnails import ensure_image_thumbnail
+from .services.image_thumbnails import ensure_image_thumbnail, prune_image_thumbnails
 from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.cache import app_cache
@@ -66,7 +66,7 @@ from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.image_path_cleanup import ImagePathCleanup
-from .services.geo import geo_backfill, list_map_images, list_map_points
+from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -601,6 +601,7 @@ async def lifespan(_app: FastAPI):
     try:
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
+            prune_image_thumbnails()
             auto_cluster_queue.resume_after_shutdown()
             idle_recluster_scheduler.start()
             import_queue.start()
@@ -638,14 +639,25 @@ async def lifespan(_app: FastAPI):
             raise clustering_shutdown_error
 
 
-app = FastAPI(title="Face Manager API", version=APP_VERSION, lifespan=lifespan)
+def configure_cors(application: FastAPI) -> None:
+    """Allow browser access from the app's origin and explicitly configured origins."""
+    allowed_origins = []
+    if os.environ.get("FACE_MANAGER_PLATFORM") != "android":
+        configured = os.environ.get("FACE_MANAGER_ALLOWED_ORIGINS", "")
+        allowed_origins = [
+            origin for origin in (value.strip() for value in configured.split(","))
+            if origin.startswith(("http://", "https://")) and "*" not in origin
+        ]
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[] if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else ["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+app = FastAPI(title="Face Manager API", version=APP_VERSION, lifespan=lifespan)
+configure_cors(app)
 
 
 @app.middleware("http")
@@ -2128,10 +2140,12 @@ def get_map_points(
     from_date: date | None = None,
     to_date: date | None = None,
     zoom: int = Query(default=2, ge=0, le=20),
+    grid_columns: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
+    grid_rows: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
 ):
     """Return bounded photo aggregates for a map viewport."""
     _validate_map_bounds(west, east, south, north, from_date, to_date)
-    return list_map_points(west, east, south, north, from_date, to_date, zoom)
+    return list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows)
 
 
 @app.get("/api/map/images")
@@ -2144,10 +2158,19 @@ def get_map_images(
     to_date: date | None = None,
     limit: int = Query(default=40, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    before_id: int | None = Query(default=None, ge=1, le=2**63 - 1),
+    before_captured_at: str | None = Query(default=None, min_length=1, max_length=64),
 ):
     """Return a stable page of geotagged photos in a viewport."""
     _validate_map_bounds(west, east, south, north, from_date, to_date)
-    return list_map_images(west, east, south, north, from_date, to_date, limit, offset)
+    if before_id is None and before_captured_at is not None:
+        raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
+    if before_id is not None and offset:
+        raise HTTPException(status_code=422, detail="offset must be zero with before_id")
+    return list_map_images(
+        west, east, south, north, from_date, to_date, limit, offset,
+        before_id=before_id, before_captured_at=before_captured_at,
+    )
 
 
 @app.get("/api/images")

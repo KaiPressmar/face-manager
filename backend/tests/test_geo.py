@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image, TiffImagePlugin
 from fastapi import HTTPException
@@ -52,6 +52,7 @@ class GeoMetadataTest(unittest.TestCase):
                 conn.commit()
                 conn.close()
                 result = geo.list_map_points(-180, 180, -90, 90)
+                self.assertEqual((result["grid_columns"], result["grid_rows"]), (32, 32))
                 self.assertEqual(result["total"], 10000)
                 self.assertEqual(sum(point["count"] for point in result["points"]), 10000)
                 self.assertLessEqual(len(result["points"]), 1024)
@@ -77,6 +78,50 @@ class GeoMetadataTest(unittest.TestCase):
                 self.assertFalse({i["id"] for i in first["items"]} &
                                  {i["id"] for i in second["items"]})
                 self.assertEqual(geo.list_map_images(-180, 180, -90, 90)["total"], 46)
+
+    def test_cursor_pages_survive_inserts_and_deletes_above_the_anchor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(schema, "DB_PATH", str(Path(folder) / "cursor.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                insert = (
+                    "INSERT INTO image(id, path, directory, filename, latitude, longitude, captured_at) "
+                    "VALUES (?, ?, '', 'photo.jpg', ?, 0, ?)"
+                )
+                conn.executemany(insert, [
+                    (1, "1.jpg", 0, None),
+                    (2, "2.jpg", 0, None),
+                    (3, "3.jpg", 0, None),
+                    (4, "4.jpg", 0, "2024-01-01T00:00:00"),
+                    (5, "5.jpg", 0, "2024-01-02T00:00:00"),
+                    (6, "6.jpg", 0, "2024-01-02T00:00:00"),
+                    (7, "7.jpg", 0, "2024-01-03T00:00:00"),
+                    (8, "outside.jpg", 80, "2024-01-03T00:00:00"),
+                ])
+                conn.commit()
+
+                bounds = (-10, 10, -10, 10)
+                first = geo.list_map_images(*bounds, limit=2)
+                self.assertEqual([item["id"] for item in first["items"]], [7, 6])
+                self.assertEqual(first["next_cursor"], {
+                    "before_id": 6, "before_captured_at": "2024-01-02T00:00:00",
+                })
+                conn.execute("DELETE FROM image WHERE id IN (6, 7)")
+                conn.executemany(insert, [
+                    (9, "9.jpg", 0, "2024-02-01T00:00:00"),
+                    (10, "10.jpg", 0, "2024-02-02T00:00:00"),
+                ])
+                conn.commit()
+                conn.close()
+
+                second = geo.list_map_images(*bounds, limit=2, **first["next_cursor"])
+                third = geo.list_map_images(*bounds, limit=2, **second["next_cursor"])
+                self.assertEqual(third["next_cursor"], {"before_id": 2, "before_captured_at": None})
+                last = geo.list_map_images(*bounds, limit=2, **third["next_cursor"])
+                for page, expected in ((second, [5, 4]), (third, [3, 2]), (last, [1])):
+                    self.assertEqual([item["id"] for item in page["items"]], expected)
+                    self.assertEqual(page["total"], 7)
+                self.assertIsNone(last["next_cursor"])
 
 
     def test_reads_nested_exif_gps_and_capture_date(self):
@@ -193,6 +238,110 @@ class GeoMetadataTest(unittest.TestCase):
                                  (1.5, 2.5, "2024-01-01T12:00:00"))
                 self.assertNotEqual(row["metadata_scanned_at"], "missing")
 
+    def test_backfill_retries_a_busy_metadata_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            photo = Path(folder) / "photo.jpg"
+            photo.touch()
+            with patch.object(schema, "DB_PATH", str(Path(folder) / "busy.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                conn.execute(
+                    "INSERT INTO image(path, directory, filename) VALUES (?, ?, ?)",
+                    (str(photo), folder, photo.name),
+                )
+                conn.commit()
+                conn.close()
+
+                write_attempts = 0
+
+                def connect():
+                    connection = schema.get_conn()
+                    wrapped = Mock(wraps=connection)
+
+                    def execute(sql, *parameters):
+                        nonlocal write_attempts
+                        if "SET latitude" in sql:
+                            write_attempts += 1
+                            if write_attempts == 1:
+                                raise sqlite3.OperationalError("database is locked")
+                        return connection.execute(sql, *parameters)
+
+                    wrapped.execute.side_effect = execute
+                    return wrapped
+
+                worker = geo.GeoBackfill()
+                with patch.object(geo, "get_conn", side_effect=connect), patch.object(
+                    geo, "extract_image_metadata", return_value=(1.5, 2.5, None)
+                ):
+                    worker._run()
+
+                conn = schema.get_conn()
+                row = conn.execute("SELECT latitude, longitude FROM image").fetchone()
+                conn.close()
+                self.assertEqual(write_attempts, 2)
+                self.assertEqual(tuple(row), (1.5, 2.5))
+
+    def test_wrapped_marker_bounds_keep_exact_stored_longitudes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(schema, "DB_PATH", str(Path(folder) / "wrapped.sqlite")):
+                schema.init_db()
+                conn = schema.get_conn()
+                conn.executemany(
+                    "INSERT INTO image(path,directory,filename,latitude,longitude) "
+                    "VALUES (?, '', ?, 0, ?)",
+                    [
+                        ("positive.jpg", "positive.jpg", 180),
+                        ("negative.jpg", "negative.jpg", -180),
+                        ("fraction.jpg", "fraction.jpg", -1.1),
+                    ],
+                )
+                conn.commit()
+                conn.close()
+
+                points = geo.list_map_points(170, 0, -10, 10)["points"]
+                self.assertEqual(
+                    [(point["west"], point["east"]) for point in points],
+                    [(180, -180), (-1.1, -1.1)],
+                )
+                for point in points:
+                    page = geo.list_map_images(
+                        point["west"], point["east"], point["south"], point["north"]
+                    )
+                    self.assertEqual(page["total"], point["count"])
+
+    def test_non_square_grid_resolves_narrow_wrapped_viewport_edges(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(schema, "DB_PATH", str(Path(folder) / "grid.sqlite")):
+                schema.init_db()
+                west, east, south, north = 179.99999995, -179.99999995, 10, 10.00000002
+                bounds = (west, east, south, north)
+                locations = [(west, south), (180, south), (-180, south), (east, north)]
+                conn = schema.get_conn()
+                conn.executemany(
+                    "INSERT INTO image(path, directory, filename, longitude, latitude) "
+                    "VALUES (?, '', 'photo.jpg', ?, ?)",
+                    [(str(index), *location) for index, location in enumerate(locations)],
+                )
+                conn.commit()
+                conn.close()
+
+                result = geo.list_map_points(*bounds, grid_columns=3, grid_rows=2)
+                self.assertEqual((result["grid_columns"], result["grid_rows"]), (3, 2))
+                self.assertEqual(
+                    [(point["x"], point["y"], point["count"]) for point in result["points"]],
+                    [(0, 0, 1), (1, 0, 2), (2, 1, 1)],
+                )
+                self.assertEqual(result["total"], 4)
+                for point in result["points"]:
+                    page = geo.list_map_images(
+                        point["west"], point["east"], point["south"], point["north"]
+                    )
+                    self.assertEqual(page["total"], point["count"])
+
+                merged = geo.list_map_points(*bounds, grid_columns=1, grid_rows=1)["points"]
+                self.assertEqual([(point["x"], point["y"], point["count"]) for point in merged],
+                                 [(0, 0, 4)])
+
     def test_legacy_schema_adds_metadata_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "old.sqlite"
@@ -210,6 +359,17 @@ class GeoMetadataTest(unittest.TestCase):
 
 
 class GeoApiTest(unittest.TestCase):
+    def test_cursor_rejects_conflicting_parameters(self):
+        from backend import app
+
+        for params in (
+            dict(before_id=None, before_captured_at="2024-01-01T00:00:00", offset=0),
+            dict(before_id=2, before_captured_at=None, offset=1),
+        ):
+            with self.subTest(params=params), self.assertRaises(HTTPException) as raised:
+                app.get_map_images(-180, 180, -90, 90, limit=2, **params)
+            self.assertEqual(raised.exception.status_code, 422)
+
     @patch("backend.app.ensure_image_thumbnail", return_value="/tmp/thumb.jpg")
     @patch("backend.app.get_available_image_path", return_value="/photos/a.jpg")
     def test_thumbnail_endpoint_returns_jpeg(self, _available, ensure):
