@@ -636,8 +636,8 @@ export async function importDatabase(file: File): Promise<void> {
 }
 
 /** Load one image with its faces, to show a face crop in its full context. */
-export async function fetchImageDetail(imageId: number): Promise<FaceImage> {
-  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail`);
+export async function fetchImageDetail(imageId: number, signal?: AbortSignal): Promise<FaceImage> {
+  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail`, { signal });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Das Bild konnte nicht geladen werden."));
   }
@@ -1312,6 +1312,8 @@ export interface MapFilters {
 }
 
 export interface MapPoint {
+  x: number;
+  y: number;
   latitude: number;
   longitude: number;
   count: number;
@@ -1332,6 +1334,8 @@ export interface MapImage {
 }
 
 export interface MapPointsResponse {
+  grid_columns: number;
+  grid_rows: number;
   points: MapPoint[];
   total: number;
   library_total: number;
@@ -1340,21 +1344,34 @@ export interface MapPointsResponse {
   indexing: boolean;
 }
 
+export interface MapImageCursor {
+  before_id: number;
+  before_captured_at: string | null;
+}
+
 export interface MapImagesResponse {
   items: MapImage[];
   total: number;
   limit: number;
   offset: number;
+  next_cursor: MapImageCursor | null;
 }
+
+type MapPointFilters = MapFilters & {
+  zoom?: number;
+  grid_columns?: number;
+  grid_rows?: number;
+};
+type MapImageFilters = MapFilters & Partial<MapImageCursor> & { limit?: number; offset?: number };
 
 async function fetchMapData<T>(
   endpoint: string,
-  filters: MapFilters & { zoom?: number; limit?: number; offset?: number },
+  filters: MapPointFilters | MapImageFilters,
   signal?: AbortSignal,
 ): Promise<T> {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (value !== undefined && value !== "") params.set(key, String(value));
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
   });
   const response = await apiFetch(`${API_BASE}/map/${endpoint}?${params}`, { signal });
   if (!response.ok) {
@@ -1364,14 +1381,14 @@ async function fetchMapData<T>(
 }
 
 export function fetchMapPoints(
-  filters: MapFilters & { zoom?: number } = {},
+  filters: MapPointFilters = {},
   signal?: AbortSignal,
 ): Promise<MapPointsResponse> {
   return fetchMapData("points", filters, signal);
 }
 
 export function fetchMapImages(
-  filters: MapFilters & { limit?: number; offset?: number } = {},
+  filters: MapImageFilters = {},
   signal?: AbortSignal,
 ): Promise<MapImagesResponse> {
   return fetchMapData("images", filters, signal);

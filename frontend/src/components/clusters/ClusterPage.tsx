@@ -1485,32 +1485,41 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
 
   const handleRenamePerson = async () => {
     if (!selectedPersonId || isMutating) {
-      return false;
+      return;
     }
     const nextName = personNameInput.trim();
     if (!nextName) {
-      return false;
+      return;
     }
     setModalError(null);
     setIsMutating(true);
     try {
-      await renamePerson(selectedPersonId, nextName);
-      const nextPersons = await listPersons();
-      setPersons(nextPersons);
-      await refreshAllData();
-      return true;
+      const { person_id: nextPersonId }: { person_id: number } = await renamePerson(
+        selectedPersonId,
+        nextName,
+      );
+      setPersons((current) => {
+        const canonicalName =
+          current.find((person) => person.id === nextPersonId)?.name.trim() ?? nextName;
+        return [
+          ...current.filter((person) => person.id !== selectedPersonId && person.id !== nextPersonId),
+          { id: nextPersonId, name: canonicalName },
+        ].sort((a, b) => a.name.localeCompare(b.name, "de"));
+      });
+      setDetailModal(null);
     } catch (error) {
       console.error("Fehler beim Umbenennen der Person:", error);
       setModalError(error instanceof Error ? error.message : "Die Person konnte nicht umbenannt werden.");
-      return false;
+      return;
     } finally {
       setIsMutating(false);
     }
+    void refreshAllData();
   };
 
   const handleDeletePerson = async () => {
     if (!selectedPersonId || !selectedSummary?.person_name || isMutating) {
-      return false;
+      return;
     }
     const confirmed = window.confirm(
       `Person "${selectedSummary.person_name}" löschen und zugeordnete Gesichter als ${
@@ -1522,23 +1531,22 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       } einordnen?`,
     );
     if (!confirmed) {
-      return false;
+      return;
     }
     setModalError(null);
     setIsMutating(true);
     try {
       await deletePerson(selectedPersonId, personDeleteTarget);
-      const nextPersons = await listPersons();
-      setPersons(nextPersons);
-      await refreshAllData();
-      return true;
+      setPersons((current) => current.filter((person) => person.id !== selectedPersonId));
+      setDetailModal(null);
     } catch (error) {
       console.error("Fehler beim Löschen der Person:", error);
       setModalError(error instanceof Error ? error.message : "Die Person konnte nicht gelöscht werden.");
-      return false;
+      return;
     } finally {
       setIsMutating(false);
     }
+    void refreshAllData();
   };
 
   // The "sort out" actions beside the assignment combobox. Person assignment is
@@ -2079,7 +2087,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.nativeEvent.isComposing && !isMutating && personNameInput.trim()) {
                       event.preventDefault();
-                      void handleRenamePerson().then((success) => { if (success) setDetailModal(null); });
+                      void handleRenamePerson();
                     }
                   }}
                   placeholder="Personenname"
@@ -2088,7 +2096,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                 <button
                   className="primary-button"
                   disabled={isMutating || !personNameInput.trim()}
-                  onClick={() => void handleRenamePerson().then((success) => { if (success) setDetailModal(null); })}
+                  onClick={() => void handleRenamePerson()}
                   type="button"
                 >
                   Person umbenennen
@@ -2116,7 +2124,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
                 <button
                   className="neon-card cluster-danger-zone__button"
                   disabled={isMutating}
-                  onClick={() => void handleDeletePerson().then((success) => { if (success) setDetailModal(null); })}
+                  onClick={() => void handleDeletePerson()}
                   type="button"
                 >
                   Person löschen

@@ -80,6 +80,28 @@ jobs:
           PYTHON_BIN: python
         run: ./scripts/check-backend.sh
 
+      - name: Set up Node.js for browser smoke tests
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install browser smoke dependencies
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/face-manager-browsers
+        run: |
+          npm --prefix frontend ci
+          npm install --prefix "${RUNNER_TEMP}/face-manager-ui-tools" --no-audit --no-fund playwright@1.65.1
+          "${RUNNER_TEMP}/face-manager-ui-tools/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Verify browser workflows
+        env:
+          PYTHON_BIN: python
+          NODE_PATH: ${{ runner.temp }}/face-manager-ui-tools/node_modules
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/face-manager-browsers
+        run: ./scripts/check-ui.sh
+
   frontend:
     name: Frontend
     runs-on: ubuntu-22.04

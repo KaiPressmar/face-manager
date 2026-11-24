@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import stat
 import tempfile
+import time
+from itertools import islice
 from pathlib import Path
 from threading import Lock, Semaphore
 
@@ -15,6 +19,12 @@ from .filesystem_paths import filesystem_path
 
 IMAGE_THUMBNAIL_MAX_SIZE = 480
 IMAGE_THUMBNAIL_QUALITY = 85
+_TOUCH_INTERVAL = 24 * 60 * 60
+_MAX_CACHE_AGE = 90 * _TOUCH_INTERVAL
+_MAX_SCAN_ENTRIES = 25_000
+_MAX_PRUNED_ENTRIES = 1_000
+_SHARD_NAME = re.compile(r"[0-9]{4,}")
+_THUMBNAIL_NAME = re.compile(r"([0-9]+)-[0-9a-f]{20}\.jpg")
 
 # Photo decodes can be large even with JPEG draft mode. Keep request bursts from
 # decoding many originals simultaneously; striped locks also coalesce requests
@@ -29,15 +39,87 @@ def _source_signature(path: str) -> tuple[str, int, int]:
     return source, stat.st_size, stat.st_mtime_ns
 
 
+def _thumbnail_root() -> Path:
+    return get_data_root() / "thumbnails" / "images"
+
+
 def _thumbnail_path(image_id: int, signature: tuple[str, int, int]) -> Path:
     digest = hashlib.sha256(repr(signature).encode("utf-8")).hexdigest()[:20]
-    return (
-        get_data_root()
-        / "thumbnails"
-        / "images"
-        / f"{image_id // 1000:04d}"
-        / f"{image_id}-{digest}.jpg"
-    )
+    return _thumbnail_root() / f"{image_id // 1000:04d}" / f"{image_id}-{digest}.jpg"
+
+
+def _is_directory(path: Path) -> bool:
+    info = path.lstat()
+    attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISDIR(info.st_mode) and not attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _cached_thumbnail_exists(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_nlink == 1 and info.st_mtime < time.time() - _TOUCH_INTERVAL:
+        try:
+            os.utime(path, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            pass
+    return True
+
+
+def prune_image_thumbnails() -> int:
+    """Discard a bounded number of expired generated JPEGs before serving requests."""
+    root = _thumbnail_root()
+    now = time.time()
+    try:
+        if not _is_directory(root.parent) or not _is_directory(root):
+            return 0
+        with os.scandir(root) as entries:
+            shards = sorted(
+                Path(entry.path) for entry in islice(entries, _MAX_SCAN_ENTRIES)
+                if _SHARD_NAME.fullmatch(entry.name)
+            )
+    except OSError:
+        return 0
+    if not shards:
+        return 0
+
+    # Rotate the starting shard daily so large libraries do not always begin
+    # cleanup with the same files, even if the previous scan exhausted its budget.
+    start = int(now // _TOUCH_INTERVAL) % len(shards)
+    remaining = _MAX_SCAN_ENTRIES
+    removed = 0
+    for shard in shards[start:] + shards[:start]:
+        try:
+            if not _is_directory(shard):
+                continue
+            with os.scandir(shard) as entries:
+                for entry in islice(entries, remaining):
+                    remaining -= 1
+                    match = _THUMBNAIL_NAME.fullmatch(entry.name)
+                    if not match:
+                        continue
+                    image_id = int(match[1])
+                    if f"{image_id // 1000:04d}" != shard.name:
+                        continue
+                    try:
+                        with _image_locks[image_id % len(_image_locks)]:
+                            info = entry.stat(follow_symlinks=False)
+                            if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                                    and info.st_mtime < now - _MAX_CACHE_AGE):
+                                os.unlink(entry.path)
+                                removed += 1
+                                if removed == _MAX_PRUNED_ENTRIES:
+                                    return removed
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if remaining == 0:
+            break
+    return removed
 
 
 def ensure_image_thumbnail(image_id: int, path: str) -> str:
@@ -48,15 +130,10 @@ def ensure_image_thumbnail(image_id: int, path: str) -> str:
     source signature.
     """
     image_id = int(image_id)
-    signature = _source_signature(path)
-    thumbnail_path = _thumbnail_path(image_id, signature)
-    if thumbnail_path.is_file():
-        return str(thumbnail_path)
-
     with _image_locks[image_id % len(_image_locks)]:
         signature = _source_signature(path)
         thumbnail_path = _thumbnail_path(image_id, signature)
-        if thumbnail_path.is_file():
+        if _cached_thumbnail_exists(thumbnail_path):
             return str(thumbnail_path)
 
         with _decode_slots:

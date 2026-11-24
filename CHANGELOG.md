@@ -11,7 +11,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Die Fotokarte gruppiert Standorte passend zur Bildschirmgröße, damit die Markierungen auch auf kleinen Bildschirmen einzeln antippbar bleiben.
+- Die Fotokarte lässt sich leichter per Tastatur bedienen. Der sichtbare Bereich kann direkt ausgewählt werden und die Fotoliste ist schneller erreichbar.
+
 ### Behoben
+
+- Beim Wechsel von Kartenausschnitt oder Zeitraum passen die angezeigten Standorte und Fotos zum gewählten Filter. Auch an der Datumsgrenze öffnen Kartenmarkierungen die richtigen Fotos.
+- Beim Nachladen verschieben neu hinzugekommene oder entfernte Fotos die nächste Seite nicht mehr.
+- Vorhandene Fotos werden auch dann weiter für die Karte geprüft, wenn die Bibliothek gleichzeitig aktualisiert wird.
+- Wenn sich eine Bilddatei nicht öffnen lässt, zeigt die Bildansicht eine Meldung an.
+- Alte, länger nicht verwendete Fotovorschauen werden beim Start nach und nach aufgeräumt.
+- Erfolgreiche Personenänderungen schließen den Dialog auch dann, wenn die Liste gerade nicht neu geladen werden kann. Lade- und Aktionsfehler bei Dateinamen erscheinen jeweils einmal.
 
 ## [0.12.0] - 2026-10-01
 

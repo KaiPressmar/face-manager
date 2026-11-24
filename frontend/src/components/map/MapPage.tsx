@@ -1,14 +1,23 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchImageDetail, fetchMapImages, fetchMapPoints, imageThumbnailUrl,
-  type FaceImage, type MapImage, type MapImagesResponse, type MapPoint, type MapPointsResponse,
+  type FaceImage, type MapImage, type MapImageCursor, type MapPoint, type MapPointsResponse,
 } from "../../utils/api";
 import FullscreenImageGallery from "../people/FullscreenImageGallery";
-import WorldMap, { boundsForView, type MapBounds, type MapView } from "./WorldMap";
+import WorldMap, { boundsForView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
 import { useModalFocus } from "../../hooks/useModalFocus";
 import "./map.css";
 
 const PAGE_SIZE = 36;
+const EMPTY_POINTS: MapPoint[] = [];
+const EMPTY_IMAGES: MapImage[] = [];
+type MapResult<T> = { key: string; data: T | null; error: string };
+type ImagePage = {
+  items: MapImage[];
+  total: number;
+  nextCursor: MapImageCursor | null;
+  extended: boolean;
+};
 const INITIAL_VIEW: MapView = { longitude: 0, latitude: 0, zoom: 1 };
 const REGIONS: { label: string; view: MapView }[] = [
   { label: "Welt", view: INITIAL_VIEW },
@@ -40,93 +49,139 @@ const year = new Date().getFullYear();
 
 const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
   const [view, setView] = useState<MapView>(INITIAL_VIEW);
+  const [pointGrid, setPointGrid] = useState<MapGrid | null>(null);
   const [region, setRegion] = useState<MapBounds | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [datePreset, setDatePreset] = useState("all");
-  const [points, setPoints] = useState<MapPointsResponse | null>(null);
-  const [images, setImages] = useState<MapImage[]>([]);
-  const [imageTotal, setImageTotal] = useState(0);
-  const [pointsLoading, setPointsLoading] = useState(active);
-  const [imagesLoading, setImagesLoading] = useState(active);
+  const [pointsResult, setPointsResult] = useState<MapResult<MapPointsResponse> | null>(null);
+  const [imagesResult, setImagesResult] = useState<MapResult<ImagePage> | null>(null);
   const [moreLoading, setMoreLoading] = useState(false);
-  const [pointsError, setPointsError] = useState("");
-  const [imagesError, setImagesError] = useState("");
-  const imageRequestGeneration = useRef(0);
+  const [moreError, setMoreError] = useState("");
   const resultsRef = useRef<HTMLElement>(null);
   const moreController = useRef<AbortController | null>(null);
   const galleryOpenerRef = useRef<HTMLElement | null>(null);
-  const [galleryIndex, setGalleryIndex] = useState<number | null>(null);
-  const [galleryImage, setGalleryImage] = useState<FaceImage | null>(null);
-  const [galleryLoading, setGalleryLoading] = useState(false);
-  const [galleryError, setGalleryError] = useState<string | null>(null);
-  const [refresh, setRefresh] = useState(0);
+  const [gallery, setGallery] = useState<{ key: string; items: MapImage[] } | null>(null);
+  const [galleryIndex, setGalleryIndex] = useState(0);
+  const [lastGalleryImage, setLastGalleryImage] = useState<FaceImage | null>(null);
+  const [galleryResult, setGalleryResult] = useState<{ id: number; error: string } | null>(null);
+  const [pointRefresh, setPointRefresh] = useState(0);
+  const [imageRefresh, setImageRefresh] = useState(0);
+  const [detailRetry, setDetailRetry] = useState(0);
 
   const invalidDate = !!(fromDate && toDate && fromDate > toDate);
+  const canLoad = active && !invalidDate;
+  const canLoadPoints = canLoad && pointGrid !== null;
+  const handleGridChange = useCallback((grid: MapGrid) => {
+    setPointGrid((current) => current?.columns === grid.columns && current.rows === grid.rows ? current : grid);
+  }, []);
   const viewport = useMemo(() => boundsForView(view), [view]);
   const filterBounds = region || viewport;
-  const filterKey = JSON.stringify({ ...filterBounds, from_date: fromDate, to_date: toDate });
-  const pointKey = JSON.stringify({ ...viewport, from_date: fromDate, to_date: toDate, zoom: Math.round(Math.log2(view.zoom) * 2) });
+  const dates = { from_date: fromDate || undefined, to_date: toDate || undefined };
+  const imageQuery = { ...filterBounds, ...dates };
+  const pointQuery = {
+    ...viewport, ...dates,
+    grid_columns: pointGrid?.columns,
+    grid_rows: pointGrid?.rows,
+  };
+  const filterKey = JSON.stringify(imageQuery);
+  const pointKey = JSON.stringify(pointQuery);
+  const pointResult = canLoad && pointsResult?.key === pointKey ? pointsResult : null;
+  const imageResult = canLoad && imagesResult?.key === filterKey ? imagesResult : null;
+  const points = pointResult?.error ? null : pointResult?.data;
+  const collection = pointsResult?.data;
+  const images = imageResult?.data?.items ?? EMPTY_IMAGES;
+  const imageTotal = imageResult?.data?.total ?? 0;
+  const nextCursor = imageResult?.data?.nextCursor;
+  const hasExtendedResults = imageResult?.data?.extended ?? false;
+  const pointsLoading = canLoad && !pointResult;
+  const imagesLoading = canLoad && !imageResult;
+  const openedGallery = canLoad && gallery?.key === filterKey ? gallery : null;
+  const galleryImageId = openedGallery?.items[galleryIndex]?.id;
+  const displayedGalleryIndex = openedGallery?.items.findIndex((image) => image.id === lastGalleryImage?.id) ?? -1;
+  const galleryError = galleryResult?.id === galleryImageId ? galleryResult?.error : undefined;
 
   useEffect(() => {
-    if (!active || invalidDate) return;
+    if (!canLoadPoints) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      setPointsLoading(true);
-      setPointsError("");
-      void fetchMapPoints({ ...viewport, from_date: fromDate || undefined, to_date: toDate || undefined, zoom: Math.min(20, Math.round(Math.log2(view.zoom) * 2)) }, controller.signal)
-        .then((result) => { if (!controller.signal.aborted) setPoints(result); })
-        .catch((reason) => { if (!controller.signal.aborted) setPointsError(reason instanceof Error ? reason.message : "Standorte konnten nicht geladen werden."); })
-        .finally(() => { if (!controller.signal.aborted) setPointsLoading(false); });
+      void fetchMapPoints(pointQuery, controller.signal)
+        .then((data) => { if (!controller.signal.aborted) setPointsResult({ key: pointKey, data, error: "" }); })
+        .catch((reason) => {
+          if (!controller.signal.aborted) setPointsResult((current) => ({
+            key: pointKey, data: current?.data ?? null,
+            error: reason instanceof Error ? reason.message : "Standorte konnten nicht geladen werden.",
+          }));
+        });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-    // The serialized key captures the rounded map bounds for deliberate debouncing.
-  }, [active, invalidDate, pointKey, refresh]);
+    // The key encodes every query value. The debounce only starts for a changed query.
+  }, [canLoadPoints, pointKey, pointRefresh]);
 
   useEffect(() => {
     resultsRef.current?.scrollTo({ top: 0 });
-  }, [filterKey]);
+    setGallery(null);
+    setLastGalleryImage(null);
+    setGalleryResult(null);
+    setMoreError("");
+    return () => { moreController.current?.abort(); };
+  }, [canLoad, filterKey]);
 
   useEffect(() => {
-    imageRequestGeneration.current += 1;
-    moreController.current?.abort();
-    setGalleryIndex(null);
-    setGalleryImage(null);
-    setImagesError("");
-    if (!active || invalidDate) { setImages([]); setImageTotal(0); setImagesLoading(false); return; }
-    setImagesLoading(true);
+    if (!canLoad) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      setImagesLoading(true);
-      setImagesError("");
-      void fetchMapImages({ ...filterBounds, from_date: fromDate || undefined, to_date: toDate || undefined, limit: PAGE_SIZE, offset: 0 }, controller.signal)
-        .then((page: MapImagesResponse) => { if (!controller.signal.aborted) { setImages(page.items); setImageTotal(page.total); } })
-        .catch((reason) => { if (!controller.signal.aborted) { setImages([]); setImageTotal(0); setImagesError(reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden."); } })
-        .finally(() => { if (!controller.signal.aborted) setImagesLoading(false); });
+      void fetchMapImages({ ...imageQuery, limit: PAGE_SIZE }, controller.signal)
+        .then((page) => {
+          if (controller.signal.aborted || moreController.current) return;
+          setImagesResult((current) => {
+            // Keep the cursor and already loaded pages together during indexing.
+            if (current?.key === filterKey && current.data?.extended) return current;
+            return {
+              key: filterKey,
+              data: { items: page.items, total: page.total, nextCursor: page.next_cursor, extended: false },
+              error: "",
+            };
+          });
+        })
+        .catch((reason) => {
+          if (!controller.signal.aborted && !moreController.current) setImagesResult((current) => ({
+            key: filterKey, data: current?.key === filterKey ? current.data : null,
+            error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
+          }));
+        });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [active, invalidDate, filterKey, refresh]);
+  }, [canLoad, filterKey, imageRefresh]);
 
   useEffect(() => {
-    if (!active || !points?.indexing || galleryIndex !== null) return;
-    const timer = window.setTimeout(() => setRefresh((value) => value + 1), 5000);
+    if (!canLoad || !points?.indexing || openedGallery || moreLoading) return;
+    const timer = window.setTimeout(() => {
+      setPointRefresh((value) => value + 1);
+      if (!hasExtendedResults) setImageRefresh((value) => value + 1);
+    }, 5000);
     return () => window.clearTimeout(timer);
-  }, [active, points?.indexing, refresh, galleryIndex]);
+  }, [canLoad, pointKey, filterKey, pointRefresh, points?.indexing, openedGallery, moreLoading, hasExtendedResults]);
 
   useEffect(() => {
-    if (galleryIndex === null) { setGalleryImage(null); return; }
-    const image = images[galleryIndex];
-    if (!image) { setGalleryIndex(null); return; }
-    let current = true;
-    setGalleryLoading(true);
-    setGalleryError(null);
-    void fetchImageDetail(image.id)
-      .then((detail) => { if (current) setGalleryImage(detail); })
-      .catch((reason) => { if (current) setGalleryError(reason instanceof Error ? reason.message : "Foto konnte nicht geöffnet werden."); })
-      .finally(() => { if (current) setGalleryLoading(false); });
-    return () => { current = false; };
-  }, [galleryIndex, images]);
+    if (galleryImageId === undefined) return;
+    const controller = new AbortController();
+    void fetchImageDetail(galleryImageId, controller.signal)
+      .then((detail) => {
+        if (!controller.signal.aborted) {
+          setLastGalleryImage(detail);
+          setGalleryResult(null);
+        }
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) setGalleryResult({
+          id: galleryImageId,
+          error: reason instanceof Error ? reason.message : "Foto konnte nicht geöffnet werden.",
+        });
+      });
+    return () => controller.abort();
+  }, [galleryImageId, detailRetry]);
 
   const setPreset = (value: string) => {
     setDatePreset(value);
@@ -150,29 +205,47 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
     if (view.zoom < 8) setView({ longitude: marker.longitude, latitude: marker.latitude, zoom: Math.min(8, view.zoom * 2) });
   };
   const closeGallery = () => {
-    setGalleryIndex(null);
+    setGallery(null);
+    setLastGalleryImage(null);
+    setGalleryResult(null);
     const opener = galleryOpenerRef.current;
     window.requestAnimationFrame(() => { if (opener?.isConnected) opener.focus(); });
   };
   const loadMore = async () => {
-    if (moreLoading || imagesLoading || invalidDate || images.length >= imageTotal) return;
-    const generation = imageRequestGeneration.current;
+    if (moreController.current || !canLoad || !nextCursor) return;
     const controller = new AbortController();
+    const loadedImages = images;
     moreController.current = controller;
     setMoreLoading(true);
+    setMoreError("");
     try {
-      const page = await fetchMapImages({ ...filterBounds, from_date: fromDate || undefined, to_date: toDate || undefined, limit: PAGE_SIZE, offset: images.length }, controller.signal);
-      if (controller.signal.aborted || generation !== imageRequestGeneration.current) return;
-      setImages((current) => current.concat(page.items));
-      setImageTotal(page.total);
-    } catch (reason) { if (!controller.signal.aborted && generation === imageRequestGeneration.current) setImagesError(reason instanceof Error ? reason.message : "Weitere Fotos konnten nicht geladen werden."); }
-    finally { if (moreController.current === controller) { moreController.current = null; setMoreLoading(false); } }
+      const page = await fetchMapImages({ ...imageQuery, ...nextCursor, limit: PAGE_SIZE }, controller.signal);
+      if (controller.signal.aborted) return;
+      const seen = new Set(loadedImages.map((image) => image.id));
+      setImagesResult({
+        key: filterKey,
+        data: {
+          items: loadedImages.concat(page.items.filter((image) => !seen.has(image.id))),
+          total: page.total,
+          nextCursor: page.next_cursor,
+          extended: true,
+        },
+        error: "",
+      });
+    } catch (reason) {
+      if (!controller.signal.aborted) setMoreError(reason instanceof Error ? reason.message : "Weitere Fotos konnten nicht geladen werden.");
+    } finally {
+      if (moreController.current === controller) {
+        moreController.current = null;
+        setMoreLoading(false);
+      }
+    }
   };
 
   return <main className="gps-page">
     <header className="gps-page__header">
       <div><span className="gps-page__eyebrow">FOTOBIBLIOTHEK · STANDORTE</span><h1>Fotokarte</h1><p>Entdecke deine Fotos dort, wo sie aufgenommen wurden.</p></div>
-      <div className="gps-page__stat"><strong>{points ? formatCount(points.located_total) : "…"}</strong><span>Fotos mit Standort</span></div>
+      <div className="gps-page__stat"><strong>{collection ? formatCount(collection.located_total) : "…"}</strong><span>Fotos mit Standort</span></div>
     </header>
 
     <section className="gps-page__toolbar" aria-label="Kartenfilter">
@@ -192,27 +265,71 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster }) => {
     </div>}
     <div className="gps-page__layout">
       <section className="gps-page__map-card" aria-label="Fotostandorte auf der Weltkarte">
-        <div className="gps-page__map-head"><div><strong>Standorte</strong><span>{pointsLoading ? "Karte wird aktualisiert …" : `${formatCount(points?.total ?? 0)} Fotos im sichtbaren Ausschnitt`}</span></div><div className="gps-page__map-actions"><button type="button" className={selectMode ? "gps-page__tool--active" : ""} aria-pressed={selectMode} onClick={() => setSelectMode((value) => !value)}>{selectMode ? "Auswahl beenden" : "Bereich wählen"}</button>{region && <button type="button" onClick={() => setRegion(null)}>Auswahl löschen</button>}</div></div>
-        <WorldMap view={view} onViewChange={setView} points={points?.points || []} selection={region} onSelectionChange={(bounds) => { setRegion(bounds); setSelectMode(false); }} onMarkerClick={handleMarkerClick} selectionMode={selectMode} />
-        <div className="gps-page__map-foot"><span>{selectMode ? "Einen Bereich mit Maus oder Finger aufziehen" : "Karte ziehen · +/− zum Zoomen · Ort anklicken für Fotos"}</span><span>{region ? "Bereich ausgewählt" : "Sichtbarer Kartenausschnitt"}</span></div>
+        <div className="gps-page__map-head">
+          <div>
+            <strong>Standorte</strong>
+            <span aria-live="polite">{pointsLoading ? "Karte wird aktualisiert …" : points ? `${formatCount(points.total)} Fotos im sichtbaren Ausschnitt` : "–"}</span>
+          </div>
+          <div className="gps-page__map-actions">
+            <button type="button" className={selectMode ? "gps-page__tool--active" : ""} aria-pressed={selectMode} onClick={() => setSelectMode((value) => !value)}>{selectMode ? "Auswahl beenden" : "Bereich wählen"}</button>
+            {selectMode && <button type="button" onClick={() => { setRegion(viewport); setSelectMode(false); }}>Sichtbaren Bereich wählen</button>}
+            {region && <button type="button" onClick={() => setRegion(null)}>Auswahl löschen</button>}
+            <button type="button" className="gps-page__skip" onClick={() => resultsRef.current?.focus()}>Zu den Fotos</button>
+          </div>
+        </div>
+        {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
+        <WorldMap
+          view={view}
+          onViewChange={setView}
+          points={points?.points ?? EMPTY_POINTS}
+          grid={points ? { columns: points.grid_columns, rows: points.grid_rows } : null}
+          onGridChange={handleGridChange}
+          selection={region}
+          onSelectionChange={(bounds) => { setRegion(bounds); setSelectMode(false); }}
+          onCancelSelection={() => setSelectMode(false)}
+          onMarkerClick={handleMarkerClick}
+          selectionMode={selectMode}
+        />
+        <div className="gps-page__map-foot">
+          <span>{selectMode ? "Einen Bereich mit Maus oder Finger aufziehen" : "Karte ziehen · +/− zum Zoomen · Ort anklicken für Fotos"}</span>
+          <a className="gps-map__credit" href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">Kartendaten: Natural Earth</a>
+          <span>{region ? "Bereich ausgewählt" : "Sichtbarer Kartenausschnitt"}</span>
+        </div>
       </section>
-    <section ref={resultsRef} className={`gps-page__results${imagesLoading ? " gps-page__results--loading" : ""}`} aria-label="Fotos im gewählten Kartenausschnitt" aria-busy={imagesLoading}><div className="gps-page__results-head"><div><span className="gps-page__eyebrow">AUSWAHL</span><h2>{region ? "Fotos im gewählten Bereich" : "Fotos im Kartenausschnitt"}</h2></div><span role="status" aria-live="polite">{imagesLoading ? "Lädt …" : `${formatCount(imageTotal)} Fotos`}</span></div>
-      <p className="gps-page__results-hint">{region ? "Die Fotos bleiben auf den gewählten Bereich begrenzt." : "Die Fotos passen sich deinem Kartenausschnitt an."}</p>
-      {(imagesError || pointsError) && <div className="gps-page__error" role="alert">{imagesError || pointsError} <button type="button" onClick={() => setRefresh((value) => value + 1)}>Erneut versuchen</button></div>}
-      {!imagesLoading && !invalidDate && !imagesError && imageTotal === 0 && <div className="gps-page__empty"><strong>{points?.indexing ? "Deine Fotokarte entsteht gerade." : points?.located_total === 0 ? "Noch keine Fotos mit Standort." : "Hier sind noch keine Fotos."}</strong><p>{points?.indexing ? "Fotos mit Standort erscheinen automatisch, sobald sie gefunden werden." : points?.located_total === 0 ? "Sobald Fotos mit gespeicherten Standortdaten hinzugefügt werden, findest du sie hier." : "Wähle einen anderen Kartenausschnitt oder entferne den Zeitfilter."}</p>{hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}</div>}
-      {imagesLoading && images.length === 0 && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
-      <div className="gps-page__grid">{images.map((image, index) => <button type="button" className="gps-page__photo" key={image.id} disabled={imagesLoading} onClick={(event) => { galleryOpenerRef.current = event.currentTarget; setGalleryIndex(index); }} aria-label={`${image.filename || "Foto"} öffnen`}><img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span></button>)}</div>
-      {!invalidDate && images.length < imageTotal && <button type="button" className="gps-page__more" disabled={moreLoading || imagesLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : "Weitere Fotos laden"}</button>}
-    </section>
+      <section ref={resultsRef} id="gps-map-results" tabIndex={-1} className="gps-page__results" aria-label="Fotos im gewählten Kartenausschnitt" aria-busy={imagesLoading}>
+        <div className="gps-page__results-head"><div><span className="gps-page__eyebrow">AUSWAHL</span><h2>{region ? "Fotos im gewählten Bereich" : "Fotos im Kartenausschnitt"}</h2></div><span role="status">{imagesLoading ? "Lädt …" : imageResult?.data ? `${formatCount(imageTotal)} Fotos` : "–"}</span></div>
+        <p className="gps-page__results-hint">{region ? "Die Fotos bleiben auf den gewählten Bereich begrenzt." : "Die Fotos passen sich deinem Kartenausschnitt an."}</p>
+        {imageResult?.error && <div className="gps-page__error" role="alert">{imageResult.error} <button type="button" onClick={() => { setImageRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
+        {imageResult?.data && !imageResult.error && imageTotal === 0 && <div className="gps-page__empty"><strong>{points?.indexing ? "Deine Fotokarte entsteht gerade." : collection?.located_total === 0 ? "Noch keine Fotos mit Standort." : "Hier sind noch keine Fotos."}</strong><p>{points?.indexing ? "Fotos mit Standort erscheinen automatisch, sobald sie gefunden werden." : collection?.located_total === 0 ? "Sobald Fotos mit gespeicherten Standortdaten hinzugefügt werden, findest du sie hier." : "Wähle einen anderen Kartenausschnitt oder entferne den Zeitfilter."}</p>{hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}</div>}
+        {imagesLoading && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
+        <div className="gps-page__grid">{images.map((image, index) => <button type="button" className="gps-page__photo" key={image.id} onClick={(event) => {
+          galleryOpenerRef.current = event.currentTarget;
+          setGalleryIndex(index);
+          setGallery({ key: filterKey, items: images });
+        }} aria-label={`${image.filename || "Foto"} öffnen`}><img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span></button>)}</div>
+        {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
+        {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
+      </section>
     </div>
     <aside className="gps-page__collection" aria-label="Standortübersicht">
-      <span><strong>{points ? formatCount(points.located_total) : "…"}</strong> Fotos mit Standort</span>
-      <span><strong>{points ? formatCount(Math.max(0, points.library_total - points.located_total - points.pending_total)) : "…"}</strong> ohne Standort</span>
-      {!!points?.pending_total && <span className="gps-page__pending">{formatCount(points.pending_total)} werden noch geprüft</span>}
+      <span><strong>{collection ? formatCount(collection.located_total) : "…"}</strong> Fotos mit Standort</span>
+      <span><strong>{collection ? formatCount(Math.max(0, collection.library_total - collection.located_total - collection.pending_total)) : "…"}</strong> ohne Standort</span>
+      {!!collection?.pending_total && <span className="gps-page__pending">{formatCount(collection.pending_total)} werden noch geprüft</span>}
       <span className="gps-page__privacy">Deine Fotostandorte bleiben privat. Die Karte funktioniert auch offline.</span>
     </aside>
-    {galleryIndex !== null && galleryImage && <FullscreenImageGallery images={[galleryImage]} activeIndex={0} onNavigateToCluster={onNavigateToCluster} onChange={() => {}} onClose={closeGallery} sequence={{ activeIndex: galleryIndex, length: images.length, onChange: setGalleryIndex, itemLabel: "Foto", loading: galleryLoading, error: galleryError }} />}
-    {galleryIndex !== null && !galleryImage && (galleryLoading || galleryError) && <GalleryStatus error={galleryError} onClose={closeGallery} />}
+    {openedGallery && lastGalleryImage && <FullscreenImageGallery images={[lastGalleryImage]} activeIndex={0} onNavigateToCluster={onNavigateToCluster} onChange={() => {}} onClose={closeGallery} sequence={{
+      activeIndex: displayedGalleryIndex,
+      length: openedGallery.items.length,
+      onChange: (index) => {
+        setGalleryResult(null);
+        if (index === galleryIndex) setDetailRetry((value) => value + 1);
+        else setGalleryIndex(index);
+      },
+      itemLabel: "Foto",
+      loading: displayedGalleryIndex !== galleryIndex && !galleryError,
+      error: galleryError,
+    }} />}
+    {openedGallery && !lastGalleryImage && <GalleryStatus error={galleryError ?? null} onClose={closeGallery} />}
   </main>;
 };
 
