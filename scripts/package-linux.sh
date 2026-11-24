@@ -45,7 +45,7 @@ python="$work_dir/build-env/bin/python"
 # Keep this install in one resolver run so the Linux pins intersect the app's
 # shared ranges. Only the GPU ORT distribution provides the Python module.
 # Ignore old local wheels so hnswlib is rebuilt for portable x86-64.
-HNSWLIB_NO_NATIVE=1 "$python" -m pip install --disable-pip-version-check --no-cache-dir --no-compile --target "$vendor" \
+HNSWLIB_NO_NATIVE=1 "$python" -m pip install --disable-pip-version-check --timeout 60 --no-cache-dir --no-compile --target "$vendor" \
     -r "$project_root/backend/requirements.txt" -r "$packaging_dir/requirements.txt"
 # Console scripts point to the temporary build venv. The ONNX libraries also
 # ship their own test and example models, which Face Manager does not use.

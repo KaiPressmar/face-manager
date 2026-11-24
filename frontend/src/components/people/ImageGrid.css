@@ -1,3 +1,7 @@
+.image-gallery-card > img {
+  z-index: 0;
+}
+
 .image-gallery-card__open {
   position: absolute;
   inset: 0;
@@ -7,6 +11,22 @@
   border-radius: inherit;
   background: transparent;
   cursor: pointer;
+}
+
+.image-gallery-card__open:focus-visible ~ .image-open-cue {
+  opacity: 1;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.image-gallery-card__retry {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 16px);
+  min-height: 44px;
 }
 
 .image-gallery-card__open:focus-visible {

@@ -73,13 +73,14 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
   // Hard guarantee that the badge stays inside the picture: it may only use the
   // space between its anchor and the opposite edge.
   const availableWidth = anchorRight ? left + width : 100 - left;
+  const badgeTop = flipBelow
+    ? `calc(${top + height}% + ${leaderLength}px)`
+    : `calc(${top}% - ${leaderLength}px)`;
 
   const labelPosition: React.CSSProperties = {
     ...horizontalAnchor,
     maxWidth: `${Math.max(18, Math.min(100, availableWidth))}%`,
-    ...(flipBelow
-      ? { top: `calc(${top + height}% + ${leaderLength}px)` }
-      : { top: `calc(${top}% - ${leaderLength}px)` }),
+    top: `clamp(0px, ${badgeTop}, max(0px, calc(100% - 24px)))`,
   };
 
   const leaderPosition: React.CSSProperties = {

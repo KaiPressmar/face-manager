@@ -6,7 +6,6 @@ import hashlib
 import os
 import re
 import stat
-import tempfile
 import time
 from itertools import islice
 from pathlib import Path
@@ -16,6 +15,8 @@ from PIL import Image, ImageOps
 
 from ..config import get_data_root
 from .filesystem_paths import filesystem_path
+from .preview_cache import orient_image, write_preview_jpeg
+from .preview_cache_budget import preview_exists
 
 IMAGE_THUMBNAIL_MAX_SIZE = 480
 IMAGE_THUMBNAIL_QUALITY = 85
@@ -48,25 +49,38 @@ def _thumbnail_path(image_id: int, signature: tuple[str, int, int, int, int, int
     return _thumbnail_root() / f"{image_id // 1000:04d}" / f"{image_id}-{digest}.jpg"
 
 
+def _registered_thumbnail_path(image_id: int, content_hash: str) -> Path:
+    digest = hashlib.sha256(f"registered-v1:{content_hash}".encode()).hexdigest()[:20]
+    return _thumbnail_root() / f"{image_id // 1000:04d}" / f"{image_id}-{digest}.jpg"
+
+
+def get_cached_image_thumbnail(image_id: int, content_hash: str) -> Path | None:
+    """Look up a thumbnail of registered content without touching the original."""
+    destination = _registered_thumbnail_path(image_id, content_hash)
+    return destination if preview_exists(destination) else None
+
+
+def write_image_thumbnail(
+    image_id: int, content_hash: str, image: Image.Image, orientation: int
+) -> Path:
+    """Write a preview from already verified raw image pixels."""
+    with _image_locks[image_id % len(_image_locks)]:
+        destination = _registered_thumbnail_path(image_id, content_hash)
+        if preview_exists(destination):
+            return destination
+        thumbnail = image
+        if max(image.size) > IMAGE_THUMBNAIL_MAX_SIZE:
+            thumbnail = ImageOps.contain(
+                image, (IMAGE_THUMBNAIL_MAX_SIZE,) * 2, Image.Resampling.LANCZOS
+            )
+        thumbnail = orient_image(thumbnail, orientation)
+        return write_preview_jpeg(thumbnail, destination, IMAGE_THUMBNAIL_QUALITY)
+
+
 def _is_directory(path: Path) -> bool:
     info = path.lstat()
     attributes = getattr(info, "st_file_attributes", 0)
     return stat.S_ISDIR(info.st_mode) and not attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-
-
-def _cached_thumbnail_exists(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(info.st_mode):
-        return False
-    if info.st_nlink == 1 and info.st_mtime < time.time() - _TOUCH_INTERVAL:
-        try:
-            os.utime(path, follow_symlinks=False)
-        except (OSError, NotImplementedError):
-            pass
-    return True
 
 
 def prune_image_thumbnails() -> int:
@@ -133,7 +147,7 @@ def ensure_image_thumbnail(image_id: int, path: str) -> str:
     with _image_locks[image_id % len(_image_locks)]:
         signature = _source_signature(path)
         thumbnail_path = _thumbnail_path(image_id, signature)
-        if _cached_thumbnail_exists(thumbnail_path):
+        if preview_exists(thumbnail_path):
             return str(thumbnail_path)
 
         with _decode_slots:
@@ -147,23 +161,12 @@ def ensure_image_thumbnail(image_id: int, path: str) -> str:
                     Image.Resampling.LANCZOS,
                 )
 
-            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp_name = tempfile.mkstemp(
-                prefix=f"{image_id}-", suffix=".jpg", dir=thumbnail_path.parent
-            )
-            os.close(fd)
-            temp_path = Path(temp_name)
-            try:
-                thumbnail.save(
-                    temp_path,
-                    format="JPEG",
-                    quality=IMAGE_THUMBNAIL_QUALITY,
-                    optimize=True,
-                )
+            def verify_source():
                 if _source_signature(path) != signature:
                     raise OSError(f"Source image changed while rendering: {path}")
-                os.replace(temp_path, thumbnail_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
+
+            write_preview_jpeg(
+                thumbnail, thumbnail_path, IMAGE_THUMBNAIL_QUALITY, before_publish=verify_source
+            )
 
     return str(thumbnail_path)

@@ -12,6 +12,7 @@ import webview
 
 from backend.config import APP_VERSION, get_error_log_path
 from backend.error_logging import configure_error_logging, install_global_exception_hooks
+from backend.services.desktop import start_native_folder_picker, stop_native_folder_picker
 from backend.services.update_manager import register_shutdown_callback
 
 logger = logging.getLogger("face_manager.desktop")
@@ -109,6 +110,7 @@ def _build_error_page(message: str) -> str:
 def main() -> None:
     """Launch the packaged desktop application."""
     logger.info("Launching Face Manager desktop %s", APP_VERSION)
+    start_native_folder_picker()
     host = "127.0.0.1"
     server = None
     server_thread = None
@@ -143,7 +145,9 @@ def main() -> None:
             error_window = webview.create_window(
                 title=f"Face Manager {APP_VERSION}",
                 html=_build_error_page(message),
-                min_size=(720, 480),
+                width=720,
+                height=480,
+                min_size=(320, 400),
             )
             webview.start(debug=False)
             if error_window is not None:
@@ -156,7 +160,9 @@ def main() -> None:
         window = webview.create_window(
             title=f"Face Manager {APP_VERSION}",
             url=f"http://{host}:{port}",
-            min_size=(1200, 780),
+            width=1100,
+            height=700,
+            min_size=(320, 400),
         )
         register_shutdown_callback(window.destroy)
         webview.start(debug=False)
@@ -164,8 +170,11 @@ def main() -> None:
         logger.exception("Desktop webview failed during startup or runtime")
         raise
     finally:
-        server.should_exit = True
-        server_thread.join(timeout=10)
+        try:
+            stop_native_folder_picker()
+        finally:
+            server.should_exit = True
+            server_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

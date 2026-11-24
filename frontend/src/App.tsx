@@ -29,6 +29,7 @@ export type { AppPage } from "./utils/navigation";
 export interface ClusterNavigationTarget {
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
+  reviewView?: "open";
   /** Person of the clicked face, if known — lets the review page open the
    *  matching work area without waiting for its cluster list to load. */
   personName?: string | null;
@@ -74,6 +75,7 @@ const App: React.FC = () => {
       if (initialEntry.groupKey !== undefined) {
         return { groupKey: initialEntry.groupKey, token: Date.now() };
       }
+      if (initialEntry.reviewView) return { reviewView: initialEntry.reviewView, token: Date.now() };
       return null;
     });
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(
@@ -106,6 +108,8 @@ const App: React.FC = () => {
       });
     } else if (entry.groupKey !== undefined) {
       setClusterNavigationTarget({ groupKey: entry.groupKey, token: Date.now() });
+    } else if (entry.reviewView) {
+      setClusterNavigationTarget({ reviewView: entry.reviewView, token: Date.now() });
     } else {
       setClusterNavigationTarget(null);
     }
@@ -259,7 +263,7 @@ const App: React.FC = () => {
     [navigate],
   );
 
-  const handleOpenPeople = useCallback(() => navigate({ page: "review" }), [navigate]);
+  const handleOpenPeople = useCallback(() => navigate({ page: "review", reviewView: "open" }), [navigate]);
 
   const handleNavigateToCluster = useCallback(
     (clusterId: number, personName?: string | null) =>

@@ -1,8 +1,10 @@
+import hashlib
 import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 from PIL import Image
@@ -12,6 +14,7 @@ from backend.services.face_thumbnails import (
     create_face_thumbnails_for_image,
     delete_face_thumbnail,
     ensure_face_thumbnail,
+    get_cached_face_thumbnail,
     get_face_library_signature,
     get_face_thumbnail_path,
     warm_missing_face_thumbnails,
@@ -143,6 +146,7 @@ class FaceThumbnailTest(unittest.TestCase):
             Image.new("RGB", (640, 480), "teal").save(image_path)
 
             conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE image (id INTEGER PRIMARY KEY, content_hash TEXT)")
             conn.execute(
                 """
                 CREATE TABLE face (
@@ -197,6 +201,55 @@ class FaceThumbnailTest(unittest.TestCase):
                 self.assertEqual(warm_again.skipped_existing, 1)
                 self.assertEqual(warm_again.created_thumbnails, 0)
 
+    def test_registered_warmup_reads_verified_copy_once_and_then_works_offline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "copy.png"
+            Image.new("RGB", (100, 80), "teal").save(source)
+            stale = root / "changed.png"
+            Image.new("RGB", (100, 80), "red").save(stale)
+            content_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+            db_path = root / "faces.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE image (id INTEGER PRIMARY KEY, content_hash TEXT);
+                    CREATE TABLE image_location (image_id INTEGER, path TEXT);
+                    CREATE TABLE face (id INTEGER PRIMARY KEY, image_id INTEGER,
+                        bbox_x REAL, bbox_y REAL, bbox_w REAL, bbox_h REAL);
+                    INSERT INTO face VALUES (1, 10, 1, 2, 30, 40), (2, 10, 5, 6, 30, 40);
+                    """
+                )
+                conn.execute("INSERT INTO image VALUES (10, ?)", (content_hash,))
+                conn.executemany(
+                    "INSERT INTO image_location VALUES (10, ?)",
+                    [(str(root / "a-missing.png"),), (str(stale),), (str(source),)],
+                )
+
+            def get_conn():
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                return conn
+
+            from backend.services.face_thumbnails import decode_verified_preview
+
+            with (
+                patch("backend.services.face_thumbnails.get_data_root", return_value=root),
+                patch("backend.services.face_thumbnails.get_conn", side_effect=get_conn),
+                patch(
+                    "backend.services.face_thumbnails.decode_verified_preview",
+                    wraps=decode_verified_preview,
+                ) as decode,
+            ):
+                result = warm_missing_face_thumbnails()
+                self.assertEqual(result.created_thumbnails, 2)
+                self.assertEqual(decode.call_count, 3)  # missing, changed, then verified copy
+                cached = get_cached_face_thumbnail(1, content_hash, (1, 2, 30, 40))
+                self.assertIsNotNone(cached)
+                source.unlink()
+                decode.reset_mock()
+                self.assertEqual(warm_missing_face_thumbnails().skipped_existing, 2)
+                decode.assert_not_called()
 
     def test_get_face_library_signature_reports_count_and_max_id(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -288,6 +341,51 @@ class FaceThumbnailTest(unittest.TestCase):
 
         # The fingerprint changing from (5,5) to (6,6) forces a second sweep.
         self.assertGreaterEqual(len(warm_calls), 2)
+
+    def test_incomplete_scan_retries_and_blocked_worker_retains_ownership(self):
+        entered, release, restarted, retried = Event(), Event(), Event(), Event()
+
+        def fake_warm(**_kwargs):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(2):
+                    raise TimeoutError("test did not release the first batch")
+            elif not restarted.is_set():
+                restarted.set()
+            else:
+                retried.set()
+            return FaceThumbnailWarmupResult(
+                total_faces=1, scanned_faces=1, skipped_missing_source=1, reached_end=True
+            )
+
+        with (
+            patch(
+                "backend.services.face_thumbnail_warmup.warm_missing_face_thumbnails",
+                side_effect=fake_warm,
+            ),
+            patch(
+                "backend.services.face_thumbnail_warmup.get_face_library_signature",
+                return_value=(1, 1),
+            ),
+        ):
+            queue = FaceThumbnailWarmupQueue(
+                is_idle=lambda: True, idle_poll_seconds=0.25, retry_seconds=0.25
+            )
+            queue.start()
+            try:
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(queue.has_active_batch())
+                self.assertFalse(queue.stop(timeout=0.01))
+                queue.start()
+                queue.invalidate_library()
+                self.assertFalse(restarted.is_set())
+                release.set()
+                self.assertTrue(restarted.wait(1))
+                self.assertTrue(retried.wait(1))
+                self.assertFalse(queue.snapshot()["task"]["cache_complete"])
+            finally:
+                release.set()
+                self.assertTrue(queue.stop())
 
 
 if __name__ == "__main__":

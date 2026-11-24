@@ -1,4 +1,6 @@
 import base64
+import signal
+import subprocess
 import unittest
 from unittest.mock import MagicMock, call, mock_open, patch
 
@@ -139,3 +141,67 @@ class ImportFolderPathTest(unittest.TestCase):
 
         self.assertEqual(selected, r"D:\Photos\Library")
         run.assert_called_once()
+
+
+@patch("backend.services.desktop.sys.platform", "linux")
+@patch("backend.services.desktop.is_wsl_host", return_value=False)
+@patch("backend.services.desktop.subprocess.Popen")
+class LinuxFolderPickerTest(unittest.TestCase):
+    def setUp(self):
+        desktop.start_native_folder_picker()
+        self.addCleanup(desktop.start_native_folder_picker)
+
+    def test_preserves_unicode_path_and_native_cancellation(self, popen, _is_wsl):
+        process = popen.return_value
+        process.returncode = 0
+        process.communicate.side_effect = [(r'"/media/Familie/M\u00e4rz"', ""), ("null\n", "")]
+
+        self.assertEqual(desktop.pick_folder(), "/media/Familie/März")
+        self.assertIsNone(desktop.pick_folder())
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:2], [desktop.sys.executable, "-I"])
+        self.assertTrue(command[2].endswith("/linux_folder_picker.py"))
+        process.communicate.assert_called_with(timeout=desktop.LINUX_PICKER_TIMEOUT_SECONDS)
+
+    def test_child_signal_is_reported_and_next_picker_can_open(self, popen, _is_wsl):
+        process = popen.return_value
+        process.communicate.return_value = ("", "epoll_ctl: Invalid argument")
+        process.returncode = -signal.SIGILL
+
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            desktop.pick_folder()
+        self.assertEqual(error.exception.returncode, -signal.SIGILL)
+
+        process.returncode = 0
+        process.communicate.return_value = ('"/photos"', "")
+        self.assertEqual(desktop.pick_folder(), "/photos")
+
+    def test_timeout_kills_and_reaps_child(self, popen, _is_wsl):
+        process = popen.return_value
+        process.communicate.side_effect = [subprocess.TimeoutExpired("chooser", 180), ("", "")]
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            desktop.pick_folder()
+
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.communicate.call_args_list, [call(timeout=180), call()])
+
+    def test_open_chooser_blocks_another_and_shutdown_kills_it(self, popen, _is_wsl):
+        process = popen.return_value
+        process.poll.return_value = None
+        process.returncode = -signal.SIGKILL
+
+        def wait_for_dialog(*, timeout):
+            with self.assertRaises(OSError):
+                desktop.pick_folder()
+            desktop.stop_native_folder_picker()
+            return "", ""
+
+        process.communicate.side_effect = wait_for_dialog
+        with self.assertRaises(subprocess.CalledProcessError):
+            desktop.pick_folder()
+        with self.assertRaises(OSError):
+            desktop.pick_folder()
+
+        popen.assert_called_once()
+        process.kill.assert_called_once_with()

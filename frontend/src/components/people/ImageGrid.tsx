@@ -89,6 +89,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const fileActionTimerRef = useRef<number | null>(null);
   const [previewStates, setPreviewStates] = useState<Record<string, PreviewState>>({});
+  const [previewRetries, setPreviewRetries] = useState<Record<string, number>>({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
   const breakpointCols = BREAKPOINT_COLUMNS[gridSize];
@@ -295,6 +296,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         >
           {images.map((img) => {
             const previewUrl = imageThumbnailUrl(img.id);
+            const previewSrc = imageThumbnailUrl(img.id, previewRetries[previewUrl]);
             const preview = previewStates[previewUrl];
             const previewSize = preview === "error" ? null : preview;
             const sourceSize = img.image_width && img.image_height
@@ -324,7 +326,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   <span className="image-gallery-card__error">Vorschau nicht verfügbar</span>
                 ) : (
                   <img
-                    src={previewUrl}
+                    key={previewSrc}
+                    src={previewSrc}
                     loading="lazy"
                     decoding="async"
                     onLoad={(event) => {
@@ -351,6 +354,27 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
                   onClick={() => setGalleryImageId(img.id)}
                 />
+                {preview === "error" && (
+                  <button
+                    type="button"
+                    className="secondary-button image-gallery-card__retry"
+                    aria-label={`Vorschau von ${img.filename || "Bild"} erneut laden`}
+                    onClick={(event) => {
+                      event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".image-gallery-card__open")?.focus();
+                      setPreviewRetries((current) => ({
+                        ...current,
+                        [previewUrl]: Math.max(Date.now(), (current[previewUrl] ?? 0) + 1),
+                      }));
+                      setPreviewStates((current) => {
+                        const next = { ...current };
+                        delete next[previewUrl];
+                        return next;
+                      });
+                    }}
+                  >
+                    Vorschau erneut laden
+                  </button>
+                )}
 
                 <div className="image-file-actions">
                   <button
@@ -382,10 +406,10 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   </span>
                 )}
 
-                <span className="image-open-cue" aria-hidden="true">
+                {preview !== "error" && <span className="image-open-cue" aria-hidden="true">
                   <span className="image-open-cue__icon">↗</span>
                   <span>Vollbild öffnen</span>
-                </span>
+                </span>}
 
                 {faceOverlayMode !== "none" &&
                   sourceSize && previewSize &&

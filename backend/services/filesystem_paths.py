@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ntpath
 import os
+import stat
 
 
 def filesystem_path(path: str | os.PathLike[str]) -> str:
@@ -37,3 +38,30 @@ def stored_path(path: str | os.PathLike[str]) -> str:
     if value.startswith("\\\\?\\"):
         return value[4:]
     return value
+
+
+def is_confirmed_missing(path: str, expected_device: int | None = None) -> bool:
+    """Check for a missing file without mistaking an unmounted volume for a deletion."""
+    source = filesystem_path(path)
+    try:
+        os.stat(source, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    else:
+        return False
+
+    # Older entries do not have device metadata. Avoid deleting paths on
+    # recognizable removable or remote sources until they can be reimported.
+    if expected_device is None:
+        normalized = stored_path(path).replace("\\", "/")
+        if normalized.startswith(("//", "/mnt/", "/media/", "/run/media/")):
+            return False
+    try:
+        parent = os.stat(os.path.dirname(source) or ".")
+    except OSError:
+        return False
+    return stat.S_ISDIR(parent.st_mode) and (
+        expected_device is None or parent.st_dev == expected_device
+    )
