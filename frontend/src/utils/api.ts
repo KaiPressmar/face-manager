@@ -594,10 +594,12 @@ export interface SharedLibraryConfig {
   sync_path: string | null;
   paused: boolean;
   share_embeddings: boolean;
+  write_enabled?: boolean;
 }
 
 export interface SharedLibraryState extends SharedLibraryConfig {
   available?: boolean;
+  write_available?: boolean;
   preview?: boolean;
   proposed_count?: number;
   status: "off" | "checking" | "online" | "offline" | "read_only" | "paused" | "attention";

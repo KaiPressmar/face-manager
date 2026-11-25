@@ -38,15 +38,23 @@ class SnapshotPage:
     skipped_images: int
 
 
+def snapshot_device_namespace(device_id: str) -> UUID:
+    if not isinstance(device_id, str) or not device_id.strip():
+        raise ValueError("A stable device identity is required")
+    return uuid5(_DEVICE_NAMESPACE, device_id)
+
+
+def snapshot_face_id(namespace: UUID, face_id: int) -> str:
+    return str(uuid5(namespace, f"face/{face_id}"))
+
+
 def _capture_context(conn: sqlite3.Connection, source_path: str | os.PathLike[str], device_id: str) -> tuple[str, UUID]:
     if not conn.in_transaction:
         raise ValueError("Library capture requires a caller-owned read transaction")
     root = os.fspath(source_path)
     if not isinstance(root, str) or not os.path.isabs(root) or "\x00" in root:
         raise ValueError("A local absolute source path is required")
-    if not isinstance(device_id, str) or not device_id.strip():
-        raise ValueError("A stable device identity is required")
-    return os.path.normpath(root), uuid5(_DEVICE_NAMESPACE, device_id)
+    return os.path.normpath(root), snapshot_device_namespace(device_id)
 
 
 def _relative_path(path: str, root: str) -> str | None:
@@ -121,7 +129,7 @@ def _face_evidence(
         )
     box = _bbox(row, geometry)
     return FaceEvidence(
-        str(uuid5(device_namespace, f"face/{row['face_id']}")),
+        snapshot_face_id(device_namespace, row["face_id"]),
         digest,
         box,
         decision,

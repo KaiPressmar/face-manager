@@ -1,5 +1,6 @@
 import hashlib
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -122,6 +123,74 @@ class SharedExchangeTest(unittest.TestCase):
                 self.journal.stage("share", events)
         self.assertIsNone(self.journal.checkpoint("share")["outgoing"])
 
+    def test_restore_detects_pending_publication_even_if_write_mode_is_disabled(self):
+        path = self.root / "shared-library-witness.sqlite"
+        journal = ExchangeJournal(path)
+        journal.initialize()
+        manifest = {"version": 1, "scope": uuid.uuid4().hex, "generation": uuid.uuid4().hex}
+        journal.bind("old-path", manifest)
+        original = journal.checkpoint("old-path")["producer_id"]
+        journal.stage("old-path", [{"private": "synthetic test"}], local_rows=((1, 3),))
+        with self.assertRaises(SharedStateChanged):
+            journal.rotate_producers()
+        with patch("backend.services.shared_sync_preview.get_data_root", return_value=self.root):
+            preview = SharedLibraryPreview()
+            self.assertFalse(preview.begin_restore())
+            journal.discard_unsent("old-path", 1)
+            self.assertTrue(preview.begin_restore())
+            preview.prepare_replacement()
+            preview.library_changed(restoring=False)
+        rotated = journal.checkpoint("old-path")["producer_id"]
+        self.assertNotEqual(rotated, original)
+        journal.bind("alternate-local-path", manifest)
+        self.assertTrue({original, rotated} <= set(journal.checkpoint("alternate-local-path")["local_producers"]))
+
+    def test_stale_unattempted_publication_is_discarded_but_attempted_intent_is_read_only(self):
+        manifest = {"version": 1, "scope": uuid.uuid4().hex, "generation": uuid.uuid4().hex}
+        self.journal.bind("scope", manifest)
+        preview = SharedLibraryPreview()
+        with patch.object(preview, "_local_revisions_match", return_value=False):
+            self.journal.stage("scope", [{"private": "synthetic test"}], local_rows=((4, 5),))
+            checkpoint = self.journal.checkpoint("scope")
+            self.assertEqual(preview._prepare_publication(self.journal, "scope", "outbox", {}, checkpoint, 0), "discarded")
+            self.assertIsNone(self.journal.checkpoint("scope")["outgoing"])
+            self.journal.stage("scope", [{"private": "synthetic test"}], local_rows=((4, 5),))
+            self.journal.mark_attempted("scope", 1)
+            checkpoint = self.journal.checkpoint("scope")
+            self.assertEqual(preview._prepare_publication(self.journal, "scope", "outbox", {}, checkpoint, 0), "reconcile")
+            self.assertIsNotNone(self.journal.checkpoint("scope")["outgoing"])
+
+    def test_worker_rechecks_local_scope_revision_and_can_retire_missing_attempt(self):
+        transport = self.transport()
+        manifest = transport.open(create=True)
+        database = self.root / "source.sqlite"
+        with closing(sqlite3.connect(database)) as conn, conn:
+            conn.execute("CREATE TABLE shared_sync_dirty_image(scope_id TEXT, image_id INT, revision INT)")
+            conn.execute("INSERT INTO shared_sync_dirty_image VALUES('outbox', 2, 9)")
+        self.journal.bind("scope", manifest)
+        events = [{"synthetic": "photo 2 before adding a private location"}]
+        self.journal.stage("scope", events, local_rows=((2, 8),))
+        self.journal.mark_attempted("scope", 1)
+        request = self.journal.checkpoint("scope")
+        args = {"action": "exchange", "sync_root": str(self.root), **request}
+        result = run_request({**args, "allow_writes": True, "local_verification": {
+            "path": str(database), "scope": "outbox", "rows": [[2, 8]],
+        }})
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(run_request({**args, "reconcile_only": True})["status"], "unpublished")
+        self.journal.abandon_attempted("scope", 1)
+        self.assertFalse(self.journal.publications_pending())
+        checkpoint = self.journal.checkpoint("scope")
+        self.assertIsNone(checkpoint["outgoing"])
+        self.assertNotEqual(checkpoint["producer_id"], request["producer_id"])
+        self.assertIn(request["producer_id"], checkpoint["local_producers"])
+
+        # An earlier authorized send could still become visible on the old stream.
+        late = transport.append_events(request["producer_id"], 1, 1, events)
+        self.journal.accept("scope", request["producer_id"], late, digest(late))
+        self.assertIn(request["producer_id"], self.journal.checkpoint("scope")["local_producers"])
+        self.assertFalse(self.journal.publications_pending())
+
     def test_old_witness_cannot_reinitialize_missing_share(self):
         with self.assertRaises(FileNotFoundError):
             run_request({
@@ -188,6 +257,81 @@ class SharedExchangeTest(unittest.TestCase):
             with closing(schema.get_conn()) as connection:
                 self.assertEqual(connection.execute("SELECT name FROM person").fetchone()["name"], "Anna")
                 self.assertEqual(connection.execute("SELECT cluster_id FROM face").fetchone()["cluster_id"], 1)
+
+    def test_writable_preview_uses_latest_remote_decision_and_publishes_local_receipt(self):
+        data_directory = self.root / "device"
+        data_directory.mkdir()
+        photo = self.root / "family.jpg"
+        photo.write_bytes(b"Verified photo data for an existing unnamed face")
+        photo_hash = hashlib.sha256(photo.read_bytes()).hexdigest()
+        with (
+            patch.dict(os.environ, FACE_MANAGER_SHARED_LIBRARY_PREVIEW="1", FACE_MANAGER_SHARED_LIBRARY_WRITE_TEST="1"),
+            patch.object(schema, "DB_PATH", str(data_directory / "library.sqlite")),
+            patch("backend.services.shared_sync_preview.get_data_root", return_value=data_directory),
+        ):
+            schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as connection, connection:
+                connection.execute(
+                    """INSERT INTO image(id,path,directory,filename,content_hash,processed_at,raw_width,raw_height,exif_orientation)
+                       VALUES(1,?,?,?,?,?,100,100,1)""",
+                    (str(photo), str(self.root), photo.name, photo_hash, "done"),
+                )
+                connection.execute(
+                    "INSERT INTO image_location(image_id,path,directory,filename) VALUES(1,?,?,?)",
+                    (str(photo), str(self.root), photo.name),
+                )
+                connection.execute(
+                    "INSERT INTO face(image_id,bbox_x,bbox_y,bbox_w,bbox_h,review_status) VALUES(1,20,20,40,40,'active')"
+                )
+            remote_key = str(uuid.uuid4())
+            face_id = str(uuid.uuid4())
+
+            def with_name(name):
+                evidence = FaceEvidence(
+                    face_id, photo_hash, (0.20, 0.20, 0.60, 0.60),
+                    Assignment("person", remote_key, name, provenance="confirmed"), True, True,
+                )
+                return photo_event(SnapshotPhoto(15, photo_hash, (photo.name,), (evidence,), 100, 100, 1), "PC1")
+
+            transport = self.transport()
+            transport.open(create=True)
+            remote_producer = uuid.uuid4().hex
+            self.enter_remote_peer(remote_producer)
+            transport.append_events(remote_producer, 1, 1, [with_name("Earlier")])
+            transport.append_events(remote_producer, 2, 2, [with_name("Current")])
+            preview = SharedLibraryPreview()
+            config = preview.configure({"source_path": str(self.root), "sync_path": str(self.root), "write_enabled": True})
+            scope = preview._scope(config)
+            journal = ExchangeJournal(data_directory / "shared-library-witness.sqlite")
+            preview.start()
+            try:
+                for _ in range(250):
+                    producer = next((item for item in transport.list_producers() if item != remote_producer), None)
+                    batch = transport.get_event_batch(producer, 1) if producer else None
+                    if (batch is not None and preview.snapshot().get("imported_decisions") == 1
+                            and journal.checkpoint(scope)["outgoing"] is None
+                            and journal.acknowledged_local_rows(scope) is None):
+                        break
+                    time.sleep(0.025)
+                else:
+                    self.fail(f"No writable exchange completed: {preview.snapshot()}")
+                self.assertEqual(preview.snapshot()["status"], "online")
+                self.assertEqual(preview.snapshot()["conflict_count"], 0)
+                event, = batch["events"]
+                self.assertEqual(event["relative_paths"], [photo.name])
+                self.assertEqual(event["faces"][0]["decision"]["person_key"], remote_key)
+                self.assertEqual(event["faces"][0]["decision"]["person_name"], "Current")
+            finally:
+                preview.stop()
+            self.assertIsNone(journal.checkpoint(scope)["outgoing"])
+            self.assertIsNone(journal.acknowledged_local_rows(scope))
+            with closing(schema.get_conn()) as connection:
+                self.assertEqual([row["name"] for row in connection.execute("SELECT name FROM person")], ["Current"])
+
+    def enter_remote_peer(self, producer: str) -> None:
+        environment = patch.dict(os.environ, FACE_MANAGER_SHARED_LIBRARY_TEST_PEER=producer)
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def _wait_for_conflict(self, preview):
         for _ in range(200):

@@ -1381,7 +1381,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         with _media_library_lock:
             _database_restore_in_progress = restore_gate = True
             _media_library_generation += 1
-        shared_library_preview.library_changed(restoring=True)
+        if not shared_library_preview.begin_restore():
+            raise HTTPException(
+                status_code=409, detail="Eine Freigabeänderung wird noch bestätigt. Bitte versuche es erneut.",
+            )
         face_thumbnail_warmup_queue.invalidate_library()
         clustering_task = auto_cluster_queue.snapshot().get("task")
         if _imports_finalizing or (
@@ -1403,6 +1406,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             validate_database_file(backup)
             backup_ready = True
 
+        shared_library_preview.prepare_replacement()
         invalidate_person_suggestion_epoch()
         os.replace(upload, current)
         replaced = True

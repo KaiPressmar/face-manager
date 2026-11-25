@@ -4,23 +4,41 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
+import sqlite3
 import stat
 import sys
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .filesystem_paths import filesystem_path
-from .shared_sync_transport import ShareTransport, TransportError, UnknownPublishError, _windows_handle
+from .shared_sync_jobs import SharedJobScheduler
+from .shared_sync_outbox import DirtyImage, revisions_match
+from .shared_sync_transport import (
+    HeartbeatObservation,
+    InvalidTransportData,
+    PublishConflictError,
+    ReadOnlyTransportError,
+    ShareTransport,
+    TransportError,
+    UnknownPublishError,
+    _windows_handle,
+)
 
 
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 MAX_EVENT_PRODUCERS = 256
 _HASH_CHUNK = 1024 * 1024
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_JOB_READ_OPERATIONS = {"inspect", "get_result", "observe"}
+_JOB_WRITE_OPERATIONS = {"claim", "heartbeat", "expire", "stage_result", "finish_result"}
 
 
-def _json_digest(value: dict) -> str:
+def _json_digest(value: object) -> str:
     data = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
@@ -93,7 +111,7 @@ def _open_source(root: str, parts: tuple[str, ...]):
             yield source, info, stat_entry
 
 
-def _verify_source(request: dict) -> dict:
+def _verify_source(request: dict, output=None) -> dict:
     parts = portable_relative_path(request["relative_path"])
     digest = hashlib.sha256()
     size = 0
@@ -108,8 +126,11 @@ def _verify_source(request: dict) -> dict:
             if size > MAX_SOURCE_BYTES:
                 raise ValueError("Source file exceeds the shared processing size limit")
             digest.update(block)
+            if output is not None:
+                output.write(block)
         if (
-            _identity(os.fstat(source.fileno())) != initial_identity
+            size != initial.st_size
+            or _identity(os.fstat(source.fileno())) != initial_identity
             or _identity(stat_entry()) != initial_identity
         ):
             return {"status": "source_changed"}
@@ -120,10 +141,132 @@ def _verify_source(request: dict) -> dict:
     return {"status": "verified", "photo_sha256": content_hash, "identity": list(initial_identity)}
 
 
+@contextmanager
+def _staging_directory(root: Path):
+    """Anchor operations inside the caller's private IPC input directory."""
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("The worker input directory must be absolute")
+    path = Path(root.anchor)
+    with ExitStack() as stack:
+        if os.name == "nt":
+            for component in (None, *root.parts[1:]):
+                if component is not None:
+                    path /= component
+                handle, close = _windows_handle(path, directory=True)
+                stack.callback(close, handle)
+            yield None
+            return
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory = os.open(path, flags)
+        stack.callback(os.close, directory)
+        for component in root.parts[1:]:
+            directory = os.open(component, flags, dir_fd=directory)
+            stack.callback(os.close, directory)
+        info = os.fstat(directory)
+        if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError("The worker input directory must be private")
+        yield directory
+
+
+def _stage_source(request: dict, staging_root: Path | None) -> dict:
+    expected_hash = request.get("expected_hash")
+    if not isinstance(expected_hash, str) or _SHA256.fullmatch(expected_hash) is None:
+        raise ValueError("Source staging requires a verified SHA-256 identifier")
+    output_path = Path(request["output_path"])
+    if staging_root is None or output_path.parent != staging_root or not output_path.is_absolute():
+        raise ValueError("The staged file must be inside the private worker input directory")
+    portable_relative_path(output_path.name)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    with _staging_directory(staging_root) as directory:
+        target = filesystem_path(output_path) if directory is None else output_path.name
+        fd = os.open(target, flags, 0o600, dir_fd=directory)
+        completed = False
+        try:
+            with os.fdopen(fd, "wb") as output:
+                result = _verify_source(request, output)
+                if result["status"] == "verified":
+                    output.flush()
+                    os.fsync(output.fileno())
+            if result["status"] == "verified":
+                completed = True
+                return {**result, "output_path": str(output_path)}
+            return result
+        finally:
+            if not completed:
+                try:
+                    os.unlink(target, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+
+
+def _observation(data: object) -> HeartbeatObservation:
+    fields = HeartbeatObservation.__dataclass_fields__
+    if not isinstance(data, dict) or data.keys() != fields.keys():
+        raise InvalidTransportData("Invalid local lease observation")
+    for name in ("scope", "generation", "job_id", "claim_digest"):
+        if not isinstance(data[name], str):
+            raise InvalidTransportData("Invalid local lease observation identifier")
+    if type(data["counter"]) is not int or data["counter"] < 0 or type(data["attempt"]) is not int:
+        raise InvalidTransportData("Invalid local lease observation counter")
+    for name in ("unchanged_since", "checked_at"):
+        value = data[name]
+        if type(value) not in (int, float) or not 0 <= value <= sys.float_info.max or not math.isfinite(value):
+            raise InvalidTransportData("Invalid local lease observation time")
+    if data["unchanged_since"] > data["checked_at"]:
+        raise InvalidTransportData("Invalid local lease observation times")
+    return HeartbeatObservation(**data)
+
+
+def _job_request(transport: ShareTransport, request: dict) -> dict:
+    operation = request["operation"]
+    scheduler = SharedJobScheduler(transport, request["device_id"], request["session_id"])
+    job = request["job"]
+    if operation == "inspect":
+        value = scheduler.inspect(job)
+    elif operation == "claim":
+        value = scheduler.claim(job)
+    elif operation == "heartbeat":
+        value = scheduler.heartbeat(job, request["attempt"], request["counter"])
+    elif operation == "get_result":
+        value = scheduler.get_result(job)
+    elif operation == "observe":
+        observed = request.get("observation")
+        value = asdict(scheduler.observe(
+            job, request["attempt"], None if observed is None else _observation(observed),
+            server_fresh=request.get("server_fresh") is True,
+        ))
+    elif operation == "expire":
+        value = scheduler.expire(
+            job, _observation(request["observation"]),
+            server_fresh=request.get("server_fresh") is True,
+            lease_seconds=request.get("lease_seconds", 60),
+        )
+    elif operation == "stage_result":
+        value = scheduler.stage_result(job, request["attempt"], request["result"])
+    else:
+        value = scheduler.finish_result(job, request["attempt"], request["result_digest"])
+    return {"status": "job", "operation": operation, "value": value}
+
+
 def _exchange(transport: ShareTransport, request: dict, manifest: dict) -> dict:
     known = request.get("known_manifest")
     if known is not None and known != manifest:
         return {"status": "share_changed"}
+
+    if request.get("reconcile_only") is True:
+        outgoing = request["outgoing"]
+        first_sequence, events = outgoing["first_sequence"], outgoing["events"]
+        if type(first_sequence) is not int or first_sequence < 1 or not isinstance(events, list) or not events:
+            raise InvalidTransportData("Invalid local event publication intent")
+        batch = transport.get_event_batch(request["producer_id"], outgoing["batch"])
+        if batch is None:
+            return {"status": "unpublished", "manifest": manifest}
+        if (
+            batch["first_sequence"] != first_sequence
+            or _json_digest(batch["events"]) != _json_digest(events)
+        ):
+            raise PublishConflictError("Published event batch differs from the local intent")
+        return {"status": "published", "manifest": manifest, "batch": batch, "digest": _json_digest(batch)}
 
     producers = transport.list_producers()
     if len(producers) > MAX_EVENT_PRODUCERS:
@@ -135,6 +278,13 @@ def _exchange(transport: ShareTransport, request: dict, manifest: dict) -> dict:
             return {"status": "share_changed"}
 
     if outgoing := request.get("outgoing"):
+        if guard := request.get("local_verification"):
+            # This is the local consent boundary. Release the database before
+            # touching the share; a later edit becomes a new revision.
+            with closing(sqlite3.connect(Path(guard["path"]).as_uri() + "?mode=ro", uri=True, timeout=0.2)) as conn:
+                conn.execute("BEGIN")
+                if not revisions_match(conn, guard["scope"], [DirtyImage(*row) for row in guard["rows"]]):
+                    return {"status": "stale", "manifest": manifest}
         batch = transport.append_events(
             request["producer_id"], outgoing["batch"], outgoing["first_sequence"], outgoing["events"]
         )
@@ -163,22 +313,39 @@ def _exchange(transport: ShareTransport, request: dict, manifest: dict) -> dict:
     return {"status": "up_to_date", "manifest": manifest, "audit_cursors": audit_cursors}
 
 
-def run_request(request: dict) -> dict:
+def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
     action = request["action"]
     if action == "verify_source":
         return _verify_source(request)
-    if action not in ("probe", "exchange"):
+    if action == "stage_source":
+        return _stage_source(request, staging_root)
+    if action not in ("probe", "exchange", "job"):
         raise ValueError("Unknown shared library action")
 
-    allow_writes = request.get("allow_writes") is True
-    transport = ShareTransport(request["sync_root"], allow_writes=allow_writes)
+    reconcile_only = action == "exchange" and request.get("reconcile_only") is True
+    allow_writes = request.get("allow_writes") is True and not reconcile_only
     known = request.get("known_manifest")
+    if reconcile_only and (not isinstance(known, dict) or type(known.get("version")) is not int):
+        raise InvalidTransportData("Publication reconciliation requires a known manifest")
+    if action == "job":
+        operation = request.get("operation")
+        if not isinstance(operation, str) or (
+            operation not in _JOB_READ_OPERATIONS and operation not in _JOB_WRITE_OPERATIONS
+        ):
+            raise ValueError("Unknown shared analysis job operation")
+        if not isinstance(known, dict) or type(known.get("version")) is not int:
+            raise InvalidTransportData("Shared analysis requires a known manifest")
+        if operation in _JOB_WRITE_OPERATIONS and not allow_writes:
+            raise ReadOnlyTransportError("Writing shared analysis jobs has not been enabled")
+    transport = ShareTransport(request["sync_root"], allow_writes=allow_writes)
     manifest = transport.open(create=action == "probe" and allow_writes and known is None)
     if known is not None and known != manifest:
         return {"status": "share_changed"}
     if action == "probe":
         writable = allow_writes and transport.probe_writes()
         return {"status": "ready", "manifest": manifest, "writable": writable}
+    if action == "job":
+        return _job_request(transport, request)
     return _exchange(transport, request, manifest)
 
 
@@ -192,14 +359,14 @@ def main(argv: list[str] | None = None) -> int:
             raw = source.read(MAX_REQUEST_BYTES + 1)
         if len(raw) > MAX_REQUEST_BYTES:
             raise ValueError("Shared library request exceeds the worker limit")
-        result = run_request(json.loads(raw))
+        result = run_request(json.loads(raw), staging_root=request_path.parent)
     except (FileNotFoundError, PermissionError) as exc:
         result = {"status": "unavailable", "error": type(exc).__name__}
     except UnknownPublishError:
         result = {"status": "published_unknown"}
     except TransportError as exc:
         result = {"status": "transport_error", "error": type(exc).__name__}
-    except (KeyError, OSError, TypeError, ValueError) as exc:
+    except (KeyError, OSError, TypeError, ValueError, sqlite3.Error) as exc:
         result = {"status": "error", "error": type(exc).__name__}
     result_path.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     return 0

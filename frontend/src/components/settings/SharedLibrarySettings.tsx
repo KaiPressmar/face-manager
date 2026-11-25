@@ -43,8 +43,8 @@ function decisionLabel(decision: SharedLibraryDecision) {
 }
 
 function configOf(state: SharedLibraryState): SharedLibraryConfig {
-  const { source_path, sync_path, paused, share_embeddings } = state;
-  return { source_path, sync_path, paused, share_embeddings };
+  const { source_path, sync_path, paused, share_embeddings, write_enabled } = state;
+  return { source_path, sync_path, paused, share_embeddings, write_enabled };
 }
 
 function DecisionPreview({ label, decision, faceId }: {
@@ -197,20 +197,34 @@ export default function SharedLibrarySettings() {
               ...inputs,
               source_path: inputs.source_path?.trim() || null,
               sync_path: inputs.sync_path?.trim() || null,
+              write_enabled: resource.write_available === true ? inputs.write_enabled === true : undefined,
             }), "Die Einrichtung wurde gespeichert.").then((next) => { if (next) setDraft(null); });
           }}>
             <p>Trage auf jedem Gerät den Pfad zum selben Fotoordner und zum selben Abgleichordner ein. Der Fotoordner darf schreibgeschützt sein.</p>
             <label className="settings-field">
               <span>Fotoordner</span>
               <input className="settings-number-input settings-text-input" value={inputs.source_path ?? ""} disabled={working} required
-                autoComplete="off" spellCheck={false} onChange={(event) => setDraft({ ...inputs, source_path: event.target.value })} />
+                autoComplete="off" spellCheck={false} onChange={(event) => setDraft({ ...inputs, source_path: event.target.value, write_enabled: false })} />
             </label>
             <label className="settings-field">
               <span>Abgleichordner</span>
               <input className="settings-number-input settings-text-input" value={inputs.sync_path ?? ""} disabled={working} required
-                autoComplete="off" spellCheck={false} onChange={(event) => setDraft({ ...inputs, sync_path: event.target.value })} />
+                autoComplete="off" spellCheck={false} onChange={(event) => setDraft({ ...inputs, sync_path: event.target.value, write_enabled: false })} />
             </label>
             <p>Wer auf den Abgleichordner zugreifen kann, kann gemeinsame Personennamen und Fotobezüge sehen.</p>
+            {resource.write_available === true && <>
+              <label className="shared-library__toggle">
+                <input
+                  type="checkbox"
+                  checked={inputs.write_enabled === true}
+                  aria-describedby="shared-library-write-description"
+                  disabled={working}
+                  onChange={(event) => setDraft({ ...inputs, write_enabled: event.target.checked })}
+                />
+                Schreibenden Abgleich für diese Ordner erlauben
+              </label>
+              <p id="shared-library-write-description">Face Manager kann Personennamen im Abgleichordner veröffentlichen und eindeutig passende Zuordnungen übernehmen.</p>
+            </>}
             {!resource.preview && <><label className="shared-library__toggle">
               <input type="checkbox" checked={inputs.share_embeddings} disabled={working} onChange={(event) => setDraft({ ...inputs, share_embeddings: event.target.checked })} />
               Gesichtsmerkmale für den Abgleich teilen
@@ -224,7 +238,13 @@ export default function SharedLibrarySettings() {
               <button type="submit" className="neon-card" disabled={working || !canSave}>Einrichtung speichern</button>
               {configured && <button type="button" className="secondary-button" disabled={working} onClick={() => {
                 if (!window.confirm("Den Abgleich für dieses Gerät ausschalten?")) return;
-                void mutate(() => updateSharedLibrary({ source_path: null, sync_path: null, paused: false, share_embeddings: inputs.share_embeddings }),
+                void mutate(() => updateSharedLibrary({
+                  source_path: null,
+                  sync_path: null,
+                  paused: false,
+                  share_embeddings: inputs.share_embeddings,
+                  write_enabled: resource.write_available === true ? false : undefined,
+                }),
                   "Der Abgleich wurde auf diesem Gerät ausgeschaltet.").then((next) => {
                     if (next) { setDraft(null); setSelectedCase(null); }
                   });
