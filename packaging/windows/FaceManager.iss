@@ -396,8 +396,8 @@ begin
     DeleteFile(RollbackExe)
   else if not MoveFileEx(RollbackExe, PreviousExe, MoveFileReplaceExisting or MoveFileWriteThrough) then
     SuppressibleMsgBox(
-      'Setup could not restore the previous executable. Close Face Manager and use the recovery copy at:' +
-      #13#10 + RollbackExe,
+      'Setup could not restore the previous executable. Close Face Manager and use the recovery copy at:' + #13#10 +
+      RollbackExe,
       mbCriticalError, MB_OK, IDOK
     );
 end;

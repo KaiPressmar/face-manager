@@ -229,6 +229,35 @@ class SharedSyncTransportTest(unittest.TestCase):
         self.assertTrue(stage.name.startswith(".pending-"))
         self.assertTrue((stage / "payload.json").is_file())
 
+    def test_negative_lookup_after_rename_rechecks_without_republishing(self):
+        producer = uuid4().hex
+        rename = sync._rename_no_replace
+        read_slot = sync._Directory.read_slot
+        published = False
+        stale_reads = 0
+
+        def record_rename(directory, source, destination):
+            nonlocal published
+            rename(directory, source, destination)
+            published = True
+
+        def temporarily_missing(directory, name):
+            nonlocal stale_reads
+            if published and name == "00000000000000000001.json" and stale_reads < 2:
+                stale_reads += 1
+                raise FileNotFoundError(name)
+            return read_slot(directory, name)
+
+        with (
+            patch.object(sync, "_rename_no_replace", side_effect=record_rename) as renamed,
+            patch.object(sync._Directory, "read_slot", temporarily_missing),
+            patch.object(sync.time, "sleep"),
+        ):
+            published_batch = self.transport.append_events(producer, 1, 1, [{"name": "A"}])
+        self.assertEqual(stale_reads, 2)
+        renamed.assert_called_once()
+        self.assertEqual(self.transport.get_event_batch(producer, 1), published_batch)
+
     def test_attempt_owner_and_expiry_are_fenced_through_the_same_slot(self):
         job, device, session = (uuid4().hex for _ in range(3))
         claim = self.transport.claim_attempt(job, 1, device, session)

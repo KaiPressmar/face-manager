@@ -250,6 +250,17 @@ class _Directory:
             stream.flush()
             os.fsync(stream.fileno())
 
+    def read_publication(self, name: str, *, immutable: bool) -> bytes:
+        read = self.read_slot if immutable else self.read
+        for delay in (0.03, 0.10, 0.30, 0.80):
+            try:
+                return read(name)
+            except FileNotFoundError:
+                # A CIFS client's negative lookup can briefly outlive a peer's
+                # rename. Retries are bounded and never issue a second rename.
+                time.sleep(delay)
+        return read(name)
+
     def unlink(self, name: str):
         try:
             os.unlink(self.target(name), dir_fd=self.fd)
@@ -430,9 +441,9 @@ class ShareTransport:
             # A mount can report success or an error before the accepted
             # bytes are known. Keep our stage on an unknown outcome.
             try:
-                existing = directory.read_slot(name) if immutable else directory.read(name)
+                existing = directory.read_publication(name, immutable=immutable)
             except OSError as exc:
-                raise UnknownPublishError("Share publication outcome is unknown") from exc
+                raise UnknownPublishError("Share publication outcome is unknown") from (rename_error or exc)
             if existing == data:
                 if immutable:
                     directory.remove_stage(temporary)
