@@ -269,6 +269,23 @@ class ExchangeJournal:
                    )""",
                 (scope_id,),
             ).fetchall()
+            witnesses = {row["producer"]: {"batch": row["batch_number"], "digest": row["digest"]} for row in rows}
+            if scope["manifest"] is not None:
+                aliases = connection.execute(
+                    """SELECT b.producer, b.batch_number, b.digest FROM shared_batch b
+                       JOIN shared_scope s ON s.id = b.scope_id
+                       WHERE s.manifest = ? AND s.id != ? AND b.digest IS NOT NULL AND b.batch_number = (
+                           SELECT MAX(batch_number) FROM shared_batch WHERE scope_id = b.scope_id
+                             AND producer = b.producer AND digest IS NOT NULL
+                       )""", (scope["manifest"], scope_id),
+                )
+                for row in aliases:
+                    remembered = witnesses.get(row["producer"])
+                    batch = row["batch_number"]
+                    if remembered and remembered["batch"] == batch and remembered["digest"] != row["digest"]:
+                        raise SharedStateChanged("Local path aliases remember different share records")
+                    if remembered is None or remembered["batch"] < batch:
+                        witnesses[row["producer"]] = {"batch": batch, "digest": row["digest"]}
             outgoing = self._latest(connection, scope_id, scope["producer"])
             return {
                 "producer_id": scope["producer"],
@@ -278,9 +295,7 @@ class ExchangeJournal:
                 )],
                 "known_manifest": json.loads(scope["manifest"]) if scope["manifest"] is not None else None,
                 "cursor": {row["producer"]: row["batch_number"] for row in rows},
-                "witnesses": {
-                    row["producer"]: {"batch": row["batch_number"], "digest": row["digest"]} for row in rows
-                },
+                "witnesses": witnesses,
                 "outgoing": {
                     "batch": outgoing["batch_number"], "first_sequence": outgoing["first_sequence"],
                     "events": json.loads(outgoing["payload"]),

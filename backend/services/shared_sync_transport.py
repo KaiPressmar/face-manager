@@ -6,6 +6,7 @@ probe does not qualify a real SMB deployment for writing.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import errno
@@ -55,6 +56,10 @@ class PublishConflictError(TransportError):
 
 class UnknownPublishError(TransportError):
     """The slot has to be read again before work can advance."""
+
+
+class PublicationDeferred(TransportError):
+    """The local snapshot changed before the record could be published."""
 
 
 def _check_id(value, pattern=_ID):
@@ -413,7 +418,8 @@ class ShareTransport:
             raise ReadOnlyTransportError("Share publication is unavailable")
 
     def _publish(
-        self, parts: tuple[str, ...], name: str, data: bytes, *, immutable: bool = True
+        self, parts: tuple[str, ...], name: str, data: bytes, *, immutable: bool = True,
+        verify_publication: Callable[[], bool] | None = None,
     ) -> None:
         self._ensure_writable()
         temporary = f".pending-{uuid4().hex}"
@@ -429,9 +435,21 @@ class ShareTransport:
                         return
                     _decode(existing)
                     raise PublishConflictError("Share slot already contains another value")
+            if verify_publication is not None and not verify_publication():
+                raise PublicationDeferred("The local snapshot changed before staging")
+            if immutable:
                 directory.stage_slot(temporary, data)
             else:
                 directory.write_temporary(temporary, data)
+            try:
+                if verify_publication is not None and not verify_publication():
+                    raise PublicationDeferred("The local snapshot changed before publication")
+            except Exception:
+                if immutable:
+                    directory.remove_stage(temporary)
+                else:
+                    directory.unlink(temporary)
+                raise
             rename = _rename_no_replace if immutable else _Directory.replace
             rename_error = None
             try:
@@ -510,8 +528,9 @@ class ShareTransport:
             raise InvalidTransportData("Share record context differs")
         return record["payload"]
 
-    def _save_record(self, parts, name, kind, payload, *, immutable=True):
-        self._publish(parts, name, self._encode_record(kind, payload), immutable=immutable)
+    def _save_record(self, parts, name, kind, payload, *, immutable=True, verify_publication=None):
+        self._publish(parts, name, self._encode_record(kind, payload), immutable=immutable,
+                      verify_publication=verify_publication)
 
     def _load_record(self, parts, name, kind):
         raw = self._read(parts, name, immutable=kind != "work-heartbeat")
@@ -589,14 +608,16 @@ class ShareTransport:
             raise InvalidTransportData("The previous event batch is unavailable")
         return previous[0]["last_sequence"], previous[1]
 
-    def append_events(self, producer_id: str, batch_no: int, first_sequence: int, events: list[dict]) -> dict:
+    def append_events(self, producer_id: str, batch_no: int, first_sequence: int, events: list[dict], *,
+                      verify_publication: Callable[[], bool] | None = None) -> dict:
         _check_id(producer_id)
         _counter(batch_no)
         last_sequence, previous = self._event_predecessor(producer_id, batch_no)
         payload = self._event_payload(producer_id, batch_no, first_sequence, events, previous)
         if first_sequence != last_sequence + 1:
             raise InvalidTransportData("Shared events must follow the previous sequence")
-        self._save_record(self._event_directory(producer_id, batch_no), f"{batch_no:020}.json", "event-batch", payload)
+        self._save_record(self._event_directory(producer_id, batch_no), f"{batch_no:020}.json", "event-batch", payload,
+                          verify_publication=verify_publication)
         return payload
 
     def _directory_names(self, parts: tuple[str, ...]):

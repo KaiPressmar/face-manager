@@ -20,6 +20,7 @@ from .shared_sync_outbox import DirtyImage, revisions_match
 from .shared_sync_transport import (
     HeartbeatObservation,
     InvalidTransportData,
+    PublicationDeferred,
     PublishConflictError,
     ReadOnlyTransportError,
     ShareTransport,
@@ -278,16 +279,22 @@ def _exchange(transport: ShareTransport, request: dict, manifest: dict) -> dict:
             return {"status": "share_changed"}
 
     if outgoing := request.get("outgoing"):
-        if guard := request.get("local_verification"):
-            # This is the local consent boundary. Release the database before
-            # touching the share; a later edit becomes a new revision.
-            with closing(sqlite3.connect(Path(guard["path"]).as_uri() + "?mode=ro", uri=True, timeout=0.2)) as conn:
+        guard = request.get("local_verification")
+
+        def verify_publication() -> bool:
+            # Release the local read transaction before staging or renaming on SMB.
+            uri = Path(guard["path"]).as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True, timeout=0.2)) as conn:
                 conn.execute("BEGIN")
-                if not revisions_match(conn, guard["scope"], [DirtyImage(*row) for row in guard["rows"]]):
-                    return {"status": "stale", "manifest": manifest}
-        batch = transport.append_events(
-            request["producer_id"], outgoing["batch"], outgoing["first_sequence"], outgoing["events"]
-        )
+                return revisions_match(conn, guard["scope"], [DirtyImage(*row) for row in guard["rows"]])
+
+        try:
+            batch = transport.append_events(
+                request["producer_id"], outgoing["batch"], outgoing["first_sequence"], outgoing["events"],
+                verify_publication=verify_publication if guard else None,
+            )
+        except PublicationDeferred:
+            return {"status": "stale", "manifest": manifest}
         return {"status": "published", "manifest": manifest, "batch": batch, "digest": _json_digest(batch)}
 
     cursor = request.get("cursor", {})

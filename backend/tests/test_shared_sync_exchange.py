@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.db import schema
+from backend.services import shared_sync_transport
 from backend.services.shared_sync_io import SharedSyncProcess
 from backend.services.shared_sync_journal import ExchangeJournal, SharedStateChanged, digest, encode
 from backend.services.shared_sync_merge import Assignment, FaceEvidence
@@ -190,6 +191,46 @@ class SharedExchangeTest(unittest.TestCase):
         self.journal.accept("scope", request["producer_id"], late, digest(late))
         self.assertIn(request["producer_id"], self.journal.checkpoint("scope")["local_producers"])
         self.assertFalse(self.journal.publications_pending())
+
+    def test_worker_rechecks_revisions_at_the_immutable_rename(self):
+        transport = self.transport()
+        manifest = transport.open(create=True)
+        database = self.root / "source.sqlite"
+        with closing(sqlite3.connect(database)) as conn, conn:
+            conn.execute("CREATE TABLE shared_sync_dirty_image(scope_id TEXT, image_id INT, revision INT)")
+            conn.execute("INSERT INTO shared_sync_dirty_image VALUES('outbox', 2, 8)")
+        self.journal.bind("scope", manifest)
+        self.journal.stage("scope", [{"synthetic": "local event"}], local_rows=((2, 8),))
+        checkpoint = self.journal.checkpoint("scope")
+        stage_slot = shared_sync_transport._Directory.stage_slot
+
+        def modify_local_revision_after_staging(directory, name, data):
+            stage_slot(directory, name, data)
+            if name.startswith(".pending-"):
+                with closing(sqlite3.connect(database)) as conn, conn:
+                    conn.execute("UPDATE shared_sync_dirty_image SET revision = 9")
+
+        with patch.object(shared_sync_transport._Directory, "stage_slot", modify_local_revision_after_staging):
+            result = run_request({
+                "action": "exchange", "sync_root": str(self.root), "allow_writes": True, **checkpoint,
+                "local_verification": {"path": str(database), "scope": "outbox", "rows": [[2, 8]]},
+            })
+        self.assertEqual(result["status"], "stale")
+        self.assertIsNone(transport.get_event_batch(checkpoint["producer_id"], 1))
+
+    def test_path_alias_inherits_verified_share_history(self):
+        transport = self.transport()
+        manifest = transport.open(create=True)
+        producer = uuid.uuid4().hex
+        batch = transport.append_events(producer, 1, 1, [{"synthetic": "witnessed"}])
+        self.journal.bind("first-path", manifest)
+        self.journal.accept("first-path", producer, batch, digest(batch))
+        self.journal.bind("another-path", manifest)
+        alternate = self.journal.checkpoint("another-path")
+        self.assertEqual(alternate["cursor"], {})
+        self.assertEqual(alternate["witnesses"], self.journal.checkpoint("first-path")["witnesses"])
+        (self.root / ".fm" / "events").rename(self.root / "previous-events")
+        self.assertEqual(run_request({"action": "exchange", "sync_root": str(self.root), **alternate})["status"], "share_changed")
 
     def test_old_witness_cannot_reinitialize_missing_share(self):
         with self.assertRaises(FileNotFoundError):
