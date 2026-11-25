@@ -16,6 +16,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
 import type { SettingsSection } from "../../utils/navigation";
 import PreviewCacheSettings from "./PreviewCacheSettings";
+import SharedLibrarySettings from "./SharedLibrarySettings";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; description: string }[] = [
   {
@@ -1128,6 +1129,7 @@ const SettingsPage: React.FC<{
               </div>
             </section>
             {settings && <PreviewCacheSettings settings={settings} />}
+            <SharedLibrarySettings />
             <section className="settings-card">
               <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
               <p className="settings-card__copy">

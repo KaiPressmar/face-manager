@@ -42,6 +42,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
+Source: "{#SourceDir}\build\FaceManagerLibraryBackup.exe"; Flags: dontcopy
 Source: "{#SourceDir}\dist\FaceManager\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\packaging\windows\assets\face-manager-icon.ico"; DestDir: "{app}"; DestName: "FaceManager-{#AppVersion}.ico"; Flags: ignoreversion
 
@@ -53,6 +54,11 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+const
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}_is1';
+  MoveFileReplaceExisting = 1;
+  MoveFileWriteThrough = 8;
+
 var
   ExistingInstallPage: TWizardPage;
   ExistingInstallInfoLabel: TNewStaticText;
@@ -62,35 +68,31 @@ var
   ExistingInstallVersion: string;
   ExistingInstallDir: string;
   ExistingUninstallString: string;
-  ExistingInstallHandled: Boolean;
   ExistingUninstallExe: string;
   ExistingUninstallParams: string;
+  PreviousExe: string;
+  RollbackExe: string;
+  InstallCompleted: Boolean;
+
+function MoveFileEx(ExistingName, NewName: string; Flags: LongWord): Boolean;
+  external 'MoveFileExW@kernel32.dll stdcall';
 
 function AppDataDir(): string;
 begin
-  Result := ExpandConstant('{localappdata}\FaceManager');
+  Result := GetEnv('FACE_MANAGER_DATA_DIR');
+  if Result = '' then
+    Result := ExpandConstant('{localappdata}\FaceManager');
 end;
 
-function UninstallKeyName(): string;
+function InitializeSetup(): Boolean;
 begin
-  Result := '{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}_is1';
-end;
-
-function TryGetExistingInstallValue(ValueName: string; var Value: string): Boolean;
-var
-  KeyName: string;
-begin
-  KeyName := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' + UninstallKeyName();
-  Result :=
-    RegQueryStringValue(HKCU, KeyName, ValueName, Value) or
-    RegQueryStringValue(HKLM, KeyName, ValueName, Value);
-end;
-
-function RemoveQuotes(const Value: string): string;
-begin
-  Result := Value;
-  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
-    Result := Copy(Result, 2, Length(Result) - 2);
+  ExistingInstallDetected := RegKeyExists(HKCU64, UninstallKey);
+  Result := ExistingInstallDetected or not RegKeyExists(HKLM64, UninstallKey);
+  if not Result then
+    SuppressibleMsgBox(
+      'A machine-wide Face Manager installation was found. This per-user installer cannot update it.',
+      mbCriticalError, MB_OK, IDOK
+    );
 end;
 
 function TrimLeftWhitespace(const Value: string): string;
@@ -143,11 +145,6 @@ begin
     (Pos(' /VERYSILENT ', UpperParams) > 0);
 end;
 
-procedure ResolveExistingUninstallCommand();
-begin
-  SplitCommandLine(ExistingUninstallString, ExistingUninstallExe, ExistingUninstallParams);
-end;
-
 function ExistingInstallSummary(): string;
 begin
   Result :=
@@ -160,18 +157,17 @@ end;
 
 procedure InitializeWizard();
 begin
-  ExistingInstallDetected :=
-    TryGetExistingInstallValue('UninstallString', ExistingUninstallString);
-
   if not ExistingInstallDetected then
     exit;
 
-  if not TryGetExistingInstallValue('DisplayVersion', ExistingInstallVersion) then
+  if not RegQueryStringValue(HKCU64, UninstallKey, 'DisplayVersion', ExistingInstallVersion) then
     ExistingInstallVersion := 'Unknown';
-  if not TryGetExistingInstallValue('InstallLocation', ExistingInstallDir) then
-    ExistingInstallDir := ExpandConstant('{app}');
-  TryGetExistingInstallValue('QuietUninstallString', ExistingUninstallString);
-  ResolveExistingUninstallCommand();
+  if not RegQueryStringValue(HKCU64, UninstallKey, 'QuietUninstallString', ExistingUninstallString) then
+    RegQueryStringValue(HKCU64, UninstallKey, 'UninstallString', ExistingUninstallString);
+  SplitCommandLine(ExistingUninstallString, ExistingUninstallExe, ExistingUninstallParams);
+  if not RegQueryStringValue(HKCU64, UninstallKey, 'InstallLocation', ExistingInstallDir) then
+    ExistingInstallDir := ExtractFileDir(ExistingUninstallExe);
+  ExistingInstallDir := RemoveBackslashUnlessRoot(ExistingInstallDir);
   if ExistingInstallDir <> '' then
     WizardForm.DirEdit.Text := ExistingInstallDir;
 
@@ -207,20 +203,74 @@ begin
   ReplaceInstallRadio.Top := UpdateInstallRadio.Top + UpdateInstallRadio.Height + ScaleY(6);
   ReplaceInstallRadio.Width := ExistingInstallPage.SurfaceWidth;
   ReplaceInstallRadio.Height := ScaleY(36);
-  ReplaceInstallRadio.Caption := 'Remove current local data and reinstall from scratch';
+  ReplaceInstallRadio.Caption := 'Remove the default local library and reinstall from scratch';
+  ReplaceInstallRadio.Enabled := GetEnv('FACE_MANAGER_DATA_DIR') = '';
 end;
 
-procedure HandleExistingInstall();
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := ExistingInstallDetected and (PageID = wpSelectDir);
+end;
+
+procedure StopInstallation(const MessageText: string);
+begin
+  Log(MessageText);
+  SuppressibleMsgBox(MessageText, mbCriticalError, MB_OK, IDOK);
+  Abort();
+end;
+
+procedure BackUpLibrary();
+var
+  DatabasePath: string;
+  ResultCode: Integer;
+begin
+  DatabasePath := AddBackslash(AppDataDir()) + 'database.sqlite';
+  if (GetEnv('FACE_MANAGER_DATA_DIR') = '') and not FileExists(DatabasePath) then
+    exit;
+
+  ExtractTemporaryFile('FaceManagerLibraryBackup.exe');
+  if not Exec(
+    ExpandConstant('{tmp}\FaceManagerLibraryBackup.exe'), '"' + DatabasePath + '" "' + ExistingInstallVersion + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode
+  ) or (ResultCode <> 0) then
+    StopInstallation(
+      'The current library could not be backed up. Close Face Manager, check available disk space, and retry setup.'
+    );
+  Log('Saved a pre-update SQLite backup in ' + AddBackslash(AppDataDir()) + 'update-backups');
+end;
+
+procedure KeepPreviousExecutable();
+var
+  CandidateBackup: string;
+begin
+  if not ExistingInstallDetected then
+    exit;
+
+  if (ExistingInstallDir = '') or
+     (CompareText(RemoveBackslashUnlessRoot(ExpandConstant('{app}')), ExistingInstallDir) <> 0) then
+    StopInstallation('Setup could not resolve the current per-user Face Manager installation directory.');
+
+  PreviousExe := AddBackslash(ExistingInstallDir) + '{#MyAppExeName}';
+  if not FileExists(PreviousExe) then
+    exit;
+
+  CandidateBackup := AddBackslash(ExistingInstallDir) + 'FaceManager-rollback-' +
+    GetDateTimeString('yyyymmddhhnnsszzz', '', '') + '.exe';
+  if not FileCopy(PreviousExe, CandidateBackup, True) then
+    StopInstallation('Setup could not save the current executable for recovery. Check available disk space and retry.');
+  RollbackExe := CandidateBackup;
+  Log('Saved the prior executable for recovery at ' + RollbackExe);
+end;
+
+procedure HandleCleanInstall();
 var
   ResultCode: Integer;
   SilentParams: string;
 begin
-  if ExistingInstallHandled or not ExistingInstallDetected then
-    exit;
-
-  ExistingInstallHandled := True;
-
-  if ExistingUninstallExe = '' then
+  if (ExistingUninstallExe = '') or (ExistingInstallDir = '') or
+     (CompareText(ExtractFileDir(ExistingUninstallExe), ExistingInstallDir) <> 0) or
+     (Pos('UNINS', Uppercase(ExtractFileName(ExistingUninstallExe))) <> 1) or
+     (CompareText(ExtractFileExt(ExistingUninstallExe), '.exe') <> 0) then
   begin
     MsgBox(
       'The existing Face Manager uninstaller could not be resolved.' + #13#10 +
@@ -272,12 +322,82 @@ begin
     Abort();
   end;
 
-  if ReplaceInstallRadio.Checked and DirExists(AppDataDir()) then
-    DelTree(AppDataDir(), True, True, True);
+  if DirExists(AppDataDir()) and not DelTree(AppDataDir(), True, True, True) then
+    StopInstallation('Setup could not remove the default local library. Close Face Manager and retry setup.');
+end;
+
+function IsRuntimeVersion(const Version: string): Boolean;
+var
+  Index: Integer;
+  Separators: Integer;
+begin
+  Result := False;
+  Separators := 0;
+  for Index := 1 to Length(Version) do
+  begin
+    if Version[Index] = '.' then
+      Separators := Separators + 1
+    else if (Version[Index] < '0') or (Version[Index] > '9') then
+      exit;
+  end;
+  Result := Separators = 2;
+end;
+
+procedure RemoveUnusedRuntime();
+var
+  PreviousRuntime: string;
+begin
+  if not ExistingInstallDetected or (ExistingInstallDir = '') then
+    exit;
+  { A configured data root can be inside the old runtime directory. }
+  if GetEnv('FACE_MANAGER_DATA_DIR') <> '' then
+    exit;
+
+  PreviousRuntime := AddBackslash(ExistingInstallDir) + '_internal';
+  if DirExists(PreviousRuntime) and not DelTree(PreviousRuntime, True, True, True) then
+    Log('Could not remove unused legacy runtime at ' + PreviousRuntime);
+
+  if IsRuntimeVersion(ExistingInstallVersion) and (ExistingInstallVersion <> '{#AppVersion}') then
+  begin
+    PreviousRuntime := AddBackslash(ExistingInstallDir) + '_internal-' + ExistingInstallVersion;
+    if DirExists(PreviousRuntime) and not DelTree(PreviousRuntime, True, True, True) then
+      Log('Could not remove unused runtime at ' + PreviousRuntime);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
-    HandleExistingInstall();
+  begin
+    if ExistingInstallDetected then
+    begin
+      if ReplaceInstallRadio.Checked then
+      begin
+        HandleCleanInstall();
+        exit;
+      end;
+    end;
+    BackUpLibrary();
+    KeepPreviousExecutable();
+  end;
+  if CurStep = ssDone then
+  begin
+    InstallCompleted := True;
+    RemoveUnusedRuntime();
+  end;
+end;
+
+procedure DeinitializeSetup();
+begin
+  if RollbackExe = '' then
+    exit;
+
+  if InstallCompleted then
+    DeleteFile(RollbackExe)
+  else if not MoveFileEx(RollbackExe, PreviousExe, MoveFileReplaceExisting or MoveFileWriteThrough) then
+    SuppressibleMsgBox(
+      'Setup could not restore the previous executable. Close Face Manager and use the recovery copy at:' +
+      #13#10 + RollbackExe,
+      mbCriticalError, MB_OK, IDOK
+    );
 end;

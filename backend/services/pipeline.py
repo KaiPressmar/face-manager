@@ -577,6 +577,7 @@ class ImportProcessor:
         """
         image_paths = []
         for root, directories, filenames in os.walk(_filesystem_path(folder)):
+            directories[:] = [name for name in directories if name.casefold() != ".fm"]
             directories.sort()
             filenames.sort()
             if cancel_event is not None:

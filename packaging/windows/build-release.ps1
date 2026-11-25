@@ -65,13 +65,16 @@ Invoke-PipInstallWithRetry @("-r", "backend/requirements.txt", "-r", $desktopReq
 & $buildPython -m pip check
 
 & $buildPython -m PyInstaller --noconfirm --clean $specPath
+& $buildPython -m PyInstaller --noconfirm --onefile --windowed `
+    --name FaceManagerLibraryBackup --distpath $buildDir --workpath (Join-Path $buildDir "backup-work") `
+    --specpath $buildDir (Join-Path $scriptDir "backup-library.py")
 
 $appExe = Join-Path $distDir "FaceManager/FaceManager.exe"
 if (-not (Test-Path $appExe)) {
     throw "PyInstaller did not create $appExe"
 }
-& $buildPython packaging/windows/cuda_runtime.py (Split-Path -Parent $appExe)
-& $buildPython packaging/windows/openvino_runtime.py (Split-Path -Parent $appExe)
+& $buildPython packaging/windows/cuda_runtime.py (Split-Path -Parent $appExe) --contents-directory "_internal-$version"
+& $buildPython packaging/windows/openvino_runtime.py (Split-Path -Parent $appExe) --contents-directory "_internal-$version"
 
 $appVersionInfo = (Get-Item $appExe).VersionInfo
 if ($appVersionInfo.ProductVersion -ne $version) {
@@ -114,18 +117,26 @@ if ($env:CI -eq "true") {
     if ($setup.ExitCode -ne 0) {
         throw "Windows installer smoke test failed with exit code $($setup.ExitCode)."
     }
-    $reportPath = Join-Path $buildDir "installed-runtime-check.txt"
-    $smoke = Start-Process -PassThru -FilePath (Join-Path $smokeDirectory "FaceManager.exe") `
-        -ArgumentList "--check-runtime `"$reportPath`""
-    if (-not $smoke.WaitForExit(120000)) {
-        $smoke.Kill()
-        throw "Installed Face Manager runtime check timed out."
+    try {
+        $reportPath = Join-Path $buildDir "installed-runtime-check.txt"
+        $smoke = Start-Process -PassThru -FilePath (Join-Path $smokeDirectory "FaceManager.exe") `
+            -ArgumentList "--check-runtime `"$reportPath`""
+        if (-not $smoke.WaitForExit(120000)) {
+            $smoke.Kill()
+            throw "Installed Face Manager runtime check timed out."
+        }
+        $report = if (Test-Path $reportPath) { Get-Content -Raw $reportPath } else { "No runtime report" }
+        if ($smoke.ExitCode -ne 0 -or $report -notlike "Face Manager $version,* CPU inference passed.*") {
+            throw "Installed Face Manager runtime check failed with exit code $($smoke.ExitCode): $report"
+        }
+        Write-Host $report
+    } finally {
+        $uninstall = Start-Process -PassThru -Wait -FilePath (Join-Path $smokeDirectory "unins000.exe") `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+        if ($uninstall.ExitCode -ne 0) {
+            throw "Uninstalling the clean smoke-test installation failed with exit code $($uninstall.ExitCode)."
+        }
     }
-    $report = if (Test-Path $reportPath) { Get-Content -Raw $reportPath } else { "No runtime report" }
-    if ($smoke.ExitCode -ne 0 -or $report -notlike "Face Manager $version,* CPU inference passed.*") {
-        throw "Installed Face Manager runtime check failed with exit code $($smoke.ExitCode): $report"
-    }
-    Write-Host $report
 }
 
 foreach ($artifact in @($appExe, $installerPath)) {
@@ -135,10 +146,21 @@ foreach ($artifact in @($appExe, $installerPath)) {
     }
 }
 
-$checksumPath = "$installerPath.sha256"
+$legacyInstallerPath = Join-Path $distDir "FaceManager-Setup-GPU-$version.exe"
+Copy-Item -LiteralPath $installerPath -Destination $legacyInstallerPath
 $checksum = (Get-FileHash -Algorithm SHA256 $installerPath).Hash.ToLowerInvariant()
-"$checksum  $(Split-Path -Leaf $installerPath)" | Set-Content -Encoding ascii $checksumPath
+if ((Get-FileHash -Algorithm SHA256 $legacyInstallerPath).Hash.ToLowerInvariant() -ne $checksum) {
+    throw "The Windows compatibility installer is not identical to the built installer."
+}
 
-Write-Host "Built installer: $installerPath"
-Write-Host "SHA-256 checksum: $checksumPath"
+foreach ($artifact in @($installerPath, $legacyInstallerPath)) {
+    $checksumPath = "$artifact.sha256"
+    "$checksum  $(Split-Path -Leaf $artifact)" | Set-Content -Encoding ascii $checksumPath
+    Write-Host "Installer: $artifact"
+    Write-Host "SHA-256 checksum: $checksumPath"
+}
+
+if ($env:GITHUB_OUTPUT) {
+    "installer_sha256=$checksum" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
+}
 Write-Host "Dependency inventory: $dependencyInventoryPath"

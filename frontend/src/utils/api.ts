@@ -570,6 +570,75 @@ export async function fetchSettings(): Promise<AppSettings> {
   return await res.json();
 }
 
+export interface SharedLibraryDecision {
+  device: string;
+  kind: "person" | "unknown_person" | "not_face" | "unassigned" | "detected" | "missing";
+  person_name?: string | null;
+}
+
+export interface SharedLibraryConflict {
+  id: string;
+  revision: string;
+  photo_id?: number | null;
+  local_face_id?: number | null;
+  shared_face_id?: number | null;
+  relative_path: string;
+  can_resolve: boolean;
+  reason: string;
+  local: SharedLibraryDecision;
+  shared: SharedLibraryDecision;
+}
+
+export interface SharedLibraryConfig {
+  source_path: string | null;
+  sync_path: string | null;
+  paused: boolean;
+  share_embeddings: boolean;
+}
+
+export interface SharedLibraryState extends SharedLibraryConfig {
+  available?: boolean;
+  preview?: boolean;
+  proposed_count?: number;
+  status: "off" | "checking" | "online" | "offline" | "read_only" | "paused" | "attention";
+  device_name?: string;
+  active_devices?: string[];
+  imported_decisions?: number;
+  conflict_count?: number;
+  conflicts?: SharedLibraryConflict[];
+  error?: string | null;
+}
+
+async function sharedLibraryRequest(path: string, options: RequestInit, fallback: string): Promise<SharedLibraryState> {
+  const headers = new Headers(options.headers);
+  headers.set("x-face-manager-display-platform", DISPLAY_PLATFORM);
+  const response = await fetch(`${API_BASE}/shared-library${path}`, { ...options, headers });
+  if (!response.ok) {
+    throw Object.assign(new Error(await readApiError(response, fallback)), { status: response.status });
+  }
+  return response.json();
+}
+
+export function fetchSharedLibrary(signal?: AbortSignal): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("", { signal }, "Der gemeinsame Ordner konnte nicht geprüft werden.");
+}
+
+export function updateSharedLibrary(config: SharedLibraryConfig): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, "Der gemeinsame Ordner konnte nicht gespeichert werden.");
+}
+
+export function resolveSharedLibrary(conflict: SharedLibraryConflict, choice: "local" | "shared"): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: conflict.id, revision: conflict.revision, choice }),
+  }, "Die Zuordnung konnte nicht übernommen werden.");
+}
+
 export async function updateSettings(
   payload: UpdateSettingsPayload,
 ): Promise<AppSettings> {

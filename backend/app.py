@@ -78,6 +78,7 @@ from .services.autocluster_queue import (
 from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
+from .services.shared_sync_preview import shared_library_preview
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
@@ -325,6 +326,8 @@ def notify_clusters_changed(reason: str) -> None:
     Args:
         reason: Short label describing what triggered the change.
     """
+    if reason != "background_progress":
+        shared_library_preview.library_changed()
     event_hub.publish("clusters", {"reason": reason})
 
 
@@ -656,6 +659,7 @@ async def lifespan(_app: FastAPI):
                 run_startup_repairs()
             face_thumbnail_warmup_queue.start()
             person_suggestion_worker.start()
+            shared_library_preview.start()
             geo_backfill.start()
             image_path_cleanup.resume()
             image_path_cleanup.schedule("startup", delay_seconds=60.0)
@@ -664,6 +668,7 @@ async def lifespan(_app: FastAPI):
             raise
         yield
     finally:
+        shared_library_preview.stop()
         person_suggestion_worker.stop()
         idle_recluster_scheduler.stop()
         clustering_shutdown_error = None
@@ -1376,6 +1381,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         with _media_library_lock:
             _database_restore_in_progress = restore_gate = True
             _media_library_generation += 1
+        shared_library_preview.library_changed(restoring=True)
         face_thumbnail_warmup_queue.invalidate_library()
         clustering_task = auto_cluster_queue.snapshot().get("task")
         if _imports_finalizing or (
@@ -1435,6 +1441,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             with _media_library_lock:
                 _database_restore_in_progress = False
                 _media_library_generation += 1
+            shared_library_preview.library_changed(restoring=False)
             face_thumbnail_warmup_queue.wake()
         disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
         for path in (upload, rollback_copy, disposable_backup):
@@ -1536,6 +1543,21 @@ def api_imports(request: Request):
         import_queue.snapshot(),
         get_display_platform(request),
     )
+
+
+@app.get("/api/shared-library")
+def api_shared_library():
+    return shared_library_preview.snapshot()
+
+
+@app.put("/api/shared-library")
+def api_configure_shared_library(data: dict = Body(...)):
+    if not shared_library_preview.available():
+        raise HTTPException(status_code=404, detail="Die Vorschau für gemeinsame Ordner ist deaktiviert.")
+    try:
+        return shared_library_preview.configure(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/autocluster-tasks")
