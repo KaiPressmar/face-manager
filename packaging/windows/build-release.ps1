@@ -1,5 +1,6 @@
 param(
-    [switch]$RequireSigned
+    [switch]$RequireSigned,
+    [switch]$FastValidationInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -89,11 +90,11 @@ if (-not (Test-Path $iscc)) {
     throw "Inno Setup 6 is not installed at $iscc"
 }
 
-& $iscc `
-    "/DAppVersion=$version" `
-    "/DSourceDir=$projectRoot" `
-    "/DOutputDir=$distDir" `
-    (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
+$compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$distDir")
+if ($FastValidationInstaller) {
+    $compileArguments += "/DInstallerCompression=lzma/fast"
+}
+& $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
 
 $installerPath = Join-Path $distDir "FaceManager-Setup-$version.exe"
 if (-not (Test-Path $installerPath)) {

@@ -2,6 +2,9 @@
 #define MyAppPublisher "Face Manager Project"
 #define MyAppURL "https://github.com/KaiPressmar/face-manager"
 #define MyAppExeName "FaceManager.exe"
+#ifndef InstallerCompression
+  #define InstallerCompression "lzma"
+#endif
 
 [Setup]
 AppId={{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}
@@ -18,7 +21,7 @@ DefaultGroupName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir={#OutputDir}
 OutputBaseFilename=FaceManager-Setup-{#AppVersion}
-Compression=lzma
+Compression={#InstallerCompression}
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
@@ -255,7 +258,7 @@ begin
     exit;
 
   CandidateBackup := AddBackslash(ExistingInstallDir) + 'FaceManager-rollback-' +
-    GetDateTimeString('yyyymmddhhnnsszzz', '', '') + '.exe';
+    GetDateTimeString('yyyymmddhhnnsszzz', #0, #0) + '.exe';
   if not FileCopy(PreviousExe, CandidateBackup, True) then
     StopInstallation('Setup could not save the current executable for recovery. Check available disk space and retry.');
   RollbackExe := CandidateBackup;
