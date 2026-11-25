@@ -45,7 +45,7 @@ jobs:
           wsl.exe --list --verbose
           wsl.exe --distribution FaceManagerSmbProof --user root --exec apt-get -q -o Acquire::Retries=2 update
           wsl.exe --distribution FaceManagerSmbProof --user root --exec apt-get -qy --no-install-recommends `
-            install cifs-utils iproute2 python3
+            install cifs-utils iproute2 kmod python3
       - name: Test native Windows and Ubuntu CIFS share publication
         shell: pwsh
         timeout-minutes: 7
