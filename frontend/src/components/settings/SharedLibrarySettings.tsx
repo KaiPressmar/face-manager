@@ -223,13 +223,8 @@ export default function SharedLibrarySettings() {
                 />
                 Schreibenden Abgleich für diese Ordner erlauben
               </label>
-              <p id="shared-library-write-description">Face Manager kann Personennamen im Abgleichordner veröffentlichen und eindeutig passende Zuordnungen übernehmen.</p>
+              <p id="shared-library-write-description">Face Manager kann Personennamen im Abgleichordner veröffentlichen. Eindeutige Zuordnungen des eingerichteten Testgeräts können übernommen werden.</p>
             </>}
-            {!resource.preview && <><label className="shared-library__toggle">
-              <input type="checkbox" checked={inputs.share_embeddings} disabled={working} onChange={(event) => setDraft({ ...inputs, share_embeddings: event.target.checked })} />
-              Gesichtsmerkmale für den Abgleich teilen
-            </label>
-            <p>Kompatible Gesichtsmerkmale erlauben anderen Geräten, vorhandene Erkennungsergebnisse wiederzuverwenden.</p></>}
             {configured && <label className="shared-library__toggle">
               <input type="checkbox" checked={inputs.paused} disabled={working} onChange={(event) => setDraft({ ...inputs, paused: event.target.checked })} />
               Abgleich auf diesem Gerät pausieren
