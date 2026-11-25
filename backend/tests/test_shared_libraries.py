@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,12 +16,14 @@ from backend.services.shared_sync_worker import run_request
 
 class SharedLibrariesTest(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(TemporaryDirectory()))
-        self.enterContext(patch.dict(os.environ, FACE_MANAGER_SHARED_LIBRARY_PREVIEW="1",
-                                     FACE_MANAGER_SHARED_LIBRARY_WRITE_TEST="1"))
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.root = Path(stack.enter_context(TemporaryDirectory()))
+        stack.enter_context(patch.dict(os.environ, FACE_MANAGER_SHARED_LIBRARY_PREVIEW="1",
+                                       FACE_MANAGER_SHARED_LIBRARY_WRITE_TEST="1"))
         for module in ("shared_libraries", "shared_sync_preview"):
-            self.enterContext(patch(f"backend.services.{module}.get_data_root", return_value=self.root))
-        self.enterContext(patch.object(SharedLibraryPreview, "start"))
+            stack.enter_context(patch(f"backend.services.{module}.get_data_root", return_value=self.root))
+        stack.enter_context(patch.object(SharedLibraryPreview, "start"))
         self.manager = SharedLibraries()
         self.manager.start()
         self.addCleanup(self.manager.stop)

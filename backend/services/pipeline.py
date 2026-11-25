@@ -81,6 +81,15 @@ def _file_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int
     )
 
 
+def _matches_imported_identity(path: str, identity: tuple[int, int, int, int, int]) -> bool:
+    if os.name == "nt":
+        # Use the same identity as hashing. On Windows the path-based stat
+        # can report creation time rather than the handle's change time.
+        with open(path, "rb") as source:
+            return _file_identity(os.fstat(source.fileno())) == identity
+    return _file_identity(os.stat(path)) == identity
+
+
 def _control_cancelled(control) -> bool:
     """Honor an optional pause checkpoint before checking cancellation."""
     wait_if_paused = getattr(control, "wait_if_paused", None)
@@ -129,7 +138,7 @@ class HashedImage:
 
     def verify_current(self) -> None:
         source = _filesystem_path(self.normalized_path)
-        if _file_identity(os.stat(source)) != self.identity:
+        if not _matches_imported_identity(source, self.identity):
             raise SourceChangedError("Die Datei wurde während des Imports geändert.")
 
 
@@ -748,17 +757,16 @@ class ImportProcessor:
             ):
                 needs_hash.append(path)
                 continue
-            try:
-                stat_result = os.stat(_filesystem_path(normalized_path))
-            except OSError:
-                needs_hash.append(path)
-                continue
             identity = (
                 int(known["file_device"]), int(known["file_inode"]),
                 int(known["file_size"]), int(known["modified_at_ns"]),
                 int(known["file_changed_at_ns"]),
             )
-            if identity == _file_identity(stat_result):
+            try:
+                current = _matches_imported_identity(_filesystem_path(normalized_path), identity)
+            except OSError:
+                current = False
+            if current:
                 unchanged.append(path)
             else:
                 needs_hash.append(path)

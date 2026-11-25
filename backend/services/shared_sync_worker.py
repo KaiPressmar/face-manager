@@ -88,15 +88,25 @@ def _open_source(root: str, parts: tuple[str, ...]):
                 handle, close = _windows_handle(path, directory=True)
                 stack.callback(close, handle)
             path /= name
-            handle, close = _windows_handle(path, directory=False)
-            try:
-                fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
-            except OSError:
-                close(handle)
-                raise
+
+            def open_file():
+                handle, close = _windows_handle(path, directory=False)
+                try:
+                    return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+                except OSError:
+                    close(handle)
+                    raise
+
+            fd = open_file()
 
             def stat_entry():
-                return os.lstat(filesystem_path(path))
+                # Windows path-based stat can report creation time where a
+                # handle reports change time. Use handles for both identities.
+                entry = open_file()
+                try:
+                    return os.fstat(entry)
+                finally:
+                    os.close(entry)
         else:
             flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             directory = os.open(path, flags)

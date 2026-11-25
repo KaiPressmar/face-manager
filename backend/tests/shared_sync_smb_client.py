@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import platform
 import struct
 import time
@@ -41,6 +42,43 @@ def _prove_nested_scopes(root, client, meet):
     print(f"{client} verified an ordinary child and a separate .fm scope through its SMB path")
 
 
+def _report_source_verification_failure(source_root, relative_path, verification, expected_sha256):
+    from backend.services import shared_sync_worker as worker
+    from backend.services.filesystem_paths import filesystem_path
+
+    def identity(info):
+        return {
+            field: getattr(info, field, None)
+            for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_birthtime_ns")
+        }
+
+    details = {
+        "worker_status": verification.get("status"),
+        "worker_sha256": verification.get("photo_sha256"),
+        "expected_sha256": expected_sha256,
+    }
+    try:
+        parts = worker.portable_relative_path(relative_path)
+        named_path = filesystem_path(source_root.joinpath(*parts))
+        with worker._open_source(str(source_root), parts) as (opened, initial, stat_entry):
+            details["opened_before"] = identity(initial)
+            details["worker_entry_before"] = identity(stat_entry())
+            details["named_entry_before"] = identity(os.lstat(named_path))
+            details["opened_vs_named_differences"] = [
+                field for field, value in details["opened_before"].items()
+                if value != details["named_entry_before"][field]
+            ]
+            details["opened_sha256"] = hashlib.file_digest(opened, "sha256").hexdigest()
+            details["opened_after"] = identity(os.fstat(opened.fileno()))
+            details["worker_entry_after"] = identity(stat_entry())
+            details["named_entry_after"] = identity(os.lstat(named_path))
+    except (OSError, ValueError, shared_sync_transport.TransportError) as error:
+        details["diagnostic_error"] = type(error).__name__
+        details["errno"] = getattr(error, "errno", None)
+        details["winerror"] = getattr(error, "winerror", None)
+    print(f"Source verification diagnostics: {json.dumps(details, sort_keys=True)}", flush=True)
+
+
 def _prove_announced_work(root, manifest, client, meet):
     from backend.services.shared_sync_jobs import make_job_descriptor
     from backend.services.shared_sync_worker import run_request
@@ -64,13 +102,18 @@ def _prove_announced_work(root, manifest, client, meet):
     for publisher, photo in _PROOF_PHOTOS.items():
         publishing = client == publisher
         relative_path = f"{publisher} album/Übung.png"
-        source = {"source_root": str(source_root), "relative_path": relative_path}
+        photo_bytes = base64.b64decode(photo)
         if publishing:
             photo_path = source_root / relative_path
             photo_path.parent.mkdir(parents=True)
-            photo_path.write_bytes(base64.b64decode(photo))
-            verified = run_request({"action": "verify_source", **source})
-            if verified.get("status") != "verified":
+            photo_path.write_bytes(photo_bytes)
+            expected_sha256 = hashlib.sha256(photo_bytes).hexdigest()
+            verified = run_request({
+                "action": "verify_source", "source_root": str(source_root), "relative_path": relative_path,
+                "expected_hash": expected_sha256,
+            })
+            if verified.get("status") != "verified" or verified.get("photo_sha256") != expected_sha256:
+                _report_source_verification_failure(source_root, relative_path, verified, expected_sha256)
                 raise RuntimeError(f"{publisher} could not verify its announced photo")
             descriptor = make_job_descriptor(manifest, verified["photo_sha256"], signature)
             announced = request("job_queue", "publish", job=descriptor, relative_path=relative_path)
@@ -115,7 +158,7 @@ def _prove_announced_work(root, manifest, client, meet):
                 if verified.get("status") != "verified":
                     raise RuntimeError(f"{client} could not stage the announced photo")
                 staged_bytes = staged.read_bytes()
-                if staged_bytes != base64.b64decode(photo):
+                if staged_bytes != photo_bytes:
                     raise RuntimeError(f"{client} staged different photo bytes")
                 # The stand-in model reads the fixture's PNG dimensions and returns no faces.
                 geometry = [1, *struct.unpack_from(">II", staged_bytes, 16)]

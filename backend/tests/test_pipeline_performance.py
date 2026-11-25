@@ -22,7 +22,9 @@ from backend.services.pipeline import (
     ImportCancelled,
     ImportFailed,
     ImportProcessor,
+    _file_identity,
     _filesystem_path,
+    _matches_imported_identity,
     _stored_filesystem_path,
     get_import_worker_count,
 )
@@ -55,6 +57,25 @@ class WindowsFilesystemPathTest(unittest.TestCase):
         )
         self.assertEqual(_stored_filesystem_path(_filesystem_path(drive_path)), drive_path)
         self.assertEqual(_stored_filesystem_path(_filesystem_path(unc_path)), unc_path)
+
+    def test_windows_compares_the_open_handle_change_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photo = Path(temp_dir) / "photo.jpg"
+            photo.write_bytes(b"photo")
+            original = photo.stat()
+            changed = SimpleNamespace(
+                st_dev=original.st_dev, st_ino=original.st_ino, st_size=original.st_size,
+                st_mtime_ns=original.st_mtime_ns, st_ctime_ns=original.st_ctime_ns + 100,
+            )
+            identity = _file_identity(original)
+            with (
+                patch("backend.services.pipeline.os.name", "nt"),
+                patch("backend.services.pipeline.os.stat", return_value=original) as path_stat,
+                patch("backend.services.pipeline.os.fstat", side_effect=[original, changed]),
+            ):
+                self.assertTrue(_matches_imported_identity(str(photo), identity))
+                self.assertFalse(_matches_imported_identity(str(photo), identity))
+                path_stat.assert_not_called()
 
     def test_truncated_jpeg_is_decoded_best_effort(self):
         with tempfile.TemporaryDirectory() as temp_dir:
