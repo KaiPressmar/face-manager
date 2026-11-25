@@ -41,6 +41,50 @@ class SharedSyncTransportTest(unittest.TestCase):
         with ThreadPoolExecutor(2) as pool:
             self.assertEqual(*list(pool.map(lambda _: initialize(), range(2))))
 
+    def test_two_initializers_survive_a_mount_that_ignores_no_replace(self):
+        other = self.root / "other"
+        other.mkdir()
+        ready_to_rename = Barrier(2)
+
+        def lossy_rename(directory, source, destination):
+            if destination == "manifest.json":
+                ready_to_rename.wait(5)
+            os.rename(
+                directory.target(source), directory.target(destination),
+                src_dir_fd=directory.fd, dst_dir_fd=directory.fd,
+            )
+
+        def initialize():
+            return sync.ShareTransport(other, allow_writes=True).open(create=True)
+
+        with patch.object(sync, "_rename_no_replace", side_effect=lossy_rename):
+            with ThreadPoolExecutor(2) as pool:
+                first, second = list(pool.map(lambda _: initialize(), range(2)))
+        self.assertEqual(first, second)
+        self.assertEqual(sync.ShareTransport(other).open(), first)
+        self.assertEqual([path.name for path in (other / ".fm").iterdir()], ["manifest.json"])
+
+    def test_invalid_existing_slots_cannot_be_replaced(self):
+        for flavor in ("empty", "file", "invalid", "additional-entry"):
+            with self.subTest(flavor=flavor):
+                root = self.root / flavor
+                slot = root / ".fm" / "manifest.json"
+                slot.parent.mkdir(parents=True)
+                if flavor == "file":
+                    slot.write_bytes(b"original")
+                else:
+                    slot.mkdir()
+                    if flavor == "invalid":
+                        (slot / "payload.json").write_bytes(b"original")
+                    if flavor == "additional-entry":
+                        (slot / "payload.json").write_bytes(sync._canonical(self.manifest))
+                        (slot / "extra.txt").write_bytes(b"original")
+                with patch.object(sync, "_rename_no_replace") as rename:
+                    with self.assertRaises(sync.InvalidTransportData):
+                        sync.ShareTransport(root, allow_writes=True).open(create=True)
+                rename.assert_not_called()
+                self.assertTrue(slot.exists())
+
     def test_bounded_content_addresses_and_context(self):
         payload = {"title": "Urlaub", "numbers": [1, 2, 3]}
         digest = self.transport.put_object("snapshot", payload)
@@ -52,7 +96,7 @@ class SharedSyncTransportTest(unittest.TestCase):
             self.transport.put_object("snapshot", {"title": "x" * sync.MAX_RECORD_BYTES})
         with self.assertRaises(sync.InvalidTransportData):
             self.transport.put_object("snapshot", {"x": float("nan")})
-        path = self.root / ".fm" / "objects" / "snapshot" / digest[:2] / f"{digest}.json"
+        path = self.root / ".fm" / "objects" / "snapshot" / digest[:2] / f"{digest}.json" / "payload.json"
         path.write_bytes(path.read_bytes().replace(b"Urlaub", b"Stadt"))
         with self.assertRaises(sync.InvalidTransportData):
             self.transport.get_object("snapshot", digest)
@@ -114,7 +158,8 @@ class SharedSyncTransportTest(unittest.TestCase):
             {"after_batch": 2, "last_batch": 3, "at_tail": True},
         )
         first = self.root.joinpath(".fm", *self.transport._event_directory(producer, 1), f"{1:020}.json")
-        first.unlink()
+        (first / "payload.json").unlink()
+        first.rmdir()
         self.assertIsNotNone(self.transport.get_event_batch(producer, 3))
         with self.assertRaises(sync.InvalidTransportData):
             self.transport.audit_event_stream(producer)
@@ -138,7 +183,8 @@ class SharedSyncTransportTest(unittest.TestCase):
                 self.assertEqual(self.transport.audit_event_stream(producer)["last_batch"], 3)
             first_shard = self.root.joinpath(".fm", *self.transport._event_directory(producer, 1))
             for path in first_shard.iterdir():
-                path.unlink()
+                (path / "payload.json").unlink()
+                path.rmdir()
             first_shard.rmdir()
             with self.assertRaises(sync.InvalidTransportData):
                 self.transport.audit_event_stream(producer)
@@ -171,6 +217,17 @@ class SharedSyncTransportTest(unittest.TestCase):
                 self.transport.append_events(producer, 2, 2, [{"name": "B"}])
         self.assertIsNone(self.transport.get_event_batch(producer, 2))
         self.assertEqual(self.transport.append_events(producer, 2, 2, [{"name": "B"}])["last_sequence"], 2)
+
+    def test_nominal_rename_without_the_final_slot_is_unknown(self):
+        producer = uuid4().hex
+        with patch.object(sync, "_rename_no_replace", return_value=None):
+            with self.assertRaises(sync.UnknownPublishError):
+                self.transport.append_events(producer, 1, 1, [{"name": "A"}])
+        self.assertIsNone(self.transport.get_event_batch(producer, 1))
+        event_directory = self.root.joinpath(".fm", *self.transport._event_directory(producer, 1))
+        stage, = event_directory.iterdir()
+        self.assertTrue(stage.name.startswith(".pending-"))
+        self.assertTrue((stage / "payload.json").is_file())
 
     def test_attempt_owner_and_expiry_are_fenced_through_the_same_slot(self):
         job, device, session = (uuid4().hex for _ in range(3))
@@ -232,7 +289,7 @@ class SharedSyncTransportTest(unittest.TestCase):
         self.assertIn(self.transport.get_decision(job, 1)["state"], outcomes)
 
     def test_linked_records_are_never_read_as_share_data(self):
-        entry = self.root / ".fm" / "manifest.json"
+        entry = self.root / ".fm" / "manifest.json" / "payload.json"
         original = self.root / "original.json"
         entry.rename(original)
         try:

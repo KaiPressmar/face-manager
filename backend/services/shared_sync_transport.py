@@ -34,6 +34,7 @@ _HASH = re.compile(r"[0-9a-f]{64}")
 _KIND = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _NUMBERED_EVENT = re.compile(r"([0-9]{20})\.json")
 _EVENT_SHARD = re.compile(r"[0-9]{20}")
+_SLOT_PAYLOAD = "payload.json"
 
 
 class TransportError(RuntimeError):
@@ -168,6 +169,58 @@ class _Directory:
     def target(self, name: str):
         return filesystem_path(self.path / name) if self.fd is None else name
 
+    @contextmanager
+    def child(self, name: str):
+        child = self.path / name
+        if self.fd is None:
+            handle, close = _windows_handle(child, directory=True)
+            try:
+                yield _Directory(child, None)
+            finally:
+                close(handle)
+            return
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
+        try:
+            yield _Directory(child, fd)
+        finally:
+            os.close(fd)
+
+    def read_slot(self, name: str) -> bytes:
+        try:
+            with self.child(name) as slot:
+                target = slot.fd if slot.fd is not None else filesystem_path(slot.path)
+                with os.scandir(target) as entries:
+                    first = next(entries, None)
+                    if first is None or first.name != _SLOT_PAYLOAD or next(entries, None) is not None:
+                        raise InvalidTransportData("An immutable share slot must contain exactly its payload")
+                try:
+                    return slot.read(_SLOT_PAYLOAD)
+                except FileNotFoundError as exc:
+                    raise InvalidTransportData("An immutable share slot is missing its payload") from exc
+        except NotADirectoryError as exc:
+            raise InvalidTransportData("An immutable share slot is not a directory") from exc
+
+    def stage_slot(self, name: str, data: bytes):
+        # Inherit the configured share's access controls. On Windows 0o700
+        # would give published slots a special owner-only ACL.
+        os.mkdir(self.target(name), dir_fd=self.fd)
+        try:
+            with self.child(name) as slot:
+                slot.write_temporary(_SLOT_PAYLOAD, data)
+        except (OSError, TransportError):
+            self.remove_stage(name)
+            raise
+
+    def remove_stage(self, name: str):
+        # Only remove a stage created by this call, and only its known file.
+        # Unknown publication outcomes retain their stages for recovery.
+        try:
+            with self.child(name) as slot:
+                slot.unlink(_SLOT_PAYLOAD)
+            os.rmdir(self.target(name), dir_fd=self.fd)
+        except (OSError, TransportError):
+            pass
+
     def read(self, name: str) -> bytes:
         if os.name == "nt":
             import msvcrt
@@ -191,7 +244,7 @@ class _Directory:
 
     def write_temporary(self, name: str, data: bytes):
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        fd = os.open(self.target(name), flags, 0o600, dir_fd=self.fd)
+        fd = os.open(self.target(name), flags, 0o666, dir_fd=self.fd)
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
             stream.flush()
@@ -273,7 +326,7 @@ class ShareTransport:
 
         def validate_scope(index: int, directory: _Directory):
             if verify_manifest and index == first_managed:
-                manifest = self._validated_manifest(directory.read("manifest.json"))
+                manifest = self._validated_manifest(directory.read_slot("manifest.json"))
                 if manifest != self._context():
                     raise InvalidTransportData("Share generation changed")
 
@@ -309,10 +362,10 @@ class ShareTransport:
                 validate_scope(index, _Directory(path, fd))
             yield _Directory(path, fd)
 
-    def _read(self, parts: tuple[str, ...], name: str) -> bytes | None:
+    def _read(self, parts: tuple[str, ...], name: str, *, immutable: bool = True) -> bytes | None:
         try:
             with self._directory(parts) as directory:
-                return directory.read(name)
+                return directory.read_slot(name) if immutable else directory.read(name)
         except FileNotFoundError:
             return None
 
@@ -325,18 +378,21 @@ class ShareTransport:
         try:
             with self._directory((), create=True) as directory:
                 try:
-                    directory.write_temporary(source, b"first")
+                    directory.stage_slot(source, b"first")
                     _rename_no_replace(directory, source, destination)
-                    directory.write_temporary(alternative, b"second")
+                    directory.stage_slot(alternative, b"second")
                     try:
                         _rename_no_replace(directory, alternative, destination)
-                    except FileExistsError:
-                        self._write_supported = directory.read(destination) == b"first"
+                    except OSError:
+                        self._write_supported = (
+                            directory.read_slot(destination) == b"first"
+                            and directory.read_slot(alternative) == b"second"
+                        )
                     else:
                         self._write_supported = False
                 finally:
                     for name in (source, alternative, destination):
-                        directory.unlink(name)
+                        directory.remove_stage(name)
         except (OSError, TransportError):
             self._write_supported = False
         return self._write_supported
@@ -352,24 +408,42 @@ class ShareTransport:
         temporary = f".pending-{uuid4().hex}"
         is_manifest = not parts and name == "manifest.json"
         with self._directory(parts, create=True, verify_manifest=not is_manifest) as directory:
-            directory.write_temporary(temporary, data)
+            if immutable:
+                try:
+                    existing = directory.read_slot(name)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if existing == data:
+                        return
+                    _decode(existing)
+                    raise PublishConflictError("Share slot already contains another value")
+                directory.stage_slot(temporary, data)
+            else:
+                directory.write_temporary(temporary, data)
             rename = _rename_no_replace if immutable else _Directory.replace
+            rename_error = None
             try:
                 rename(directory, temporary, name)
             except (OSError, TransportError) as exc:
-                # An SMB error may arrive after publication. Compare the
-                # exact data and keep the temporary file on unknown outcome.
-                try:
-                    existing = directory.read(name)
-                except (OSError, TransportError) as read_error:
-                    raise UnknownPublishError("Share publication outcome is unknown") from read_error
-                if existing == data:
+                rename_error = exc
+            # A mount can report success or an error before the accepted
+            # bytes are known. Keep our stage on an unknown outcome.
+            try:
+                existing = directory.read_slot(name) if immutable else directory.read(name)
+            except OSError as exc:
+                raise UnknownPublishError("Share publication outcome is unknown") from exc
+            if existing == data:
+                if immutable:
+                    directory.remove_stage(temporary)
+                else:
                     directory.unlink(temporary)
-                    return
-                if not immutable:
-                    raise UnknownPublishError("Heartbeat publication outcome is unknown") from exc
-                directory.unlink(temporary)
-                raise PublishConflictError("Share slot already contains another value") from exc
+                return
+            if not immutable:
+                raise UnknownPublishError("Heartbeat publication outcome is unknown") from rename_error
+            _decode(existing)
+            directory.remove_stage(temporary)
+            raise PublishConflictError("Share slot already contains another value") from rename_error
 
     @staticmethod
     def _validated_manifest(data: bytes) -> dict:
@@ -429,7 +503,7 @@ class ShareTransport:
         self._publish(parts, name, self._encode_record(kind, payload), immutable=immutable)
 
     def _load_record(self, parts, name, kind):
-        raw = self._read(parts, name)
+        raw = self._read(parts, name, immutable=kind != "work-heartbeat")
         return None if raw is None else (self._decode_record(kind, raw), _digest(raw))
 
     def put_object(self, kind: str, payload: dict) -> str:
@@ -527,16 +601,27 @@ class ShareTransport:
             return
 
     def _has_later_slots(self, producer_id: str, missing_batch: int) -> bool:
+        current_shard = self._event_shard(missing_batch)
         for name in self._directory_names(self._event_directory(producer_id, missing_batch)):
             record = _NUMBERED_EVENT.fullmatch(name)
-            if record is not None and int(record[1]) > missing_batch:
+            if record is None:
+                continue
+            number = _counter(int(record[1]))
+            if self._event_shard(number) != current_shard:
+                raise InvalidTransportData("Shared event slot is in the wrong shard")
+            if number > missing_batch and self._read_event_batch(producer_id, number) is not None:
                 return True
-        current_shard = self._event_shard(missing_batch)
         for name in self._directory_names(("events", producer_id)):
             # A future shard is sufficient evidence: legitimate writers
             # verify a contiguous predecessor before they create any shard.
             if _EVENT_SHARD.fullmatch(name) is not None and int(name) > current_shard:
-                return True
+                try:
+                    with self._directory(("events", producer_id, name)):
+                        return True
+                except FileNotFoundError:
+                    continue
+                except NotADirectoryError as exc:
+                    raise InvalidTransportData("Shared event shard is not a directory") from exc
         return False
 
     def audit_event_stream(

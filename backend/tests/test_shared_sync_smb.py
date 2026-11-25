@@ -6,11 +6,27 @@ import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
+from backend.services import shared_sync_transport
 from backend.services.shared_sync_transport import PublishConflictError, ShareTransport
 
 
 class SharedSyncSmbTest(unittest.TestCase):
+    def _race(self, slot, operations):
+        barrier = threading.Barrier(2)
+        rename = shared_sync_transport._rename_no_replace
+
+        def synchronized_publication(directory, source, destination):
+            if destination == slot:
+                barrier.wait(timeout=10)
+            return rename(directory, source, destination)
+
+        with patch.object(shared_sync_transport, "_rename_no_replace", synchronized_publication):
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                futures = [workers.submit(operation) for operation in operations]
+                return [future.result(timeout=30) for future in futures]
+
     @unittest.skipUnless(
         os.environ.get("FACE_MANAGER_TEST_SMB_FIRST") and os.environ.get("FACE_MANAGER_TEST_SMB_SECOND"),
         "Two independently mounted CIFS clients are required",
@@ -22,21 +38,30 @@ class SharedSyncSmbTest(unittest.TestCase):
         first, second = (ShareTransport(path, allow_writes=True) for path in (first_path, second_path))
         self.assertTrue(first.probe_writes(), "First CIFS mount lacks atomic no-replace publication")
         self.assertTrue(second.probe_writes(), "Second CIFS mount lacks atomic no-replace publication")
-        with ThreadPoolExecutor(max_workers=2) as workers:
-            futures = [workers.submit(client.open, True) for client in (first, second)]
-            self.assertEqual(futures[0].result(), futures[1].result())
-            barrier = threading.Barrier(2)
-            job_id = uuid.uuid4().hex
+        left, right = self._race("manifest.json", [lambda: first.open(True), lambda: second.open(True)])
+        self.assertEqual(left, right)
+        self.assertEqual(left, ShareTransport(first_path).open())
+        self.assertEqual(left, ShareTransport(second_path).open())
 
-            def claim(client):
-                device, session = uuid.uuid4().hex, uuid.uuid4().hex
-                barrier.wait(timeout=5)
-                try:
-                    return client.claim_attempt(job_id, 1, device, session)
-                except PublishConflictError:
-                    return None
+        job_id = uuid.uuid4().hex
 
-            claims = [workers.submit(claim, client) for client in (first, second)]
-            accepted, = [candidate for future in claims if (candidate := future.result()) is not None]
+        def claim(client):
+            device, session = uuid.uuid4().hex, uuid.uuid4().hex
+            try:
+                return client.claim_attempt(job_id, 1, device, session)
+            except PublishConflictError:
+                return None
+
+        claims = self._race("claim.json", [lambda: claim(first), lambda: claim(second)])
+        accepted, = [record for record in claims if record is not None]
         self.assertEqual(first.get_claim(job_id, 1), accepted)
         self.assertEqual(second.get_claim(job_id, 1), accepted)
+
+        producer = uuid.uuid4().hex
+        events = [{"operation": "identical retry"}]
+        alpha, beta = self._race("00000000000000000001.json", [
+            lambda: first.append_events(producer, 1, 1, events),
+            lambda: second.append_events(producer, 1, 1, events),
+        ])
+        self.assertEqual(alpha, beta)
+        self.assertEqual(second.get_event_batch(producer, 1), alpha)
