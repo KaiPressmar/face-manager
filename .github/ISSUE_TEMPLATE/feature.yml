@@ -14,7 +14,6 @@ body:
       options:
         - Windows 11 x64
         - Ubuntu 26.04 amd64
-        - Android
         - Source checkout or another platform
   - type: textarea
     id: workflow

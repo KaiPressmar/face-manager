@@ -288,11 +288,9 @@ The publication then performs these steps:
 4. Create a GitHub Release draft from the curated notes or refresh the draft
    for an unchanged retry.
 5. Build and verify the Windows installer and Ubuntu 26.04 amd64 package on
-   their target runners. Build the Android APK and sign it when CI signing
-   credentials are configured.
+   their target runners.
 6. Upload both desktop installers and their SHA-256 files to the draft.
-   Upload the Android APK and checksum when CI signs the APK. Public builds
-   also provide GitHub provenance attestations for the uploaded installers.
+   Public builds provide GitHub provenance attestations for the uploaded installers.
 7. After all packaging jobs succeed, verify that both desktop installers and
    their checksum assets are present, nonempty and uploaded. Publish the draft
    and mark it as the latest release.
@@ -312,17 +310,6 @@ and notes before continuing with the artifacts.
 | `FaceManager-Setup-X.Y.Z.exe.sha256` | Windows installer checksum |
 | `face-manager_X.Y.Z_amd64.deb` | Ubuntu 26.04 amd64 package for NVIDIA, Intel GPU and CPU |
 | `face-manager_X.Y.Z_amd64.deb.sha256` | Ubuntu package checksum |
-| `FaceManager-Android-X.Y.Z.apk` | Signed standalone Android app (ARM64 and x86-64) |
-| `FaceManager-Android-X.Y.Z.apk.sha256` | Android APK checksum |
-
-Android implementation changes also require `./scripts/check-android.sh` and all three
-`Android (API 31)`, `Android (API 35)` and `Android (API 36)` CI jobs. Do not merge when any device
-job is pending or failed. Android packaging follows the tested release commit;
-see [Android signing and verification](android/README.md). When Actions signing
-secrets are absent, sign the CI-produced unsigned artifact with the retained
-private release key and attach it to the CI-created release. A release containing
-Android changes is complete only once the signed APK and checksum are present;
-an unsigned workflow artifact is not an installable deliverable.
 
 For public repositories, provenance can also be verified with GitHub CLI:
 
