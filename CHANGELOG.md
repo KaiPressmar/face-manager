@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.15.0] - 2026-11-25
+
+### Verbessert
+
 - Die bisherige Windows-GPU-Ausgabe kann über das normale App-Update zum gemeinsamen Installer wechseln. Beim Update bleibt die Fotobibliothek erhalten.
 
 ### Behoben
