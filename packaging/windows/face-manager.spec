@@ -10,6 +10,7 @@ from PyInstaller.utils.hooks import (
 
 
 project_root = Path.cwd()
+app_version = (project_root / "VERSION").read_text(encoding="utf-8").strip()
 frontend_dist = project_root / "frontend" / "dist"
 icon_path = project_root / "packaging" / "windows" / "assets" / "face-manager-icon.ico"
 version_info_path = project_root / "build" / "windows-version-info.txt"
@@ -90,6 +91,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    contents_directory=f"_internal-{app_version}",
     icon=str(icon_path),
     version=str(version_info_path),
 )

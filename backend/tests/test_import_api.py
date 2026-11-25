@@ -54,6 +54,16 @@ class ImportApiTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
 
     @patch.object(app, "import_queue")
+    @patch("backend.app.os.path.isdir", side_effect=AssertionError("Shared folders are checked by the worker"))
+    @patch.object(app.shared_library_preview, "contains_source", return_value=True)
+    def test_import_from_a_configured_share_does_not_wait_for_filesystem(self, _, directory_check, queue):
+        queue.enqueue.return_value = {"folder_path": "/mnt/family/event", "status": "queued"}
+        result = app.api_create_import(self.make_request(), {"folder_path": "/mnt/family/event"})
+        self.assertEqual(result["status"], "queued")
+        directory_check.assert_not_called()
+        queue.enqueue.assert_called_once_with("/mnt/family/event")
+
+    @patch.object(app, "import_queue")
     @patch("backend.app.os.path.isdir", return_value=True)
     @patch("backend.app.normalize_import_folder_path", return_value="/photos")
     @patch("backend.app.to_display_path")

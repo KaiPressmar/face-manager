@@ -16,6 +16,8 @@ import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
 import type { SettingsSection } from "../../utils/navigation";
 import PreviewCacheSettings from "./PreviewCacheSettings";
+import SharedLibrarySettings from "./SharedLibrarySettings";
+import type { SharedLibraryController } from "../../hooks/useSharedLibrary";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; description: string }[] = [
   {
@@ -107,8 +109,9 @@ const SETTINGS_NAV_ITEMS: { section: SettingsSection; label: string }[] = [
 
 const SettingsPage: React.FC<{
   activeSection?: SettingsSection;
+  sharedLibrary: SharedLibraryController;
   onNavigateSection: (section: SettingsSection) => void;
-}> = ({ activeSection, onNavigateSection }) => {
+}> = ({ activeSection, sharedLibrary, onNavigateSection }) => {
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [strictnessInput, setStrictnessInput] = useState("0.50");
@@ -1128,6 +1131,7 @@ const SettingsPage: React.FC<{
               </div>
             </section>
             {settings && <PreviewCacheSettings settings={settings} />}
+            <SharedLibrarySettings controller={sharedLibrary} />
             <section className="settings-card">
               <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
               <p className="settings-card__copy">

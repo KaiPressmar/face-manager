@@ -2,6 +2,12 @@ import html
 import logging
 import socket
 import sys
+
+if __name__ == "__main__" and getattr(sys, "frozen", False) and sys.argv[1:2] == ["--shared-sync-worker"]:
+    from backend.services.shared_sync_worker import main as shared_sync_worker_main
+
+    sys.exit(shared_sync_worker_main(sys.argv[2:]))
+
 import threading
 import time
 import traceback

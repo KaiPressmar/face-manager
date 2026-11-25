@@ -48,8 +48,8 @@ def collect_openvino_files() -> tuple[list[tuple[str, str]], list[tuple[str, str
     return binaries, data
 
 
-def validate_openvino_bundle(app_dir: Path) -> None:
-    internal = app_dir / "_internal"
+def validate_openvino_bundle(app_dir: Path, contents_directory: str = "_internal") -> None:
+    internal = app_dir / contents_directory
     binaries, data = collect_openvino_files()
     for source, destination in binaries + data:
         bundled = internal / destination / Path(source).name
@@ -65,7 +65,8 @@ def validate_openvino_bundle(app_dir: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_dir", type=Path)
+    parser.add_argument("--contents-directory", default="_internal")
     args = parser.parse_args()
     validate_onnxruntime_installation()
-    validate_openvino_bundle(args.app_dir)
+    validate_openvino_bundle(args.app_dir, args.contents_directory)
     print("Verified OpenVINO DLLs and package metadata for the Windows bundle")

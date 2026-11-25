@@ -6,6 +6,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -21,7 +22,9 @@ from backend.services.pipeline import (
     ImportCancelled,
     ImportFailed,
     ImportProcessor,
+    _file_identity,
     _filesystem_path,
+    _matches_imported_identity,
     _stored_filesystem_path,
     get_import_worker_count,
 )
@@ -54,6 +57,25 @@ class WindowsFilesystemPathTest(unittest.TestCase):
         )
         self.assertEqual(_stored_filesystem_path(_filesystem_path(drive_path)), drive_path)
         self.assertEqual(_stored_filesystem_path(_filesystem_path(unc_path)), unc_path)
+
+    def test_windows_compares_the_open_handle_change_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            photo = Path(temp_dir) / "photo.jpg"
+            photo.write_bytes(b"photo")
+            original = photo.stat()
+            changed = SimpleNamespace(
+                st_dev=original.st_dev, st_ino=original.st_ino, st_size=original.st_size,
+                st_mtime_ns=original.st_mtime_ns, st_ctime_ns=original.st_ctime_ns + 100,
+            )
+            identity = _file_identity(original)
+            with (
+                patch("backend.services.pipeline.os.name", "nt"),
+                patch("backend.services.pipeline.os.stat", return_value=original) as path_stat,
+                patch("backend.services.pipeline.os.fstat", side_effect=[original, changed]),
+            ):
+                self.assertTrue(_matches_imported_identity(str(photo), identity))
+                self.assertFalse(_matches_imported_identity(str(photo), identity))
+                path_stat.assert_not_called()
 
     def test_truncated_jpeg_is_decoded_best_effort(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -331,6 +353,71 @@ class ParallelImportIntegrationTest(unittest.TestCase):
 
             resources.reset_clusterer.assert_called_once_with(poisoned_index)
             fresh_index.add_and_assign.assert_called_once()
+
+    def test_source_change_after_shared_analysis_preserves_previous_library_entry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            photo = root / "photo.png"
+            Image.new("RGB", (24, 24), "red").save(photo)
+            original_hash = ImagePreparer.hash_image(photo).content_hash
+            embedding = np.zeros(512, dtype=np.float32)
+            embedding[0] = 1
+            resources = Mock()
+            clusterer = resources.get_clusterer.return_value
+            shared = Mock()
+            shared.available_for.return_value = True
+            shared.analyze.return_value = SimpleNamespace(
+                state="reused", faces=[{"bbox": (1, 2, 10, 12), "embedding": embedding}], geometry=(1, 32, 32),
+            )
+
+            def replace_source_during_index_update(*_args, **_kwargs):
+                replacement = root / "replacement.tmp"
+                Image.new("RGB", (48, 48), "green").save(replacement, format="PNG")
+                replacement.replace(photo)
+                return np.array([99]), None
+
+            clusterer.add_and_assign.side_effect = replace_source_during_index_update
+            with patch.object(schema, "DB_PATH", str(root / "database.sqlite")):
+                schema.init_db(scan_sources=False)
+                with closing(schema.get_conn()) as conn, conn:
+                    conn.execute("INSERT INTO person(id, name) VALUES (1, 'Anna')")
+                    conn.execute("INSERT INTO cluster(id, person_id) VALUES (1, 1)")
+                    conn.execute(
+                        """INSERT INTO image(id, path, directory, filename, content_hash, processed_at,
+                                             raw_width, raw_height, exif_orientation)
+                           VALUES (1, ?, ?, ?, ?, 'processed', 24, 24, 1)""",
+                        (str(photo), str(root), photo.name, original_hash),
+                    )
+                    conn.execute(
+                        "INSERT INTO image_location(image_id, path, directory, filename) VALUES (1, ?, ?, ?)",
+                        (str(photo), str(root), photo.name),
+                    )
+                    conn.execute(
+                        "INSERT INTO face(id, image_id, cluster_id, embedding) VALUES (1, 1, 1, ?)",
+                        (embedding.tobytes(),),
+                    )
+
+                Image.new("RGB", (32, 32), "blue").save(photo)
+                analyzed_hash = ImagePreparer.hash_image(photo).content_hash
+                with self.assertRaisesRegex(ImportFailed, "während des Imports geändert"):
+                    ImportProcessor(resources, shared_analysis=shared).process(str(root), lambda _: None, threading.Event())
+
+                with closing(schema.get_conn()) as conn:
+                    images = conn.execute("SELECT id, content_hash, raw_width FROM image").fetchall()
+                    locations = conn.execute("SELECT image_id, path FROM image_location").fetchall()
+                    faces = conn.execute(
+                        """SELECT f.id, f.cluster_id, p.name, f.embedding FROM face f
+                           JOIN cluster c ON c.id = f.cluster_id JOIN person p ON p.id = c.person_id"""
+                    ).fetchall()
+                    self.assertEqual([tuple(row) for row in images], [(1, original_hash, 24)])
+                    self.assertEqual([tuple(row) for row in locations], [(1, str(photo))])
+                    self.assertEqual([tuple(row) for row in faces], [(1, 1, "Anna", embedding.tobytes())])
+                    self.assertIsNone(conn.execute("SELECT id FROM cluster WHERE id = 99").fetchone())
+                self.assertNotEqual(ImagePreparer.hash_image(photo).content_hash, analyzed_hash)
+
+            shared.analyze.assert_called_once_with(resources.get_model.return_value, str(photo), analyzed_hash)
+            resources.get_model.return_value.detect_and_embed.assert_not_called()
+            resources.reset_clusterer.assert_called_once_with(clusterer)
 
     def test_model_initialization_failure_is_fatal_without_partial_image(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -41,9 +41,9 @@ def collect_cuda_binaries() -> list[tuple[str, str]]:
     return binaries
 
 
-def validate_cuda_bundle(app_dir: Path) -> None:
+def validate_cuda_bundle(app_dir: Path, contents_directory: str = "_internal") -> None:
     """Fail packaging if the frozen application is missing its CUDA runtime."""
-    internal = app_dir / "_internal"
+    internal = app_dir / contents_directory
     ort_dir = internal / "onnxruntime" / "capi"
     for filename in (
         "onnxruntime.dll",
@@ -61,5 +61,7 @@ def validate_cuda_bundle(app_dir: Path) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app_dir", type=Path)
-    validate_cuda_bundle(parser.parse_args().app_dir)
+    parser.add_argument("--contents-directory", default="_internal")
+    args = parser.parse_args()
+    validate_cuda_bundle(args.app_dir, args.contents_directory)
     print("Verified ONNX Runtime and NVIDIA DLLs in the Windows bundle")

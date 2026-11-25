@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { fetchRuntimeInfo, type ImportQueueState, type RuntimeInfo } from "../../utils/api";
+import { fetchRuntimeInfo, type ImportQueueState, type RuntimeInfo, type SharedLibraryState } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
 import { subscribeToTopic } from "../../utils/events";
@@ -18,7 +18,7 @@ const THEME_META: Record<ThemeMode, { icon: string; label: string }> = {
   dark: { icon: "☾", label: "Dunkel" },
 };
 
-const Topbar: React.FC = () => {
+const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibraryReadError?: string | null }> = ({ sharedLibrary, sharedLibraryReadError }) => {
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   // Adding pictures is the one setup action that stays relevant forever, so it
@@ -123,7 +123,7 @@ const Topbar: React.FC = () => {
             <span className="topbar-import-button__icon" aria-hidden="true">＋</span>
             <span className="topbar-import-button__label">Bilder hinzufügen</span>
           </button>
-          <BackgroundTasksStatus openImportsRequest={openImportsRequest} />
+          <BackgroundTasksStatus openImportsRequest={openImportsRequest} sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
           {importNotice && (
             <span className="topbar-import-notice" role="status">
               {importNotice}

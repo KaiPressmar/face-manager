@@ -1,0 +1,157 @@
+.shared-library,
+.shared-library__form,
+.shared-library__case,
+.shared-library__conflicts {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.shared-library__form,
+.shared-library__case,
+.shared-library__conflicts,
+.shared-library__status {
+  display: grid;
+  gap: 8px;
+}
+
+.shared-library p,
+.shared-library h3,
+.shared-library h4 {
+  margin: 0;
+}
+
+.shared-library summary {
+  min-height: 44px;
+  padding-block: 12px;
+  cursor: pointer;
+}
+
+.shared-library__tab {
+  text-decoration: none;
+}
+
+.shared-library__path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 6px 10px;
+}
+
+.shared-library__path > p {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 520px) {
+  .shared-library__path {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.shared-library .settings-text-input,
+.shared-library button {
+  min-height: 44px;
+  max-width: 100%;
+}
+
+.shared-library .settings-actions {
+  flex-wrap: wrap;
+}
+
+.shared-library__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.shared-library__decisions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+  gap: 8px;
+}
+
+.shared-library__decision,
+.shared-library__case-list li {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.shared-library__decision img {
+  display: block;
+  width: 92px;
+  aspect-ratio: 1;
+  object-fit: cover;
+  margin-block: 6px;
+}
+
+.shared-library__full-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+}
+
+.shared-library__case-list {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.shared-library__case-list[hidden] {
+  display: none;
+}
+
+.shared-library__case-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.shared-library__case > a,
+.shared-library__case > button {
+  justify-self: start;
+}
+
+
+.shared-library__folders,
+.shared-library__folder,
+.shared-library__alias-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shared-library__folder {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.shared-library__alias-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.shared-library__alias-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.shared-library__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
