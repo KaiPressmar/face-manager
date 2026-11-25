@@ -3,6 +3,3 @@ contact_links:
   - name: Desktop download and installation
     url: https://github.com/KaiPressmar/face-manager#download-and-install
     about: Find the Windows and Ubuntu packages and installation steps.
-  - name: Android installation
-    url: https://github.com/KaiPressmar/face-manager/tree/main/android#readme
-    about: Find the APK instructions, device requirements, and signing notes.

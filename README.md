@@ -12,7 +12,6 @@ Download the package for your system under **Assets**. [Latest GitHub release](h
 | --- | --- | --- |
 | Windows 11 x64 | `FaceManager-Setup-X.Y.Z.exe` | Open the installer. |
 | Ubuntu 26.04 amd64 | `face-manager_X.Y.Z_amd64.deb` | Install the downloaded package with APT. |
-| Android | `FaceManager-Android-X.Y.Z.apk` | Install the signed APK when it appears in the release assets. [Android guide](android/README.md) |
 
 From the Ubuntu download folder, replace `X.Y.Z` with the version in the filename. Use the same command with the new file to update.
 
@@ -20,7 +19,7 @@ From the Ubuntu download folder, replace `X.Y.Z` with the version in the filenam
 sudo apt install ./face-manager_X.Y.Z_amd64.deb
 ```
 
-Open **Face Manager** from your applications menu. On Ubuntu, the `face-manager` command also opens the app. The first desktop face-processing run downloads the InsightFace model if it is absent. The Android package includes its models.
+Open **Face Manager** from your applications menu. On Ubuntu, the `face-manager` command also opens the app. The first desktop face-processing run downloads the InsightFace model if it is absent.
 
 The Windows installer serves CPU and GPU systems. If you installed an older `-GPU` edition, download the current installer from GitHub once and select **Keep current data and update the application (recommended)**. Windows SmartScreen may warn about the unsigned installer. Each desktop package has a published SHA-256 checksum. [Release assets](https://github.com/KaiPressmar/face-manager/releases/latest)
 
@@ -31,7 +30,7 @@ With a supported graphics driver, Face Manager tries NVIDIA CUDA, then an availa
 ## First import
 
 1. Open **Bilder** (Photos) and select **Bilder hinzufügen** (Add photos). The empty library also offers **Bilderordner auswählen** (Choose photo folders).
-2. Add one or more folders. The dialog offers native folder selection on desktop and Android. Ubuntu also accepts an absolute path to a local folder or mounted network share.
+2. Add one or more folders. The dialog offers native folder selection on the desktop. Ubuntu also accepts an absolute path to a local folder or mounted network share.
 3. Start the import and follow it in **Aktivitäten** (Activity). Face Manager scans subfolders for JPEG and PNG files. Identical files share one library entry, with each source location recorded.
 4. Open **Personen** (People) to name groups under **Ohne Namen** (Unnamed) and review suggestions under **Vorschläge** (Suggestions). The **Personen zuordnen** prompt in **Bilder** opens the unnamed groups directly.
 5. Return to **Bilder** to browse by person or folder. Open **Karte** (Map) to see photos with GPS coordinates.
@@ -104,7 +103,7 @@ Use **Einstellungen → Daten und Wartung → Sicherung erstellen** to back up t
 
 If the default Ubuntu data directory has no database, the package can reuse an existing `~/.face-manager` library.
 
-The desktop app binds to localhost. The development API listens on `0.0.0.0:8000` for WSL and remote development. Both APIs expose unauthenticated endpoints, so keep these ports on a trusted network. Use an authenticated proxy if you deliberately provide access outside that boundary. Android restricts access to its authenticated local WebView session.
+The desktop app binds to localhost. The development API listens on `0.0.0.0:8000` for WSL and remote development. Both APIs expose unauthenticated endpoints, so keep these ports on a trusted network. Use an authenticated proxy if you deliberately provide access outside that boundary.
 
 ## Run from source
 
