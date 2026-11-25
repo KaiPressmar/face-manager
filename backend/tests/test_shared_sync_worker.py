@@ -72,6 +72,17 @@ class SourceStageTest(unittest.TestCase):
         Image.new("RGB", (80, 60), "#ffa915").save(self.source)
         self.assertEqual(worker.run_request(request), {"status": "source_changed"})
 
+    def test_batch_keeps_verified_changed_and_unavailable_sources_distinct(self):
+        request = {"action": "verify_sources", "source_root": str(self.photo_root), "sources": [
+            {"relative_path": self.source.name, "expected_hash": self.request["expected_hash"]},
+            {"relative_path": "missing.jpg", "expected_hash": self.request["expected_hash"]},
+            {"relative_path": self.source.name, "expected_hash": "a" * 64},
+        ]}
+        result = worker.run_request(request)
+        self.assertEqual(result["status"], "verified_sources")
+        self.assertEqual([proof["status"] for proof in result["results"]], ["verified", "unavailable", "source_changed"])
+        self.assertEqual(result["results"][0]["photo_sha256"], self.request["expected_hash"])
+
     def test_cannot_write_outside_private_directory_or_overwrite_existing_files(self):
         with self.assertRaises(ValueError):
             worker.run_request({**self.request, "output_path": str(self.source)}, staging_root=self.ipc)

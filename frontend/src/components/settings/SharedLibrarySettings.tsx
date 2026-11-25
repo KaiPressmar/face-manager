@@ -20,8 +20,8 @@ const STATUS_LABEL: Record<SharedLibraryState["status"], string> = {
 };
 
 function configOf(state: SharedLibraryState): SharedLibraryConfig {
-  const { source_path, sync_path, paused, share_embeddings, write_enabled } = state;
-  return { source_path, sync_path, paused, share_embeddings, write_enabled };
+  const { source_path, sync_path, paused, share_embeddings, write_enabled, assist_paused } = state;
+  return { source_path, sync_path, paused, share_embeddings, write_enabled, assist_paused };
 }
 
 export default function SharedLibrarySettings({ controller }: { controller: SharedLibraryController }) {
@@ -45,7 +45,7 @@ export default function SharedLibrarySettings({ controller }: { controller: Shar
   const changePath = (field: "source_path" | "sync_path", path: string) => {
     const base = draftRef.current ?? inputs;
     if (base && base[field] !== path) setConfigDraft({
-      ...base, [field]: path, write_enabled: false, initialize_share: false, share_embeddings: false,
+      ...base, [field]: path, write_enabled: false, initialize_share: false, share_embeddings: false, assist_paused: false,
     });
   };
 
@@ -149,12 +149,12 @@ export default function SharedLibrarySettings({ controller }: { controller: Shar
                   aria-describedby="shared-library-write-description"
                   disabled={disabled}
                   onChange={(event) => setConfigDraft({
-                    ...inputs, write_enabled: event.target.checked, initialize_share: false, share_embeddings: false,
+                    ...inputs, write_enabled: event.target.checked, initialize_share: false, share_embeddings: false, assist_paused: false,
                   })}
                 />
                 Schreibenden Abgleich für diese Ordner erlauben
               </label>
-              <p id="shared-library-write-description">Face Manager kann bestätigte Personennamen und Fotobezüge für diese Ordner veröffentlichen und eindeutig passende Zuordnungen des geprüften Geräts übernehmen.</p>
+              <p id="shared-library-write-description">Face Manager kann bestätigte Personennamen und Fotobezüge für diese Ordner veröffentlichen und eindeutig passende Zuordnungen des geprüften Geräts übernehmen. Vor dem ersten Schreibabgleich sichert die App deine bestehende Fotobibliothek auf diesem Gerät.</p>
               {inputs.write_enabled === true && <label className="shared-library__toggle">
                 <input type="checkbox" checked={inputs.initialize_share === true} disabled={disabled}
                   onChange={(event) => setConfigDraft({ ...inputs, initialize_share: event.target.checked })} />
@@ -164,10 +164,17 @@ export default function SharedLibrarySettings({ controller }: { controller: Shar
                 <label className="shared-library__toggle">
                   <input type="checkbox" checked={inputs.share_embeddings === true} disabled={disabled}
                     aria-describedby="shared-library-analysis-description"
-                    onChange={(event) => setConfigDraft({ ...inputs, share_embeddings: event.target.checked })} />
+                    onChange={(event) => setConfigDraft({ ...inputs, share_embeddings: event.target.checked, assist_paused: false })} />
                   Gesichtsmerkmale mit anderen Geräten teilen
                 </label>
                 <p id="shared-library-analysis-description">Geräte mit Leserechten für den Abgleichordner können numerische Gesichtsmerkmale wiederverwenden. Dafür brauchen sie ein kompatibles Erkennungsmodell. Die Bilddateien bleiben an ihrem Speicherort.</p>
+                {inputs.share_embeddings && <label className="shared-library__toggle">
+                  <input type="checkbox" checked={inputs.assist_paused === true} disabled={disabled}
+                    aria-describedby="shared-library-assist-description"
+                    onChange={(event) => setConfigDraft({ ...inputs, assist_paused: event.target.checked })} />
+                  Eigene Rechenhilfe pausieren
+                </label>}
+                {inputs.share_embeddings && <p id="shared-library-assist-description">Dieses Gerät beginnt keine neuen gemeinsamen Analyseaufträge. Es kann weiterhin fertige Ergebnisse und Zuordnungen empfangen.</p>}
               </>}
             </>}
             {configured && <label className="shared-library__toggle">

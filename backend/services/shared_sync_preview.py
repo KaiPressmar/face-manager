@@ -37,9 +37,10 @@ from .shared_sync_outbox import (
     retire_scope, revisions_match,
 )
 from .shared_sync_reconcile import compare_verified_photo, matching_source_path, photo_event
-from .shared_sync_resolution import record_resolution
+from .shared_sync_resolution import record_resolution, shared_library_scope
 from .shared_sync_snapshot import capture_image
 from .shared_sync_transport import MAX_EVENT_BATCH_BYTES
+from .shared_sync_worker import MAX_SOURCE_CHECKS
 from .storage import invalidate_image_query_cache
 
 
@@ -71,7 +72,7 @@ class SharedLibraryPreview:
         self._device = socket.gethostname()[:255]
         self._config = {
             "source_path": None, "sync_path": None, "paused": False,
-            "share_embeddings": False, "write_enabled": False, "initialize_share": False,
+            "share_embeddings": False, "write_enabled": False, "initialize_share": False, "assist_paused": False,
         }
         self._status = {"status": "off"}
         self._revision = 0
@@ -84,6 +85,8 @@ class SharedLibraryPreview:
         self._media_cache = OrderedDict()
         self._media_lane = SharedSyncLane(publish_capable=False)
         self._media_request_lock = threading.Lock()
+        self._preparing_backup = False
+        self._baseline_backup = None
 
     @staticmethod
     def available() -> bool:
@@ -101,7 +104,7 @@ class SharedLibraryPreview:
         with self._lock:
             if self._restoring or self._config["paused"] or not self._config["share_embeddings"]:
                 return None
-            return self._analysis_share
+            return replace(self._analysis_share, assist_paused=self._config["assist_paused"]) if self._analysis_share else None
 
     def contains_source(self, path: str) -> bool:
         """Check configured membership without opening a network directory."""
@@ -222,7 +225,7 @@ class SharedLibraryPreview:
         """Fence the local library switch while a publication outcome is outstanding."""
         with self._lock:
             try:
-                if (self._mutating and self._process.busy) or self._journal().publications_pending():
+                if self._preparing_backup or (self._mutating and self._process.busy) or self._journal().publications_pending():
                     return False
             except sqlite3.Error:
                 return False
@@ -253,7 +256,8 @@ class SharedLibraryPreview:
         paused, share_embeddings = raw.get("paused", False), raw.get("share_embeddings", False)
         write_enabled = raw.get("write_enabled", False)
         initialize_share = raw.get("initialize_share", False)
-        if any(type(value) is not bool for value in (paused, share_embeddings, write_enabled, initialize_share)):
+        assist_paused = raw.get("assist_paused", False)
+        if any(type(value) is not bool for value in (paused, share_embeddings, write_enabled, initialize_share, assist_paused)):
             raise ValueError("Die Einstellungen sind ungültig.")
         if share_embeddings and not (write_enabled and SharedLibraryPreview.analysis_available()):
             raise ValueError("Der gemeinsame Abgleich von Gesichtsmerkmalen ist für diesen Ordner nicht verfügbar.")
@@ -264,6 +268,7 @@ class SharedLibraryPreview:
         return {
             "source_path": source, "sync_path": sync, "paused": paused,
             "share_embeddings": share_embeddings, "write_enabled": write_enabled, "initialize_share": initialize_share,
+            "assist_paused": assist_paused and share_embeddings,
         }
 
     @staticmethod
@@ -309,8 +314,9 @@ class SharedLibraryPreview:
                     decision_scope = digest([scope, manifest["scope"], manifest["generation"]])
                     retiring = digest([decision_scope, previous["producer_id"]])
             self._save_config(config)
+            if any(config[key] != self._config[key] for key in ("source_path", "sync_path", "paused", "write_enabled", "share_embeddings")):
+                self._analysis_share = None
             self._config = config
-            self._analysis_share = None
             self._visible_choices = {}
             self._selected_choice = None
             self._visible_media.clear()
@@ -390,6 +396,36 @@ class SharedLibraryPreview:
             connection.execute("BEGIN IMMEDIATE")
             acknowledge_changes(connection, outbox_scope, [DirtyImage(*row) for row in rows])
         journal.forget_local_receipt(scope, batch_number)
+
+    def _backup_before_first_sync(self, manifest: dict, device_id: str, revision: int) -> bool:
+        from .shared_sync_backup import ensure_initial_share_backup
+
+        logical_scope = shared_library_scope(manifest)
+        key = logical_scope, device_id
+        with self._lock:
+            if not self._current(revision):
+                return False
+            if self._baseline_backup == key:
+                return True
+            self._preparing_backup = True
+        try:
+            with closing(get_conn()) as connection:
+                ensure_initial_share_backup(
+                    connection, get_data_root() / "shared-library-backups",
+                    library_scope=logical_scope, producer_id=device_id,
+                )
+        except (OSError, ValueError, sqlite3.Error):
+            logger.warning("Could not prepare the local library before shared sync", exc_info=True)
+            self._update(revision, status="attention", error="Die bestehende Fotobibliothek konnte vor dem Abgleich nicht gesichert werden.")
+            return False
+        finally:
+            with self._lock:
+                self._preparing_backup = False
+        with self._lock:
+            if not self._current(revision):
+                return False
+            self._baseline_backup = key
+        return True
 
     def _finish_choice(self, revision, choice, message=None) -> None:
         with self._lock:
@@ -530,11 +566,7 @@ class SharedLibraryPreview:
         attempted, receipts = local
         current = self._local_revisions_match(outbox_scope, receipts)
         if current:
-            for event in outgoing["events"]:
-                verification = self._request({
-                    "action": "verify_source", "source_root": config["source_path"],
-                    "relative_path": event["relative_paths"][0], "expected_hash": event["photo_sha256"],
-                }, revision)
+            for verification in self._verify_outgoing_sources(config["source_path"], outgoing["events"], revision):
                 if verification["status"] == "source_changed":
                     current = False
                     break
@@ -556,6 +588,22 @@ class SharedLibraryPreview:
             return False
         journal.mark_attempted(scope, batch_number)
         return True
+
+    def _verify_outgoing_sources(self, source_root: str, events: list[dict], revision: int):
+        check = {"source_root": source_root}
+        sources = [
+            {"relative_path": event["relative_paths"][0], "expected_hash": event["photo_sha256"]}
+            for event in events
+        ]
+        if 1 < len(sources) <= MAX_SOURCE_CHECKS:
+            result = self._request({"action": "verify_sources", "sources": sources, **check}, revision)
+            if result.get("status") == "verified_sources" and len(result.get("results", ())) == len(sources):
+                yield from result["results"]
+                return
+        # Slow individual files may fit their own worker deadline even if the
+        # combined request could not finish. Keep their original fallback.
+        for source in sources:
+            yield self._request({"action": "verify_source", **check, **source}, revision)
 
     def _stage_local(self, journal, scope, outbox_scope, decision_scope, config, device_id, state, revision) -> bool:
         with self._lock:
@@ -604,14 +652,14 @@ class SharedLibraryPreview:
                 logger.warning("Skipping an unsupported local photo snapshot")
                 skipped.append(change)
                 continue
-            verified = self._request({
-                "action": "verify_source", "source_root": config["source_path"],
-                "relative_path": relative, "expected_hash": photo.photo_sha256,
-            }, revision)
-            if verified.get("status") != "verified" or verified.get("photo_sha256") != photo.photo_sha256:
-                continue
             events.append(event)
             receipts.append((change.image_id, change.revision))
+
+        verified = self._verify_outgoing_sources(config["source_path"], events, revision)
+        verified_candidates = [
+            (event, receipt) for event, receipt, proof in zip(events, receipts, verified)
+            if proof.get("status") == "verified" and proof.get("photo_sha256") == event["photo_sha256"]
+        ]
 
         with self._lock:
             if not self._current(revision):
@@ -620,11 +668,11 @@ class SharedLibraryPreview:
                 with closing(get_conn()) as connection, connection:
                     connection.execute("BEGIN IMMEDIATE")
                     acknowledge_changes(connection, outbox_scope, skipped)
-            if events:
+            if verified_candidates:
                 with closing(get_conn()) as connection, connection:
                     connection.execute("BEGIN IMMEDIATE")
                     current = []
-                    for event, receipt in zip(events, receipts):
+                    for event, receipt in verified_candidates:
                         image_id, captured_revision = receipt
                         row = connection.execute(
                             "SELECT revision FROM shared_sync_dirty_image WHERE scope_id = ? AND image_id = ?",
@@ -634,7 +682,7 @@ class SharedLibraryPreview:
                             current.append((event, receipt))
                     if current:
                         journal.stage(scope, [event for event, _ in current], local_rows=tuple(row for _, row in current))
-        return bool(events or skipped or more_baseline)
+        return bool(verified_candidates or skipped or more_baseline)
 
     def _review(self, journal, scope, producer, batch, source_path, cases, proposed, device_id, revision,
                 *, decision_scope=None, apply=False, stats=None, manifest=None) -> bool:
@@ -839,6 +887,10 @@ class SharedLibraryPreview:
                     writable = write_requested and read_state.get("writable", False)
                     manifest = request["known_manifest"]
                     if writable:
+                        if not self._backup_before_first_sync(manifest, device_id, revision):
+                            self._wake.wait(3)
+                            self._wake.clear()
+                            continue
                         decision_scope = digest([scope, manifest["scope"], manifest["generation"]])
                         outbox_scope = digest([decision_scope, device_id])
                         with self._lock:

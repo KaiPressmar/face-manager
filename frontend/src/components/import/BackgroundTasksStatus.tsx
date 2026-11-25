@@ -699,6 +699,7 @@ const BackgroundTasksStatus: React.FC<{
               <div className="activity-center__section-title">Gemeinsamer Ordner</div>
               <div className="activity-shared-library">
                 <strong>{folderName(shared.source_path ?? "")}</strong>
+                {shared.assist_paused && !shared.paused && <small>Eigene Rechenhilfe pausiert</small>}
                 <span>{sharedStatus}</span>
                 {sharedLibraryReadError && <small>Der aktuelle Stand konnte nicht geladen werden.</small>}
                 {Boolean(shared.peer_names?.length) && <small>Bekannte Geräte: {shared.peer_names?.join(", ")}</small>}

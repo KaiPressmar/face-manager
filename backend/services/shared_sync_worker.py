@@ -36,6 +36,7 @@ from .shared_sync_transport import (
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 MAX_EVENT_PRODUCERS = 256
+MAX_SOURCE_CHECKS = 8
 _HASH_CHUNK = 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _JOB_READ_OPERATIONS = {"inspect", "get_result", "observe"}
@@ -143,6 +144,22 @@ def _verify_source(request: dict, output=None) -> dict:
     if expected_hash is not None and expected_hash != content_hash:
         return {"status": "source_changed"}
     return {"status": "verified", "photo_sha256": content_hash, "identity": list(initial_identity)}
+
+
+def _verify_sources(request: dict) -> dict:
+    sources = request["sources"]
+    if not isinstance(sources, list) or not 1 <= len(sources) <= MAX_SOURCE_CHECKS:
+        raise ValueError("Invalid source verification batch size")
+    verified = []
+    for source in sources:
+        if not isinstance(source, dict) or set(source) != {"relative_path", "expected_hash"}:
+            raise ValueError("Invalid source verification entry")
+        try:
+            result = _verify_source({"source_root": request["source_root"], **source})
+        except (OSError, ValueError):
+            result = {"status": "unavailable"}
+        verified.append(result)
+    return {"status": "verified_sources", "results": verified}
 
 
 def _conflict_preview(request: dict) -> dict:
@@ -367,6 +384,8 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
     action = request["action"]
     if action == "verify_source":
         return _verify_source(request)
+    if action == "verify_sources":
+        return _verify_sources(request)
     if action == "conflict_preview":
         return _conflict_preview(request)
     if action == "stage_source":

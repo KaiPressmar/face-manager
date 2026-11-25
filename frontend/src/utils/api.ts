@@ -599,6 +599,7 @@ export interface SharedLibraryConfig {
   share_embeddings: boolean;
   write_enabled?: boolean;
   initialize_share?: boolean;
+  assist_paused?: boolean;
 }
 
 export interface SharedLibraryState extends SharedLibraryConfig {
