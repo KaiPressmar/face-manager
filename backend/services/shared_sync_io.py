@@ -168,3 +168,40 @@ class SharedSyncProcess:
             shutil.rmtree(path)
         except OSError:
             logger.warning("Could not remove a shared sync worker's local result directory")
+
+
+class SharedSyncLane:
+    """Serialize bounded IPC requests while keeping timed-out children fenced."""
+
+    def __init__(self, *, publish_capable=True):
+        self.process = SharedSyncProcess(publish_capable=publish_capable)
+        self.lock = Lock()
+
+    def request(self, payload, *, staging_root=None):
+        # Separate processes for active work and heartbeats keep a slow source
+        # read from blocking lease renewal. Never start over a quarantined child.
+        with self.lock:
+            self.process.poll()
+            if self.process.busy:
+                return {"status": "unavailable"}
+            if staging_root is not None:
+                return self._start(payload, staging_root)
+            with tempfile.TemporaryDirectory(prefix="shared-import-request-") as directory:
+                return self._start(payload, Path(directory))
+
+    def _start(self, payload, directory):
+        request_path = directory / "request.json"
+        request_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False), encoding="utf-8")
+        self.process.start([str(request_path)])
+        deadline = time.monotonic() + 11
+        while time.monotonic() < deadline:
+            result = self.process.poll()
+            if result is not None:
+                if result.status == "ok":
+                    return result.payload
+                may_write = payload.get("action") == "job" and payload.get("allow_writes") is True
+                if result.status == "published_unknown" and may_write:
+                    return {"status": "published_unknown"}
+                break
+            time.sleep(0.025)
+        return {"status": "unavailable"}

@@ -48,7 +48,8 @@ with sqlite3.connect(sys.argv[1]) as connection:
 
 $fixtures = @(
     @{ Version = "0.6.1"; Suffix = ""; TestFailure = $false; UseDefaultData = $true },
-    @{ Version = "0.13.0"; Suffix = "-GPU"; TestFailure = $true; UseDefaultData = $false }
+    @{ Version = "0.13.0"; Suffix = "-GPU"; TestFailure = $true; UseDefaultData = $false },
+    @{ Version = "0.14.2"; Suffix = ""; TestFailure = $false; UseDefaultData = $true }
 )
 
 try {
@@ -150,7 +151,8 @@ try {
                 throw "Setup modified the original library from $legacyName."
             }
             $backupDirectory = Join-Path $dataDirectory "update-backups"
-            $snapshot = Get-ChildItem -LiteralPath $backupDirectory -Filter "*.sqlite" | Select-Object -First 1
+            $snapshot = Get-ChildItem -LiteralPath $backupDirectory -Filter "database-$legacyVersion-*.sqlite" |
+                Select-Object -First 1
             if ($null -eq $snapshot) {
                 throw "Setup did not generate a recoverable pre-upgrade library backup."
             }

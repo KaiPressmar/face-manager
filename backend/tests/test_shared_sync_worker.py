@@ -55,6 +55,23 @@ class SourceStageTest(unittest.TestCase):
                 worker.run_request(self.request, staging_root=self.ipc)
         self.assertFalse(self.output.exists())
 
+    def test_conflict_previews_bind_photo_content_and_raw_geometry(self):
+        from PIL import Image
+
+        Image.new("RGB", (80, 60), "#42798b").save(self.source)
+        request = {
+            "action": "conflict_preview", "source_root": str(self.photo_root), "relative_path": self.source.name,
+            "expected_hash": hashlib.sha256(self.source.read_bytes()).hexdigest(), "geometry": [1, 80, 60],
+            "boxes": {"local": [0.1, 0.1, 0.5, 0.7], "shared": [0.12, 0.1, 0.52, 0.7]},
+        }
+        result = worker.run_request(request)
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(set(result["images"]), {"photo", "local", "shared"})
+        self.assertTrue(all(value.startswith("data:image/jpeg;base64,") for value in result["images"].values()))
+        self.assertEqual(worker.run_request({**request, "geometry": [6, 80, 60]}), {"status": "source_changed"})
+        Image.new("RGB", (80, 60), "#ffa915").save(self.source)
+        self.assertEqual(worker.run_request(request), {"status": "source_changed"})
+
     def test_cannot_write_outside_private_directory_or_overwrite_existing_files(self):
         with self.assertRaises(ValueError):
             worker.run_request({**self.request, "output_path": str(self.source)}, staging_root=self.ipc)

@@ -582,8 +582,11 @@ export interface SharedLibraryConflict {
   photo_id?: number | null;
   local_face_id?: number | null;
   shared_face_id?: number | null;
+  evidence_available?: boolean;
   relative_path: string;
   can_resolve: boolean;
+  can_keep_local?: boolean;
+  can_use_shared?: boolean;
   reason: string;
   local: SharedLibraryDecision;
   shared: SharedLibraryDecision;
@@ -595,16 +598,22 @@ export interface SharedLibraryConfig {
   paused: boolean;
   share_embeddings: boolean;
   write_enabled?: boolean;
+  initialize_share?: boolean;
 }
 
 export interface SharedLibraryState extends SharedLibraryConfig {
   available?: boolean;
   write_available?: boolean;
+  analysis_available?: boolean;
   preview?: boolean;
   proposed_count?: number;
   status: "off" | "checking" | "online" | "offline" | "read_only" | "paused" | "attention";
   device_name?: string;
   active_devices?: string[];
+  peer_names?: string[];
+  resolution_pending?: boolean;
+  concurrent_choices?: boolean;
+  choice_error?: string | null;
   imported_decisions?: number;
   conflict_count?: number;
   conflicts?: SharedLibraryConflict[];
@@ -639,6 +648,17 @@ export function resolveSharedLibrary(conflict: SharedLibraryConflict, choice: "l
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id: conflict.id, revision: conflict.revision, choice }),
   }, "Die Zuordnung konnte nicht übernommen werden.");
+}
+
+export async function fetchSharedConflictEvidence(conflict: SharedLibraryConflict, signal: AbortSignal): Promise<{
+  local?: string;
+  shared?: string;
+  photo?: string;
+}> {
+  const query = new URLSearchParams({ revision: conflict.revision });
+  const response = await fetch(`${API_BASE}/shared-library/conflicts/${encodeURIComponent(conflict.id)}/evidence?${query}`, { signal });
+  if (!response.ok) throw new Error("Das geprüfte Foto ist gerade nicht verfügbar.");
+  return response.json();
 }
 
 export async function updateSettings(

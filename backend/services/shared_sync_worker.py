@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+from io import BytesIO
 import json
 import math
 import os
@@ -13,6 +15,7 @@ import sys
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from tempfile import SpooledTemporaryFile
 
 from .filesystem_paths import filesystem_path
 from .shared_sync_jobs import SharedJobScheduler
@@ -140,6 +143,46 @@ def _verify_source(request: dict, output=None) -> dict:
     if expected_hash is not None and expected_hash != content_hash:
         return {"status": "source_changed"}
     return {"status": "verified", "photo_sha256": content_hash, "identity": list(initial_identity)}
+
+
+def _conflict_preview(request: dict) -> dict:
+    """Generate bounded previews from the exact verified bytes and raw boxes."""
+    from PIL import Image
+
+    from .preview_cache import get_image_geometry, orient_image
+
+    def jpeg(image, size):
+        image.thumbnail((size, size), Image.Resampling.LANCZOS)
+        with BytesIO() as output:
+            image.save(output, format="JPEG", quality=77, optimize=True)
+            if output.tell() > 256 * 1024:
+                raise ValueError("Conflict preview exceeds its size limit")
+            return f"data:image/jpeg;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
+
+    with SpooledTemporaryFile(max_size=4 * 1024 * 1024) as bytes_read:
+        result = _verify_source(request, output=bytes_read)
+        if result["status"] != "verified":
+            return result
+        bytes_read.seek(0)
+        with Image.open(bytes_read) as decoded:
+            geometry = get_image_geometry(decoded)
+            if list(geometry) != request["geometry"] or decoded.width * decoded.height > 64_000_000:
+                return {"status": "source_changed"}
+            original = decoded.convert("RGB")
+    orientation, width, height = geometry
+    fields = {"photo": jpeg(orient_image(original, orientation).copy(), 1024)}
+    for side in ("local", "shared"):
+        box = request["boxes"].get(side)
+        if box is None:
+            continue
+        if not isinstance(box, list) or len(box) != 4 or any(type(value) not in (int, float) for value in box):
+            raise ValueError("Invalid conflict preview region")
+        x1, y1, x2, y2 = box
+        if not (0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1):
+            raise ValueError("Invalid conflict preview region")
+        crop = original.crop((math.floor(x1 * width), math.floor(y1 * height), math.ceil(x2 * width), math.ceil(y2 * height)))
+        fields[side] = jpeg(orient_image(crop, orientation), 200)
+    return {"status": "ready", "photo_sha256": result["photo_sha256"], "images": fields}
 
 
 @contextmanager
@@ -324,6 +367,8 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
     action = request["action"]
     if action == "verify_source":
         return _verify_source(request)
+    if action == "conflict_preview":
+        return _conflict_preview(request)
     if action == "stage_source":
         return _stage_source(request, staging_root)
     if action not in ("probe", "exchange", "job"):
@@ -345,7 +390,8 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
         if operation in _JOB_WRITE_OPERATIONS and not allow_writes:
             raise ReadOnlyTransportError("Writing shared analysis jobs has not been enabled")
     transport = ShareTransport(request["sync_root"], allow_writes=allow_writes)
-    manifest = transport.open(create=action == "probe" and allow_writes and known is None)
+    initialize = action == "probe" and allow_writes and known is None and request.get("initialize_share") is True
+    manifest = transport.open(create=initialize)
     if known is not None and known != manifest:
         return {"status": "share_changed"}
     if action == "probe":

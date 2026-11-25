@@ -339,6 +339,7 @@ class ShareTransport:
         path = Path(self._root.anchor)
         components = (*self._root.parts[1:], ".fm", *parts)
         first_managed = len(self._root.parts) - 1
+        first_creatable = first_managed + int(verify_manifest)
 
         def validate_scope(index: int, directory: _Directory):
             if verify_manifest and index == first_managed:
@@ -352,7 +353,7 @@ class ShareTransport:
                 stack.callback(close, handle)
                 for index, name in enumerate(components):
                     path /= name
-                    if create and index >= first_managed:
+                    if create and index >= first_creatable:
                         try:
                             os.mkdir(filesystem_path(path))
                         except FileExistsError:
@@ -367,7 +368,7 @@ class ShareTransport:
             fd = os.open(path, flags)
             stack.callback(os.close, fd)
             for index, name in enumerate(components):
-                if create and index >= first_managed:
+                if create and index >= first_creatable:
                     try:
                         os.mkdir(name, dir_fd=fd)
                     except FileExistsError:
@@ -392,7 +393,8 @@ class ShareTransport:
         token = uuid4().hex
         source, alternative, destination = (f".probe-{token}-{part}" for part in range(3))
         try:
-            with self._directory((), create=True) as directory:
+            have_manifest = self._manifest is not None
+            with self._directory((), create=not have_manifest, verify_manifest=have_manifest) as directory:
                 try:
                     directory.stage_slot(source, b"first")
                     _rename_no_replace(directory, source, destination)

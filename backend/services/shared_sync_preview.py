@@ -8,11 +8,13 @@ import os
 import socket
 import sqlite3
 import threading
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 from ..config import get_data_root
 from ..db import schema
@@ -20,14 +22,22 @@ from ..db.schema import get_conn
 from .cache import app_cache
 from .desktop import normalize_import_folder_path
 from .events import event_hub
-from .shared_sync_apply import apply_unambiguous, compare_for_scope, scoped_snapshot
-from .shared_sync_io import SharedSyncProcess
+from .shared_sync_apply import (
+    apply_unambiguous, compare_for_scope, is_conflict_person_available, resolve_face_conflict, scoped_snapshot,
+)
+from .shared_sync_conflicts import (
+    ConflictEvidencePending, apply_verified_choice, build_conflict_case, reserve_conflict_guard, stage_conflict_choice,
+    validate_conflict_packet, verified_current_parents,
+)
+from .shared_sync_io import SharedSyncLane, SharedSyncProcess
+from .shared_sync_import import ImportShare
 from .shared_sync_journal import ExchangeJournal, digest, encode
 from .shared_sync_outbox import (
     DirtyImage, acknowledge_changes, enqueue_baseline_page, initialize_outbox, pending_changes, register_scope,
     retire_scope, revisions_match,
 )
 from .shared_sync_reconcile import compare_verified_photo, matching_source_path, photo_event
+from .shared_sync_resolution import record_resolution
 from .shared_sync_snapshot import capture_image
 from .shared_sync_transport import MAX_EVENT_BATCH_BYTES
 from .storage import invalidate_image_query_cache
@@ -61,12 +71,19 @@ class SharedLibraryPreview:
         self._device = socket.gethostname()[:255]
         self._config = {
             "source_path": None, "sync_path": None, "paused": False,
-            "share_embeddings": False, "write_enabled": False,
+            "share_embeddings": False, "write_enabled": False, "initialize_share": False,
         }
         self._status = {"status": "off"}
         self._revision = 0
         self._restoring = False
         self._mutating = False
+        self._analysis_share = None
+        self._visible_choices = {}
+        self._selected_choice = None
+        self._visible_media = {}
+        self._media_cache = OrderedDict()
+        self._media_lane = SharedSyncLane(publish_capable=False)
+        self._media_request_lock = threading.Lock()
 
     @staticmethod
     def available() -> bool:
@@ -76,18 +93,95 @@ class SharedLibraryPreview:
     def write_available() -> bool:
         return SharedLibraryPreview.available() and os.environ.get("FACE_MANAGER_SHARED_LIBRARY_WRITE_TEST") == "1"
 
+    @staticmethod
+    def analysis_available() -> bool:
+        return SharedLibraryPreview.write_available() and os.environ.get("FACE_MANAGER_SHARED_LIBRARY_ANALYSIS_TEST") == "1"
+
+    def analysis_share(self):
+        with self._lock:
+            if self._restoring or self._config["paused"] or not self._config["share_embeddings"]:
+                return None
+            return self._analysis_share
+
+    def contains_source(self, path: str) -> bool:
+        """Check configured membership without opening a network directory."""
+        with self._lock:
+            source = self._config["source_path"]
+        if source is None or not os.path.isabs(path):
+            return False
+        try:
+            root = os.path.normcase(source)
+            return os.path.commonpath((os.path.normcase(path), root)) == root
+        except ValueError:
+            return False
+
     def snapshot(self) -> dict:
         with self._lock:
-            return {
+            visible = {
                 **self._config, **self._status,
                 "available": self.available(), "preview": not self._config["write_enabled"],
-                "write_available": self.write_available(), "device_name": self._device,
+                "write_available": self.write_available(), "analysis_available": self.analysis_available(),
+                "device_name": self._device,
             }
+            if self._selected_choice is not None:
+                case_id = self._selected_choice[0]
+                visible["resolution_pending"] = True
+                visible["conflicts"] = [
+                    {**case, "resolution_pending": True} if case["id"] == case_id else case
+                    for case in visible.get("conflicts", [])
+                ]
+            return visible
+
+    def select_conflict(self, case_id, case_revision, choice) -> dict:
+        """Queue a witnessed choice. The request handler does not access the share."""
+        with self._lock:
+            offered = self._visible_choices.get(case_id) if isinstance(case_id, str) else None
+            if (
+                self._status.get("status") != "online" or self._restoring or not offered
+                or offered[0].revision != case_revision or choice not in ("local", "shared")
+                or self._selected_choice is not None or (choice == "shared" and not offered[2])
+            ):
+                raise ValueError("Der Fall ist gerade nicht verfügbar. Lade ihn neu und prüfe beide Entscheidungen.")
+            self._selected_choice = (case_id, case_revision, choice, *offered)
+            self._wake.set()
+            return self.snapshot()
+
+    def conflict_evidence(self, case_id: str, case_revision: str) -> dict | None:
+        with self._lock:
+            media = self._visible_media.get(case_id)
+            if self._restoring or media is None or media[0] != case_revision:
+                return None
+            revision = self._revision
+            key = (revision, case_id, case_revision)
+            if cached := self._media_cache.get(key):
+                self._media_cache.move_to_end(key)
+                return cached
+            if self._status.get("status") not in ("online", "read_only"):
+                return None
+        if not self._media_request_lock.acquire(blocking=False):
+            return None
+        try:
+            result = self._media_lane.request(media[1])
+        finally:
+            self._media_request_lock.release()
+        with self._lock:
+            if (
+                self._revision != revision or self._visible_media.get(case_id) != media
+                or result.get("status") != "ready" or result.get("photo_sha256") != media[1]["expected_hash"]
+            ):
+                return None
+            images = result["images"]
+            self._media_cache[key] = images
+            if len(self._media_cache) > 6:
+                self._media_cache.popitem(last=False)
+            return images
 
     def _update(self, revision: int, **fields) -> None:
         with self._lock:
             if revision == self._revision and not self._restoring:
                 self._status = {**self._status, **fields}
+                if fields.get("status") in ("off", "offline", "read_only", "attention"):
+                    self._analysis_share = None
 
     def _current(self, revision: int) -> bool:
         with self._lock:
@@ -99,8 +193,13 @@ class SharedLibraryPreview:
         with self._lock:
             if restoring is not None:
                 self._restoring = restoring
+                self._analysis_share = None
             if self._config["source_path"]:
                 self._revision += 1
+                self._visible_choices = {}
+                self._selected_choice = None
+                self._visible_media.clear()
+                self._media_cache.clear()
                 self._status = {"status": "paused" if self._config["paused"] else "checking"}
                 self._wake.set()
 
@@ -147,26 +246,55 @@ class SharedLibraryPreview:
             if value is not None and (not os.path.isabs(value) or any(part.casefold() == ".fm" for part in Path(value).parts)):
                 raise ValueError("Wähle den übergeordneten Ordner als absoluten Pfad aus.")
             paths.append(value)
-        if bool(paths[0]) != bool(paths[1]):
-            raise ValueError("Wähle den Fotoordner und den Ordner für den gemeinsamen Stand.")
+        source, sync = paths
+        if source is None and sync is not None:
+            raise ValueError("Wähle zuerst den Fotoordner.")
+        sync = sync or source
         paused, share_embeddings = raw.get("paused", False), raw.get("share_embeddings", False)
         write_enabled = raw.get("write_enabled", False)
-        if any(type(value) is not bool for value in (paused, share_embeddings, write_enabled)):
+        initialize_share = raw.get("initialize_share", False)
+        if any(type(value) is not bool for value in (paused, share_embeddings, write_enabled, initialize_share)):
             raise ValueError("Die Einstellungen sind ungültig.")
-        if share_embeddings:
-            raise ValueError("Die Vorschau speichert keine Gesichtsmerkmale auf der Freigabe.")
-        if write_enabled and not (paths[0] and SharedLibraryPreview.write_available()):
+        if share_embeddings and not (write_enabled and SharedLibraryPreview.analysis_available()):
+            raise ValueError("Der gemeinsame Abgleich von Gesichtsmerkmalen ist für diesen Ordner nicht verfügbar.")
+        if write_enabled and not (source and SharedLibraryPreview.write_available()):
             raise ValueError("Schreibender Abgleich ist für diesen Ordner nicht verfügbar.")
+        if initialize_share and not write_enabled:
+            raise ValueError("Für einen neuen gemeinsamen Stand muss der Abgleichordner beschreibbar sein.")
         return {
-            "source_path": paths[0], "sync_path": paths[1], "paused": paused,
-            "share_embeddings": False, "write_enabled": write_enabled,
+            "source_path": source, "sync_path": sync, "paused": paused,
+            "share_embeddings": share_embeddings, "write_enabled": write_enabled, "initialize_share": initialize_share,
         }
+
+    @staticmethod
+    def _save_config(config: dict) -> None:
+        path = get_data_root() / "shared-library-preview.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix="shared-config-", dir=path.parent) as directory:
+            temporary = Path(directory) / "config.json"
+            temporary.write_text(encode(config), encoding="utf-8")
+            os.replace(temporary, path)
+
+    def _consume_initialization(self, revision: int) -> bool:
+        """Persist the consumed authorization before a filesystem mutation can start."""
+        with self._lock:
+            if not self._current(revision) or not self._config["initialize_share"]:
+                return False
+            config = {**self._config, "initialize_share": False}
+            self._save_config(config)
+            self._config = config
+            return True
 
     def configure(self, raw: dict) -> dict:
         config = self._validated(raw)
         with self._lock:
             if self._restoring:
                 raise ValueError("Die Fotobibliothek wird gerade wiederhergestellt.")
+            if (
+                "initialize_share" not in raw and config["write_enabled"] and self._config["initialize_share"]
+                and (config["source_path"], config["sync_path"]) == (self._config["source_path"], self._config["sync_path"])
+            ):
+                config["initialize_share"] = True
             retiring = None
             if self._config["write_enabled"] and (
                 not config["write_enabled"] or config["source_path"] != self._config["source_path"]
@@ -180,13 +308,13 @@ class SharedLibraryPreview:
                 if manifest:
                     decision_scope = digest([scope, manifest["scope"], manifest["generation"]])
                     retiring = digest([decision_scope, previous["producer_id"]])
-            path = get_data_root() / "shared-library-preview.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with TemporaryDirectory(prefix="shared-config-", dir=path.parent) as directory:
-                temporary = Path(directory) / "config.json"
-                temporary.write_text(encode(config), encoding="utf-8")
-                os.replace(temporary, path)
+            self._save_config(config)
             self._config = config
+            self._analysis_share = None
+            self._visible_choices = {}
+            self._selected_choice = None
+            self._visible_media.clear()
+            self._media_cache.clear()
             self._revision += 1
             self._status = {"status": "paused" if config["paused"] else "checking" if config["source_path"] else "off"}
             self._wake.set()
@@ -209,6 +337,9 @@ class SharedLibraryPreview:
                 config = json.loads(config_path.read_text(encoding="utf-8"))
                 if not self.write_available():
                     config["write_enabled"] = False
+                    config["initialize_share"] = False
+                if not self.analysis_available():
+                    config["share_embeddings"] = False
                 self._config = self._validated(config)
         except (OSError, ValueError, TypeError):
             logger.warning("Could not load the shared library preview configuration")
@@ -259,6 +390,130 @@ class SharedLibraryPreview:
             connection.execute("BEGIN IMMEDIATE")
             acknowledge_changes(connection, outbox_scope, [DirtyImage(*row) for row in rows])
         journal.forget_local_receipt(scope, batch_number)
+
+    def _finish_choice(self, revision, choice, message=None) -> None:
+        with self._lock:
+            if self._current(revision) and self._selected_choice is choice:
+                self._selected_choice = None
+                self._update(revision, choice_error=message)
+
+    def _stage_choice(self, journal, scope, outbox_scope, decision_scope, manifest, config, device_id, peer, state, revision):
+        with self._lock:
+            selected = self._selected_choice
+        if selected is None or state.get("staged_choice") is selected:
+            return False
+        _, expected, side, case, image_id, _ = selected
+        result = self._request({
+            "action": "verify_source", "source_root": config["source_path"],
+            "relative_path": case.relative_path, "expected_hash": case.photo_sha256,
+        }, revision)
+        if result["status"] in ("unavailable", "interrupted"):
+            return False
+        try:
+            with self._lock:
+                if not self._current(revision) or self._selected_choice is not selected:
+                    return False
+                if result.get("photo_sha256") != case.photo_sha256 or peer != case.peer_proof.producer:
+                    raise ValueError("Conflict source or peer changed")
+                with closing(get_conn()) as connection, connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    local = capture_image(connection, config["source_path"], device_id, image_id)
+                    fresh = self._current_conflict(journal, scope, decision_scope, manifest, device_id,
+                                                   peer, case, local, connection)
+                    if fresh is None or fresh.revision != expected:
+                        raise ValueError("The reviewed decisions changed")
+                    if side == "shared":
+                        remote = journal.latest_published_photo(scope, peer, case.photo_sha256).event
+                        plan = compare_for_scope(connection, scope=decision_scope, device_id=device_id,
+                                                 local=local, remote=remote, verified_hash=case.photo_sha256)
+                        if not any(
+                            len(issue.local) == len(issue.shared) == 1
+                            and issue.local[0].face_id == case.local_proof.face_id
+                            and issue.shared[0].face_id == case.peer_proof.face_id
+                            and is_conflict_person_available(connection, scope=decision_scope,
+                                                             left=issue.local[0], right=issue.shared[0])
+                            for issue in plan.conflicts
+                        ):
+                            raise ValueError("Shared person is no longer available")
+                    dirty = reserve_conflict_guard(connection, outbox_scope, image_id)
+                    chosen = case.local_branch if side == "local" else case.peer_branch
+                    stage_conflict_choice(connection, journal, scope, outbox_scope, fresh, expected, chosen.revision, dirty)
+                state["staged_choice"] = selected
+                return True
+        except ValueError:
+            self._finish_choice(revision, selected, "Die geprüften Angaben haben sich geändert. Prüfe den Fall erneut.")
+            return False
+
+    @staticmethod
+    def _current_conflict(journal, scope, decision_scope, manifest, device_id, peer, case, local, connection):
+        if local is None:
+            return None
+        mapped = scoped_snapshot(connection, scope=decision_scope, device_id=device_id, local=local)
+        return build_conflict_case(
+            journal, scope, manifest, device_id, peer, mapped, case.local_proof.face_id, case.peer_proof.face_id,
+            verified_hash=case.photo_sha256, verified_relative_path=case.relative_path,
+        )
+
+    def _consume_choice(self, journal, scope, decision_scope, manifest, config, device_id, peer, entry, revision):
+        try:
+            witnessed = validate_conflict_packet(journal, scope, manifest, device_id, peer, entry.producer, entry.event)
+        except ConflictEvidencePending:
+            return "retry"
+        except ValueError:
+            logger.warning("Ignored an unsupported shared conflict decision")
+            return "ignored"
+        case, resolution = witnessed.case, witnessed.resolution
+        try:
+            related = journal.resolution_packets_for_photo(scope, case.photo_sha256)
+        except ValueError:
+            return "concurrent"
+        competing = []
+        for _, packet in related:
+            if packet == entry or packet.producer not in (peer, device_id):
+                continue
+            try:
+                other = validate_conflict_packet(journal, scope, manifest, device_id, peer, packet.producer, packet.event)
+            except ValueError:
+                continue
+            if other.resolution.subject_id == resolution.subject_id and other.resolution.parents == resolution.parents:
+                competing.append(other.resolution)
+        result = self._request({
+            "action": "verify_source", "source_root": config["source_path"],
+            "relative_path": case.relative_path, "expected_hash": case.photo_sha256,
+        }, revision)
+        if result["status"] in ("unavailable", "interrupted"):
+            return "retry"
+        if result.get("photo_sha256") != case.photo_sha256:
+            return "stale"
+        try:
+            with self._lock:
+                if not self._current(revision):
+                    return "retry"
+                with closing(get_conn()) as connection, connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    row = connection.execute("SELECT id FROM image WHERE content_hash = ?", (case.photo_sha256,)).fetchone()
+                    if row is None:
+                        return "retry"
+                    image_id = row["id"]
+                    local = capture_image(connection, config["source_path"], device_id, image_id)
+                    mapped = scoped_snapshot(connection, scope=decision_scope, device_id=device_id, local=local) if local else None
+                    parents = verified_current_parents(journal, scope, witnessed, mapped) if mapped else ()
+                    for other in competing:
+                        record_resolution(connection, other)
+
+                    def write(_assignment, _event_id):
+                        resolve_face_conflict(
+                            connection, scope=decision_scope, source_path=config["source_path"], device_id=device_id,
+                            image_id=image_id, remote=witnessed.peer_event.event, verified_hash=case.photo_sha256,
+                            verified_relative_path=case.relative_path, local_face_id=case.local_proof.face_id,
+                            shared_face_id=case.peer_proof.face_id, expected_local=case.local_branch.decision,
+                            expected_shared=case.peer_branch.decision,
+                            choice="local" if resolution.selected_revision == case.local_branch.revision else "shared",
+                        )
+
+                    return apply_verified_choice(connection, witnessed, parents, write)
+        except ValueError:
+            return "stale"
 
     @staticmethod
     def _local_revisions_match(outbox_scope: str, receipts: list) -> bool:
@@ -382,7 +637,7 @@ class SharedLibraryPreview:
         return bool(events or skipped or more_baseline)
 
     def _review(self, journal, scope, producer, batch, source_path, cases, proposed, device_id, revision,
-                *, decision_scope=None, apply=False, stats=None) -> bool:
+                *, decision_scope=None, apply=False, stats=None, manifest=None) -> bool:
         needs_retry = False
         current_positions = journal.latest_photo_positions(scope, producer, batch)
         for position, remote in enumerate(journal.events(scope, producer, batch)):
@@ -393,6 +648,9 @@ class SharedLibraryPreview:
             photo_hash = remote.get("photo_sha256")
             if not isinstance(photo_hash, str):
                 continue
+            peer = remote.get("device_name")
+            if stats is not None and isinstance(peer, str) and 0 < len(peer) <= 255:
+                stats.setdefault("peer_names", {})[producer] = peer
             with closing(get_conn()) as connection, connection:
                 connection.execute("BEGIN")
                 row = connection.execute("SELECT id FROM image WHERE content_hash = ?", (photo_hash,)).fetchone()
@@ -415,6 +673,7 @@ class SharedLibraryPreview:
                 cases.pop((producer, photo_hash), None)
                 proposed.pop((producer, photo_hash), None)
                 continue
+            actionable = {}
             try:
                 if decision_scope is None:
                     plan = compare_verified_photo(local, remote, verified_hash=result["photo_sha256"])
@@ -430,6 +689,7 @@ class SharedLibraryPreview:
                                     connection, scope=decision_scope, source_path=source_path, device_id=device_id,
                                     image_id=local.image_id, remote=remote, verified_hash=photo_hash,
                                     verified_relative_path=relative,
+                                    remote_producer=producer, remote_sequence=batch,
                                 )
                             fresh = capture_image(connection, source_path, device_id, local.image_id)
                             if fresh is None:
@@ -438,6 +698,19 @@ class SharedLibraryPreview:
                                 connection, scope=decision_scope, device_id=device_id, local=fresh,
                                 remote=remote, verified_hash=photo_hash,
                             )
+                            if apply:
+                                mapped = scoped_snapshot(connection, scope=decision_scope, device_id=device_id, local=fresh)
+                                for issue in plan.conflicts:
+                                    if len(issue.local) != 1 or len(issue.shared) != 1:
+                                        continue
+                                    left, right = issue.local[0], issue.shared[0]
+                                    case = build_conflict_case(
+                                        journal, scope, manifest, device_id, producer, mapped,
+                                        left.face_id, right.face_id, verified_hash=photo_hash, verified_relative_path=relative,
+                                    )
+                                    if case:
+                                        allowed = is_conflict_person_available(connection, scope=decision_scope, left=left, right=right)
+                                        actionable[left.face_id, right.face_id] = (case, fresh.image_id, allowed)
                     if applied:
                         stats["applied"] = stats.get("applied", 0) + applied
                         invalidate_image_query_cache()
@@ -455,17 +728,80 @@ class SharedLibraryPreview:
             open_faces.extend(("unmatched", face, None) for face in plan.unmatched_local if face.decision is not None)
             open_faces.extend(("unmatched", None, face) for face in plan.unmatched_shared if face.decision is not None)
             seen = cases.setdefault((producer, photo_hash), [])
+            offers = stats.setdefault("choices", {}) if stats is not None else {}
+            media = stats.setdefault("media", {}) if stats is not None else {}
+            for previous in seen:
+                offers.pop(previous["id"], None)
+                media.pop(previous["id"], None)
             seen.clear()
-            for index, (reason, left, right) in enumerate(open_faces[:_MAX_VISIBLE_CASES]):
+            for index, (reason, left, right) in enumerate(open_faces):
                 case_id = digest([producer, photo_hash, reason, left.face_id if left else None,
                                   right.face_id if right else None, index])
+                offer = actionable.get((left.face_id, right.face_id)) if left and right else None
+                if offer:
+                    offers[case_id] = offer
+                case_revision = offer[0].revision if offer else digest([batch, case_id])
+                has_geometry = all(type(value) is int for value in (local.exif_orientation, local.raw_width, local.raw_height))
+                if has_geometry:
+                    media[case_id] = (case_revision, {
+                        "action": "conflict_preview", "source_root": source_path, "relative_path": relative,
+                        "expected_hash": photo_hash, "geometry": (local.exif_orientation, local.raw_width, local.raw_height),
+                        "boxes": {key: face.bbox for key, face in (("local", left), ("shared", right)) if face and face.geometry_reliable},
+                    })
                 seen.append({
-                    "id": case_id, "revision": digest([batch, case_id]), "can_resolve": False,
+                    "id": case_id, "revision": case_revision, "evidence_available": has_geometry,
+                    "can_resolve": offer is not None, "can_keep_local": offer is not None,
+                    "can_use_shared": bool(offer and offer[2]),
                     "relative_path": relative,
                     "reason": {"different_decisions": "different_decision", "unverified_person_identity": "different_person"}.get(reason, reason),
                     "local": _decision(left, self._device), "shared": _decision(right, remote["device_name"]),
                 })
         return needs_retry
+
+    def _reproject_photos(self, journal, scope, producer, photo_hashes, read_state):
+        pending = read_state.setdefault("pending", {})
+        for photo_hash in photo_hashes:
+            latest = journal.latest_published_photo(scope, producer, photo_hash)
+            if latest is not None:
+                pending[producer, latest.batch] = None
+
+    def _project_choices(self, journal, scope, decision_scope, manifest, config, device_id, peer, state, revision) -> bool:
+        packets = journal.resolution_packets(scope, state.get("resolution_cursor", 0), limit=1)
+        retries = state.setdefault("resolution_retries", {})
+        fresh = bool(packets)
+        if not packets and retries:
+            sequence = next(iter(retries))
+            producer, batch, position = retries.pop(sequence)
+            entry = journal.published_event(scope, producer, batch, position)
+            if entry is not None:
+                packets = [(sequence, entry)]
+        for sequence, entry in packets:
+            if fresh:
+                state["resolution_cursor"] = sequence
+            if entry.producer not in (peer, device_id):
+                return fresh
+            result = self._consume_choice(journal, scope, decision_scope, manifest, config, device_id, peer, entry, revision)
+            if result == "retry":
+                retries[sequence] = (entry.producer, entry.batch, entry.position)
+                return fresh
+            if result != "ignored":
+                self._reproject_photos(journal, scope, peer, (entry.event["photo_sha256"],), state)
+            if result == "applied":
+                invalidate_image_query_cache()
+                app_cache.clear()
+                event_hub.publish("clusters", {"reason": "shared_library_resolution"})
+            if result == "concurrent":
+                state["concurrent_choices"] = True
+            selected = state.get("staged_choice")
+            if selected and entry.producer == device_id and result != "ignored":
+                _, _, side, case, _, _ = selected
+                branch = case.local_branch if side == "local" else case.peer_branch
+                if entry.event["resolution"]["event_id"] == case.packet(branch.revision)["resolution"]["event_id"]:
+                    message = None if result == "applied" else "Der Fall bleibt offen. Prüfe den aktuellen gemeinsamen Stand."
+                    self._finish_choice(revision, selected, message)
+                    state.pop("staged_choice", None)
+            return True
+        return False
 
     def _loop(self) -> None:
         journal = self._journal()
@@ -490,9 +826,11 @@ class SharedLibraryPreview:
                     device_id = request["producer_id"]
                     write_requested = config["write_enabled"] and self.write_available()
                     if write_requested and not read_state.get("writable"):
+                        known = request["known_manifest"]
+                        initialize = config["initialize_share"] and self._consume_initialization(revision)
                         probe = self._request({
                             "action": "probe", "sync_root": config["sync_path"], "allow_writes": True,
-                            "known_manifest": request["known_manifest"],
+                            "known_manifest": known, "initialize_share": initialize and known is None,
                         }, revision)
                         if self._current(revision) and probe["status"] == "ready":
                             journal.bind(scope, probe["manifest"])
@@ -514,6 +852,9 @@ class SharedLibraryPreview:
                         publication = self._prepare_publication(journal, scope, outbox_scope, config, request, revision)
                         if publication in ("discarded", "wait"):
                             if publication == "discarded":
+                                selected = read_state.pop("staged_choice", None)
+                                if selected is not None:
+                                    self._finish_choice(revision, selected, "Der Fall hat sich vor der Veröffentlichung geändert.")
                                 self._wake.set()
                             else:
                                 self._update(revision, status="offline", error=None)
@@ -543,6 +884,11 @@ class SharedLibraryPreview:
                                 continue
                             journal.accept(scope, device_id, result["batch"], result["digest"])
                             self._drain_receipt(journal, scope, outbox_scope)
+                        peer = os.environ.get("FACE_MANAGER_SHARED_LIBRARY_TEST_PEER")
+                        if peer:
+                            self._reproject_photos(journal, scope, peer, (
+                                entry["photo_sha256"] for entry in result["batch"]["events"] if entry.get("type") == "photo_snapshot"
+                            ), read_state)
                         did_work = True
                     elif status == "received" and writable:
                         producer, batch = result["producer"], result["batch"]
@@ -565,11 +911,15 @@ class SharedLibraryPreview:
                         local_producers = set(request["local_producers"])
                         remote_producers = {key: tail for key, tail in request["cursor"].items() if key not in local_producers}
                         approved_peer = os.environ.get("FACE_MANAGER_SHARED_LIBRARY_TEST_PEER")
+                        apply = writable and set(remote_producers) == {approved_peer}
                         review = {
                             "decision_scope": decision_scope if writable else None,
-                            "apply": writable and set(remote_producers) == {approved_peer},
-                            "stats": read_state,
+                            "apply": apply, "stats": read_state, "manifest": manifest,
                         }
+                        if apply:
+                            did_work = self._project_choices(
+                                journal, scope, decision_scope, manifest, config, device_id, approved_peer, read_state, revision,
+                            )
                         for producer, tail in remote_producers.items():
                             next_batch = projected.get(producer, 0) + 1
                             if next_batch <= tail:
@@ -591,9 +941,29 @@ class SharedLibraryPreview:
                             visible.extend(group[:_MAX_VISIBLE_CASES - len(visible)])
                             if len(visible) == _MAX_VISIBLE_CASES:
                                 break
+                        with self._lock:
+                            if self._current(revision):
+                                choices = read_state.get("choices", {})
+                                self._visible_choices = {case["id"]: choices[case["id"]] for case in visible if case["id"] in choices} if apply else {}
+                                media = read_state.get("media", {})
+                                self._visible_media = {case["id"]: media[case["id"]] for case in visible if case["id"] in media}
+                        if writable and config["share_embeddings"] and self.analysis_available():
+                            with self._lock:
+                                if self._current(revision) and self._analysis_share is None:
+                                    self._analysis_share = ImportShare(
+                                        config["source_path"], config["sync_path"], manifest, device_id, uuid4().hex,
+                                        fresh_reads=os.environ.get("FACE_MANAGER_SHARED_LIBRARY_FRESH_READ_TEST") == "1",
+                                    )
                         self._update(revision, status="online" if writable else "read_only", conflicts=visible,
                                      imported_decisions=read_state.get("applied", 0),
+                                     peer_names=sorted(set(read_state.get("peer_names", {}).values()), key=str.casefold),
+                                     concurrent_choices=read_state.get("concurrent_choices", False),
                                      conflict_count=sum(map(len, cases.values())), proposed_count=sum(proposed.values()), error=None)
+                        if writable and not did_work:
+                            did_work = apply and self._stage_choice(
+                                journal, scope, outbox_scope, decision_scope, manifest, config, device_id, approved_peer,
+                                read_state, revision,
+                            )
                         if writable and not did_work:
                             did_work = self._stage_local(
                                 journal, scope, outbox_scope, decision_scope, config, device_id, read_state, revision,
@@ -605,6 +975,8 @@ class SharedLibraryPreview:
                             if not self._current(revision):
                                 continue
                             journal.abandon_attempted(scope, request["outgoing"]["batch"])
+                            if (selected := read_state.get("staged_choice")) is not None:
+                                self._finish_choice(revision, selected, "Die Entscheidung konnte nach der Unterbrechung nicht bestätigt werden.")
                             read_state.clear()
                             with closing(get_conn()) as connection, connection:
                                 connection.execute("BEGIN IMMEDIATE")

@@ -19,6 +19,7 @@ import {
   resumeAutoClusterTask,
   resumeImportJob,
   resumeThumbnailWarmup,
+  SharedLibraryState,
   ThumbnailWarmupState,
   ThumbnailWarmupTask,
 } from "../../utils/api";
@@ -350,7 +351,21 @@ function finishedLabel(timestamp: string | null): string {
   return date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
-const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ openImportsRequest = 0 }) => {
+const SHARED_ACTIVITY_STATUS = {
+  off: "Nicht eingerichtet",
+  checking: "Verbindung wird geprüft",
+  read_only: "Schreibgeschützt verbunden",
+  online: "Freigabe verbunden",
+  paused: "Abgleich pausiert",
+  offline: "Ordner gerade nicht erreichbar",
+  attention: "Abgleich benötigt Aufmerksamkeit",
+};
+
+const BackgroundTasksStatus: React.FC<{
+  openImportsRequest?: number;
+  sharedLibrary?: SharedLibraryState | null;
+  sharedLibraryReadError?: string | null;
+}> = ({ openImportsRequest = 0, sharedLibrary, sharedLibraryReadError }) => {
   const [queue, setQueue] = useState<ImportQueueState | null>(null);
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
@@ -591,7 +606,9 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
     };
   }, [isPinned]);
 
-  if (!connectionError && activeTasks.length === 0 && history.length === 0) return null;
+  const shared = sharedLibrary?.available && sharedLibrary.source_path ? sharedLibrary : null;
+  const sharedStatus = sharedLibraryReadError ? "Letzter bekannter Stand" : shared && SHARED_ACTIVITY_STATUS[shared.status];
+  if (!connectionError && !shared && activeTasks.length === 0 && history.length === 0) return null;
 
   const compactLabel =
     activeTasks.length > 0
@@ -602,7 +619,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
   const compactEta =
     activeTasks.length > 0
       ? formatFriendlyDuration(totalEta) ?? "Zeit wird berechnet"
-      : "Bereit";
+      : shared ? sharedStatus : "Bereit";
 
   return (
     <div
@@ -639,7 +656,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
               <p>
                 {activeTasks.length > 0
                   ? "Während dieser Arbeiten kann Face Manager vorübergehend langsamer reagieren."
-                  : "Aktuell ist keine Aufgabe offen."}
+                  : shared ? "Hier findest du den Stand deines gemeinsamen Ordners." : "Aktuell ist keine Aufgabe offen."}
               </p>
             </div>
             {activeTasks.length > 0 && (
@@ -674,6 +691,23 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
                   {parallelImports} Bilderordner werden gleichzeitig verarbeitet. Die angezeigte Gesamtzeit berücksichtigt das bereits.
                 </p>
               )}
+            </div>
+          )}
+
+          {shared && (
+            <div className="activity-center__section activity-center__section--shared" aria-label="Gemeinsamer Ordner">
+              <div className="activity-center__section-title">Gemeinsamer Ordner</div>
+              <div className="activity-shared-library">
+                <strong>{folderName(shared.source_path ?? "")}</strong>
+                <span>{sharedStatus}</span>
+                {sharedLibraryReadError && <small>Der aktuelle Stand konnte nicht geladen werden.</small>}
+                {Boolean(shared.peer_names?.length) && <small>Bekannte Geräte: {shared.peer_names?.join(", ")}</small>}
+                <a href="#/gesichter-pruefen/abgleich" onClick={() => setIsPinned(false)}>
+                  {(shared.conflict_count ?? 0) > 0
+                    ? `${shared.conflict_count} beim Abgleich prüfen`
+                    : "Abgleich ansehen"}
+                </a>
+              </div>
             </div>
           )}
 

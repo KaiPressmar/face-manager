@@ -26,6 +26,27 @@
   cursor: pointer;
 }
 
+.shared-library__tab {
+  text-decoration: none;
+}
+
+.shared-library__path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 6px 10px;
+}
+
+.shared-library__path > p {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 520px) {
+  .shared-library__path {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .shared-library .settings-text-input,
 .shared-library button {
   min-height: 44px;
@@ -62,6 +83,14 @@
   aspect-ratio: 1;
   object-fit: cover;
   margin-block: 6px;
+}
+
+.shared-library__full-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
 }
 
 .shared-library__case-list {

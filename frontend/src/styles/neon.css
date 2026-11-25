@@ -811,6 +811,30 @@ button.sidebar__version:hover {
   border-top: 1px solid var(--border);
 }
 
+.activity-shared-library {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.activity-shared-library strong {
+  color: var(--text);
+}
+
+.activity-shared-library a {
+  display: flex;
+  align-items: center;
+  justify-self: start;
+  min-height: 32px;
+  color: var(--accent-text);
+}
+
 .activity-center__section-title {
   display: flex;
   align-items: center;

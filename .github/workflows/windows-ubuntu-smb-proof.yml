@@ -1,0 +1,52 @@
+name: Windows and Ubuntu SMB interoperability proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/windows-ubuntu-smb-proof.yml'
+      - 'scripts/test-wsl-smb.ps1'
+      - 'backend/services/shared_sync_transport.py'
+      - 'backend/tests/shared_sync_smb_client.py'
+
+permissions:
+  contents: read
+
+jobs:
+  cross-platform-smb:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Check WSL and prepare an Ubuntu 26.04 guest
+        shell: pwsh
+        timeout-minutes: 12
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          wsl.exe --version
+          $archive = Join-Path $env:TEMP 'fm-ubuntu-26.04.1-amd64-rootfs.tar.gz'
+          $location = Join-Path $env:TEMP 'fm-wsl-smb-proof'
+          $source = 'https://releases.ubuntu.com/26.04/ubuntu-26.04.1-wsl-amd64.wsl'
+          $sha256 = '48d56724b5c8e60f24893e83e73bbb58c60b3ca22fba3da977075420acd54104'
+          curl.exe --fail --silent --show-error --location --retry 2 --retry-max-time 240 --max-time 180 `
+            --output $archive $source
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $sha256) {
+            throw 'The downloaded Canonical Ubuntu WSL image does not match its pinned SHA-256.'
+          }
+          New-Item -ItemType Directory -Path $location | Out-Null
+          wsl.exe --import FaceManagerSmbProof $location $archive --version 2
+          Remove-Item -LiteralPath $archive -Force
+          wsl.exe --list --verbose
+          wsl.exe --distribution FaceManagerSmbProof --user root --exec apt-get -q -o Acquire::Retries=2 update
+          wsl.exe --distribution FaceManagerSmbProof --user root --exec apt-get -qy --no-install-recommends `
+            install cifs-utils iproute2 python3
+      - name: Test native Windows and Ubuntu CIFS share publication
+        shell: pwsh
+        timeout-minutes: 7
+        run: ./scripts/test-wsl-smb.ps1 -Distribution FaceManagerSmbProof

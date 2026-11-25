@@ -15,6 +15,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+- Windows-Netzwerkordner werden beim Einreihen im Hintergrund geprüft. Dadurch bleibt die App während der Ordnerprüfung bedienbar.
+
 ## [0.14.2] - 2026-11-24
 
 ### Neu

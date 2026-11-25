@@ -35,6 +35,32 @@ class SharedExchangeTest(unittest.TestCase):
             self.skipTest("Local filesystem does not support no-replace publication")
         return transport
 
+    def test_join_does_not_create_a_new_share_or_replace_one_that_disappeared(self):
+        request = {"action": "probe", "sync_root": str(self.root), "allow_writes": True}
+        with self.assertRaises(FileNotFoundError):
+            run_request(request)
+        self.assertFalse((self.root / ".fm").exists())
+
+        initialized = run_request({**request, "initialize_share": True})
+        if not initialized["writable"]:
+            self.skipTest("Local filesystem does not support no-replace publication")
+        (self.root / ".fm").rename(self.root / "unmounted-share")
+        with self.assertRaises(FileNotFoundError):
+            run_request({**request, "known_manifest": initialized["manifest"], "initialize_share": True})
+        self.assertFalse((self.root / ".fm").exists())
+
+    def test_creation_authorization_is_one_shot_and_uses_photo_folder_by_default(self):
+        with (
+            patch.dict(os.environ, FACE_MANAGER_SHARED_LIBRARY_PREVIEW="1", FACE_MANAGER_SHARED_LIBRARY_WRITE_TEST="1"),
+            patch("backend.services.shared_sync_preview.get_data_root", return_value=self.root),
+        ):
+            preview = SharedLibraryPreview()
+            config = preview.configure({"source_path": str(self.root), "write_enabled": True, "initialize_share": True})
+            self.assertEqual(config["sync_path"], config["source_path"])
+            self.assertTrue(preview._consume_initialization(preview._revision))
+            self.assertFalse(preview._consume_initialization(preview._revision))
+            self.assertIn('"initialize_share":false', (self.root / "shared-library-preview.json").read_text())
+
     def test_pc2_keeps_its_previous_name_after_pc1_redetects_the_same_photo(self):
         photo_path = self.root / "family.jpg"
         photo_path.write_bytes(b"The same test photo on both devices")

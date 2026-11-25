@@ -1,6 +1,9 @@
+import hashlib
+import json
 import logging
 import os
 import sys
+from importlib import metadata
 from pathlib import Path
 from threading import Lock
 from weakref import ref
@@ -28,6 +31,11 @@ DETECTION_SIZE = (1024, 1024)
 _openvino_lock = Lock()
 _openvino_registered = False
 _openvino_dll_directory = None
+_SHARED_PREPROCESSING_VERSION = "raw-pillow-rgb-insightface-l2-f32le-512-v1"
+
+
+def _weight_identity(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 def _configure_bundled_cuda_search_path() -> None:
@@ -145,6 +153,14 @@ class FaceModel:
             providers=providers,
         )
         app.prepare(ctx_id=ctx_id, det_size=DETECTION_SIZE)
+        try:
+            app._face_manager_weight_assets = tuple(
+                (task, path, _weight_identity(path.stat()))
+                for task in FACE_MODELS
+                for path in (Path(app.models[task].model_file),)
+            )
+        except (AttributeError, KeyError, OSError, TypeError):
+            app._face_manager_weight_assets = None
         return app
 
     def __init__(self):
@@ -162,6 +178,7 @@ class FaceModel:
             providers.append(INTEL_PROVIDER)
         self._remaining_providers = iter(providers)
         self._active = self._load_next_provider()
+        self._shared_signature_cache = None
         _active_model = ref(self)
 
     def _load_next_provider(self):
@@ -207,6 +224,55 @@ class FaceModel:
     @property
     def compute_mode(self):
         return get_compute_mode(self.execution_provider)
+
+    def shared_pipeline_signature(self) -> str:
+        """Fingerprint the model assets and preprocessing used for shared results."""
+        with self._lock:
+            app, _ = self._active
+            assets = getattr(app, "_face_manager_weight_assets", None)
+            if assets is None:
+                raise RuntimeError("Shared analysis requires identifiable model weights")
+            if any(_weight_identity(path.stat()) != identity for _, path, identity in assets):
+                raise RuntimeError("Model weights changed after the active model was loaded")
+            detector, recognizer = (app.models[task] for task in FACE_MODELS)
+            settings = (
+                tuple(tuple(size) for size in getattr(detector, "input_sizes", (detector.input_size,))),
+                float(detector.det_thresh), float(detector.nms_thresh),
+                float(detector.input_mean), float(detector.input_std), tuple(recognizer.input_size),
+                float(recognizer.input_mean), float(recognizer.input_std),
+            )
+            cached = self._shared_signature_cache
+            if cached is not None and cached[0] == (assets, settings):
+                return cached[1]
+
+            weights = {}
+            for task, path, identity in assets:
+                with path.open("rb") as source:
+                    if _weight_identity(os.fstat(source.fileno())) != identity:
+                        raise RuntimeError("Model weights changed before fingerprinting")
+                    digest = hashlib.sha256()
+                    while block := source.read(1024 * 1024):
+                        digest.update(block)
+                    weights[task] = digest.hexdigest()
+                    if _weight_identity(os.fstat(source.fileno())) != identity or _weight_identity(path.stat()) != identity:
+                        raise RuntimeError("Model weights changed while fingerprinting")
+            import cv2
+            from PIL import __version__ as pillow_version
+
+            data = {
+                "preprocessing": _SHARED_PREPROCESSING_VERSION,
+                "insightface": metadata.version("insightface"),
+                "opencv": cv2.__version__,
+                "pillow": pillow_version,
+                "onnxruntime": ort.__version__,
+                "settings": settings,
+                "weights": weights,
+            }
+            signature = hashlib.sha256(
+                json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            ).hexdigest()
+            self._shared_signature_cache = ((assets, settings), signature)
+            return signature
 
     def detect_and_embed(self, image_np):
         """Detect faces and calculate normalized embeddings.

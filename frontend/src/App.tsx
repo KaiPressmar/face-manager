@@ -5,6 +5,7 @@ import ClusterPage from "./components/clusters/ClusterPage";
 import ImageRenamePage from "./components/renaming/ImageRenamePage";
 import SettingsPage from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
+import { useSharedLibrary } from "./hooks/useSharedLibrary";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import WhatsNewModal from "./components/shared/WhatsNewModal";
 import UpdateAvailableModal from "./components/shared/UpdateAvailableModal";
@@ -29,7 +30,7 @@ export type { AppPage } from "./utils/navigation";
 export interface ClusterNavigationTarget {
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
-  reviewView?: "open";
+  reviewView?: "open" | "shared";
   /** Person of the clicked face, if known — lets the review page open the
    *  matching work area without waiting for its cluster list to load. */
   personName?: string | null;
@@ -65,6 +66,7 @@ const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
 };
 
 const App: React.FC = () => {
+  const sharedLibrary = useSharedLibrary();
   const initialEntry = parseNavigationHash(window.location.hash);
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [clusterNavigationTarget, setClusterNavigationTarget] =
@@ -304,6 +306,8 @@ const App: React.FC = () => {
             <ClusterPage
               navigationTarget={clusterNavigationTarget}
               active={active}
+              sharedLibrary={sharedLibrary}
+              onLeaveSharedReview={() => navigate({ page: "review" })}
             />
           </ErrorBoundary>
         );
@@ -319,6 +323,7 @@ const App: React.FC = () => {
           <SettingsPage
             activeSection={settingsSection}
             onNavigateSection={handleNavigateSettingsSection}
+            sharedLibrary={sharedLibrary}
           />
         );
     }
@@ -328,6 +333,8 @@ const App: React.FC = () => {
     <>
       <Layout
         page={page}
+        sharedLibrary={sharedLibrary.resource}
+        sharedLibraryReadError={sharedLibrary.readError}
         onChangePage={handleChangePage}
         onShowReleaseNotes={openFullChangelog}
         onShowUpdate={

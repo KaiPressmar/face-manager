@@ -165,7 +165,7 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/build-release.ps1
 
-      - name: Exercise upgrades from published Windows installers
+      - name: Exercise upgrades from legacy and combined Windows installers
         shell: pwsh
         timeout-minutes: 30
         env:

@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 
 from .shared_sync_transport import MAX_EVENT_BATCH_BYTES, MAX_EVENTS_PER_BATCH
+
+
+MAX_RESOLUTION_PACKETS_PER_PHOTO = 128
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _valid_batch(events, payload: str) -> bool:
@@ -34,6 +40,14 @@ def digest(value) -> str:
 
 class SharedStateChanged(ValueError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedEvent:
+    producer: str
+    batch: int
+    position: int
+    event: dict
 
 
 class ExchangeJournal:
@@ -73,6 +87,7 @@ class ExchangeJournal:
                     batch_number INTEGER NOT NULL,
                     rows_json TEXT NOT NULL,
                     attempted INTEGER NOT NULL DEFAULT 0,
+                    acknowledge_rows INTEGER NOT NULL DEFAULT 1,
                     PRIMARY KEY (scope_id, batch_number)
                 );
                 CREATE TABLE IF NOT EXISTS shared_local_producer (
@@ -98,15 +113,54 @@ class ExchangeJournal:
                 );
                 CREATE INDEX IF NOT EXISTS shared_photo_batch
                     ON shared_latest_photo(scope_id, producer, batch_number, position);
+                CREATE TABLE IF NOT EXISTS shared_resolution_packet (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope_id TEXT NOT NULL,
+                    producer TEXT NOT NULL,
+                    batch_number INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    photo_sha256 TEXT,
+                    UNIQUE (scope_id, producer, batch_number, position)
+                );
+                CREATE INDEX IF NOT EXISTS shared_resolution_packet_scope
+                    ON shared_resolution_packet(scope_id, id);
             """)
             columns = {row[1] for row in connection.execute("PRAGMA table_info(shared_publication_receipt)")}
             if "attempted" not in columns:
                 connection.execute("ALTER TABLE shared_publication_receipt ADD COLUMN attempted INTEGER NOT NULL DEFAULT 1")
+            if "acknowledge_rows" not in columns:
+                connection.execute("ALTER TABLE shared_publication_receipt ADD COLUMN acknowledge_rows INTEGER NOT NULL DEFAULT 1")
+            resolution_columns = {row[1] for row in connection.execute("PRAGMA table_info(shared_resolution_packet)")}
+            if "photo_sha256" not in resolution_columns:
+                connection.execute("ALTER TABLE shared_resolution_packet ADD COLUMN photo_sha256 TEXT")
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS shared_resolution_packet_photo
+                   ON shared_resolution_packet(scope_id, photo_sha256, id)"""
+            )
             connection.execute("INSERT OR IGNORE INTO shared_local_producer SELECT id, producer FROM shared_scope")
-            if connection.execute("PRAGMA user_version").fetchone()[0] < 1:
-                for row in connection.execute("SELECT * FROM shared_batch WHERE digest IS NOT NULL ORDER BY batch_number"):
-                    self._index_photos(connection, row["scope_id"], row["producer"], row["batch_number"], json.loads(row["payload"]))
-                connection.execute("PRAGMA user_version = 1")
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version < 2:
+                for row in connection.execute(
+                    "SELECT * FROM shared_batch WHERE digest IS NOT NULL ORDER BY rowid"
+                ):
+                    key = (row["scope_id"], row["producer"], row["batch_number"])
+                    events = json.loads(row["payload"])
+                    if version < 1:
+                        self._index_photos(connection, *key, events)
+                    self._index_resolution_packets(connection, *key, events)
+            elif version == 2:
+                for row in connection.execute(
+                    """SELECT q.id, q.position, b.payload FROM shared_resolution_packet q JOIN shared_batch b
+                         ON b.scope_id = q.scope_id AND b.producer = q.producer AND b.batch_number = q.batch_number
+                       WHERE b.digest IS NOT NULL"""
+                ):
+                    entry = json.loads(row["payload"])[row["position"]]
+                    connection.execute(
+                        "UPDATE shared_resolution_packet SET photo_sha256 = ? WHERE id = ?",
+                        (self._resolution_photo(entry), row["id"]),
+                    )
+            if version < 3:
+                connection.execute("PRAGMA user_version = 3")
 
     @staticmethod
     def _scope(connection: sqlite3.Connection, scope_id: str) -> sqlite3.Row:
@@ -133,6 +187,12 @@ class ExchangeJournal:
             if scope["manifest"] is not None and scope["manifest"] != serialized:
                 raise SharedStateChanged("The shared library identity has changed")
             connection.execute("UPDATE shared_scope SET manifest = ? WHERE id = ?", (serialized, scope_id))
+
+    def bound_manifest(self, scope_id: str) -> dict | None:
+        """Read the already witnessed shared identity without creating a scope."""
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT manifest FROM shared_scope WHERE id = ?", (scope_id,)).fetchone()
+            return json.loads(row["manifest"]) if row is not None and row["manifest"] is not None else None
 
     def publications_pending(self) -> bool:
         if not self.path.exists():
@@ -163,7 +223,10 @@ class ExchangeJournal:
                 connection.execute("UPDATE shared_scope SET producer = ? WHERE id = ?", (producer, scope_id))
                 connection.execute("INSERT INTO shared_local_producer VALUES (?, ?)", (scope_id, producer))
 
-    def stage(self, scope_id: str, events: list[dict], *, local_rows: tuple[tuple[int, int], ...] = ()) -> None:
+    def stage(
+        self, scope_id: str, events: list[dict], *, local_rows: tuple[tuple[int, int], ...] = (),
+        acknowledge_rows: bool = True,
+    ) -> None:
         payload = encode(events)
         if not _valid_batch(events, payload):
             raise ValueError("The outgoing event batch is outside the supported size")
@@ -175,6 +238,16 @@ class ExchangeJournal:
             if latest is not None and latest["digest"] is None:
                 if latest["payload"] != payload:
                     raise SharedStateChanged("Reconcile the pending batch before staging a new one")
+                guarded = connection.execute(
+                    """SELECT rows_json, acknowledge_rows FROM shared_publication_receipt
+                       WHERE scope_id = ? AND batch_number = ?""", (scope_id, latest["batch_number"]),
+                ).fetchone()
+                if (
+                    bool(guarded) != bool(local_rows)
+                    or guarded and (guarded["rows_json"] != encode(local_rows)
+                                    or bool(guarded["acknowledge_rows"]) != acknowledge_rows)
+                ):
+                    raise SharedStateChanged("The pending batch uses different local publication guards")
                 return
             batch_number = 1 if latest is None else latest["batch_number"] + 1
             first_sequence = 1 if latest is None else latest["first_sequence"] + latest["event_count"]
@@ -184,8 +257,9 @@ class ExchangeJournal:
             )
             if local_rows:
                 connection.execute(
-                    "INSERT INTO shared_publication_receipt(scope_id, batch_number, rows_json) VALUES (?, ?, ?)",
-                    (scope_id, batch_number, encode(local_rows)),
+                    """INSERT INTO shared_publication_receipt(scope_id, batch_number, rows_json, acknowledge_rows)
+                       VALUES (?, ?, ?, ?)""",
+                    (scope_id, batch_number, encode(local_rows), acknowledge_rows),
                 )
 
     def pending_local_rows(self, scope_id: str, batch_number: int) -> tuple[bool, list] | None:
@@ -243,14 +317,14 @@ class ExchangeJournal:
     def acknowledged_local_rows(self, scope_id: str) -> tuple[int, list] | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
-                """SELECT r.batch_number, r.rows_json FROM shared_publication_receipt r
+                """SELECT r.batch_number, r.rows_json, r.acknowledge_rows FROM shared_publication_receipt r
                    JOIN shared_scope s ON s.id = r.scope_id
                    JOIN shared_batch b ON b.scope_id = r.scope_id AND b.producer = s.producer
                        AND b.batch_number = r.batch_number AND b.digest IS NOT NULL
                    WHERE r.scope_id = ? ORDER BY r.batch_number LIMIT 1""",
                 (scope_id,),
             ).fetchone()
-            return (row["batch_number"], json.loads(row["rows_json"])) if row else None
+            return (row["batch_number"], json.loads(row["rows_json"]) if row["acknowledge_rows"] else []) if row else None
 
     def forget_local_receipt(self, scope_id: str, batch_number: int) -> None:
         with closing(self._connect()) as connection, connection:
@@ -329,6 +403,7 @@ class ExchangeJournal:
                     (verified_digest, scope_id, producer, batch_number),
                 )
                 self._index_photos(connection, scope_id, producer, batch_number, events)
+                self._index_resolution_packets(connection, scope_id, producer, batch_number, events)
                 return
             if scope["producer"] == producer:
                 raise SharedStateChanged("The share contains an unknown publication from this device")
@@ -354,6 +429,7 @@ class ExchangeJournal:
                     (scope_id, producer, batch_number),
                 )
             self._index_photos(connection, scope_id, producer, batch_number, events)
+            self._index_resolution_packets(connection, scope_id, producer, batch_number, events)
 
     @staticmethod
     def _index_photos(connection, scope_id: str, producer: str, batch_number: int, events: list[dict]) -> None:
@@ -381,16 +457,87 @@ class ExchangeJournal:
                 )
             }
 
+    @staticmethod
+    def _resolution_photo(event: dict) -> str | None:
+        photo = event.get("photo_sha256")
+        return photo if isinstance(photo, str) and _SHA256.fullmatch(photo) else None
+
+    @staticmethod
+    def _index_resolution_packets(connection, scope_id: str, producer: str, batch_number: int, events: list[dict]) -> None:
+        connection.executemany(
+            """INSERT OR IGNORE INTO shared_resolution_packet (scope_id, producer, batch_number, position, photo_sha256)
+               VALUES (?, ?, ?, ?, ?)""",
+            ((scope_id, producer, batch_number, position, ExchangeJournal._resolution_photo(event))
+             for position, event in enumerate(events) if event.get("type") == "conflict_resolution_proof"),
+        )
+
+    @staticmethod
+    def _resolution_entries(rows) -> list[tuple[int, PublishedEvent]]:
+        result = []
+        for row in rows:
+            entry = json.loads(row["payload"])[row["position"]]
+            result.append((row["id"], PublishedEvent(row["producer"], row["batch_number"], row["position"], entry)))
+        return result
+
+    def resolution_packets(self, scope_id: str, after_id: int, limit: int = 8) -> list[tuple[int, PublishedEvent]]:
+        """Page through locally acknowledged resolution packets in receipt order."""
+        if type(after_id) is not int or not 0 <= after_id < 2**63 or type(limit) is not int or not 1 <= limit <= 64:
+            raise ValueError("Invalid conflict receipt cursor or page size")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT q.id, q.producer, q.batch_number, q.position, b.payload
+                   FROM shared_resolution_packet q JOIN shared_batch b
+                     ON b.scope_id = q.scope_id AND b.producer = q.producer AND b.batch_number = q.batch_number
+                   WHERE q.scope_id = ? AND q.id > ? AND b.digest IS NOT NULL ORDER BY q.id LIMIT ?""",
+                (scope_id, after_id, limit),
+            )
+            return self._resolution_entries(rows)
+
+    def resolution_packets_for_photo(self, scope_id: str, photo_sha256: str) -> list[tuple[int, PublishedEvent]]:
+        """Read all witnessed candidates, or fail closed when review would be incomplete."""
+        if not isinstance(photo_sha256, str) or not _SHA256.fullmatch(photo_sha256):
+            raise ValueError("Invalid conflict photo hash")
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT q.id, q.producer, q.batch_number, q.position, b.payload
+                   FROM shared_resolution_packet q JOIN shared_batch b
+                     ON b.scope_id = q.scope_id AND b.producer = q.producer AND b.batch_number = q.batch_number
+                   WHERE q.scope_id = ? AND q.photo_sha256 = ? AND b.digest IS NOT NULL
+                   ORDER BY q.id LIMIT ?""",
+                (scope_id, photo_sha256, MAX_RESOLUTION_PACKETS_PER_PHOTO + 1),
+            )
+            entries = self._resolution_entries(rows)
+        if len(entries) > MAX_RESOLUTION_PACKETS_PER_PHOTO:
+            raise ValueError("Too many witnessed resolutions for this photo")
+        return entries
+
     def has_current_photo(self, scope_id: str, producer: str, event: dict) -> bool:
+        current = self.latest_published_photo(scope_id, producer, event["photo_sha256"])
+        return current is not None and current.event == event
+
+    def latest_published_photo(self, scope_id: str, producer: str, photo_sha256: str) -> PublishedEvent | None:
+        """Get the latest acknowledged snapshot from this producer and scope."""
         with closing(self._connect()) as connection:
             row = connection.execute(
-                """SELECT p.position, b.payload FROM shared_latest_photo p
+                """SELECT p.batch_number, p.position, b.payload FROM shared_latest_photo p
                    JOIN shared_batch b ON b.scope_id = p.scope_id AND b.producer = p.producer
                        AND b.batch_number = p.batch_number
-                   WHERE p.scope_id = ? AND p.producer = ? AND p.content_hash = ?""",
-                (scope_id, producer, event["photo_sha256"]),
+                   WHERE p.scope_id = ? AND p.producer = ? AND p.content_hash = ? AND b.digest IS NOT NULL""",
+                (scope_id, producer, photo_sha256),
             ).fetchone()
-            return bool(row and json.loads(row["payload"])[row["position"]] == event)
+            if row is None:
+                return None
+            position = row["position"]
+            return PublishedEvent(producer, row["batch_number"], position, json.loads(row["payload"])[position])
+
+    def published_event(self, scope_id: str, producer: str, batch: int, position: int) -> PublishedEvent | None:
+        """Read acknowledged evidence at its exact position, including older heads."""
+        if type(position) is not int or position < 0:
+            return None
+        records = self.events(scope_id, producer, batch)
+        if position >= len(records):
+            return None
+        return PublishedEvent(producer, batch, position, records[position])
 
     def events(self, scope_id: str, producer: str, batch_number: int) -> list[dict]:
         """Read verified events from a specific producer batch for application."""

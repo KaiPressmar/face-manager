@@ -100,6 +100,16 @@ Also test user-visible behavior manually where applicable. Update documentation
 in the same pull request when commands, configuration, UI behavior, or release
 outputs change.
 
+The manually triggered **Windows and Ubuntu SMB interoperability proof** drives
+separate Windows UNC and Ubuntu 26.04 CIFS clients against a temporary Windows
+SMB share on one host. To run it directly, use elevated PowerShell on a Windows
+test machine with the SMB Server service running and an Ubuntu WSL2 distribution
+in NAT mode with `cifs-utils`, `iproute2`, and `python3` installed.
+
+```powershell
+./scripts/test-wsl-smb.ps1 -Distribution Ubuntu-26.04
+```
+
 ### Release notes and developer notes
 
 Before opening or updating a pull request, review the complete change from an
@@ -288,12 +298,14 @@ The publication then performs these steps:
 4. Create a GitHub Release draft from the curated notes or refresh the draft
    for an unchanged retry.
 5. Build and verify the Windows installer and Ubuntu 26.04 amd64 package on
-   their target runners.
-6. Upload both desktop installers and their SHA-256 files to the draft.
-   Public builds provide GitHub provenance attestations for the uploaded installers.
-7. After all packaging jobs succeed, verify that both desktop installers and
-   their checksum assets are present, nonempty and uploaded. Publish the draft
-   and mark it as the latest release.
+   their target runners. The Windows job tests upgrades from published CPU, GPU,
+   and combined installers.
+6. Upload the desktop installers, the byte-identical Windows GPU compatibility
+   copy, and their SHA-256 files to the draft. Public builds provide GitHub
+   provenance attestations for the installers.
+7. After all packaging jobs succeed, verify the draft's tag, all six assets, and
+   the uploaded Windows installer digests and checksum contents. Publish the
+   draft and mark it as the latest release.
 
 Users continue to see the previous latest release until these checks succeed.
 
@@ -308,6 +320,8 @@ and notes before continuing with the artifacts.
 | --- | --- |
 | `FaceManager-Setup-X.Y.Z.exe` | Shared Windows x64 installer for NVIDIA, Intel GPU and CPU |
 | `FaceManager-Setup-X.Y.Z.exe.sha256` | Windows installer checksum |
+| `FaceManager-Setup-GPU-X.Y.Z.exe` | Byte-identical compatibility copy for legacy Windows GPU updaters |
+| `FaceManager-Setup-GPU-X.Y.Z.exe.sha256` | Windows compatibility checksum with the legacy filename |
 | `face-manager_X.Y.Z_amd64.deb` | Ubuntu 26.04 amd64 package for NVIDIA, Intel GPU and CPU |
 | `face-manager_X.Y.Z_amd64.deb.sha256` | Ubuntu package checksum |
 
@@ -336,11 +350,13 @@ The application also checks the public GitHub latest-release endpoint at startup
 and then no more than once per hour unless the user triggers a manual check.
 Release assets must retain the filenames above and their matching `.sha256`
 files. The updater chooses the asset for the installed platform and verifies
-its SHA-256 before allowing installation. Owners of the legacy Windows GPU
-installer can download the shared installer from GitHub Releases and upgrade
-once. Ubuntu package users can open the release page and install the downloaded
-`.deb` with APT. Keep the explicit installation confirmation for unsigned Windows
-installers. Update-check settings and skipped versions are persisted locally.
+its SHA-256 before allowing installation. Legacy Windows GPU updaters use the
+compatibility filename. Keep that file and its own checksum on each latest stable
+release while those updaters are supported. The shared Windows installer is also
+available directly from GitHub Releases. Ubuntu package users can open the
+release page and install the downloaded `.deb` with APT. Keep the explicit
+installation confirmation for unsigned Windows installers. Update-check settings
+and skipped versions are persisted locally.
 
 ### Failures and retries
 

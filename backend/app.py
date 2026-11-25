@@ -79,6 +79,8 @@ from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.shared_sync_preview import shared_library_preview
+from .services.shared_sync_import import SharedImportAnalysis
+from .services.pipeline import ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
@@ -358,6 +360,7 @@ def _notify_recluster_commit(_processed_faces: int, _total_faces: int) -> None:
 
 import_queue = ImportQueue(
     auto_start=False,
+    processor=ImportProcessor(shared_analysis=SharedImportAnalysis(shared_library_preview.analysis_share)),
     on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
@@ -1479,7 +1482,6 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
 
 
 @app.post("/api/process-folder")
-@safe_import_enqueue
 def api_process_folder(request: Request, data: dict = Body(...)):
     """Queue a folder import through the legacy endpoint.
 
@@ -1506,7 +1508,6 @@ def api_process_status(request: Request):
 
 
 @app.post("/api/imports", status_code=202)
-@safe_import_enqueue
 def api_create_import(request: Request, data: dict = Body(...)):
     """Queue a folder for serialized background import.
 
@@ -1519,21 +1520,27 @@ def api_create_import(request: Request, data: dict = Body(...)):
     Raises:
         HTTPException: If the folder path is missing or invalid.
     """
-    if "folder_path" not in data:
+    if not isinstance(data.get("folder_path"), str) or not data["folder_path"].strip() or "\0" in data["folder_path"]:
         raise HTTPException(status_code=400, detail="Wähle einen Bilderordner aus.")
 
     folder_path = normalize_import_folder_path(data["folder_path"])
 
-    if not os.path.isdir(folder_path):
+    defer_check = folder_path.startswith(("\\\\", "//")) or shared_library_preview.contains_source(folder_path)
+    if not defer_check and not os.path.isdir(folder_path):
         raise HTTPException(
             status_code=400,
             detail=f"Der ausgewählte Ordner ist nicht verfügbar: {folder_path}",
         )
 
-    payload = import_queue.enqueue(folder_path)
+    payload = _enqueue_import(folder_path)
     if get_display_platform(request) == "windows":
         payload["folder_path"] = to_display_path(payload["folder_path"])
     return payload
+
+
+@safe_import_enqueue
+def _enqueue_import(folder_path: str):
+    return import_queue.enqueue(folder_path)
 
 
 @app.get("/api/imports")
@@ -1562,6 +1569,24 @@ def api_configure_shared_library(data: dict = Body(...)):
         return shared_library_preview.configure(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shared-library/resolve", status_code=202)
+def api_resolve_shared_library(data: dict = Body(...)):
+    if not shared_library_preview.write_available():
+        raise HTTPException(status_code=404, detail="Der schreibende Abgleich ist nicht verfügbar.")
+    try:
+        return shared_library_preview.select_conflict(data.get("id"), data.get("revision"), data.get("choice"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/shared-library/conflicts/{case_id}/evidence")
+def api_shared_conflict_evidence(case_id: str, revision: str):
+    evidence = shared_library_preview.conflict_evidence(case_id, revision)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Das geprüfte Foto ist gerade nicht verfügbar.")
+    return JSONResponse(evidence, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/autocluster-tasks")
