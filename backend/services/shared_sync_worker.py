@@ -380,6 +380,40 @@ def _exchange(transport: ShareTransport, request: dict, manifest: dict) -> dict:
     return {"status": "up_to_date", "manifest": manifest, "audit_cursors": audit_cursors}
 
 
+def _parent_share(root: str) -> str | None:
+    path = Path(root)
+    device = path.stat().st_dev
+    for parent in tuple(path.parents)[:16]:
+        try:
+            if parent.stat().st_dev != device:
+                break
+            ShareTransport(str(parent)).open()
+            return str(parent)
+        except (FileNotFoundError, PermissionError):
+            continue
+    return None
+
+
+def _inspect_nested_scope(request: dict) -> dict:
+    parent = Path(request["parent"])
+    child = Path(request["child"])
+    if not parent.is_absolute() or child == parent or not child.is_relative_to(parent):
+        return {"status": "separate"}
+    if ".." in child.parts:
+        return {"status": "separate"}
+    for path in (*reversed(child.parents), child):
+        info = os.lstat(filesystem_path(path))
+        if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return {"status": "separate"}
+    if parent.stat().st_dev != child.stat().st_dev:
+        return {"status": "separate"}
+    try:
+        os.lstat(filesystem_path(child / ".fm"))
+    except FileNotFoundError:
+        return {"status": "ordinary_child"}
+    return {"status": "separate"}
+
+
 def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
     action = request["action"]
     if action == "verify_source":
@@ -390,7 +424,9 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
         return _conflict_preview(request)
     if action == "stage_source":
         return _stage_source(request, staging_root)
-    if action not in ("probe", "exchange", "job"):
+    if action == "inspect_nested_scope":
+        return _inspect_nested_scope(request)
+    if action not in ("probe", "exchange", "job", "job_queue"):
         raise ValueError("Unknown shared library action")
 
     reconcile_only = action == "exchange" and request.get("reconcile_only") is True
@@ -408,9 +444,23 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
             raise InvalidTransportData("Shared analysis requires a known manifest")
         if operation in _JOB_WRITE_OPERATIONS and not allow_writes:
             raise ReadOnlyTransportError("Writing shared analysis jobs has not been enabled")
+    if action == "job_queue":
+        operation = request.get("operation")
+        if operation not in ("publish", "list") or not isinstance(known, dict) or type(known.get("version")) is not int:
+            raise InvalidTransportData("Shared analysis queue requires a known manifest and operation")
+        if operation == "publish" and not allow_writes:
+            raise ReadOnlyTransportError("Publishing shared analysis jobs has not been enabled")
     transport = ShareTransport(request["sync_root"], allow_writes=allow_writes)
     initialize = action == "probe" and allow_writes and known is None and request.get("initialize_share") is True
-    manifest = transport.open(create=initialize)
+    try:
+        manifest = transport.open()
+    except FileNotFoundError:
+        if known is None and request.get("find_parent") is True:
+            if parent := _parent_share(request["sync_root"]):
+                return {"status": "parent_share", "parent": parent}
+        if not initialize:
+            raise
+        manifest = transport.open(create=True)
     if known is not None and known != manifest:
         return {"status": "share_changed"}
     if action == "probe":
@@ -418,6 +468,14 @@ def run_request(request: dict, *, staging_root: Path | None = None) -> dict:
         return {"status": "ready", "manifest": manifest, "writable": writable}
     if action == "job":
         return _job_request(transport, request)
+    if action == "job_queue":
+        from .shared_sync_job_announcements import list_job_announcements, publish_job_announcement
+
+        if operation == "publish":
+            value = publish_job_announcement(transport, request["job"], request["relative_path"])
+        else:
+            value = list_job_announcements(transport, after=request.get("after"), limit=request.get("limit", 16))
+        return {"status": "job_queue", "operation": operation, "value": value}
     return _exchange(transport, request, manifest)
 
 

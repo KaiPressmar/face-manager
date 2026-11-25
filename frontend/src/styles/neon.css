@@ -827,11 +827,11 @@ button.sidebar__version:hover {
   color: var(--text);
 }
 
-.activity-shared-library a {
+.activity-center__section--shared > a {
   display: flex;
   align-items: center;
   justify-self: start;
-  min-height: 32px;
+  min-height: 44px;
   color: var(--accent-text);
 }
 

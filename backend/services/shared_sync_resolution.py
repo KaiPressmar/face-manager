@@ -173,6 +173,10 @@ def initialize_resolutions(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS shared_sync_resolution_parent_revision
         ON shared_sync_resolution_parent(revision, event_id)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS shared_sync_resolution_topic
+        ON shared_sync_resolution(library_scope, photo_sha256, subject_id, applied)
+    """)
 
 
 def record_resolution(conn: sqlite3.Connection, event: ConflictResolution) -> bool:
@@ -192,16 +196,44 @@ def record_resolution(conn: sqlite3.Connection, event: ConflictResolution) -> bo
     return bool(inserted)
 
 
+def was_resolution_applied(conn: sqlite3.Connection, event_id: str) -> bool:
+    """Read whether a confirmed choice once changed or ratified this library."""
+    _require_transaction(conn)
+    _identifier(event_id)
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shared_sync_resolution'"
+    ).fetchone()
+    if table is None:
+        return False
+    row = conn.execute(
+        "SELECT applied FROM shared_sync_resolution WHERE event_id = ?", (event_id,),
+    ).fetchone()
+    return bool(row and row[0])
+
+
 def concurrent_resolutions(conn: sqlite3.Connection, event: ConflictResolution) -> tuple[ConflictResolution, ...]:
     """Return unresolved competing choices for the exact same reviewed branches."""
     _require_transaction(conn)
     rows = conn.execute("""
+        WITH RECURSIVE superseded(revision) AS (
+            SELECT parent.revision FROM shared_sync_resolution successor
+            JOIN shared_sync_resolution_parent parent ON parent.event_id = successor.event_id
+            WHERE successor.applied = 1
+              AND successor.library_scope = :scope AND successor.photo_sha256 = :photo
+              AND successor.subject_id = :subject
+            UNION
+            SELECT parent.revision FROM superseded newer
+            JOIN shared_sync_resolution ancestor ON ancestor.event_id = newer.revision
+            JOIN shared_sync_resolution_parent parent ON parent.event_id = ancestor.event_id
+            WHERE ancestor.library_scope = :scope AND ancestor.photo_sha256 = :photo
+              AND ancestor.subject_id = :subject
+        )
         SELECT DISTINCT other.event_id, other.payload
         FROM shared_sync_resolution_parent own
         JOIN shared_sync_resolution_parent overlap ON overlap.revision = own.revision
         JOIN shared_sync_resolution other ON other.event_id = overlap.event_id
-        WHERE own.event_id = ? AND other.event_id != own.event_id
-          AND other.library_scope = ? AND other.photo_sha256 = ? AND other.subject_id = ?
+        WHERE own.event_id = :event_id AND other.event_id != own.event_id
+          AND other.library_scope = :scope AND other.photo_sha256 = :photo AND other.subject_id = :subject
           AND NOT EXISTS (
               SELECT revision, decision FROM shared_sync_resolution_parent WHERE event_id = own.event_id
               EXCEPT
@@ -213,14 +245,10 @@ def concurrent_resolutions(conn: sqlite3.Connection, event: ConflictResolution) 
               SELECT revision, decision FROM shared_sync_resolution_parent WHERE event_id = own.event_id
           )
           AND NOT EXISTS (
-              SELECT 1 FROM shared_sync_resolution_parent successor_parent
-              JOIN shared_sync_resolution successor ON successor.event_id = successor_parent.event_id
-              WHERE successor_parent.revision = other.event_id AND successor.applied = 1
-                AND successor.library_scope = other.library_scope
-                AND successor.photo_sha256 = other.photo_sha256 AND successor.subject_id = other.subject_id
+              SELECT 1 FROM superseded WHERE revision = other.event_id
           )
         ORDER BY other.event_id
-    """, (event.event_id, event.library_scope, event.photo_sha256, event.subject_id))
+    """, {"event_id": event.event_id, "scope": event.library_scope, "photo": event.photo_sha256, "subject": event.subject_id})
     return tuple(decode_resolution(json.loads(row[1])) for row in rows)
 
 

@@ -72,9 +72,30 @@ class SharedAnalysisTest(unittest.TestCase):
             self.model, self.source.name, self.photo_sha256
         )
         self.assertEqual(reused.state, "reused")
+        self.assertIsNone(reused.worker_name)
         self.assertEqual(self.requests, [("job", "get_result")])
         self.model.detect_and_embed.assert_called_once()
         np.testing.assert_array_equal(reused.faces[0]["embedding"], outcome.faces[0]["embedding"])
+
+    def test_optional_worker_attribution_is_safe_and_backward_compatible(self):
+        owner = self.exchange(worker_name=" Büro-PC ")
+        completed = owner.analyze_or_reuse(self.model, self.source.name, self.photo_sha256)
+        self.assertEqual(completed.worker_name, "Büro-PC")
+        reused = self.exchange(allow_writes=False).analyze_or_reuse(
+            self.model, self.source.name, self.photo_sha256,
+        )
+        self.assertEqual(reused.worker_name, "Büro-PC")
+        self.assertEqual(reused.worker_device_id, owner.device_id)
+
+        old = analysis.encode_analysis(completed.job, (1, 64, 32), [face_sample()])
+        self.assertEqual(analysis.decode_analysis(completed.job, old)[0], (1, 64, 32))
+        for invalid_name in ("\nPC", "PC\u202e1", "PC\u2028Name", "/private/photos", "x" * 81):
+            invalid = analysis.encode_analysis(
+                completed.job, (1, 64, 32), [],
+                worker_name=invalid_name, worker_device_id=owner.device_id,
+            )
+            self.assertNotIn("worker_name", invalid)
+            self.assertEqual(analysis.decode_analysis(completed.job, invalid), ((1, 64, 32), []))
 
     def test_lost_stage_receipt_retries_serialized_result_without_new_inference(self):
         dropped = False

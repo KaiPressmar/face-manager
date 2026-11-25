@@ -584,6 +584,8 @@ export interface SharedLibraryConflict {
   shared_face_id?: number | null;
   evidence_available?: boolean;
   relative_path: string;
+  folder_id?: string;
+  source_path?: string | null;
   can_resolve: boolean;
   can_keep_local?: boolean;
   can_use_shared?: boolean;
@@ -602,7 +604,11 @@ export interface SharedLibraryConfig {
   assist_paused?: boolean;
 }
 
-export interface SharedLibraryState extends SharedLibraryConfig {
+export interface SharedLibraryFolder extends SharedLibraryConfig {
+  folder_id?: string;
+  linked_paths?: string[];
+  blocked_paths?: string[];
+  parent_source_path?: string | null;
   available?: boolean;
   write_available?: boolean;
   analysis_available?: boolean;
@@ -621,6 +627,20 @@ export interface SharedLibraryState extends SharedLibraryConfig {
   error?: string | null;
 }
 
+export interface SharedLibraryState extends SharedLibraryFolder {
+  folders?: Array<SharedLibraryFolder & { folder_id: string }>;
+}
+
+export function sharedLibraryFolders(state: SharedLibraryState | null | undefined): SharedLibraryFolder[] {
+  if (!state || state.available === false) return [];
+  return state.folders ?? (state.source_path ? [state] : []);
+}
+
+export function sharedLibraryConflictFolder(state: SharedLibraryState | null, conflict: SharedLibraryConflict) {
+  if (!conflict.folder_id) return state;
+  return state?.folders?.find(({ folder_id }) => folder_id === conflict.folder_id);
+}
+
 async function sharedLibraryRequest(path: string, options: RequestInit, fallback: string): Promise<SharedLibraryState> {
   const headers = new Headers(options.headers);
   headers.set("x-face-manager-display-platform", DISPLAY_PLATFORM);
@@ -635,7 +655,9 @@ export function fetchSharedLibrary(signal?: AbortSignal): Promise<SharedLibraryS
   return sharedLibraryRequest("", { signal }, "Der gemeinsame Ordner konnte nicht geprüft werden.");
 }
 
-export function updateSharedLibrary(config: SharedLibraryConfig): Promise<SharedLibraryState> {
+export type SharedLibraryUpdate = (SharedLibraryConfig & { folder_id?: string }) | { folder_id: string; remove_linked_path: string };
+
+export function updateSharedLibrary(config: SharedLibraryUpdate): Promise<SharedLibraryState> {
   return sharedLibraryRequest("", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

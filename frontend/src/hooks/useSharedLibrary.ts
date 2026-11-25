@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchSharedLibrary, type SharedLibraryState } from "../utils/api";
+import { fetchSharedLibrary, sharedLibraryFolders, type SharedLibraryState } from "../utils/api";
 
 export function useSharedLibrary() {
   const [resource, setResource] = useState<SharedLibraryState | null>(null);
@@ -54,7 +54,8 @@ export function useSharedLibrary() {
     };
   }, [refresh]);
 
-  const configured = resource?.available !== false && Boolean(resource?.source_path);
+  const folders = sharedLibraryFolders(resource);
+  const configured = folders.length > 0;
   useEffect(() => {
     if (!configured) return;
     const refreshVisible = () => { if (!document.hidden) void refresh(); };
@@ -66,7 +67,7 @@ export function useSharedLibrary() {
     };
   }, [configured, refresh]);
 
-  return { resource, readError, working, configured, refresh, mutate };
+  return { resource, readError, working, configured, folders, refresh, mutate };
 }
 
 export type SharedLibraryController = ReturnType<typeof useSharedLibrary>;

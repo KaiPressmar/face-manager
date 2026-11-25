@@ -145,6 +145,23 @@ class SharedSyncResolutionTests(unittest.TestCase):
             record_resolution(db, resolution(BEA, subject_id="9" * 64))
             self.assertEqual(assess_resolution(db, event, event.parents), "ready")
 
+    def test_applied_descendant_closes_unapplied_competing_ancestors(self):
+        first, other = resolution(), resolution(BEA)
+        middle_heads = (first.as_branch(), other.as_branch())
+        middle, competing = (resolution(branch, middle_heads) for branch in middle_heads)
+        final_heads = (middle.as_branch(), competing.as_branch())
+        final = resolution(final_heads[0], final_heads)
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute("BEGIN IMMEDIATE")
+            for event in (final, competing, middle, other, first):
+                record_resolution(db, event)
+            self.assertEqual(concurrent_resolutions(db, first), (other,))
+            self.assertEqual(concurrent_resolutions(db, middle), (competing,))
+            self.assertTrue(mark_resolution_applied(db, final, final.parents))
+            self.assertEqual(concurrent_resolutions(db, first), ())
+            self.assertEqual(concurrent_resolutions(db, middle), ())
+            self.assertEqual(assess_resolution(db, other, (final.as_branch(),)), "stale")
+
 
 if __name__ == "__main__":
     unittest.main()

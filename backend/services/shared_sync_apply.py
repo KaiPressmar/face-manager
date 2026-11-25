@@ -5,6 +5,7 @@ import re
 import sqlite3
 from typing import Literal
 import unicodedata
+from uuid import uuid5
 
 from ..db.schema import FACE_REVIEW_STATUS_ACTIVE, normalize_person_name_key
 from .shared_sync_journal import digest
@@ -15,6 +16,7 @@ from .storage import mark_persons_dirty_for_recluster
 
 
 _PRODUCER = re.compile(r"[0-9a-f]{32}")
+_RESOLUTION_ID = re.compile(r"[0-9a-f]{64}")
 
 
 class SharedConflictChanged(ValueError):
@@ -65,9 +67,12 @@ def _create_observations(connection: sqlite3.Connection) -> None:
             local_state TEXT NOT NULL
         )
     """)
-    # Treat a local write to decision fields as a touch even if the previous
-    # values are written back. SQL does not distinguish manual and background
-    # writes here. Both conservatively end this face's automatic provenance.
+    _create_invalidation_triggers(connection, "observation", "shared_sync_auto_observation")
+
+
+def _create_invalidation_triggers(connection, category: str, table: str) -> None:
+    # A local write to these fields ends provenance even if it writes back the
+    # previous value. SQL cannot distinguish manual and background touches.
     invalidations = (
         ("face", "UPDATE OF id, image_id, cluster_id, review_status, bbox_x, bbox_y, bbox_w, bbox_h, embedding ON face",
          "SELECT OLD.id UNION SELECT NEW.id"),
@@ -81,8 +86,8 @@ def _create_observations(connection: sqlite3.Connection) -> None:
          "SELECT id FROM face WHERE image_id IN (OLD.image_id, NEW.image_id)"),
     )
     for name, event, affected in invalidations:
-        connection.execute(f"""CREATE TRIGGER shared_sync_invalidate_observation_{name} AFTER {event}
-            BEGIN DELETE FROM shared_sync_auto_observation WHERE face_id IN ({affected}); END""")
+        connection.execute(f"""CREATE TRIGGER IF NOT EXISTS shared_sync_invalidate_{category}_{name} AFTER {event}
+            BEGIN DELETE FROM {table} WHERE face_id IN ({affected}); END""")
 
 
 def _scoped_rows(connection, *, scope: str, device_id: str, image_id: int):
@@ -441,7 +446,7 @@ def resolve_face_conflict(
     connection, *, scope: str, source_path: str, device_id: str, image_id: int,
     remote: dict, verified_hash: str, verified_relative_path: str,
     local_face_id: str, shared_face_id: str, expected_local: Assignment | None,
-    expected_shared: Assignment | None, choice: Literal["local", "shared"],
+    expected_shared: Assignment | None, choice: Literal["local", "shared"], resolution_event_id: str | None = None,
 ) -> bool:
     """Apply the reviewed side of one exact conflict in the caller's write transaction.
 
@@ -450,6 +455,8 @@ def resolve_face_conflict(
     This function leaves latest-event, device and outbox checks to the caller.
     """
     _require_write_transaction(connection, scope)
+    if resolution_event_id is not None:
+        _validate_resolution_id(resolution_event_id)
     if choice not in ("local", "shared"):
         raise ValueError("Invalid shared conflict choice")
     local = _capture_verified(connection, source_path, device_id, image_id, remote, verified_hash, verified_relative_path)
@@ -481,25 +488,93 @@ def resolve_face_conflict(
     if _has_observations(connection):
         connection.execute("DELETE FROM shared_sync_auto_observation WHERE face_id = ?", (row["id"],))
     if choice == "shared":
-        person_id, cluster_id, status = None, None, FACE_REVIEW_STATUS_ACTIVE
-        if chosen.kind == "person":
-            person_id = _linked_person(connection, scope, chosen, people)
-        elif chosen.kind == "archived":
-            status = chosen.archive_status
-        if chosen.kind != "unassigned":
-            cluster_id = connection.execute("INSERT INTO cluster(person_id) VALUES (?)", (person_id,)).lastrowid
-        connection.execute("UPDATE face SET cluster_id = ?, review_status = ? WHERE id = ?", (cluster_id, status, row["id"]))
-        # A label is user data even if there are no faces left in that cluster.
-        if row["cluster_id"] is not None and row["label"] is None:
-            connection.execute(
-                "DELETE FROM cluster WHERE id = ? AND NOT EXISTS (SELECT 1 FROM face WHERE cluster_id = cluster.id)",
-                (row["cluster_id"],),
-            )
-        mark_persons_dirty_for_recluster(connection, (row["person_id"], person_id))
+        person_id = _linked_person(connection, scope, chosen, people) if chosen.kind == "person" else None
+        _set_conflict_assignment(connection, row, chosen, person_id)
 
+    _save_conflict_confirmation(
+        connection, scope, source_path, device_id, image_id, row, local_face_id, right, choice, resolution_event_id,
+    )
+    return True
+
+
+def _set_conflict_assignment(connection, row, decision: Assignment, person_id: int | None) -> None:
+    status = decision.archive_status if decision.kind == "archived" else FACE_REVIEW_STATUS_ACTIVE
+    cluster_id = None
+    if decision.kind != "unassigned":
+        cluster_id = connection.execute("INSERT INTO cluster(person_id) VALUES (?)", (person_id,)).lastrowid
+    connection.execute("UPDATE face SET cluster_id = ?, review_status = ? WHERE id = ?", (cluster_id, status, row["id"]))
+    if row["cluster_id"] is not None and row["label"] is None:
+        connection.execute(
+            "DELETE FROM cluster WHERE id = ? AND NOT EXISTS (SELECT 1 FROM face WHERE cluster_id = cluster.id)",
+            (row["cluster_id"],),
+        )
+    mark_persons_dirty_for_recluster(connection, (row["person_id"], person_id))
+
+
+def _validate_resolution_id(event_id: str) -> None:
+    if not isinstance(event_id, str) or not _RESOLUTION_ID.fullmatch(event_id):
+        raise ValueError("Invalid confirmed conflict identity")
+
+
+def _create_confirmed_heads(connection) -> None:
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS shared_sync_confirmed_head (
+            face_id INTEGER PRIMARY KEY REFERENCES face(id) ON DELETE CASCADE,
+            scope TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            local_state TEXT NOT NULL
+        )
+    """)
+    _create_invalidation_triggers(connection, "confirmed_head", "shared_sync_confirmed_head")
+
+
+def confirmed_conflict_head(
+    connection, *, scope: str, image_id: int, device_id: str, face: FaceEvidence,
+) -> str | None:
+    """Identify an exact, still-untouched confirmed write on this local face."""
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shared_sync_confirmed_head'"
+    ).fetchone() is None:
+        return None
+    namespace = snapshot_device_namespace(device_id)
+    for face_id, event_id, state in connection.execute("""
+        SELECT h.face_id, h.event_id, h.local_state FROM shared_sync_confirmed_head h
+        JOIN face f ON f.id = h.face_id WHERE f.image_id = ? AND h.scope = ?
+    """, (image_id, scope)):
+        if snapshot_face_id(namespace, face_id) == face.face_id and state == _face_state(face):
+            return event_id
+    return None
+
+
+def _competing_person_options(connection, scope, device_id, face, decision: Assignment) -> dict[str, int | None]:
+    namespace = snapshot_device_namespace(device_id)
+    candidate = connection.execute(
+        "SELECT id FROM person WHERE person_name_key(name) = ?", (normalize_person_name_key(decision.person_name),),
+    ).fetchone()
+    if candidate and str(uuid5(namespace, f"person/{candidate[0]}")) == decision.person_key:
+        return {decision.person_key: candidate[0]}
+    return _person_options(
+        connection, scope, [FaceMatch(face, face, decision, "shared")], has_links=_has_links(connection),
+    )
+
+
+def is_competing_assignment_available(
+    connection, *, scope: str, device_id: str, face: FaceEvidence, decision: Assignment,
+) -> bool:
+    """Check the exact selected identity before enabling or publishing a choice."""
+    if decision.kind != "person" or (
+        face.decision is not None and replace(face.decision, provenance=decision.provenance) == decision
+    ):
+        return True
+    return decision.person_key in _competing_person_options(connection, scope, device_id, face, decision)
+
+
+def _save_conflict_confirmation(
+    connection, scope, source_path, device_id, image_id, row, local_face_id, right, choice, event_id,
+) -> None:
     # Keeping a previously undecided face is now an explicit local unassignment.
     connection.execute(
-        "INSERT OR IGNORE INTO shared_sync_face_receipt VALUES (?, ?, ?)", (row["id"], scope, shared_face_id),
+        "INSERT OR IGNORE INTO shared_sync_face_receipt VALUES (?, ?, ?)", (row["id"], scope, right.face_id),
     )
     fresh = capture_image(connection, source_path, device_id, image_id)
     mapped = scoped_snapshot(connection, scope=scope, device_id=device_id, local=fresh)
@@ -517,5 +592,59 @@ def resolve_face_conflict(
     connection.execute("""
         INSERT INTO shared_sync_face_resolution VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(face_id, scope, shared_face_key) DO UPDATE SET fingerprint = excluded.fingerprint, choice = excluded.choice
-    """, (row["id"], scope, shared_face_id, _resolution_fingerprint(retained, right), choice))
+    """, (row["id"], scope, right.face_id, _resolution_fingerprint(retained, right), choice))
+    if event_id is not None:
+        _create_confirmed_heads(connection)
+        connection.execute("""
+            INSERT INTO shared_sync_confirmed_head VALUES (?, ?, ?, ?)
+            ON CONFLICT(face_id) DO UPDATE SET scope = excluded.scope, event_id = excluded.event_id,
+                local_state = excluded.local_state
+        """, (row["id"], scope, event_id, _face_state(retained)))
+
+
+def resolve_competing_face_conflict(
+    connection, *, scope: str, source_path: str, device_id: str, image_id: int,
+    original_remote: dict, verified_hash: str, verified_relative_path: str, local_face_id: str, shared_face_id: str,
+    expected_local: Assignment | None, expected_head: str | None, chosen: Assignment, resolution_event_id: str,
+) -> bool:
+    """Conclude two witnessed choices without replacing a newer local edit.
+
+    The caller checked both competing parents and supplied the just-proven
+    current local assignment and confirmed head under the same transaction.
+    """
+    _require_write_transaction(connection, scope)
+    _validate_resolution_id(resolution_event_id)
+    local = _capture_verified(
+        connection, source_path, device_id, image_id, original_remote, verified_hash, verified_relative_path,
+    )
+    if local is None:
+        raise SharedConflictChanged("The photo can no longer be verified in this shared scope")
+    _create_tables(connection)
+    rows = _scoped_rows(connection, scope=scope, device_id=device_id, image_id=image_id)
+    local = _mapped_snapshot(local, rows)
+    plan = compare_verified_photo(local, original_remote, verified_hash=verified_hash)
+    pair = next((
+        (left, right) for left, right, _ in _matched_pairs(plan)
+        if left.face_id == local_face_id and right.face_id == shared_face_id
+    ), None)
+    if pair is None or pair[0].decision != expected_local:
+        raise SharedConflictChanged("The confirmed face or decision has changed")
+    left, right = pair
+    if confirmed_conflict_head(connection, scope=scope, image_id=image_id, device_id=device_id, face=left) != expected_head:
+        raise SharedConflictChanged("The local conflict was edited after its first confirmation")
+
+    row = rows[local_face_id]
+    same_decision = left.decision is not None and replace(left.decision, provenance=chosen.provenance) == chosen
+    if not same_decision:
+        person_id = None
+        if chosen.kind == "person":
+            people = _competing_person_options(connection, scope, device_id, left, chosen)
+            person_id = _linked_person(connection, scope, chosen, people)
+        _set_conflict_assignment(connection, row, chosen, person_id)
+    if _has_observations(connection):
+        connection.execute("DELETE FROM shared_sync_auto_observation WHERE face_id = ?", (row["id"],))
+    _save_conflict_confirmation(
+        connection, scope, source_path, device_id, image_id, row, local_face_id, right,
+        "local" if same_decision else "shared", resolution_event_id,
+    )
     return True

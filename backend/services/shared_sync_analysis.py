@@ -16,13 +16,14 @@ import stat
 from tempfile import TemporaryDirectory
 from threading import Event, Lock, Thread
 import time
+import unicodedata
 
 import numpy as np
 from PIL import Image
 
 from ..config import EMBEDDING_DIM
 from .preview_cache import get_image_geometry
-from .shared_sync_jobs import make_job_descriptor
+from .shared_sync_jobs import make_job_descriptor, validate_job_descriptor
 from .shared_sync_transport import MAX_ATTEMPTS, InvalidTransportData, PublishConflictError, UnknownPublishError
 
 MAX_FACES = 256
@@ -34,6 +35,9 @@ _OBSERVATION_LIMIT = 32
 _EMBEDDING_BYTES = EMBEDDING_DIM * 4
 _MAX_LOCAL_STAGE_BYTES = 512 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_DEVICE_ID = re.compile(r"[0-9a-f]{32}")
+_ANALYSIS_FIELDS = {"version", "embedding_format", "photo_sha256", "pipeline_signature", "geometry", "faces"}
+_ATTRIBUTION_FIELDS = {"worker_name", "worker_device_id"}
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,8 @@ class SharedAnalysisOutcome:
     job: dict
     faces: list[dict] | None = None
     geometry: tuple[int, int, int] | None = None
+    worker_name: str | None = None
+    worker_device_id: str | None = None
 
 
 class _Unavailable(RuntimeError):
@@ -85,7 +91,22 @@ def _validate_embedding(vector: np.ndarray) -> np.ndarray:
     return vector
 
 
-def encode_analysis(job: dict, geometry: tuple[int, int, int], faces: list[dict]) -> dict:
+def _worker_attribution(value: dict) -> tuple[str | None, str | None]:
+    name, device = value.get("worker_name"), value.get("worker_device_id")
+    if not isinstance(name, str) or not isinstance(device, str) or _DEVICE_ID.fullmatch(device) is None:
+        return None, None
+    if not 1 <= len(name) <= 80 or not name.strip() or any(
+        char in "/\\" or unicodedata.category(char)[0] == "C" or unicodedata.category(char) in ("Zl", "Zp")
+        for char in name
+    ):
+        return None, None
+    return name.strip(), device
+
+
+def encode_analysis(
+    job: dict, geometry: tuple[int, int, int], faces: list[dict], *,
+    worker_name: str | None = None, worker_device_id: str | None = None,
+) -> dict:
     """Serialize a bounded result from the local face model."""
     geometry = _validate_geometry(geometry)
     if not isinstance(faces, list) or len(faces) > MAX_FACES:
@@ -107,7 +128,7 @@ def encode_analysis(job: dict, geometry: tuple[int, int, int], faces: list[dict]
             "bbox": list(_validate_box(bbox, geometry)),
             "embedding": base64.b64encode(vector.tobytes()).decode("ascii"),
         })
-    return {
+    result = {
         "version": _WIRE_VERSION,
         "embedding_format": _EMBEDDING_FORMAT,
         "photo_sha256": job["photo_sha256"],
@@ -115,13 +136,17 @@ def encode_analysis(job: dict, geometry: tuple[int, int, int], faces: list[dict]
         "geometry": list(geometry),
         "faces": serialized,
     }
+    name, device = _worker_attribution({"worker_name": worker_name, "worker_device_id": worker_device_id})
+    if name is not None:
+        result.update(worker_name=name, worker_device_id=device)
+    return result
 
 
 def decode_analysis(job: dict, value: dict) -> tuple[tuple[int, int, int], list[dict]]:
     """Validate a committed result before exposing native float32 data to import."""
     if (
         not isinstance(value, dict)
-        or value.keys() != {"version", "embedding_format", "photo_sha256", "pipeline_signature", "geometry", "faces"}
+        or not _ANALYSIS_FIELDS <= value.keys() <= _ANALYSIS_FIELDS | _ATTRIBUTION_FIELDS
         or type(value["version"]) is not int or value["version"] != _WIRE_VERSION
         or value["embedding_format"] != _EMBEDDING_FORMAT
         or value["photo_sha256"] != job["photo_sha256"]
@@ -202,6 +227,7 @@ class SharedAnalysisExchange:
         self, *, request, sync_root, source_root, manifest, device_id, session_id,
         allow_writes: bool, on_lease=None, heartbeat_request=None, heartbeat_seconds: float = 10,
         max_attempt_seconds: float = 900,
+        worker_name: str | None = None,
     ):
         if on_lease is not None and heartbeat_request is not None:
             raise ValueError("Use one shared analysis lease renewal mechanism")
@@ -215,6 +241,7 @@ class SharedAnalysisExchange:
         self.manifest = dict(manifest)
         self.device_id = device_id
         self.session_id = session_id
+        self.worker_name = worker_name
         self.allow_writes = allow_writes is True
         self._on_lease = on_lease
         self._heartbeat_request = heartbeat_request
@@ -258,7 +285,8 @@ class SharedAnalysisExchange:
         geometry, faces = decode_analysis(job, value)
         with self._lock:
             self._pending.pop(job["job_id"], None)
-        return SharedAnalysisOutcome(state, job, faces, geometry)
+        worker_name, worker_device_id = _worker_attribution(value)
+        return SharedAnalysisOutcome(state, job, faces, geometry, worker_name, worker_device_id)
 
     def _renew(self, job: dict, attempt: int):
         if self._on_lease is None and self._heartbeat_request is None:
@@ -409,7 +437,9 @@ class SharedAnalysisExchange:
             faces = model.detect_and_embed(pixels)
             if model.shared_pipeline_signature() != job["pipeline_signature"]:
                 raise InvalidTransportData("Shared analysis pipeline changed during inference")
-            return encode_analysis(job, geometry, faces)
+            return encode_analysis(
+                job, geometry, faces, worker_name=self.worker_name, worker_device_id=self.device_id,
+            )
 
     def _owned(self, model, relative_path: str, job: dict, attempt: int) -> SharedAnalysisOutcome:
         with self._lease(job, attempt) as ensure_active:
@@ -442,7 +472,18 @@ class SharedAnalysisExchange:
             geometry, faces = decode_analysis(job, wire)
             with self._lock:
                 self._pending.pop(job["job_id"], None)
-            return SharedAnalysisOutcome("analyzed", job, faces, geometry)
+            worker_name, worker_device_id = _worker_attribution(wire)
+            return SharedAnalysisOutcome("analyzed", job, faces, geometry, worker_name, worker_device_id)
+
+    def analyze_announced(
+        self, model, job: dict, relative_path: str, *,
+        server_fresh: bool = False, lease_seconds: float = 60,
+    ) -> SharedAnalysisOutcome:
+        """Take discovered work only when its exact inference pipeline is available."""
+        job = validate_job_descriptor(self.manifest, job)
+        if model.shared_pipeline_signature() != job["pipeline_signature"]:
+            return SharedAnalysisOutcome("incompatible", job)
+        return self._analyze_or_reuse(model, relative_path, job, server_fresh, lease_seconds)
 
     def analyze_or_reuse(
         self, model, relative_path: str, photo_sha256: str, *,
@@ -450,6 +491,9 @@ class SharedAnalysisExchange:
     ) -> SharedAnalysisOutcome:
         """Reuse a committed result or analyze only an attempt owned by this session."""
         job = self.describe(model, photo_sha256)
+        return self._analyze_or_reuse(model, relative_path, job, server_fresh, lease_seconds)
+
+    def _analyze_or_reuse(self, model, relative_path, job, server_fresh, lease_seconds):
         if server_fresh is not True:
             self.reset_observations()
         job_id = job["job_id"]

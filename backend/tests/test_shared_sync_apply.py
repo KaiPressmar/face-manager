@@ -9,7 +9,8 @@ from uuid import uuid4
 from backend.db import schema
 from backend.services.shared_sync_apply import (
     SharedConflictBlocked, SharedConflictChanged, apply_unambiguous, compare_for_scope,
-    is_conflict_person_available, resolve_face_conflict, scoped_snapshot,
+    confirmed_conflict_head, is_conflict_person_available, resolve_competing_face_conflict, resolve_face_conflict,
+    scoped_snapshot,
 )
 from backend.services.shared_sync_merge import Assignment, FaceEvidence
 from backend.services.shared_sync_reconcile import photo_event
@@ -106,6 +107,47 @@ class SharedSyncApplyTests(unittest.TestCase):
             "expected_local": left.decision, "expected_shared": right.decision, "choice": choice,
         }
         return resolve_face_conflict(self.connection, **{**params, **updates})
+
+    def test_competing_confirmation_can_restore_original_identity_but_never_override_a_local_touch(self):
+        self.connection.execute("INSERT INTO person(id, name) VALUES (1, 'Anna')")
+        self.connection.execute("INSERT INTO cluster(id, person_id) VALUES (1, 1)")
+        box = self._face(1, cluster_id=1)
+        remote = self._remote((box, Assignment("person", str(uuid4()), "Bea", provenance="confirmed")))
+        self._start()
+        conflict, = self._compare(remote).conflicts
+        first = "1" * 64
+        final = "2" * 64
+        left, = conflict.local
+        right, = conflict.shared
+        self.assertTrue(self._resolve(remote, conflict, "shared", resolution_event_id=first))
+        self.assertEqual(self._state(), [(1, "active", "Bea")])
+
+        def current():
+            photo = capture_image(self.connection, self.root, DEVICE, 1)
+            return scoped_snapshot(self.connection, scope=SCOPE, device_id=DEVICE, local=photo).faces[0]
+
+        def head(face):
+            return confirmed_conflict_head(self.connection, scope=SCOPE, image_id=1, device_id=DEVICE, face=face)
+
+        def conclude(expected, expected_head, chosen):
+            return resolve_competing_face_conflict(
+                self.connection, scope=SCOPE, source_path=self.root, device_id=DEVICE, image_id=1,
+                original_remote=remote, verified_hash=HASH, verified_relative_path=SOURCE,
+                local_face_id=left.face_id, shared_face_id=right.face_id, expected_local=expected,
+                expected_head=expected_head, chosen=chosen, resolution_event_id=final,
+            )
+
+        self.assertEqual(head(current()), first)
+        self.assertTrue(conclude(current().decision, first, left.decision))
+        self.assertEqual(self._state(), [(1, "active", "Anna")])
+        self.assertEqual(head(current()), final)
+        person = self.connection.execute("SELECT id FROM person WHERE name = 'Anna'").fetchall()
+        self.assertEqual([row[0] for row in person], [1])
+        self.connection.execute("UPDATE face SET cluster_id = cluster_id WHERE id = 1")
+        self.assertIsNone(head(current()))
+        with self.assertRaises(SharedConflictChanged):
+            conclude(current().decision, final, right.decision)
+        self.assertEqual(self._state(), [(1, "active", "Anna")])
 
     def test_shared_person_and_archive_are_applied_once_with_canonical_export_identity(self):
         person_key = str(uuid4())

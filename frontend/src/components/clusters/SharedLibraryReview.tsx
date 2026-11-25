@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { SharedLibraryController } from "../../hooks/useSharedLibrary";
-import { fetchSharedConflictEvidence, resolveSharedLibrary, type SharedLibraryConflict, type SharedLibraryDecision } from "../../utils/api";
+import { fetchSharedConflictEvidence, resolveSharedLibrary, sharedLibraryConflictFolder, type SharedLibraryConflict, type SharedLibraryDecision } from "../../utils/api";
 import { navigationHash } from "../../utils/navigation";
 import "../settings/shared-library.css";
 
 const CONFLICT_REASON: Record<string, string> = {
   different_decision: "Für dieses Gesicht gibt es unterschiedliche Entscheidungen.",
+  concurrent_choices: "Zwei Geräte haben diesen Fall unterschiedlich entschieden. Vergleiche die geprüften Ausschnitte und die beiden Entscheidungen.",
   different_person: "Dieses Gesicht wurde unterschiedlichen Personen zugeordnet.",
   unmatched: "Das Gesicht konnte nicht eindeutig zugeordnet werden.",
   ambiguous_geometry: "Mehrere Gesichtsausschnitte kommen für den Abgleich infrage.",
@@ -71,13 +72,15 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
   const conflicts = resource?.conflicts ?? [];
   const count = resource?.conflict_count ?? conflicts.length;
   const current = selectedCase && conflicts.find(({ id }) => id === selectedCase.id);
+  const folder = selectedCase && sharedLibraryConflictFolder(resource, selectedCase);
+  const concurrent = selectedCase?.reason === "concurrent_choices";
   const stale = Boolean(selectedCase && (needsReload || current?.revision !== selectedCase.revision));
   const choices = (["local", "shared"] as const).filter((choice) => {
-    if (!current?.can_resolve || !selectedCase?.can_resolve || resource?.preview || resource?.resolution_pending) return false;
+    if (!current?.can_resolve || !selectedCase?.can_resolve || !folder || folder.preview || folder.resolution_pending) return false;
     const key = choice === "local" ? "can_keep_local" : "can_use_shared";
     return current[key] !== false && selectedCase[key] !== false;
   });
-  const editable = resource?.status === "online" && !resource.paused && !readError && !stale;
+  const editable = folder?.status === "online" && folder.available !== false && !folder.paused && !readError && !stale;
   const previewKey = selectedCase && `${selectedCase.id}/${selectedCase.revision}/${previewRetry}`;
   const currentPreview = preview?.key === previewKey ? preview : null;
   const images = currentPreview?.images;
@@ -124,7 +127,9 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
       const next = await mutate(() => resolveSharedLibrary(selectedCase, choice));
       if (next) {
         closeCase();
-        if (!next.resolution_pending) setNotice("Die Entscheidung wurde übernommen.");
+        if (!next.resolution_pending && !sharedLibraryConflictFolder(next, selectedCase)?.resolution_pending) {
+          setNotice("Die Entscheidung wurde zur Prüfung vorgemerkt.");
+        }
       }
     } catch (error) {
       if (error instanceof Error && "status" in error && error.status === 409) setNeedsReload(true);
@@ -146,7 +151,7 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
         <p role="status">{resource.status === "checking" ? "Freigabe wird geprüft …" : count === 1 ? "1 Fall zu prüfen" : `${count} Fälle zu prüfen`}</p>
         {resource.error && <p role="alert">{resource.error}</p>}
         {resource.resolution_pending && <p role="status">Die Entscheidung ist zur Prüfung vorgemerkt.</p>}
-        {resource.concurrent_choices && <p role="status">Für ein Gesicht wurden auf zwei Geräten unterschiedliche Entscheidungen getroffen. Prüfe die Zuordnung in der lokalen Bibliothek.</p>}
+        {resource.concurrent_choices && !conflicts.some(({ reason }) => reason === "concurrent_choices") && <p role="status">Für ein Gesicht liegen unterschiedliche Entscheidungen vor. Sobald der Fall verfügbar ist, kannst du ihn hier prüfen.</p>}
         {resource.choice_error && <p className="settings-feedback" role="alert">{resource.choice_error}</p>}
         {resource.status === "online" && !conflicts.length && count === 0 && <p>Gerade sind keine Fälle offen.</p>}
         {!conflicts.length && count > 0 && <p>Die Fälle sind noch nicht verfügbar. Lade den Stand erneut.</p>}
@@ -154,6 +159,7 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
         <div className="shared-library__conflicts">
         {selectedCase && <section aria-labelledby="shared-library-case" className="shared-library__case">
           <h3 id="shared-library-case" tabIndex={-1} ref={caseHeading}>{selectedCase.relative_path}</h3>
+          {selectedCase.source_path && <p>Gemeinsamer Ordner: {selectedCase.source_path}</p>}
           {stale ? <div className="settings-feedback settings-feedback--error">
             <p role="alert">Der Fall hat sich geändert. Lade den aktuellen Stand.</p>
             <button type="button" className="secondary-button" onClick={async () => {
@@ -171,9 +177,9 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
           </div> : <>
             <p>{CONFLICT_REASON[selectedCase.reason] ?? "Dieser Fall braucht eine Prüfung."}</p>
             <div className="shared-library__decisions">
-              <DecisionPreview key={`local-${previewKey}`} label="Auf diesem Gerät" decision={selectedCase.local} image={images?.local}
+              <DecisionPreview key={`local-${previewKey}`} label={concurrent ? "Erste Entscheidung" : "Auf diesem Gerät"} decision={selectedCase.local} image={images?.local}
                 loading={previewLoading} onDecoded={(valid) => markCrop("local", valid)} />
-              <DecisionPreview key={`shared-${previewKey}`} label="Auf der Freigabe" decision={selectedCase.shared} image={images?.shared}
+              <DecisionPreview key={`shared-${previewKey}`} label={concurrent ? "Zweite Entscheidung" : "Auf der Freigabe"} decision={selectedCase.shared} image={images?.shared}
                 loading={previewLoading} onDecoded={(valid) => markCrop("shared", valid)} />
             </div>
             {previewFailed && <div className="settings-feedback settings-feedback--error">
@@ -187,15 +193,17 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
               </button>
               {showPhoto && <img className="shared-library__full-preview" src={images.photo} alt={`Geprüftes Foto · ${selectedCase.relative_path}`} />}
             </>}
-            {resource?.preview && <p>Dieser Fall ist in der Vorschau zur Prüfung vorgemerkt.</p>}
-            {!resource?.preview && !resource?.resolution_pending && choices.length === 0 && <p>Für eine sichere Entscheidung fehlen eindeutige Treffer. Der Fall bleibt offen.</p>}
+            {folder?.preview && <p>Dieser Fall ist in der Vorschau zur Prüfung vorgemerkt.</p>}
+            {!folder?.preview && !folder?.resolution_pending && choices.length === 0 && <p>Für eine sichere Entscheidung fehlen eindeutige Treffer. Der Fall bleibt offen.</p>}
             {choices.length > 0 && !editable && <p>Zum Übernehmen einer Entscheidung braucht dieses Gerät eine verbundene, schreibbare Freigabe.</p>}
             {choices.length > 0 && !cropsDecoded && <p>Zum Übernehmen müssen beide geprüften Ausschnitte sichtbar sein.</p>}
             {choices.length > 0 && <div className="settings-actions">
               {choices.map((choice) => <button key={choice} type="button" className="secondary-button"
                 disabled={working || !editable || !cropsDecoded} onClick={() => {
                   void resolve(choice);
-                }}>{choice === "local" ? "Entscheidung dieses Geräts übernehmen" : "Entscheidung der Freigabe übernehmen"}</button>)}
+                }}>{concurrent
+                  ? `Entscheidung von ${selectedCase[choice].device} übernehmen`
+                  : choice === "local" ? "Entscheidung dieses Geräts übernehmen" : "Entscheidung der Freigabe übernehmen"}</button>)}
             </div>}
           </>}
           <button type="button" className="secondary-button" disabled={working} onClick={closeCase}>Später prüfen</button>
@@ -204,9 +212,10 @@ export default function SharedLibraryReview({ controller }: { controller: Shared
           {conflicts.map((item, index) => <li key={item.id}>
             <div>
               <strong>{item.relative_path}</strong>
+              {item.source_path && <p>Gemeinsamer Ordner: {item.source_path}</p>}
               <p>{decisionLabel(item.local)} · {decisionLabel(item.shared)}</p>
             </div>
-            <button type="button" className="secondary-button" aria-label={`Fall zu ${item.relative_path} prüfen · ${index + 1} von ${conflicts.length}`} onClick={(event) => {
+            <button type="button" className="secondary-button" aria-label={`Fall zu ${item.relative_path} prüfen${item.source_path ? ` · ${item.source_path}` : ""} · ${index + 1} von ${conflicts.length}`} onClick={(event) => {
               caseOpener.current = event.currentTarget;
               setPreview(null);
               setPreviewRetry((previous) => previous + 1);

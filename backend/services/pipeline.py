@@ -11,6 +11,7 @@ import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
@@ -55,6 +56,7 @@ _PROCESSING_SLOT_COUNT = 1
 _PROCESSING_SLOT_SEMAPHORE: threading.BoundedSemaphore = threading.BoundedSemaphore(1)
 _MAX_DEFERRED_SHARED_IMAGES = 16
 _SHARED_RESULT_WAIT_SECONDS = 70
+_SHARED_ANNOUNCEMENT_LOOKAHEAD = 8
 
 
 class ImportCancelled(Exception):
@@ -446,8 +448,16 @@ class ImportProcessor:
             deferred = deque()
 
             def import_candidates():
-                for candidate in preparer.iter_hashed_completed(paths_to_hash, cancel_event):
-                    yield *candidate, None, None
+                ready = preparer.iter_hashed_completed(paths_to_hash, cancel_event)
+                can_announce = getattr(self.shared_analysis, "can_announce_for_import", None)
+                if callable(can_announce) and can_announce(str(folder)):
+                    while batch := list(islice(ready, _SHARED_ANNOUNCEMENT_LOOKAHEAD)):
+                        self._announce_ready_images(cursor, batch, cancel_event)
+                        for candidate in batch:
+                            yield *candidate, None, None
+                else:
+                    for candidate in ready:
+                        yield *candidate, None, None
                 while deferred:
                     yield deferred.popleft()
 
@@ -592,6 +602,41 @@ class ImportProcessor:
             if processing_slot_acquired:
                 self._release_processing_slot()
             conn.close()
+
+    @staticmethod
+    def _computed_hash(future):
+        try:
+            return future.result()
+        except Exception:
+            # The ordinary import loop reports hashing failures once, with
+            # their original path and progress entry.
+            return None
+
+    def _announce_ready_images(self, cursor, candidates, cancel_event) -> None:
+        """Give other devices ready work while this import analyzes its first image."""
+        model = None
+        for path, future in candidates:
+            self._raise_if_cancelled(cancel_event)
+            if not self.shared_analysis.available_for(_stored_filesystem_path(str(path))):
+                continue
+            hashed = self._computed_hash(future)
+            if hashed is None:
+                continue
+            matching = self._find_content(cursor, hashed.content_hash)
+            if matching is not None and matching["processed_at"]:
+                continue
+            try:
+                if model is None:
+                    model = self.resources.get_model()
+                if self.shared_analysis.announce(model, hashed.normalized_path, hashed.content_hash) is False:
+                    # Do not repeat a timed-out publication for every ready
+                    # photo before any ordinary import progress can be made.
+                    return
+            except (OSError, RuntimeError, ValueError) as exc:
+                # Announcement I/O runs in a bounded helper. The ordinary
+                # import path can still continue or retry its own notice.
+                logger.info("Could not announce shared analysis lookahead: %s", exc)
+                return
 
     @staticmethod
     def _acquire_processing_slot(cancel_event: threading.Event) -> None:

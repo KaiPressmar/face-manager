@@ -78,9 +78,9 @@ from .services.autocluster_queue import (
 from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
-from .services.shared_sync_preview import shared_library_preview
+from .services.shared_libraries import shared_library_preview
 from .services.shared_sync_import import SharedImportAnalysis
-from .services.pipeline import ImportProcessor
+from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
@@ -358,9 +358,15 @@ def _notify_recluster_commit(_processed_faces: int, _total_faces: int) -> None:
     _publish_background_cluster_progress_throttled()
 
 
+_shared_analysis = SharedImportAnalysis(
+    shared_library_preview.analysis_share, available_shares=shared_library_preview.analysis_shares,
+    on_reused=shared_library_preview.note_analysis_peer, dispatch=shared_library_preview.dispatch_analysis,
+)
+_import_processor = ImportProcessor(shared_analysis=_shared_analysis)
+
 import_queue = ImportQueue(
     auto_start=False,
-    processor=ImportProcessor(shared_analysis=SharedImportAnalysis(shared_library_preview.analysis_share)),
+    processor=_import_processor,
     on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
@@ -641,6 +647,32 @@ def mark_cluster_assignments_dirty(reason: str) -> None:
     person_suggestion_worker.wake()
 
 
+def _assist_shared_imports(stop: threading.Event) -> None:
+    next_folder = 0
+    delay = 2
+    while not stop.wait(delay):
+        delay = 2
+        bindings = tuple(binding for binding in shared_library_preview.analysis_shares() if not binding.assist_paused)
+        if not bindings or not _reclustering_writer_available():
+            continue
+        binding = bindings[next_folder % len(bindings)]
+        next_folder += 1
+        try:
+            _import_processor._acquire_processing_slot(stop)
+            try:
+                if _reclustering_writer_available():
+                    progress = _shared_analysis.assist(binding, _import_processor.resources.get_model, limit=1)
+                    if progress["more"]:
+                        delay = 0.25
+            finally:
+                _import_processor._release_processing_slot()
+        except ImportCancelled:
+            return
+        except Exception:
+            logger.warning("Could not assist a shared import", exc_info=True)
+            stop.wait(5)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Run the durable import worker for the application lifetime.
@@ -651,6 +683,8 @@ async def lifespan(_app: FastAPI):
     Yields:
         Control while the application is accepting requests.
     """
+    assist_stop = threading.Event()
+    assist_thread = None
     try:
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
@@ -663,6 +697,11 @@ async def lifespan(_app: FastAPI):
             face_thumbnail_warmup_queue.start()
             person_suggestion_worker.start()
             shared_library_preview.start()
+            if shared_library_preview.analysis_available():
+                assist_thread = threading.Thread(
+                    target=_assist_shared_imports, args=(assist_stop,), name="shared-photo-analysis", daemon=True,
+                )
+                assist_thread.start()
             geo_backfill.start()
             image_path_cleanup.resume()
             image_path_cleanup.schedule("startup", delay_seconds=60.0)
@@ -671,7 +710,10 @@ async def lifespan(_app: FastAPI):
             raise
         yield
     finally:
+        assist_stop.set()
         shared_library_preview.stop()
+        if assist_thread is not None:
+            assist_thread.join(timeout=1)
         person_suggestion_worker.stop()
         idle_recluster_scheduler.stop()
         clustering_shutdown_error = None

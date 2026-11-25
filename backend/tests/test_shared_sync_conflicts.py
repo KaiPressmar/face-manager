@@ -5,19 +5,23 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.services.shared_sync_conflicts import (
     ConflictEvidencePending,
     apply_verified_choice,
+    build_competing_conflict_case,
     build_conflict_case,
     reserve_conflict_guard,
     stage_conflict_choice,
     validate_conflict_packet,
+    verified_competing_parents,
     verified_current_parents,
 )
 from backend.services.shared_sync_journal import ExchangeJournal, digest
 from backend.services.shared_sync_merge import Assignment, FaceEvidence
 from backend.services.shared_sync_reconcile import photo_event
+from backend.services.shared_sync_resolution import mark_resolution_applied, record_resolution
 from backend.services.shared_sync_snapshot import SnapshotPhoto
 
 
@@ -244,6 +248,162 @@ class SharedConflictEvidenceTests(unittest.TestCase):
         self.assertEqual(entry.event, remote)
         reopened.initialize()
         self.assertEqual(reopened.resolution_packets("local", 0), [(sequence, entry)])
+
+    def test_followup_proves_both_immutable_confirmations_and_is_order_independent(self):
+        self.receive_pair()
+        original = self.case()
+        own = original.packet(original.local_branch.revision)
+        peer = original.packet(original.peer_branch.revision)
+        self.journal.stage("local", [own])
+        receipt(self.journal, "local", self.own, 2, [own])
+        receipt(self.journal, "local", REMOTE, 2, [peer])
+        first = self.journal.published_event("local", self.own, 2, 0)
+        second = self.journal.published_event("local", REMOTE, 2, 0)
+        case = build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, first, second)
+        inverse = build_competing_conflict_case(self.journal, "local", MANIFEST, REMOTE, self.own, second, first)
+        wire = case.packet(case.local_branch.revision)
+        self.assertEqual(wire, inverse.packet(inverse.peer_branch.revision))
+        self.assertEqual(wire["version"], 2)
+        verified = self.validate(wire)
+        self.assertEqual(verified.original_case, original)
+        self.assertEqual(verified.resolution.chosen_decision, ANNA)
+        with self.assertRaises(ValueError):
+            self.validate({**wire, "proofs": [
+                {**wire["proofs"][0], "event_id": "d" * 64}, wire["proofs"][1],
+            ]})
+        with self.assertRaises(ConflictEvidencePending):
+            self.validate({**wire, "proofs": [
+                {**wire["proofs"][0], "batch": 99}, wire["proofs"][1],
+            ]})
+        with self.assertRaises(ValueError):
+            build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, first, first)
+
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            exact = (case.local_branch, case.peer_branch)
+            self.assertEqual(
+                verified_competing_parents(conn, self.journal, "local", "decisions", verified, self.local_photo), exact,
+            )
+            self.assertEqual(
+                verified_competing_parents(conn, self.journal, "local", "decisions", verified, photo(OWN_FACE, BEA)), (),
+            )
+            receipt(self.journal, "local", REMOTE, 3, [photo_event(photo(PEER_FACE, ANNA), "Existing device")])
+            self.assertEqual(
+                verified_competing_parents(conn, self.journal, "local", "decisions", verified, self.local_photo), exact,
+            )
+            applied = verified.supporting_resolutions[0]
+            record_resolution(conn, applied)
+            self.assertTrue(mark_resolution_applied(conn, applied, applied.parents))
+            # An already applied parent lacking its untouched face marker is never safe to replace.
+            self.assertEqual(
+                verified_competing_parents(conn, self.journal, "local", "decisions", verified, self.local_photo), (),
+            )
+
+    def test_followup_rejects_later_peer_edit_outside_both_witnessed_choices(self):
+        self.receive_pair()
+        original = self.case()
+        own = original.packet(original.local_branch.revision)
+        peer = original.packet(original.peer_branch.revision)
+        self.journal.stage("local", [own])
+        receipt(self.journal, "local", self.own, 2, [own])
+        receipt(self.journal, "local", REMOTE, 2, [peer])
+        case = build_competing_conflict_case(
+            self.journal, "local", MANIFEST, self.own, REMOTE,
+            self.journal.published_event("local", self.own, 2, 0),
+            self.journal.published_event("local", REMOTE, 2, 0),
+        )
+        verified = self.validate(case.packet(case.local_branch.revision))
+        changed = photo_event(photo(PEER_FACE, replace(BEA, person_name="Dora")), "Existing device")
+        receipt(self.journal, "local", REMOTE, 3, [changed])
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.assertEqual(
+                verified_competing_parents(conn, self.journal, "local", "decisions", verified, self.local_photo), (),
+            )
+
+    def _cast_competing_choices(self, case, batch):
+        own = case.packet(case.local_branch.revision)
+        peer = case.packet(case.peer_branch.revision)
+        self.journal.stage("local", [own])
+        receipt(self.journal, "local", self.own, batch, [own])
+        receipt(self.journal, "local", REMOTE, batch, [peer])
+        return (
+            self.journal.published_event("local", self.own, batch, 0),
+            self.journal.published_event("local", REMOTE, batch, 0),
+        )
+
+    def test_competing_followup_votes_allow_a_third_explicit_choice_and_older_owned_state(self):
+        self.receive_pair()
+        original = self.case()
+        first, second = self._cast_competing_choices(original, 2)
+        followup = build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, first, second)
+        third, fourth = self._cast_competing_choices(followup, 3)
+        next_case = build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, third, fourth)
+        wire = next_case.packet(next_case.local_branch.revision)
+        verified = self.validate(wire)
+        self.assertEqual(wire["version"], 2)
+        self.assertEqual(verified.ancestry_depth, 3)
+        self.assertEqual(verified.original_case, original)
+        self.assertEqual(len(verified.supporting_resolutions), 4)
+        original_applied = self.validate(second.event).resolution
+        owned = photo(OWN_FACE, original_applied.chosen_decision)
+        expected = (next_case.local_branch, next_case.peer_branch)
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            record_resolution(conn, original_applied)
+            self.assertTrue(mark_resolution_applied(conn, original_applied, original_applied.parents))
+            with patch(
+                "backend.services.shared_sync_conflicts.confirmed_conflict_head", return_value=original_applied.event_id,
+            ):
+                self.assertEqual(verified_competing_parents(
+                    conn, self.journal, "local", "decisions", verified, owned,
+                ), expected)
+            self.assertEqual(verified_competing_parents(conn, self.journal, "local", "decisions", verified, owned), ())
+
+        with patch("backend.services.shared_sync_conflicts.MAX_CONFLICT_PROOF_DEPTH", 2):
+            with self.assertRaisesRegex(ValueError, "history is too deep"):
+                self.validate(wire)
+        with patch("backend.services.shared_sync_conflicts.MAX_CONFLICT_ANCESTOR_RECORDS", 3):
+            with self.assertRaisesRegex(ValueError, "Too many receipt records"):
+                self.validate(wire)
+
+    def test_acknowledged_confirmation_cannot_refer_to_a_later_same_author_receipt(self):
+        self.receive_pair()
+        first, second = self._cast_competing_choices(self.case(), 2)
+        followup = build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, first, second)
+        future = followup.packet(followup.local_branch.revision)
+        for proof in future["proofs"]:
+            if proof["producer"] == self.own:
+                proof["batch"] = 4
+        self.journal.stage("local", [future])
+        receipt(self.journal, "local", self.own, 3, [future])
+        self.journal.stage("local", [first.event])
+        receipt(self.journal, "local", self.own, 4, [first.event])
+        self.assertEqual(self.validate(future, author=self.own).resolution.chosen_decision, ANNA)
+        with self.assertRaisesRegex(ValueError, "earlier receipts"):
+            validate_conflict_packet(
+                self.journal, "local", MANIFEST, self.own, REMOTE, self.own, future,
+                published=self.journal.published_event("local", self.own, 3, 0),
+            )
+
+    def test_two_author_receipt_cycle_is_rejected(self):
+        self.receive_pair()
+        first, second = self._cast_competing_choices(self.case(), 2)
+        followup = build_competing_conflict_case(self.journal, "local", MANIFEST, self.own, REMOTE, first, second)
+        own = followup.packet(followup.local_branch.revision)
+        peer = followup.packet(followup.peer_branch.revision)
+        for packet, other, other_author in ((own, peer, REMOTE), (peer, own, self.own)):
+            for proof in packet["proofs"]:
+                if proof["producer"] == other_author:
+                    proof.update(batch=3, event_id=other["resolution"]["event_id"])
+        self.journal.stage("local", [own])
+        receipt(self.journal, "local", self.own, 3, [own])
+        receipt(self.journal, "local", REMOTE, 3, [peer])
+        with self.assertRaisesRegex(ValueError, "cannot reference each other cyclically"):
+            validate_conflict_packet(
+                self.journal, "local", MANIFEST, self.own, REMOTE, self.own, own,
+                published=self.journal.published_event("local", self.own, 3, 0),
+            )
 
 
 if __name__ == "__main__":

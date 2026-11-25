@@ -117,3 +117,41 @@
 .shared-library__case > button {
   justify-self: start;
 }
+
+
+.shared-library__folders,
+.shared-library__folder,
+.shared-library__alias-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shared-library__folder {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.shared-library__alias-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.shared-library__alias-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.shared-library__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
