@@ -27,19 +27,19 @@ if ($kernel -notmatch 'WSL2' -or $osVersion -notcontains 'ID=ubuntu') {
 Write-Host "Ubuntu guest kernel: $kernel"
 $osVersion | Where-Object { $_ -like 'PRETTY_NAME=*' } | Write-Host
 if (-not (Invoke-Linux @('cat', '/proc/filesystems') | Where-Object { $_ -match '\bcifs$' })) {
-    Invoke-Linux @('modprobe', 'cifs')
+    Invoke-Linux @('/usr/sbin/modprobe', 'cifs')
 }
-Invoke-Linux @('mount.cifs', '-V')
+Invoke-Linux @('/usr/sbin/mount.cifs', '-V')
 if ((Get-Service LanmanServer).Status -ne 'Running') {
     throw 'The native Windows SMB Server (LanmanServer) service is not running.'
 }
 
-$defaultRoute = Invoke-Linux @('ip', '-4', 'route', 'show', 'default') | Select-Object -First 1
+$defaultRoute = Invoke-Linux @('/usr/sbin/ip', '-4', 'route', 'show', 'default') | Select-Object -First 1
 if ($defaultRoute -notmatch '^default via (?<gateway>[0-9.]+)') {
     throw 'The Ubuntu WSL2 guest has no IPv4 gateway for the private SMB test.'
 }
 $gateway = $Matches.gateway
-$guestRoute = Invoke-Linux @('ip', '-4', 'route', 'get', $gateway) | Select-Object -First 1
+$guestRoute = Invoke-Linux @('/usr/sbin/ip', '-4', 'route', 'get', $gateway) | Select-Object -First 1
 if ($guestRoute -notmatch '\bsrc (?<guest>[0-9.]+)' -or
     -not (Get-NetIPAddress -IPAddress $gateway -AddressFamily IPv4 -ErrorAction SilentlyContinue)) {
     throw "The Ubuntu gateway $gateway is not an IPv4 address on the Windows host. WSL NAT is required for this proof."
