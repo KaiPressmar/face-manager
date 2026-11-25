@@ -78,6 +78,9 @@ from .services.autocluster_queue import (
 from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
+from .services.shared_libraries import shared_library_preview
+from .services.shared_sync_import import SharedImportAnalysis
+from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
@@ -325,6 +328,8 @@ def notify_clusters_changed(reason: str) -> None:
     Args:
         reason: Short label describing what triggered the change.
     """
+    if reason != "background_progress":
+        shared_library_preview.library_changed()
     event_hub.publish("clusters", {"reason": reason})
 
 
@@ -353,8 +358,15 @@ def _notify_recluster_commit(_processed_faces: int, _total_faces: int) -> None:
     _publish_background_cluster_progress_throttled()
 
 
+_shared_analysis = SharedImportAnalysis(
+    shared_library_preview.analysis_share, available_shares=shared_library_preview.analysis_shares,
+    on_reused=shared_library_preview.note_analysis_peer, dispatch=shared_library_preview.dispatch_analysis,
+)
+_import_processor = ImportProcessor(shared_analysis=_shared_analysis)
+
 import_queue = ImportQueue(
     auto_start=False,
+    processor=_import_processor,
     on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
@@ -635,6 +647,32 @@ def mark_cluster_assignments_dirty(reason: str) -> None:
     person_suggestion_worker.wake()
 
 
+def _assist_shared_imports(stop: threading.Event) -> None:
+    next_folder = 0
+    delay = 2
+    while not stop.wait(delay):
+        delay = 2
+        bindings = tuple(binding for binding in shared_library_preview.analysis_shares() if not binding.assist_paused)
+        if not bindings or not _reclustering_writer_available():
+            continue
+        binding = bindings[next_folder % len(bindings)]
+        next_folder += 1
+        try:
+            _import_processor._acquire_processing_slot(stop)
+            try:
+                if _reclustering_writer_available():
+                    progress = _shared_analysis.assist(binding, _import_processor.resources.get_model, limit=1)
+                    if progress["more"]:
+                        delay = 0.25
+            finally:
+                _import_processor._release_processing_slot()
+        except ImportCancelled:
+            return
+        except Exception:
+            logger.warning("Could not assist a shared import", exc_info=True)
+            stop.wait(5)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Run the durable import worker for the application lifetime.
@@ -645,6 +683,8 @@ async def lifespan(_app: FastAPI):
     Yields:
         Control while the application is accepting requests.
     """
+    assist_stop = threading.Event()
+    assist_thread = None
     try:
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
@@ -656,6 +696,12 @@ async def lifespan(_app: FastAPI):
                 run_startup_repairs()
             face_thumbnail_warmup_queue.start()
             person_suggestion_worker.start()
+            shared_library_preview.start()
+            if shared_library_preview.analysis_available():
+                assist_thread = threading.Thread(
+                    target=_assist_shared_imports, args=(assist_stop,), name="shared-photo-analysis", daemon=True,
+                )
+                assist_thread.start()
             geo_backfill.start()
             image_path_cleanup.resume()
             image_path_cleanup.schedule("startup", delay_seconds=60.0)
@@ -664,6 +710,10 @@ async def lifespan(_app: FastAPI):
             raise
         yield
     finally:
+        assist_stop.set()
+        shared_library_preview.stop()
+        if assist_thread is not None:
+            assist_thread.join(timeout=1)
         person_suggestion_worker.stop()
         idle_recluster_scheduler.stop()
         clustering_shutdown_error = None
@@ -1376,6 +1426,10 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         with _media_library_lock:
             _database_restore_in_progress = restore_gate = True
             _media_library_generation += 1
+        if not shared_library_preview.begin_restore():
+            raise HTTPException(
+                status_code=409, detail="Eine Freigabeänderung wird noch bestätigt. Bitte versuche es erneut.",
+            )
         face_thumbnail_warmup_queue.invalidate_library()
         clustering_task = auto_cluster_queue.snapshot().get("task")
         if _imports_finalizing or (
@@ -1397,6 +1451,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             validate_database_file(backup)
             backup_ready = True
 
+        shared_library_preview.prepare_replacement()
         invalidate_person_suggestion_epoch()
         os.replace(upload, current)
         replaced = True
@@ -1435,6 +1490,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
             with _media_library_lock:
                 _database_restore_in_progress = False
                 _media_library_generation += 1
+            shared_library_preview.library_changed(restoring=False)
             face_thumbnail_warmup_queue.wake()
         disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
         for path in (upload, rollback_copy, disposable_backup):
@@ -1468,7 +1524,6 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
 
 
 @app.post("/api/process-folder")
-@safe_import_enqueue
 def api_process_folder(request: Request, data: dict = Body(...)):
     """Queue a folder import through the legacy endpoint.
 
@@ -1495,7 +1550,6 @@ def api_process_status(request: Request):
 
 
 @app.post("/api/imports", status_code=202)
-@safe_import_enqueue
 def api_create_import(request: Request, data: dict = Body(...)):
     """Queue a folder for serialized background import.
 
@@ -1508,21 +1562,27 @@ def api_create_import(request: Request, data: dict = Body(...)):
     Raises:
         HTTPException: If the folder path is missing or invalid.
     """
-    if "folder_path" not in data:
+    if not isinstance(data.get("folder_path"), str) or not data["folder_path"].strip() or "\0" in data["folder_path"]:
         raise HTTPException(status_code=400, detail="Wähle einen Bilderordner aus.")
 
     folder_path = normalize_import_folder_path(data["folder_path"])
 
-    if not os.path.isdir(folder_path):
+    defer_check = folder_path.startswith(("\\\\", "//")) or shared_library_preview.contains_source(folder_path)
+    if not defer_check and not os.path.isdir(folder_path):
         raise HTTPException(
             status_code=400,
             detail=f"Der ausgewählte Ordner ist nicht verfügbar: {folder_path}",
         )
 
-    payload = import_queue.enqueue(folder_path)
+    payload = _enqueue_import(folder_path)
     if get_display_platform(request) == "windows":
         payload["folder_path"] = to_display_path(payload["folder_path"])
     return payload
+
+
+@safe_import_enqueue
+def _enqueue_import(folder_path: str):
+    return import_queue.enqueue(folder_path)
 
 
 @app.get("/api/imports")
@@ -1536,6 +1596,39 @@ def api_imports(request: Request):
         import_queue.snapshot(),
         get_display_platform(request),
     )
+
+
+@app.get("/api/shared-library")
+def api_shared_library():
+    return shared_library_preview.snapshot()
+
+
+@app.put("/api/shared-library")
+def api_configure_shared_library(data: dict = Body(...)):
+    if not shared_library_preview.available():
+        raise HTTPException(status_code=404, detail="Die Vorschau für gemeinsame Ordner ist deaktiviert.")
+    try:
+        return shared_library_preview.configure(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/shared-library/resolve", status_code=202)
+def api_resolve_shared_library(data: dict = Body(...)):
+    if not shared_library_preview.write_available():
+        raise HTTPException(status_code=404, detail="Der schreibende Abgleich ist nicht verfügbar.")
+    try:
+        return shared_library_preview.select_conflict(data.get("id"), data.get("revision"), data.get("choice"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/shared-library/conflicts/{case_id}/evidence")
+def api_shared_conflict_evidence(case_id: str, revision: str):
+    evidence = shared_library_preview.conflict_evidence(case_id, revision)
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="Das geprüfte Foto ist gerade nicht verfügbar.")
+    return JSONResponse(evidence, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/autocluster-tasks")

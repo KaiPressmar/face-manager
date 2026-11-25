@@ -7,9 +7,11 @@ import logging
 import os
 import stat
 import threading
+import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
@@ -22,6 +24,7 @@ from ..models.face_model import FaceModel, get_compute_mode
 from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
 from .image_thumbnails import write_image_thumbnail
 from .preview_cache import get_image_geometry
+from .shared_sync_transport import TransportError
 from .geo import extract_image_metadata, record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
@@ -51,6 +54,9 @@ _PROCESSING_SLOT_LOCK = threading.Lock()
 _IMPORT_INDEX_LOCK = threading.Lock()
 _PROCESSING_SLOT_COUNT = 1
 _PROCESSING_SLOT_SEMAPHORE: threading.BoundedSemaphore = threading.BoundedSemaphore(1)
+_MAX_DEFERRED_SHARED_IMAGES = 16
+_SHARED_RESULT_WAIT_SECONDS = 70
+_SHARED_ANNOUNCEMENT_LOOKAHEAD = 8
 
 
 class ImportCancelled(Exception):
@@ -73,6 +79,15 @@ def _file_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int
         source_stat.st_mtime_ns,
         source_stat.st_ctime_ns,
     )
+
+
+def _matches_imported_identity(path: str, identity: tuple[int, int, int, int, int]) -> bool:
+    if os.name == "nt":
+        # Use the same identity as hashing. On Windows the path-based stat
+        # can report creation time rather than the handle's change time.
+        with open(path, "rb") as source:
+            return _file_identity(os.fstat(source.fileno())) == identity
+    return _file_identity(os.stat(path)) == identity
 
 
 def _control_cancelled(control) -> bool:
@@ -123,7 +138,7 @@ class HashedImage:
 
     def verify_current(self) -> None:
         source = _filesystem_path(self.normalized_path)
-        if _file_identity(os.stat(source)) != self.identity:
+        if not _matches_imported_identity(source, self.identity):
             raise SourceChangedError("Die Datei wurde während des Imports geändert.")
 
 
@@ -358,13 +373,14 @@ class ImportProcessor:
 
     IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 
-    def __init__(self, resources: Optional[ImportResources] = None):
+    def __init__(self, resources: Optional[ImportResources] = None, *, shared_analysis=None):
         """Initialize an import processor.
 
         Args:
             resources: Shared resources to reuse across queued jobs.
         """
         self.resources = resources or ImportResources()
+        self.shared_analysis = shared_analysis
 
     def process(
         self,
@@ -438,14 +454,33 @@ class ImportProcessor:
                     }
                 )
 
-            for image_path, future in preparer.iter_hashed_completed(
-                paths_to_hash, cancel_event
-            ):
+            deferred = deque()
+
+            def import_candidates():
+                ready = preparer.iter_hashed_completed(paths_to_hash, cancel_event)
+                can_announce = getattr(self.shared_analysis, "can_announce_for_import", None)
+                if callable(can_announce) and can_announce(str(folder)):
+                    while batch := list(islice(ready, _SHARED_ANNOUNCEMENT_LOOKAHEAD)):
+                        self._announce_ready_images(cursor, batch, cancel_event)
+                        for candidate in batch:
+                            yield *candidate, None, None
+                else:
+                    for candidate in ready:
+                        yield *candidate, None, None
+                while deferred:
+                    yield deferred.popleft()
+
+            for image_path, future, hashed, expiry in import_candidates():
                 self._raise_if_cancelled(cancel_event)
+                postponed = False
                 try:
-                    hashed = future.result()
+                    if future is not None:
+                        hashed = future.result()
                     if not self._attach_processed_content(cursor, conn, hashed):
-                        image_np = preparer.decode(hashed.path, hashed)
+                        shared = expiry is not None or (
+                            self.shared_analysis is not None and self.shared_analysis.available_for(hashed.normalized_path)
+                        )
+                        image_np = None if shared else preparer.decode(hashed.path, hashed)
                         if not processing_started:
                             self._acquire_processing_slot(cancel_event)
                             processing_slot_acquired = True
@@ -483,6 +518,37 @@ class ImportProcessor:
                         # Keep filesystem reads and model inference ahead of SQLite writes.
                         self._raise_if_cancelled(cancel_event)
                         progress_callback({"current_file": str(hashed.path)})
+                        shared_faces = None
+                        if shared:
+                            deadline = expiry or time.monotonic() + _SHARED_RESULT_WAIT_SECONDS
+                            while True:
+                                try:
+                                    outcome = self.shared_analysis.analyze(model, hashed.normalized_path, hashed.content_hash)
+                                except (OSError, TransportError) as exc:
+                                    logger.info("Using local analysis after shared analysis was unavailable: %s", exc)
+                                    outcome = None
+                                if outcome is None or outcome.state == "exhausted":
+                                    image_np = preparer.decode(hashed.path, hashed)
+                                    break
+                                if outcome.state == "source_changed":
+                                    raise SourceChangedError("Die Datei wurde während des gemeinsamen Imports geändert.")
+                                if outcome.state in ("analyzed", "reused"):
+                                    shared_faces, hashed.geometry = outcome.faces, outcome.geometry
+                                    break
+                                if time.monotonic() >= deadline:
+                                    # The local result never claims or replaces another device's lease.
+                                    logger.info("Using local analysis after the shared result deadline")
+                                    image_np = preparer.decode(hashed.path, hashed)
+                                    break
+                                if future is not None and len(deferred) < _MAX_DEFERRED_SHARED_IMAGES:
+                                    deferred.append((image_path, None, hashed, deadline))
+                                    postponed = True
+                                    break
+                                time.sleep(0.25)
+                                self._raise_if_cancelled(cancel_event)
+                            if postponed:
+                                continue
+                            self._raise_if_cancelled(cancel_event)
                         self._process_image(
                             cursor,
                             conn,
@@ -493,6 +559,7 @@ class ImportProcessor:
                             progress_callback,
                             pending_source=hashed,
                             on_index_ready=report_index_ready,
+                            shared_faces=shared_faces,
                         )
                     content_groups.setdefault(hashed.content_hash, set()).add(hashed.normalized_path)
                     successful_images += 1
@@ -509,8 +576,8 @@ class ImportProcessor:
                     last_error = f"{image_path}: {exc}"
                     progress_callback({"last_error": last_error})
                 finally:
-                    completed_images += 1
-                    hashed_images += 1
+                    completed_images += not postponed
+                    hashed_images += future is not None
                     progress_callback(
                         {
                             "current_file": str(image_path),
@@ -546,6 +613,41 @@ class ImportProcessor:
             conn.close()
 
     @staticmethod
+    def _computed_hash(future):
+        try:
+            return future.result()
+        except Exception:
+            # The ordinary import loop reports hashing failures once, with
+            # their original path and progress entry.
+            return None
+
+    def _announce_ready_images(self, cursor, candidates, cancel_event) -> None:
+        """Give other devices ready work while this import analyzes its first image."""
+        model = None
+        for path, future in candidates:
+            self._raise_if_cancelled(cancel_event)
+            if not self.shared_analysis.available_for(_stored_filesystem_path(str(path))):
+                continue
+            hashed = self._computed_hash(future)
+            if hashed is None:
+                continue
+            matching = self._find_content(cursor, hashed.content_hash)
+            if matching is not None and matching["processed_at"]:
+                continue
+            try:
+                if model is None:
+                    model = self.resources.get_model()
+                if self.shared_analysis.announce(model, hashed.normalized_path, hashed.content_hash) is False:
+                    # Do not repeat a timed-out publication for every ready
+                    # photo before any ordinary import progress can be made.
+                    return
+            except (OSError, RuntimeError, ValueError) as exc:
+                # Announcement I/O runs in a bounded helper. The ordinary
+                # import path can still continue or retry its own notice.
+                logger.info("Could not announce shared analysis lookahead: %s", exc)
+                return
+
+    @staticmethod
     def _acquire_processing_slot(cancel_event: threading.Event) -> None:
         """Acquire the shared processing slot with cancellation checks."""
         while True:
@@ -577,6 +679,7 @@ class ImportProcessor:
         """
         image_paths = []
         for root, directories, filenames in os.walk(_filesystem_path(folder)):
+            directories[:] = [name for name in directories if name.casefold() != ".fm"]
             directories.sort()
             filenames.sort()
             if cancel_event is not None:
@@ -654,17 +757,16 @@ class ImportProcessor:
             ):
                 needs_hash.append(path)
                 continue
-            try:
-                stat_result = os.stat(_filesystem_path(normalized_path))
-            except OSError:
-                needs_hash.append(path)
-                continue
             identity = (
                 int(known["file_device"]), int(known["file_inode"]),
                 int(known["file_size"]), int(known["modified_at_ns"]),
                 int(known["file_changed_at_ns"]),
             )
-            if identity == _file_identity(stat_result):
+            try:
+                current = _matches_imported_identity(_filesystem_path(normalized_path), identity)
+            except OSError:
+                current = False
+            if current:
                 unchanged.append(path)
             else:
                 needs_hash.append(path)
@@ -675,16 +777,20 @@ class ImportProcessor:
         cursor,
         connection,
         image_id: int | None,
-        image_np: np.ndarray,
+        image_np: np.ndarray | None,
         model: FaceModel,
         clusterer: FaceClustering | None,
         progress_callback: ProgressCallback,
         *,
         pending_source: HashedImage | None = None,
         on_index_ready: Callable[[], None] | None = None,
+        shared_faces: list[dict] | None = None,
     ) -> None:
         """Run inference, then serialize index and database changes together."""
-        faces = model.detect_and_embed(image_np)
+        if shared_faces is None:
+            faces = model.detect_and_embed(image_np)
+        else:
+            faces = shared_faces
         distance_threshold = get_cluster_distance_threshold()
         with _IMPORT_INDEX_LOCK:
             # Look up the index here, after inference. A preceding importer
@@ -706,7 +812,7 @@ class ImportProcessor:
         committed_image_id, existing_face_ids, thumbnail_faces = committed
         for face_id in existing_face_ids:
             delete_face_thumbnail(face_id)
-        if pending_source is not None and pending_source.geometry is not None:
+        if image_np is not None and pending_source is not None and pending_source.geometry is not None:
             try:
                 with Image.fromarray(image_np) as raw:
                     orientation = pending_source.geometry[0]

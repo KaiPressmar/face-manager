@@ -13,6 +13,17 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.15.0] - 2026-11-25
+
+### Verbessert
+
+- Die bisherige Windows-GPU-Ausgabe kann über das normale App-Update zum gemeinsamen Installer wechseln. Beim Update bleibt die Fotobibliothek erhalten.
+
+### Behoben
+
+- Windows-Netzwerkordner werden beim Einreihen im Hintergrund geprüft. Dadurch bleibt die App während der Ordnerprüfung bedienbar.
+- Beim erneuten Import eines Windows-Netzwerkordners erkennt Face Manager unveränderte Fotos zuverlässig wieder.
+
 ## [0.14.2] - 2026-11-24
 
 ### Neu

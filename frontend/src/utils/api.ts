@@ -570,6 +570,120 @@ export async function fetchSettings(): Promise<AppSettings> {
   return await res.json();
 }
 
+export interface SharedLibraryDecision {
+  device: string;
+  kind: "person" | "unknown_person" | "not_face" | "unassigned" | "detected" | "missing";
+  person_name?: string | null;
+}
+
+export interface SharedLibraryConflict {
+  id: string;
+  revision: string;
+  photo_id?: number | null;
+  local_face_id?: number | null;
+  shared_face_id?: number | null;
+  evidence_available?: boolean;
+  relative_path: string;
+  folder_id?: string;
+  source_path?: string | null;
+  can_resolve: boolean;
+  can_keep_local?: boolean;
+  can_use_shared?: boolean;
+  reason: string;
+  local: SharedLibraryDecision;
+  shared: SharedLibraryDecision;
+}
+
+export interface SharedLibraryConfig {
+  source_path: string | null;
+  sync_path: string | null;
+  paused: boolean;
+  share_embeddings: boolean;
+  write_enabled?: boolean;
+  initialize_share?: boolean;
+  assist_paused?: boolean;
+}
+
+export interface SharedLibraryFolder extends SharedLibraryConfig {
+  folder_id?: string;
+  linked_paths?: string[];
+  blocked_paths?: string[];
+  parent_source_path?: string | null;
+  available?: boolean;
+  write_available?: boolean;
+  analysis_available?: boolean;
+  preview?: boolean;
+  proposed_count?: number;
+  status: "off" | "checking" | "online" | "offline" | "read_only" | "paused" | "attention";
+  device_name?: string;
+  active_devices?: string[];
+  peer_names?: string[];
+  resolution_pending?: boolean;
+  concurrent_choices?: boolean;
+  choice_error?: string | null;
+  imported_decisions?: number;
+  conflict_count?: number;
+  conflicts?: SharedLibraryConflict[];
+  error?: string | null;
+}
+
+export interface SharedLibraryState extends SharedLibraryFolder {
+  folders?: Array<SharedLibraryFolder & { folder_id: string }>;
+}
+
+export function sharedLibraryFolders(state: SharedLibraryState | null | undefined): SharedLibraryFolder[] {
+  if (!state || state.available === false) return [];
+  return state.folders ?? (state.source_path ? [state] : []);
+}
+
+export function sharedLibraryConflictFolder(state: SharedLibraryState | null, conflict: SharedLibraryConflict) {
+  if (!conflict.folder_id) return state;
+  return state?.folders?.find(({ folder_id }) => folder_id === conflict.folder_id);
+}
+
+async function sharedLibraryRequest(path: string, options: RequestInit, fallback: string): Promise<SharedLibraryState> {
+  const headers = new Headers(options.headers);
+  headers.set("x-face-manager-display-platform", DISPLAY_PLATFORM);
+  const response = await fetch(`${API_BASE}/shared-library${path}`, { ...options, headers });
+  if (!response.ok) {
+    throw Object.assign(new Error(await readApiError(response, fallback)), { status: response.status });
+  }
+  return response.json();
+}
+
+export function fetchSharedLibrary(signal?: AbortSignal): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("", { signal }, "Der gemeinsame Ordner konnte nicht geprüft werden.");
+}
+
+export type SharedLibraryUpdate = (SharedLibraryConfig & { folder_id?: string }) | { folder_id: string; remove_linked_path: string };
+
+export function updateSharedLibrary(config: SharedLibraryUpdate): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  }, "Der gemeinsame Ordner konnte nicht gespeichert werden.");
+}
+
+export function resolveSharedLibrary(conflict: SharedLibraryConflict, choice: "local" | "shared"): Promise<SharedLibraryState> {
+  return sharedLibraryRequest("/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: conflict.id, revision: conflict.revision, choice }),
+  }, "Die Zuordnung konnte nicht übernommen werden.");
+}
+
+export async function fetchSharedConflictEvidence(conflict: SharedLibraryConflict, signal: AbortSignal): Promise<{
+  local?: string;
+  shared?: string;
+  photo?: string;
+}> {
+  const query = new URLSearchParams({ revision: conflict.revision });
+  const response = await fetch(`${API_BASE}/shared-library/conflicts/${encodeURIComponent(conflict.id)}/evidence?${query}`, { signal });
+  if (!response.ok) throw new Error("Das geprüfte Foto ist gerade nicht verfügbar.");
+  return response.json();
+}
+
 export async function updateSettings(
   payload: UpdateSettingsPayload,
 ): Promise<AppSettings> {

@@ -38,11 +38,16 @@ import ClusterList from "./ClusterList";
 import ReviewInbox from "./ReviewInbox";
 import PersonAssignment, { type PersonOption } from "./PersonAssignment";
 import { useModalFocus } from "../../hooks/useModalFocus";
+import type { SharedLibraryController } from "../../hooks/useSharedLibrary";
+import { navigationHash } from "../../utils/navigation";
+import SharedLibraryReview from "./SharedLibraryReview";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
 
 interface ClusterPageProps {
   navigationTarget: ClusterNavigationTarget | null;
+  sharedLibrary: SharedLibraryController;
+  onLeaveSharedReview: () => void;
   /** Whether this page is the visible one; background polling pauses when not. */
   active?: boolean;
 }
@@ -141,7 +146,8 @@ function mergeReviewGroups(reviewGroups: FaceReviewGroupSummary[]): FaceReviewGr
   return DEFAULT_REVIEW_GROUPS.map((group) => map.get(group.group_key) || group);
 }
 
-const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = true }) => {
+const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibrary, onLeaveSharedReview, active = true }) => {
+  const sharedReviewActive = navigationTarget?.reviewView === "shared";
   const [clusters, setClusters] = useState<ClusterSummary[]>([]);
   const [reviewGroups, setReviewGroups] =
     useState<FaceReviewGroupSummary[]>(DEFAULT_REVIEW_GROUPS);
@@ -165,7 +171,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
     if (typeof navigationTarget?.clusterId === "number") {
       return navigationTarget.personName ? "people" : "open";
     }
-    return navigationTarget?.reviewView ?? "suggestions";
+    return navigationTarget?.reviewView === "open" ? "open" : "suggestions";
   });
   const [assignmentRevision, setAssignmentRevision] = useState(0);
   const [activeArchiveSectionKey, setActiveArchiveSectionKey] = useState<string | null>(null);
@@ -187,7 +193,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   const [isDetailsLoading, setIsDetailsLoading] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
   const detailModalRef = useRef<HTMLElement>(null);
-  useModalFocus(detailModalRef, () => setDetailModal(null), !isMutating, detailModal !== null);
+  useModalFocus(detailModalRef, () => setDetailModal(null), !isMutating, detailModal !== null && !sharedReviewActive);
   const [highlightedClusterId, setHighlightedClusterId] = useState<number | null>(null);
   const [clusterDetailsMap, setClusterDetailsMap] = useState<Record<number, ClusterDetails>>({});
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
@@ -1089,7 +1095,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       return;
     }
     appliedNavigationTokenRef.current = navigationTarget.token;
-    if (navigationTarget.reviewView) {
+    if (navigationTarget.reviewView === "shared") {
+      cancelPendingNavigation();
+      suggestionPhotoRequest.current?.abort();
+      setFaceGallery(null);
+      setDetailModal(null);
+      return;
+    }
+    if (navigationTarget.reviewView === "open") {
       cancelPendingNavigation();
       setWorkspaceView(navigationTarget.reviewView);
       return;
@@ -1661,6 +1674,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   );
 
   const selectWorkspaceView = (view: ReviewWorkspaceView) => {
+    if (sharedReviewActive) onLeaveSharedReview();
     if (pendingNavigationClusterIdRef.current !== null) setSelectedTarget(null);
     cancelPendingNavigation();
     setWorkspaceView(view);
@@ -1669,7 +1683,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
   return (
     <div
       className={
-        workspaceView === "suggestions"
+        workspaceView === "suggestions" || sharedReviewActive
           ? "review-page"
           : "review-page review-page--workspace"
       }
@@ -1690,8 +1704,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           ["archive", "Aussortiert", "Unbekannt und Fehl-Erkennungen", archivedFaceCount],
         ] as const).map(([view, label, description, count]) => (
           <button
-            className={workspaceView === view ? "review-page-tab review-page-tab--active" : "review-page-tab"}
-            aria-current={workspaceView === view ? "true" : undefined}
+            className={!sharedReviewActive && workspaceView === view ? "review-page-tab review-page-tab--active" : "review-page-tab"}
+            aria-current={!sharedReviewActive && workspaceView === view ? "true" : undefined}
             key={view}
             onClick={() => selectWorkspaceView(view)}
             type="button"
@@ -1700,9 +1714,20 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
             <b>{count.toLocaleString()}</b>
           </button>
         ))}
+        {sharedLibrary.configured && (
+          <a
+            className={sharedReviewActive ? "review-page-tab review-page-tab--active shared-library__tab" : "review-page-tab shared-library__tab"}
+            aria-current={sharedReviewActive ? "page" : undefined}
+            href={navigationHash({ page: "review", reviewView: "shared" })}
+          >
+            <span><strong>Abgleich prüfen</strong><small>Gemeinsamer Ordner</small></span>
+            <b>{(sharedLibrary.resource?.conflict_count ?? sharedLibrary.resource?.conflicts?.length ?? 0).toLocaleString()}</b>
+          </a>
+        )}
       </nav>
 
-      {workflowFeedback && (
+      {sharedReviewActive && <SharedLibraryReview controller={sharedLibrary} />}
+      {!sharedReviewActive && workflowFeedback && (
         <p
           className="review-workflow-feedback"
           role={workflowFeedback.kind === "error" ? "alert" : "status"}
@@ -1711,7 +1736,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         </p>
       )}
 
-      <div hidden={workspaceView !== "suggestions"}>
+      <div hidden={workspaceView !== "suggestions" || sharedReviewActive}>
         <ReviewInbox
           personSuggestions={personSuggestions}
           reviewSuggestions={reviewSuggestions}
@@ -1732,7 +1757,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
           onOpenNewFaces={() => selectWorkspaceView("open")}
         />
       </div>
-      {workspaceView !== "suggestions" && (
+      {workspaceView !== "suggestions" && !sharedReviewActive && (
       <div className="cluster-workspace">
       <aside className="cluster-workspace__sidebar">
         <ClusterList
@@ -1987,7 +2012,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
       </div>
       )}
 
-      {detailModal?.type === "rename_cluster" && selectedTarget?.type === "cluster" && (
+      {!sharedReviewActive && detailModal?.type === "rename_cluster" && selectedTarget?.type === "cluster" && (
         <div className="modal-backdrop" onMouseDown={() => { if (!isMutating) setDetailModal(null); }}>
           <section
             className="cluster-action-modal cluster-action-modal--narrow"
@@ -2049,7 +2074,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         </div>
       )}
 
-      {detailModal?.type === "manage_person" && selectedTarget?.type === "cluster" && selectedPersonId && (
+      {!sharedReviewActive && detailModal?.type === "manage_person" && selectedTarget?.type === "cluster" && selectedPersonId && (
         <div className="modal-backdrop" onMouseDown={() => { if (!isMutating) setDetailModal(null); }}>
           <section
             className="cluster-action-modal cluster-action-modal--narrow"
@@ -2135,7 +2160,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, active = tr
         </div>
       )}
 
-      {faceGallery && (
+      {!sharedReviewActive && faceGallery && (
         <FaceGroupGallery
           faces={faceGallery.faces}
           initialFaceId={faceGallery.initialFaceId}

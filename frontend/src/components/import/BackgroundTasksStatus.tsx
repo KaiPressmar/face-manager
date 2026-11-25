@@ -19,6 +19,8 @@ import {
   resumeAutoClusterTask,
   resumeImportJob,
   resumeThumbnailWarmup,
+  sharedLibraryFolders,
+  SharedLibraryState,
   ThumbnailWarmupState,
   ThumbnailWarmupTask,
 } from "../../utils/api";
@@ -350,7 +352,21 @@ function finishedLabel(timestamp: string | null): string {
   return date.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
-const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ openImportsRequest = 0 }) => {
+const SHARED_ACTIVITY_STATUS = {
+  off: "Nicht eingerichtet",
+  checking: "Verbindung wird geprüft",
+  read_only: "Schreibgeschützt verbunden",
+  online: "Freigabe verbunden",
+  paused: "Abgleich pausiert",
+  offline: "Ordner gerade nicht erreichbar",
+  attention: "Abgleich benötigt Aufmerksamkeit",
+};
+
+const BackgroundTasksStatus: React.FC<{
+  openImportsRequest?: number;
+  sharedLibrary?: SharedLibraryState | null;
+  sharedLibraryReadError?: string | null;
+}> = ({ openImportsRequest = 0, sharedLibrary, sharedLibraryReadError }) => {
   const [queue, setQueue] = useState<ImportQueueState | null>(null);
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
@@ -591,7 +607,13 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
     };
   }, [isPinned]);
 
-  if (!connectionError && activeTasks.length === 0 && history.length === 0) return null;
+  const sharedFolders = sharedLibraryFolders(sharedLibrary);
+  const sharedCount = sharedFolders.length;
+  const sharedStatus = sharedLibraryReadError
+    ? "Letzter bekannter Stand"
+    : sharedCount === 1 ? SHARED_ACTIVITY_STATUS[sharedFolders[0].status] : `${sharedCount} gemeinsame Ordner`;
+  const sharedConflicts = sharedLibrary?.conflict_count ?? sharedLibrary?.conflicts?.length ?? 0;
+  if (!connectionError && !sharedCount && activeTasks.length === 0 && history.length === 0) return null;
 
   const compactLabel =
     activeTasks.length > 0
@@ -602,7 +624,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
   const compactEta =
     activeTasks.length > 0
       ? formatFriendlyDuration(totalEta) ?? "Zeit wird berechnet"
-      : "Bereit";
+      : sharedCount ? sharedStatus : "Bereit";
 
   return (
     <div
@@ -639,7 +661,7 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
               <p>
                 {activeTasks.length > 0
                   ? "Während dieser Arbeiten kann Face Manager vorübergehend langsamer reagieren."
-                  : "Aktuell ist keine Aufgabe offen."}
+                  : sharedCount ? "Hier findest du den Stand der gemeinsamen Ordner." : "Aktuell ist keine Aufgabe offen."}
               </p>
             </div>
             {activeTasks.length > 0 && (
@@ -674,6 +696,26 @@ const BackgroundTasksStatus: React.FC<{ openImportsRequest?: number }> = ({ open
                   {parallelImports} Bilderordner werden gleichzeitig verarbeitet. Die angezeigte Gesamtzeit berücksichtigt das bereits.
                 </p>
               )}
+            </div>
+          )}
+
+          {sharedCount > 0 && (
+            <div className="activity-center__section activity-center__section--shared" aria-label="Gemeinsame Ordner">
+              <div className="activity-center__section-title">Gemeinsame Ordner</div>
+              {sharedLibraryReadError && <p role="status">Der aktuelle Stand konnte nicht geladen werden.</p>}
+              {sharedFolders.map((folder) => (
+                <div className="activity-shared-library" key={folder.folder_id ?? "legacy"}>
+                  <strong>{folderName(folder.source_path ?? "")}</strong>
+                  {sharedCount > 1 && <small>{folder.source_path}</small>}
+                  {!sharedLibraryReadError && folder.assist_paused && !folder.paused && <small>Eigene Rechenhilfe pausiert</small>}
+                  <span>{sharedLibraryReadError ? "Letzter bekannter Stand" : SHARED_ACTIVITY_STATUS[folder.status]}</span>
+                  {Boolean(folder.peer_names?.length) && <small>Bekannte Geräte: {folder.peer_names?.join(", ")}</small>}
+                  {!sharedLibraryReadError && (folder.conflict_count ?? 0) > 0 && <small>{folder.conflict_count} zu prüfen</small>}
+                </div>
+              ))}
+              <a href="#/gesichter-pruefen/abgleich" onClick={() => setIsPinned(false)}>
+                {sharedConflicts > 0 ? `${sharedConflicts} beim Abgleich prüfen` : "Abgleich ansehen"}
+              </a>
             </div>
           )}
 

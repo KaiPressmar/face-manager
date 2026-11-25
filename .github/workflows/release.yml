@@ -122,6 +122,9 @@ jobs:
     needs:
       - release
     runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      installer_sha256: ${{ steps.build.outputs.installer_sha256 }}
     env:
       RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
       VERSION: ${{ needs.release.outputs.version }}
@@ -158,8 +161,16 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       - name: Build Windows release bundle
+        id: build
         shell: pwsh
         run: ./packaging/windows/build-release.ps1
+
+      - name: Exercise upgrades from legacy and combined Windows installers
+        shell: pwsh
+        timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./packaging/windows/test-installer-upgrade.ps1 -Version $env:VERSION
 
       - name: Attest Windows installer provenance
         if: github.event.repository.visibility == 'public'
@@ -175,6 +186,8 @@ jobs:
           gh release upload "v$env:VERSION" `
             "dist/FaceManager-Setup-$env:VERSION.exe" `
             "dist/FaceManager-Setup-$env:VERSION.exe.sha256" `
+            "dist/FaceManager-Setup-GPU-$env:VERSION.exe#Compatibility installer for legacy GPU updaters" `
+            "dist/FaceManager-Setup-GPU-$env:VERSION.exe.sha256" `
             --clobber
 
   linux-installer:
@@ -221,86 +234,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "v${VERSION}" "dist/face-manager_${VERSION}_amd64.deb" "dist/face-manager_${VERSION}_amd64.deb.sha256" --clobber
 
-  android-apk:
-    name: Build Android APK
-    if: needs.release.outputs.publish == 'true'
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    env:
-      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
-      VERSION: ${{ needs.release.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.11'
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm --prefix frontend ci
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Install Android build tools
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Load release signing identity when configured
-        id: signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          if [[ -n "${KEYSTORE_BASE64}" ]]; then
-            umask 077
-            printf '%s' "${KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/android-release.jks"
-            echo "ANDROID_KEYSTORE_PATH=${RUNNER_TEMP}/android-release.jks" >> "${GITHUB_ENV}"
-            echo 'configured=true' >> "${GITHUB_OUTPUT}"
-          else
-            echo 'configured=false' >> "${GITHUB_OUTPUT}"
-          fi
-      - name: Build Android release from tested commit
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./scripts/package-android.sh
-      - name: Retain unsigned APK for offline signing
-        if: steps.signing.outputs.configured != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-unsigned-${{ env.VERSION }}
-          path: dist/*-unsigned.apk
-          retention-days: 14
-      - name: Attest signed Android APK
-        if: steps.signing.outputs.configured == 'true' && github.event.repository.visibility == 'public'
-        uses: actions/attest@v4
-        with:
-          subject-path: dist/FaceManager-Android-${{ env.VERSION }}.apk
-      - name: Publish signed Android APK and checksum
-        if: steps.signing.outputs.configured == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "v${VERSION}" "dist/FaceManager-Android-${VERSION}.apk" "dist/FaceManager-Android-${VERSION}.apk.sha256" --clobber
-      - name: Remove signing material
-        if: always()
-        run: rm -f "${RUNNER_TEMP}/android-release.jks"
-
   publish:
     name: Publish verified release
     if: needs.release.outputs.publish == 'true'
-    needs: [release, windows-installer, linux-installer, android-apk]
+    needs: [release, windows-installer, linux-installer]
     runs-on: ubuntu-26.04
     permissions:
       contents: write
@@ -308,13 +245,41 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.release.outputs.version }}
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+      WINDOWS_INSTALLER_SHA256: ${{ needs.windows-installer.outputs.installer_sha256 }}
     steps:
-      - name: Verify both desktop installers and publish
+      - name: Verify uploaded desktop installers and publish
+        shell: bash
         run: |
-          assets="$(gh release view "v${VERSION}" --json assets --jq '.assets')"
-          for package in "FaceManager-Setup-${VERSION}.exe" "face-manager_${VERSION}_amd64.deb"; do
+          tag="v${VERSION}"
+          [[ "${WINDOWS_INSTALLER_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$(gh api "repos/${GH_REPO}/commits/${tag}" --jq '.sha')" == "${RELEASE_SHA}" ]]
+          release="$(gh release view "${tag}" --json apiUrl,isDraft,isPrerelease,tagName)"
+          jq -e --arg tag "${tag}" '.tagName == $tag and .isDraft and (.isPrerelease | not)' <<< "${release}" >/dev/null
+          release_url="$(jq -er '.apiUrl' <<< "${release}")"
+          release_id="${release_url##*/}"
+          [[ "${release_id}" =~ ^[0-9]+$ ]]
+          assets="$(gh api --paginate "repos/${GH_REPO}/releases/${release_id}/assets?per_page=100" | jq -s 'add')"
+
+          for package in "FaceManager-Setup-${VERSION}.exe" "FaceManager-Setup-GPU-${VERSION}.exe" "face-manager_${VERSION}_amd64.deb"; do
             for asset in "${package}" "${package}.sha256"; do
-              jq -e --arg asset "${asset}" 'any(.[]; .name == $asset and .size > 0 and .state == "uploaded")' <<< "${assets}" >/dev/null
+              jq -e --arg name "${asset}" '[.[] | select(.name == $name and .size > 0 and .state == "uploaded")] | length == 1' <<< "${assets}" >/dev/null
             done
           done
-          gh release edit "v${VERSION}" --draft=false --latest
+
+          checksum_dir="$(mktemp -d)"
+          trap 'rm -rf "${checksum_dir}"' EXIT
+          for package in "FaceManager-Setup-${VERSION}.exe" "FaceManager-Setup-GPU-${VERSION}.exe"; do
+            digest="$(jq -er --arg name "${package}" '.[] | select(.name == $name) | .digest' <<< "${assets}")"
+            [[ "${digest}" == "sha256:${WINDOWS_INSTALLER_SHA256}" ]]
+            gh release download "${tag}" --pattern "${package}.sha256" --dir "${checksum_dir}"
+            sidecar="${checksum_dir}/${package}.sha256"
+            if ! cmp -s "${sidecar}" <(printf '%s  %s\r\n' "${WINDOWS_INSTALLER_SHA256}" "${package}"); then
+              cmp "${sidecar}" <(printf '%s  %s\n' "${WINDOWS_INSTALLER_SHA256}" "${package}")
+            fi
+            read -r sidecar_digest _ < <(sha256sum "${sidecar}")
+            uploaded_digest="$(jq -er --arg name "${package}.sha256" '.[] | select(.name == $name) | .digest' <<< "${assets}")"
+            [[ "${uploaded_digest}" == "sha256:${sidecar_digest}" ]]
+          done
+
+          gh release edit "${tag}" --draft=false --latest

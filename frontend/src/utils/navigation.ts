@@ -13,7 +13,7 @@ export interface NavigationEntry {
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
   personName?: string | null;
-  reviewView?: "open";
+  reviewView?: "open" | "shared";
   settingsSection?: SettingsSection;
 }
 
@@ -53,6 +53,7 @@ export function navigationHash(entry: NavigationEntry): string {
     return `${base}/kategorie/${entry.groupKey}`;
   }
   if (entry.page === "review" && entry.reviewView === "open") return `${base}/ohne-namen`;
+  if (entry.page === "review" && entry.reviewView === "shared") return `${base}/abgleich`;
   if (entry.page === "settings" && entry.settingsSection !== undefined) {
     return `${base}/${entry.settingsSection}`;
   }
@@ -77,6 +78,7 @@ export function parseNavigationHash(hash: string): NavigationEntry {
     if (REVIEW_GROUPS.has(groupKey)) return { page, groupKey };
   }
   if (page === "review" && segments[1] === "ohne-namen") return { page, reviewView: "open" };
+  if (page === "review" && segments[1] === "abgleich") return { page, reviewView: "shared" };
   if (page === "settings") {
     const settingsSection = segments[1] as SettingsSection;
     if (SETTINGS_SECTIONS.has(settingsSection)) return { page, settingsSection };
