@@ -111,13 +111,17 @@ if ($installerProductVersion -ne $version) {
 
 if ($env:CI -eq "true") {
     $smokeDirectory = Join-Path $buildDir "installed-smoke"
-    $setup = Start-Process -PassThru -Wait -FilePath $installerPath -ArgumentList @(
-        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$smokeDirectory`""
-    )
-    if ($setup.ExitCode -ne 0) {
-        throw "Windows installer smoke test failed with exit code $($setup.ExitCode)."
-    }
+    $savedDataDirectory = $env:FACE_MANAGER_DATA_DIR
+    $env:FACE_MANAGER_DATA_DIR = Join-Path $buildDir "installed-smoke-data"
+    $installed = $false
     try {
+        $setup = Start-Process -PassThru -Wait -FilePath $installerPath -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$smokeDirectory`""
+        )
+        if ($setup.ExitCode -ne 0) {
+            throw "Windows installer smoke test failed with exit code $($setup.ExitCode)."
+        }
+        $installed = $true
         $reportPath = Join-Path $buildDir "installed-runtime-check.txt"
         $smoke = Start-Process -PassThru -FilePath (Join-Path $smokeDirectory "FaceManager.exe") `
             -ArgumentList "--check-runtime `"$reportPath`""
@@ -131,10 +135,13 @@ if ($env:CI -eq "true") {
         }
         Write-Host $report
     } finally {
-        $uninstall = Start-Process -PassThru -Wait -FilePath (Join-Path $smokeDirectory "unins000.exe") `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
-        if ($uninstall.ExitCode -ne 0) {
-            throw "Uninstalling the clean smoke-test installation failed with exit code $($uninstall.ExitCode)."
+        $env:FACE_MANAGER_DATA_DIR = $savedDataDirectory
+        if ($installed) {
+            $uninstall = Start-Process -PassThru -Wait -FilePath (Join-Path $smokeDirectory "unins000.exe") `
+                -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+            if ($uninstall.ExitCode -ne 0) {
+                throw "Uninstalling the clean smoke-test installation failed with exit code $($uninstall.ExitCode)."
+            }
         }
     }
 }
