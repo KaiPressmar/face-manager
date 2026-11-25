@@ -13,9 +13,13 @@ DIGEST = "a9" * 32
 
 class SharedSyncSnapshotTest(unittest.TestCase):
     def setUp(self):
-        temp = self.enterContext(tempfile.TemporaryDirectory())
-        self.root = Path(temp) / "shared"
-        self.enterContext(patch.object(schema, "DB_PATH", str(Path(temp) / "library.sqlite")))
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        self.root = directory / "shared"
+        database_override = patch.object(schema, "DB_PATH", str(directory / "library.sqlite"))
+        database_override.start()
+        self.addCleanup(database_override.stop)
         schema.init_db(scan_sources=False)
         self.conn = schema.get_conn()
         self.addCleanup(self.conn.close)
