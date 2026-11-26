@@ -13,6 +13,7 @@ Requests, nicht in diese Versionshinweise.
 
 - Der Import zeigt getrennt an, wie viele Bilder unlesbar oder nicht erreichbar waren.
 - Bei zu langen Dateinamen kürzt die Vorschau die angehängte Namensliste und behält den ursprünglichen Namensteil bei.
+- Ländergrenzen erleichtern die Orientierung auf der Fotokarte auch offline.
 
 ### Behoben
 

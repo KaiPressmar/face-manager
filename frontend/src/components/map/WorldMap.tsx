@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MapPoint } from "../../utils/api";
+import borders from "./world-borders.json";
 import land from "./world-land.json";
 
 export interface MapBounds {
@@ -156,9 +157,15 @@ interface Props {
   onCancelSelection: () => void;
 }
 
-const landPaths = (land as number[][][]).map((ring) =>
-  ring.map(([lon, lat], index) => `${index ? "L" : "M"}${projectX(lon).toFixed(2)},${projectY(lat).toFixed(2)}`).join(" ") + "Z",
-).join(" ");
+function projectLine(positions: number[][]) {
+  return positions.map(([longitude, latitude], index) =>
+    `${index ? "L" : "M"}${projectX(longitude).toFixed(2)},${projectY(latitude).toFixed(2)}`,
+  ).join(" ");
+}
+
+const landPaths = land.map((ring) => projectLine(ring) + "Z").join(" ");
+const countryBorders = borders.international.map(projectLine).join(" ");
+const otherBorders = borders.other.map(projectLine).join(" ");
 const coordinates = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 4 });
 
 const WorldMap: React.FC<Props> = ({
@@ -331,6 +338,10 @@ const WorldMap: React.FC<Props> = ({
         {[0, 1, 2, 3, 4, 5].map((line) => <line key={`lat-${line}`} x1={0} x2={WIDTH} y1={line * 100} y2={line * 100} className="gps-map__graticule" />)}
         {[0, 1, 2, 3, 4, 5, 6].map((line) => <line key={`lon-${line}`} y1={0} y2={HEIGHT} x1={line * (WIDTH / 6)} x2={line * (WIDTH / 6)} className="gps-map__graticule" />)}
         <path d={landPaths} className="gps-map__land" />
+        <g aria-hidden="true" className="gps-map__borders">
+          <path d={countryBorders} className="gps-map__border" />
+          <path d={otherBorders} className="gps-map__border gps-map__border--other" />
+        </g>
         {selectionRect && <rect {...selectionRect} className="gps-map__selection" />}
         {activeRect && <rect {...activeRect} className="gps-map__selection gps-map__selection--drag" />}
         {grid && points.map((marker) => {
