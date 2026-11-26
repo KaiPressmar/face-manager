@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.18.0] - 2026-11-26
+
+### Neu
+
 - Mit „Zurück“ und „Vorwärts“ erreichst du deine früheren Ansichten. „Zur Ausgangsansicht“ setzt die aktuelle Seite bewusst zurück.
 - Mit „Schnellwechsel“ findest du Bereiche anhand von Begriffen wie „Karte“ oder „Sicherung“.
 - Lokale Namenszuordnungen und Archivaktionen lassen sich unter „Personen“ rückgängig machen und wiederholen.
