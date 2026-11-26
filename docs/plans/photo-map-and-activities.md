@@ -83,6 +83,14 @@ Face Manager lädt das Modell zur Gesichtserkennung und das Modell zum Vergleich
 
 Für eine später freiwillig aufrufbare Prüfung eignet sich eher der Vergleich mit sicher datierten Fotos und bereits bestätigten Personen. Eine bestätigte Person kann die Vergleichsfotos eingrenzen, nachdem andere Hinweise wie Ordner, Datum und belegter Ort widersprechen. Die Oberfläche sollte die Vergleichsfotos und den Unterschied zeigen. Wiederholte Familienfeiern, gleich aussehende Personen, gescannte Bilder, unsichere Zuordnungen und unterschiedliche Zeitzonen sind Testfälle. Der Nutzer entscheidet über jede Berichtigung. Der erste Prototyp misst, wie oft brauchbare Hinweise gefunden werden und wie viele Fotos fälschlich als widersprüchlich erscheinen.
 
+## Fehlende Gesichter markieren
+
+Im geöffneten Foto startet **Gesicht markieren** einen eigenen Bearbeitungsmodus. Ein Rahmen lässt sich mit Maus oder Finger aufziehen, per Tastatur platzieren und in Lage und Größe ändern. Zum Benennen verwenden wir dieselbe Personensuche wie bei erkannten Gesichtern. Abbrechen führt zur Bildansicht zurück. Die Galerie zeigt die gespeicherte Markierung direkt im Foto.
+
+**Vorschläge anzeigen** sucht auf Wunsch auf diesem einen Bild nach weiteren möglichen Gesichtern. Ein Vorschlag setzt beim Anklicken einen bearbeitbaren Rahmen. Gespeichert wird erst mit der bestätigten Namenszuordnung. Die Suche nutzt schwächere Bildhinweise, hält Abstand zu vorhandenen Markierungen und lässt auch eine vollständig manuelle Auswahl zu. Beim normalen Import gelten die bisherigen Erkennungskriterien.
+
+Der Editor bindet die angezeigte Vorschau an das registrierte Foto. Er meldet eine ausgetauschte Datei, bevor er einen Namen am falschen Bild speichern kann. Der Review priorisiert gedrehte und gespiegelte Fotos, abgeschnittene Gesichter am Rand, mehrere nahe Gesichter, erneuten Import, alte Bibliotheken und den Erhalt der Zuordnung bei Sicherung und Wiederherstellung. Der Geräteabgleich kann die Entscheidung einem bereits vorhandenen, eindeutig passenden Rahmen zuordnen. Bei einem offenen Abgleich ohne passenden Rahmen lässt sich das Gesicht am zweiten Gerät manuell ergänzen.
+
 ## Aktivitäten
 
 Die Kopfzeile bietet einen festen Einstieg per Klick. Import, Gruppierung und Bildvorschauen behalten ihre Aktionen. Der Standort- und Zeitabgleich meldet geprüfte Fotos, nicht erreichbare Dateien und den Abschluss. Detailansichten können weiterhin kurz zeigen, warum ihre Daten noch unvollständig sind.

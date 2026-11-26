@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
+from copy import copy
 from importlib import metadata
 from pathlib import Path
 from threading import Lock
@@ -33,12 +34,17 @@ CUDA_PROVIDER = "CUDAExecutionProvider"
 INTEL_PROVIDER = "OpenVINOExecutionProvider"
 FACE_MODELS = ("detection", "recognition")
 DETECTION_SIZE = (1024, 1024)
+SUGGESTION_SCORE_THRESHOLD = .36
 _openvino_lock = Lock()
 _openvino_registered = False
 _openvino_dll_directory = None
 _SHARED_PREPROCESSING_VERSION = "raw-pillow-rgb-insightface-l2-f32le-512-v1"
 _BUFFALO_WEIGHTS = {"detection": "det_10g.onnx", "recognition": "w600k_r50.onnx"}
 _BUFFALO_UNUSED = {"1k3d68.onnx", "2d106det.onnx", "genderage.onnx"}
+
+
+class FaceDetectionBusy(RuntimeError):
+    """The active detection model is serving another operation."""
 
 
 def _weight_identity(info):
@@ -436,6 +442,26 @@ class FaceModel:
             ).hexdigest()
             self._shared_signature_cache = ((assets, settings), signature)
             return signature
+
+    def suggest_face_detections(self, image_np):
+        """Return scored detections from the active detector without computing embeddings."""
+        if not self._lock.acquire(blocking=False):
+            raise FaceDetectionBusy()
+        try:
+            app, _ = self._active
+            detector = app.det_model
+            candidate_detector = copy(detector)
+            if candidate_detector is detector or not hasattr(candidate_detector, "det_thresh"):
+                raise RuntimeError("The active detector cannot use an isolated suggestion threshold")
+            # Share the prepared ONNX session, not the detector's mutable
+            # threshold or anchor cache. Accelerated imports use this same lock.
+            candidate_detector.det_thresh = min(SUGGESTION_SCORE_THRESHOLD, detector.det_thresh)
+            if hasattr(candidate_detector, "center_cache"):
+                candidate_detector.center_cache = {}
+            boxes, _ = candidate_detector.detect(image_np)
+            return boxes
+        finally:
+            self._lock.release()
 
     def detect_and_embed(self, image_np):
         """Detect faces and calculate normalized embeddings.

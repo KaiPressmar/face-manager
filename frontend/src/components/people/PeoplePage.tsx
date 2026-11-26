@@ -1030,6 +1030,18 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         hasActiveFilters={hasActiveFilters}
         onResetFilters={resetFilters}
         photoSelection={selectedAlbumImages ? { ids: selectedAlbumImages, onToggle: toggleAlbumPhoto } : undefined}
+        onManualFaceSaved={(detail, faceId) => {
+          if (faceStatuses.length && !faceStatuses.includes("active")) return;
+          const face = detail.faces.find((item) => item.id === faceId);
+          if (!face || !detail.image_width || !detail.image_height) return;
+          setImages((current) => current.map((image) => {
+            if (image.id !== detail.id || image.content_hash !== detail.content_hash ||
+                image.faces.some((item) => item.id === faceId)) return image;
+            const oriented = applyImageGeometry(image, { source: image, detail });
+            if (oriented.image_width !== detail.image_width || oriented.image_height !== detail.image_height) return image;
+            return { ...oriented, faces: [...oriented.faces, face] };
+          }));
+        }}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
           setTotalImages((current) => Math.max(0, current - 1));

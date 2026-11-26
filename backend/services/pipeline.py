@@ -22,6 +22,7 @@ from PIL import Image, ImageFile, UnidentifiedImageError
 from ..db.schema import HASH_CHUNK_SIZE, calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
 from ..models.face_model import FaceModel, get_compute_mode
+from .face_geometry import face_boxes_overlap
 from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
 from .image_thumbnails import write_image_thumbnail
 from .preview_cache import get_image_geometry
@@ -130,6 +131,18 @@ def configure_processing_slots(slot_count: int) -> None:
             return
         _PROCESSING_SLOT_COUNT = bounded
         _PROCESSING_SLOT_SEMAPHORE = threading.BoundedSemaphore(bounded)
+
+
+@contextmanager
+def try_face_processing_slot():
+    """Share the import budget without waiting for a background worker."""
+    semaphore = _PROCESSING_SLOT_SEMAPHORE
+    acquired = semaphore.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            semaphore.release()
 
 
 @dataclass
@@ -870,8 +883,8 @@ class ImportProcessor:
                 logger.warning("Could not prepare previews for image %s", committed_image_id, exc_info=True)
         progress_callback(
             {
-                "total_faces_increment": len(faces),
-                "processed_faces_increment": len(faces),
+                "total_faces_increment": len(thumbnail_faces),
+                "processed_faces_increment": len(thumbnail_faces),
             }
         )
 
@@ -899,17 +912,27 @@ class ImportProcessor:
                     connection.commit()
                     return None
             assert image_id is not None
+            if not connection.in_transaction:
+                cursor.execute("BEGIN IMMEDIATE")
 
             existing_face_ids = [
                 int(row["id"])
                 for row in cursor.execute(
-                    "SELECT id FROM face WHERE image_id = ?", (image_id,)
+                    "SELECT id FROM face WHERE image_id = ? AND is_manual = 0", (image_id,)
                 ).fetchall()
             ]
-            cursor.execute("DELETE FROM face WHERE image_id = ?", (image_id,))
+            manual_boxes = cursor.execute(
+                """SELECT bbox_x, bbox_y, bbox_w, bbox_h FROM face
+                   WHERE image_id = ? AND is_manual = 1 AND bbox_x IS NOT NULL AND bbox_y IS NOT NULL
+                   AND bbox_w > 0 AND bbox_h > 0""",
+                (image_id,),
+            ).fetchall()
+            cursor.execute("DELETE FROM face WHERE image_id = ? AND is_manual = 0", (image_id,))
             fallback_cluster_ids: dict[int, int] = {}
             thumbnail_faces = []
             for face in faces:
+                if any(face_boxes_overlap(box, face["bbox"], minimum_iou=0.55) for box in manual_boxes):
+                    continue
                 embedding = face["embedding"]
                 index_dirty = True
                 cluster_ids, _ = clusterer.add_and_assign(
@@ -961,6 +984,8 @@ class ImportProcessor:
                 if index_dirty:
                     self.resources.reset_clusterer(clusterer)
             raise
+        if existing_face_ids:
+            self.resources.reset_clusterer(clusterer)
         return int(image_id), existing_face_ids, thumbnail_faces
 
     @staticmethod

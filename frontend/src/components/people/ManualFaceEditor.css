@@ -1,0 +1,210 @@
+.manual-face-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20020;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: rgb(7 15 24 / .76);
+}
+
+.manual-face-dialog {
+  box-sizing: border-box;
+  width: min(900px, 100%);
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  background: var(--surface-1);
+  color: var(--text);
+}
+
+.manual-face-header,
+.manual-face-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.manual-face-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  justify-content: space-between;
+  padding: 10px clamp(12px, 3vw, 24px);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.manual-face-header h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.manual-face-content {
+  display: grid;
+  gap: 10px;
+  padding: 12px clamp(12px, 3vw, 24px) 20px;
+}
+
+.manual-face-content > p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.manual-face-content p[role="alert"] {
+  color: var(--danger-soft-text, var(--text));
+}
+
+.manual-face-stage {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.manual-face-canvas {
+  position: relative;
+  isolation: isolate;
+  max-width: 100%;
+  overflow: hidden;
+  overflow: clip;
+  overflow-clip-margin: 5px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+
+.manual-face-canvas img {
+  display: block;
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  height: auto;
+  image-orientation: from-image;
+  pointer-events: none;
+}
+
+.manual-face-canvas .manual-face-image--loading { position: absolute; visibility: hidden; }
+
+.manual-face-rectangle {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 2px solid #ffd975;
+  box-shadow: 0 0 0 1px #13202a, inset 0 0 0 1px #13202a;
+  cursor: move;
+}
+
+.manual-face-existing {
+  position: absolute;
+  z-index: 1;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 1px #20272a;
+  opacity: .66;
+}
+
+.manual-face-rectangle > span {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  transform: translate(-50%, -50%);
+}
+
+.manual-face-rectangle > span::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  border: 1px solid #13202a;
+  border-radius: 2px;
+  background: #ffd975;
+}
+
+.manual-face-rectangle > [data-corner="nw"] { left: 0; top: 0; cursor: nwse-resize; }
+.manual-face-rectangle > [data-corner="ne"] { left: 100%; top: 0; cursor: nesw-resize; }
+.manual-face-rectangle > [data-corner="sw"] { left: 0; top: 100%; cursor: nesw-resize; }
+.manual-face-rectangle > [data-corner="se"] { left: 100%; top: 100%; cursor: nwse-resize; }
+
+.manual-face-suggestion {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
+  border: 2px dashed #8aedff;
+  background: rgb(14 27 35 / .2);
+  color: #fff;
+}
+
+.manual-face-suggestion > span {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 4px;
+  background: #152933;
+}
+
+.manual-face-header > button,
+.manual-face-actions > button {
+  min-height: 44px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.manual-face-dialog button:focus-visible,
+.manual-face-canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.manual-face-dialog .cluster-person-combobox__input,
+.manual-face-dialog .cluster-action-button {
+  min-height: 44px;
+  font-size: 1rem;
+}
+
+.manual-face-dialog .cluster-assign-bar {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.manual-face-dialog .cluster-assignment-workflow,
+.manual-face-dialog .cluster-person-combobox {
+  min-width: 0;
+}
+
+.manual-face-dialog .cluster-action-button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.manual-face-dialog .cluster-person-combobox__menu {
+  position: static;
+  margin-top: 4px;
+}
+
+.manual-face-coordinates {
+  font-size: .875rem;
+  color: var(--text-muted);
+}
+
+@media (pointer: coarse) {
+  .manual-face-rectangle > span { width: 44px; height: 44px; }
+}
+
+@media (max-width: 600px) {
+  .manual-face-dialog .cluster-assign-bar { display: grid; grid-template-columns: minmax(0, 1fr); }
+}
