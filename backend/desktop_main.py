@@ -183,9 +183,8 @@ def main() -> None:
             page = urlsplit(window.get_current_url() or "")
             if f"{page.scheme}://{page.netloc}" != origin:
                 raise ValueError("Albumblätter können nur aus Face Manager gespeichert werden.")
-            selection = window.create_file_dialog(
-                webview.SAVE_DIALOG, save_filename=filename, file_types=("PNG (*.png)",),
-            )
+            file_type = "ZIP (*.zip)" if filename.endswith(".zip") else "PNG (*.png)"
+            selection = window.create_file_dialog(webview.SAVE_DIALOG, save_filename=filename, file_types=(file_type,))
             # PyWebView 5.4's Windows picker returns a path, GTK a sequence.
             if isinstance(selection, str):
                 return selection or None
@@ -194,10 +193,9 @@ def main() -> None:
         def confirm_album_overwrite(filename: str) -> bool:
             return window.create_confirmation_dialog("Datei ersetzen", f"„{filename}“ ersetzen?")
 
-        # Expose only one callable. The Windows picker confirms replacement
-        # itself. GTK's native picker does not enable that confirmation.
-        album_export = AlbumPngExport(choose_album_destination, confirm_album_overwrite if sys.platform == "linux" else None)
-        window.expose(album_export.save_album_png)
+        # The picker only returns a path. Confirm the file the exporter actually found there.
+        album_export = AlbumPngExport(choose_album_destination, confirm_album_overwrite)
+        window.expose(album_export.save_album_png, album_export.save_album_zip)
         register_shutdown_callback(window.destroy)
         webview.start(debug=False)
     except Exception:

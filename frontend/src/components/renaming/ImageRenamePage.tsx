@@ -3,10 +3,12 @@ import {
   type ApplyImageRenamePayload,
   type ApplyImageRenameResult,
   ImageRenameCandidate,
+  type ImageRenamePreview,
   applyImageRenames,
   fetchImageRenameCandidateCount,
   fetchImageRenameCandidates,
   openImageLocation,
+  previewImageRenames,
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import { copyTextToClipboard } from "../../utils/clipboard";
@@ -22,13 +24,13 @@ const SKELETON_ROW_COUNT = 6;
 const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
+const REVIEW_PAGE_SIZE = 20;
 type ImageGroupingMode = "date" | "folder";
 type SortDirection = "desc" | "asc";
 
 interface RenameReview {
   payload: ApplyImageRenamePayload;
   count: number;
-  example?: ImageRenameCandidate;
 }
 
 interface RenameReport {
@@ -40,6 +42,11 @@ function skipLabel(reason: string) {
   switch (reason) {
     case "already_matches": return "Bereits passend benannt";
     case "target_exists": return "Zielname bereits belegt";
+    case "batch_target_conflict": return "Mehrere ausgewählte Dateien haben denselben Zielnamen";
+    case "source_alias": return "Datei ist über eine Verknüpfung oder mehrere Pfade ausgewählt";
+    case "source_changed": return "Datei wurde seit der Prüfung geändert oder ersetzt";
+    case "exclusive_rename_unavailable": return "Sicheres Umbenennen ist an diesem Speicherort nicht verfügbar";
+    case "preview_changed": return "Vorschlag hat sich seit der Auswahl geändert";
     case "missing_source": return "Datei nicht erreichbar";
     case "invalid_filename": return "Vorgeschlagener Name nicht zulässig";
     case "filename_too_long": return "Vorgeschlagener Dateiname zu lang";
@@ -89,6 +96,9 @@ const ImageRenamePage: React.FC<{
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [excludedPaths, setExcludedPaths] = useState<Set<string>>(new Set());
   const [renameReview, setRenameReview] = useState<RenameReview | null>(null);
+  const [reviewPreview, setReviewPreview] = useState<ImageRenamePreview | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewPage, setReviewPage] = useState(0);
   const [renameReport, setRenameReport] = useState<RenameReport | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -111,6 +121,28 @@ const ImageRenamePage: React.FC<{
   useEffect(() => {
     if (!active) setRenameReview(null);
   }, [active]);
+
+  const reviewPayload = renameReview?.payload;
+  useEffect(() => {
+    if (!active || !reviewPayload) return;
+    const controller = new AbortController();
+    void previewImageRenames(reviewPayload, controller.signal).then(
+      (preview) => {
+        if (!controller.signal.aborted) {
+          setReviewPreview({
+            ...preview,
+            items: [...preview.items].sort((a, b) => Number(Boolean(b.reason)) - Number(Boolean(a.reason))),
+          });
+        }
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) {
+          setReviewError(error instanceof Error ? error.message : "Die Prüfung konnte nicht geladen werden.");
+        }
+      },
+    );
+    return () => controller.abort();
+  }, [active, reviewPayload]);
 
   useEffect(() => {
     if (active && renameReport) reportRef.current?.focus();
@@ -246,7 +278,6 @@ const ImageRenamePage: React.FC<{
       : selectedPaths.has(path);
   const selectableItems = items.filter(isSelectable);
   const canReview = selectedCount > 0 && !isLoading && !loadError && !isSubmitting;
-  const exampleWarning = renameReview?.example && filenameWarning(renameReview.example);
 
   const toggleItem = (path: string) => {
     setMessage(null);
@@ -409,9 +440,11 @@ const ImageRenamePage: React.FC<{
   const openRenameReview = () => {
     if (!canReview) return;
     setActionError(null);
+    setReviewPreview(null);
+    setReviewError(null);
+    setReviewPage(0);
     setRenameReview({
       count: selectedCount,
-      example: selectableItems.find((item) => isSelected(item.path)),
       payload: {
         ...(selectionMode === "all"
           ? { rename_all: true, excluded_paths: Array.from(excludedPaths) }
@@ -425,18 +458,30 @@ const ImageRenamePage: React.FC<{
   };
 
   const handleSubmit = async () => {
-    if (!renameReview || submittingRef.current || !active) return;
+    if (!renameReview || !reviewPreview?.ready_count || submittingRef.current || !active) return;
     submittingRef.current = true;
     setIsSubmitting(true);
     setActionError(null);
     setMessage(null);
     setRenameReport(null);
     try {
-      const result = await applyImageRenames(renameReview.payload);
+      const confirmedTargets = Object.fromEntries(reviewPreview.items.flatMap((item) => (
+        item.target_path && item.source_token && !item.reason
+          ? [[item.path, { target_path: item.target_path, source_token: item.source_token }]]
+          : []
+      )));
+      const alreadySkipped = reviewPreview.items.flatMap((item) => (
+        item.reason ? [{ path: item.path, reason: item.reason }] : []
+      ));
+      const result = await applyImageRenames({ ...renameReview.payload, confirmed_targets: confirmedTargets });
       const reported = result.renamed_count + result.skipped_count + result.error_count;
       setRenameReport({
-        result,
-        unreported: renameReview.payload.rename_all ? 0 : Math.max(0, renameReview.count - reported),
+        result: {
+          ...result,
+          skipped: [...alreadySkipped, ...result.skipped],
+          skipped_count: alreadySkipped.length + result.skipped_count,
+        },
+        unreported: Math.max(0, reviewPreview.ready_count - reported),
       });
       handleClearSelection();
     } catch (submitError) {
@@ -647,8 +692,10 @@ const ImageRenamePage: React.FC<{
       const label = "Übersprungen";
       skippedByReason.set(label, (skippedByReason.get(label) ?? 0) + result.skipped_count - skipped.length);
     }
+    const recoveryErrors = errors.filter((item) => item.recovery_path);
+    const ordinaryErrors = errors.filter((item) => !item.recovery_path).slice(0, Math.max(0, 12 - recoveryErrors.length));
     const details: { path: string; label: string; description?: string; destination?: string }[] = [
-      ...errors.slice(0, 12).map((item) => ({ path: item.path, label: "Fehler", description: item.reason })),
+      ...[...recoveryErrors, ...ordinaryErrors].map((item) => ({ path: item.path, label: "Fehler", description: item.reason })),
       ...skipped.slice(0, 12).map((item) => ({ path: item.path, label: skipLabel(item.reason) })),
       ...renamed.slice(0, 12).map((item) => ({ path: item.from_path, label: "Umbenannt", destination: item.to_path })),
     ];
@@ -879,30 +926,48 @@ const ImageRenamePage: React.FC<{
         <div className="modal-backdrop">
           <section
             ref={reviewDialogRef}
-            className="cluster-action-modal cluster-action-modal--narrow"
+            className="cluster-action-modal rename-review"
             role="dialog"
             aria-modal="true"
             aria-labelledby="rename-review-title"
             aria-describedby="rename-review-scope"
-            aria-busy={isSubmitting}
+            aria-busy={isSubmitting || (!reviewPreview && !reviewError)}
           >
             <header className="cluster-action-modal__header">
               <h2 id="rename-review-title">Dateinamen prüfen</h2>
             </header>
-            <div className="cluster-action-modal__confirmation" id="rename-review-scope">
+            <div className="cluster-action-modal__confirmation">
               <strong>{renameReview.count} ausgewählte {renameReview.count === 1 ? "Datei" : "Dateien"}</strong>
-              <p>Face Manager benennt die Dateien am jeweiligen Speicherort um.</p>
+              <p id="rename-review-scope">Face Manager benennt die Dateien am jeweiligen Speicherort um.</p>
               {renameReview.payload.rename_all && (
-                <p>Die Auswahl gilt für alle Treffer des aktuellen Filters, auch auf anderen Seiten. Bei langen Dateinamen können Personennamen entfallen. Face Manager überspringt unzulässige Dateinamen.</p>
+                <p>Die Auswahl umfasst alle Treffer des aktuellen Filters, auch auf anderen Seiten.</p>
               )}
-              {renameReview.example && (
+              {!reviewPreview && !reviewError && <p role="status">Dateinamen werden geprüft…</p>}
+              {reviewError && <p role="alert">{reviewError}</p>}
+              {reviewPreview && (
                 <>
-                  <div className="rename-file-names rename-review-example">
-                    <div><small>{renameReview.count > 1 ? "Beispiel" : "Aktueller Name"}</small><code>{renameReview.example.current_filename}</code></div>
-                    <span className="rename-file-names__arrow" aria-hidden="true">→</span>
-                    <div><small>Vorgeschlagener Name</small><strong>{renameReview.example.proposed_filename}</strong></div>
-                  </div>
-                  {exampleWarning && <p>{exampleWarning}</p>}
+                  <p role="status">
+                    {reviewPreview.ready_count} bereit zum Umbenennen · {reviewPreview.skipped_count} werden übersprungen
+                  </p>
+                  <ul key={reviewPage} className="rename-review__targets" aria-label="Geprüfte Dateinamen" tabIndex={0}>
+                    {reviewPreview.items.slice(reviewPage * REVIEW_PAGE_SIZE, (reviewPage + 1) * REVIEW_PAGE_SIZE).map((item) => (
+                      <li key={item.path}>
+                        <div className="rename-file-names">
+                          <div><small>Aktueller Pfad</small><code>{item.path}</code></div>
+                          <span className="rename-file-names__arrow" aria-hidden="true">→</span>
+                          <div><small>Zielname</small><strong>{item.target_path ? pathBasename(item.target_path) : "Kein Vorschlag"}</strong></div>
+                        </div>
+                        {item.reason && <p className="rename-review__reason">{skipLabel(item.reason)}</p>}
+                      </li>
+                    ))}
+                  </ul>
+                  {reviewPreview.items.length > REVIEW_PAGE_SIZE && (
+                    <nav className="rename-review__pages" aria-label="Vorschauseiten">
+                      <button className="neon-card" type="button" onClick={() => setReviewPage(reviewPage - 1)} disabled={isSubmitting || reviewPage === 0}>Zurück</button>
+                      <span aria-live="polite">Seite {reviewPage + 1} von {Math.ceil(reviewPreview.items.length / REVIEW_PAGE_SIZE)}</span>
+                      <button className="neon-card" type="button" onClick={() => setReviewPage(reviewPage + 1)} disabled={isSubmitting || (reviewPage + 1) * REVIEW_PAGE_SIZE >= reviewPreview.items.length}>Weiter</button>
+                    </nav>
+                  )}
                 </>
               )}
             </div>
@@ -910,7 +975,7 @@ const ImageRenamePage: React.FC<{
               <button className="neon-card" type="button" data-initial-focus onClick={() => setRenameReview(null)} disabled={isSubmitting}>
                 Abbrechen
               </button>
-              <button className="neon-button" type="button" onClick={() => void handleSubmit()} disabled={isSubmitting}>
+              <button className="neon-button" type="button" onClick={() => void handleSubmit()} disabled={isSubmitting || !reviewPreview?.ready_count}>
                 {isSubmitting ? "Dateien werden umbenannt…" : "Dateien jetzt umbenennen"}
               </button>
             </footer>

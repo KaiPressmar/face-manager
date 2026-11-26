@@ -18,6 +18,10 @@ import type { SettingsSection } from "../../utils/navigation";
 import PreviewCacheSettings from "./PreviewCacheSettings";
 import SharedLibrarySettings from "./SharedLibrarySettings";
 import type { SharedLibraryController } from "../../hooks/useSharedLibrary";
+import { countWithLabel } from "../../utils/germanFormatting";
+import { downloadRestoreBackup, hasRestoreBackup, previewDatabaseRestore, type RestorePreview } from "../../utils/libraryMaintenance";
+import RestoreConfirmation from "./RestoreConfirmation";
+import ArchiveRepair from "./ArchiveRepair";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; description: string }[] = [
   {
@@ -75,6 +79,15 @@ const LOG_LEVEL_OPTIONS = [
   },
 ] as const;
 
+function saveDatabaseBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function buildSuffixFormatPreview(
   blockSeparator: string,
   joiner: string,
@@ -129,6 +142,9 @@ const SettingsPage: React.FC<{
   const [isReclustering, setIsReclustering] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isInspectingBackup, setIsInspectingBackup] = useState(false);
+  const [pendingRestore, setPendingRestore] = useState<{ file: File; preview: RestorePreview } | null>(null);
+  const [restoreBackupAvailable, setRestoreBackupAvailable] = useState(false);
   const [backupFeedback, setBackupFeedback] = useState<{ text: string; error?: boolean } | null>(null);
   const backupInFlight = useRef(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
@@ -156,6 +172,14 @@ const SettingsPage: React.FC<{
   const canSaveFilenameFormat = filenameFormatChanged && !invalidBlockSeparator && !invalidPersonJoiner && !isSaving;
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    void hasRestoreBackup().then((available) => {
+      if (active) setRestoreBackupAvailable(available);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -486,13 +510,7 @@ const SettingsPage: React.FC<{
         setBackupFeedback({ text: "Wähle auf deinem Gerät den Speicherort für die Sicherung." });
         return;
       }
-      const blob = await exportDatabase();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "face-manager-database.sqlite";
-      link.click();
-      URL.revokeObjectURL(url);
+      saveDatabaseBlob(await exportDatabase(), "face-manager-database.sqlite");
       setBackupFeedback({ text: "Die Sicherung wurde erstellt." });
     } catch (exportError) {
       setBackupFeedback({
@@ -519,10 +537,33 @@ const SettingsPage: React.FC<{
     if (!file || backupInFlight.current) return;
 
     backupInFlight.current = true;
-    setIsImporting(true);
-    setBackupFeedback({ text: "Die Sicherung wird geprüft und wiederhergestellt …" });
+    setIsInspectingBackup(true);
+    setBackupFeedback({ text: "Die ausgewählte Sicherung wird geprüft …" });
     try {
-      await importDatabase(file);
+      const preview = await previewDatabaseRestore(file);
+      setPendingRestore({ file, preview });
+      setBackupFeedback(null);
+    } catch (previewError) {
+      setBackupFeedback({
+        error: true,
+        text: previewError instanceof Error ? previewError.message : "Die Sicherung konnte nicht geprüft werden.",
+      });
+    } finally {
+      backupInFlight.current = false;
+      setIsInspectingBackup(false);
+    }
+  };
+
+  const confirmRestore = async () => {
+    if (!pendingRestore || backupInFlight.current) return;
+    const { file, preview } = pendingRestore;
+    backupInFlight.current = true;
+    setPendingRestore(null);
+    setIsImporting(true);
+    setBackupFeedback({ text: "Die Bibliothek wird wiederhergestellt …" });
+    try {
+      await importDatabase(file, preview.checksum);
+      setRestoreBackupAvailable(true);
       try {
         const next = await fetchSettings();
         setSettings(next);
@@ -544,6 +585,25 @@ const SettingsPage: React.FC<{
     } finally {
       backupInFlight.current = false;
       setIsImporting(false);
+    }
+  };
+
+  const handleDownloadRestoreBackup = async () => {
+    if (backupInFlight.current) return;
+    backupInFlight.current = true;
+    setIsExporting(true);
+    setBackupFeedback({ text: "Die vorherige Bibliothek wird vorbereitet …" });
+    try {
+      saveDatabaseBlob(await downloadRestoreBackup(), "face-manager-vorherige-bibliothek.sqlite");
+      setBackupFeedback({ text: "Die Sicherung der vorherigen Bibliothek ist heruntergeladen." });
+    } catch (downloadError) {
+      setBackupFeedback({
+        error: true,
+        text: downloadError instanceof Error ? downloadError.message : "Die vorherige Bibliothek konnte nicht heruntergeladen werden.",
+      });
+    } finally {
+      backupInFlight.current = false;
+      setIsExporting(false);
     }
   };
 
@@ -569,9 +629,9 @@ const SettingsPage: React.FC<{
     ? pathCleanup.status === "queued"
       ? "Die Prüfung wartet, bis keine wichtigeren Hintergrundaufgaben laufen."
       : pathCleanup.status === "running"
-        ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft…`
+        ? `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft…`
         : pathCleanup.status === "completed"
-          ? `${pathCleanup.scanned_paths.toLocaleString("de-DE")} Speicherorte geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${pathCleanup.removed_paths.toLocaleString("de-DE")} Speicherorte und ${pathCleanup.removed_images.toLocaleString("de-DE")} Bilder entfernt.`
+          ? `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${countWithLabel(pathCleanup.removed_paths, "Speicherort", "Speicherorte")} und ${countWithLabel(pathCleanup.removed_images, "Bild", "Bilder")} entfernt.`
           : pathCleanup.status === "failed"
             ? "Die letzte Pfadprüfung konnte nicht abgeschlossen werden."
             : "Noch keine Pfadprüfung in dieser Sitzung ausgeführt."
@@ -1039,7 +1099,7 @@ const SettingsPage: React.FC<{
                   className="neon-card"
                   type="button"
                   onClick={handleExport}
-                  disabled={isExporting || isImporting}
+                  disabled={isExporting || isImporting || isInspectingBackup}
                 >
                   {isExporting ? "Sicherung wird erstellt…" : "Sicherung erstellen"}
                 </button>
@@ -1047,10 +1107,14 @@ const SettingsPage: React.FC<{
                   className="neon-card"
                   type="button"
                   onClick={handleImportClick}
-                  disabled={isExporting || isImporting}
+                  disabled={isExporting || isImporting || isInspectingBackup}
                 >
                   {isImporting ? "Wird wiederhergestellt…" : "Sicherung wiederherstellen"}
                 </button>
+                {restoreBackupAvailable && <button className="neon-card" type="button"
+                  onClick={handleDownloadRestoreBackup} disabled={isExporting || isImporting || isInspectingBackup}>
+                  Vorherige Bibliothek herunterladen
+                </button>}
               </div>
               {backupFeedback && (
                 <p
@@ -1068,7 +1132,11 @@ const SettingsPage: React.FC<{
                 hidden
                 onChange={handleImportChange}
               />
+              {pendingRestore && <RestoreConfirmation file={pendingRestore.file} preview={pendingRestore.preview}
+                onClose={() => setPendingRestore(null)} onConfirm={() => void confirmRestore()} />}
             </section>
+
+            <ArchiveRepair />
 
             <section className="settings-card">
               <h2 className="settings-card__title">Fehlerprotokoll</h2>

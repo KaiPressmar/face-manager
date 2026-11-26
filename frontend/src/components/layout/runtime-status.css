@@ -8,10 +8,6 @@
   list-style: none;
 }
 
-.runtime-status > summary::-webkit-details-marker {
-  display: none;
-}
-
 .runtime-status__panel {
   position: absolute;
   z-index: 12;
@@ -52,4 +48,14 @@
 .runtime-status__timings dd {
   margin: 0;
   white-space: nowrap;
+}
+
+@media (max-width: 540px) {
+  .runtime-status__panel {
+    position: fixed;
+    inset-inline: 12px;
+    inset-block-start: var(--runtime-panel-top, 80px);
+    width: auto;
+    max-height: min(24rem, calc(100dvh - var(--runtime-panel-top, 80px) - 12px));
+  }
 }

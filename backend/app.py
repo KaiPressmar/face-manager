@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -12,7 +13,7 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from functools import partial, wraps
 from contextlib import asynccontextmanager, nullcontext
-from datetime import date
+from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from queue import Full, Queue
@@ -50,6 +51,12 @@ from .error_logging import (
 )
 from .models.face_model import get_runtime_provider_details
 from .services import albums
+from .services.archive_repair import (
+    apply_archive_repair,
+    preview_archive_repair,
+    register_archive_repair_snapshot,
+    undo_archive_repair,
+)
 from .services.desktop import (
     is_windows_host,
     is_wsl_host,
@@ -123,6 +130,7 @@ from .services.storage import (
     DEFAULT_FILENAME_PERSON_JOINER,
     DEFAULT_UI_THEME,
     ManualFaceConflictError,
+    StaleFaceAssignmentError,
     StalePersonSuggestionError,
     _safe_float,
     assign_cluster_to_person,
@@ -175,6 +183,7 @@ from .services.storage import (
     accept_review_suggestions,
     normalize_face_review_group,
     normalize_face_status_filters,
+    preview_image_location_renames,
     rename_cluster,
     rename_person,
     delete_person,
@@ -1129,16 +1138,36 @@ def validate_cluster_distance_threshold(value: float) -> float:
     return threshold
 
 
-def validate_database_file(path: Path) -> None:
-    """Verify that a file is a readable SQLite database with core tables."""
+def validate_database_file(path: Path) -> dict[str, int]:
+    """Verify a SQLite snapshot without modifying it and return its summary."""
+    required = {
+        "image": {"id", "path", "directory", "filename"},
+        "face": {"id", "image_id", "cluster_id", "bbox_x", "bbox_y", "bbox_w", "bbox_h"},
+        "cluster": {"id", "label", "person_id"},
+        "person": {"id", "name"},
+    }
     conn = None
     try:
-        conn = sqlite3.connect(path)
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        conn.execute("PRAGMA trusted_schema = OFF")
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
         if conn.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
             raise sqlite3.DatabaseError("Database integrity check failed")
+        table_names = {row[0] for row in rows}
+        if any(table not in table_names or not columns.issubset({
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+        }) for table, columns in required.items()):
+            raise HTTPException(
+                status_code=400,
+                detail="In der ausgewählten Datei fehlen benötigte Face-Manager-Daten.",
+            )
+        return {
+            "photos": conn.execute("SELECT COUNT(*) FROM image").fetchone()[0],
+            "people": conn.execute("SELECT COUNT(*) FROM person").fetchone()[0],
+            "albums": conn.execute("SELECT COUNT(*) FROM album").fetchone()[0] if "album" in table_names else 0,
+        }
     except sqlite3.DatabaseError as exc:
         raise HTTPException(
             status_code=400,
@@ -1148,14 +1177,6 @@ def validate_database_file(path: Path) -> None:
         if conn is not None:
             conn.close()
 
-    table_names = {row[0] for row in rows}
-    required = {"image", "face", "cluster", "person"}
-    if not required.issubset(table_names):
-        raise HTTPException(
-            status_code=400,
-            detail="In der ausgewählten Datei fehlen benötigte Face-Manager-Daten.",
-        )
-
 
 def snapshot_database_backup(target_path: Path) -> None:
     """Save the live SQLite state, including WAL, without copying OS metadata."""
@@ -1164,6 +1185,7 @@ def snapshot_database_backup(target_path: Path) -> None:
     try:
         target = sqlite3.connect(target_path)
         source.backup(target)
+        target.execute("PRAGMA journal_mode = DELETE")
         target.commit()
     finally:
         if target is not None:
@@ -1407,6 +1429,7 @@ def api_export_database():
     target = sqlite3.connect(temp_path)
     try:
         source.backup(target)
+        target.execute("PRAGMA journal_mode = DELETE")
         target.commit()
         with open(temp_path, "rb") as exported:
             payload = exported.read()
@@ -1436,6 +1459,108 @@ def _restore_work_file(db_path: Path, purpose: str) -> Path:
     return Path(name)
 
 
+_RESTORE_BACKUP_NAME = re.compile(r"database-before-restore-\d{8}-\d{6}-\d{6}-[a-z0-9_]+\.sqlite")
+
+
+def _latest_restore_backup() -> Path | None:
+    folder = Path(DB_PATH).parent / "restore-backups"
+    if not folder.is_dir() or folder.is_symlink():
+        return None
+    return max((
+        path for path in folder.iterdir()
+        if _RESTORE_BACKUP_NAME.fullmatch(path.name) and not path.is_symlink() and path.is_file()
+    ), default=None)
+
+
+@app.post("/api/database/restore-preview")
+def api_preview_database_restore(payload: bytes = Body(..., media_type="application/octet-stream")):
+    if not payload:
+        raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
+    path = _restore_work_file(Path(DB_PATH), "restore-preview")
+    try:
+        path.write_bytes(payload)
+        return {**validate_database_file(path), "checksum": hashlib.sha256(payload).hexdigest()}
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@app.get("/api/database/restore-backup")
+def api_get_restore_backup():
+    return {"available": _latest_restore_backup() is not None}
+
+
+@app.get("/api/database/restore-backup/file")
+def api_download_restore_backup():
+    backup = _latest_restore_backup()
+    if backup is None:
+        raise HTTPException(status_code=404, detail="Es ist keine Sicherung des vorherigen Stands vorhanden.")
+    return FileResponse(backup, filename=backup.name, media_type="application/octet-stream")
+
+
+class _ArchiveRepairSelection(BaseModel):
+    tokens: list[str] = Field(min_length=1, max_length=500)
+
+
+class _ArchiveRepairUndo(BaseModel):
+    batch_id: str = Field(min_length=1, max_length=64)
+
+
+@app.get("/api/database/archive-repair")
+def api_preview_archive_repair():
+    generation = _get_media_library_generation()
+    result = preview_archive_repair()
+    _get_media_library_generation(generation)
+    return result
+
+
+@app.post("/api/database/archive-repair/snapshots")
+@safe_cluster_mutation
+def api_register_archive_repair_snapshot(payload: bytes = Body(..., media_type="application/octet-stream")):
+    _get_media_library_generation()
+    try:
+        return register_archive_repair_snapshot(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        logger.exception("Could not store archive repair comparison snapshot")
+        raise HTTPException(
+            status_code=503, detail="Die Sicherung konnte nicht zum Vergleich gespeichert werden."
+        ) from exc
+
+
+def _finish_archive_repair(operation, argument):
+    _get_media_library_generation()
+    try:
+        result = operation(argument)
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        logger.exception("Could not complete archive repair")
+        raise HTTPException(
+            status_code=503,
+            detail="Die Zuordnungen konnten nicht geändert werden. Bitte versuche es erneut.",
+        ) from exc
+    reset_import_resources()
+    invalidate_image_query_cache()
+    mark_cluster_assignments_dirty("archive_repair")
+    notify_clusters_changed("archive_repair")
+    return result
+
+
+@app.post("/api/database/archive-repair/apply")
+@safe_cluster_mutation
+def api_apply_archive_repair(selection: _ArchiveRepairSelection):
+    return _finish_archive_repair(apply_archive_repair, selection.tokens)
+
+
+@app.post("/api/database/archive-repair/undo")
+@safe_cluster_mutation
+def api_undo_archive_repair(selection: _ArchiveRepairUndo):
+    return _finish_archive_repair(undo_archive_repair, selection.batch_id)
+
+
 def _initialize_restored_library() -> None:
     init_db(recover=False, scan_sources=False)
     reset_import_resources()
@@ -1445,12 +1570,20 @@ def _initialize_restored_library() -> None:
 
 @app.post("/api/database/import")
 @safe_cluster_mutation
-def api_import_database(payload: bytes = Body(..., media_type="application/octet-stream")):
+def api_import_database(
+    payload: bytes = Body(..., media_type="application/octet-stream"),
+    preview_checksum: Annotated[str | None, Header(alias="X-Restore-SHA256")] = None,
+):
     """Replace the active library, keeping its snapshot until recovery is verified."""
     global _database_restore_in_progress, _media_library_generation
     ensure_database_is_idle()
     if not payload:
         raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
+    if preview_checksum is not None and (
+        not re.fullmatch(r"[a-f0-9]{64}", preview_checksum)
+        or not hmac.compare_digest(hashlib.sha256(payload).hexdigest(), preview_checksum)
+    ):
+        raise HTTPException(status_code=409, detail="Die Sicherungsdatei wurde geändert. Wähle sie erneut aus.")
 
     current = Path(DB_PATH)
     upload = backup = rollback_copy = None
@@ -1498,6 +1631,15 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         replaced = True
         remove_database_sidecars(current)
         _initialize_restored_library()
+        if backup_ready:
+            recovery_folder = current.parent / "restore-backups"
+            recovery_folder.mkdir(exist_ok=True)
+            if recovery_folder.is_symlink():
+                raise OSError("The restore backup directory must be local")
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+            suffix = backup.stem.rsplit("-", 1)[-1]
+            os.replace(backup, recovery_folder / f"database-before-restore-{stamp}-{suffix}.sqlite")
+            backup = None
         library_ready = True
     except Exception as exc:
         if not replaced and isinstance(exc, HTTPException):
@@ -1828,7 +1970,15 @@ def api_clusters():
 @app.get("/api/clusters-overview")
 def api_clusters_overview():
     """Return the cluster-page bootstrap payload in a single round trip."""
-    return get_cluster_overview()
+    return _assignment_snapshot(get_cluster_overview)
+
+
+def _assignment_snapshot(read):
+    generation = _get_media_library_generation()
+    library_id = get_person_suggestion_epoch()
+    result = read()
+    _get_media_library_generation(generation)
+    return {**result, "assignment_library_id": library_id}
 
 
 @app.get("/api/person-suggestions")
@@ -1958,13 +2108,12 @@ def api_cluster_detail(cluster_id: int):
 @app.get("/api/clusters/{cluster_id}/faces")
 def api_cluster_faces(cluster_id: int):
     """Return faces for one cluster only."""
-    cluster = get_cluster_summary(cluster_id)
-    if cluster is None:
-        raise HTTPException(status_code=404, detail="Die Gesichtsgruppe wurde nicht gefunden.")
-    return {
-        **cluster,
-        "faces": get_cluster_faces(cluster_id),
-    }
+    def read():
+        cluster = get_cluster_summary(cluster_id)
+        if cluster is None:
+            raise HTTPException(status_code=404, detail="Die Gesichtsgruppe wurde nicht gefunden.")
+        return {**cluster, "faces": get_cluster_faces(cluster_id)}
+    return _assignment_snapshot(read)
 
 
 @app.get("/api/face-review-groups/{group_key}/faces")
@@ -1974,7 +2123,7 @@ def api_face_review_group_faces(group_key: str):
         normalize_face_review_group(group_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return get_faces_for_review_group(group_key)
+    return _assignment_snapshot(partial(get_faces_for_review_group, group_key))
 
 
 @app.post("/api/clusters/{cluster_id}/assign-person")
@@ -2050,6 +2199,29 @@ def api_remove_face_from_cluster(cluster_id: int, face_id: int):
     return {"status": "ok", "updated_count": updated}
 
 
+def _expected_face_assignments(rows):
+    if rows is None:
+        return None
+    detail = "Die Angaben zur Gesichtsauswahl sind ungültig."
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail=detail)
+    expected = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=400, detail=detail)
+        face_id, cluster_id, status = row.get("id"), row.get("cluster_id"), row.get("review_status")
+        person_name = row.get("person_name")
+        if (
+            type(face_id) is not int or face_id <= 0 or face_id in expected
+            or (cluster_id is not None and (type(cluster_id) is not int or cluster_id <= 0))
+            or status not in ("active", "unknown_person", "not_face")
+            or "person_name" not in row or (person_name is not None and not isinstance(person_name, str))
+        ):
+            raise HTTPException(status_code=400, detail=detail)
+        expected[face_id] = (cluster_id, status, person_name)
+    return expected
+
+
 @app.post("/api/faces/batch")
 @safe_cluster_mutation
 def api_batch_update_faces(data: dict = Body(...)):
@@ -2068,7 +2240,13 @@ def api_batch_update_faces(data: dict = Body(...)):
             person_name = data.get("person_name") or data.get("personName")
             if not person_name or not str(person_name).strip():
                 raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
-            cluster_id = assign_faces_to_person(face_ids, str(person_name))
+            expected_library_id = data.get("expected_library_id")
+            if expected_library_id is not None and expected_library_id != get_person_suggestion_epoch():
+                raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade die Gesichtsauswahl neu.")
+            expected_faces = _expected_face_assignments(data.get("expected_faces"))
+            cluster_id = assign_faces_to_person(face_ids, str(person_name), **(
+                {"expected_faces": expected_faces} if expected_faces is not None else {}
+            ))
             response = {"status": "ok", "cluster_id": cluster_id}
         elif action == "mark_unknown_person":
             updated = mark_faces_with_review_status(face_ids, "unknown_person")
@@ -2081,6 +2259,8 @@ def api_batch_update_faces(data: dict = Body(...)):
             response = {"status": "ok", "updated_count": updated}
         else:
             raise HTTPException(status_code=400, detail="Diese Aktion ist nicht verfügbar.")
+    except StaleFaceAssignmentError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -3367,39 +3547,61 @@ def api_count_image_rename_candidates(
     return {"total": total}
 
 
+def _image_rename_selection(data):
+    def filter_values(key):
+        values = data.get(key, [])
+        if not isinstance(values, list):
+            raise HTTPException(status_code=422, detail="Die Dateiauswahl ist ungültig.")
+        return (value for value in values if isinstance(value, str) and value.strip())
+
+    return {
+        "folders": [normalize_import_folder_path(path) for path in filter_values("folders")],
+        "persons": [person.strip() for person in filter_values("persons")],
+        "selected_paths": [normalize_import_folder_path(path) for path in filter_values("selected_paths")],
+        "excluded_paths": [normalize_import_folder_path(path) for path in filter_values("excluded_paths")],
+        "rename_all": bool(data.get("rename_all")),
+        "sort_by": data.get("sort_by", "date"),
+        "sort_direction": data.get("sort_direction", "desc"),
+    }
+
+
+@app.post("/api/image-renames/preview")
+def api_preview_image_rename_candidates(request: Request, data: dict = Body(...)):
+    generation = _get_media_library_generation()
+    preview = preview_image_location_renames(**_image_rename_selection(data))
+    _get_media_library_generation(generation)
+    if get_display_platform(request) == "windows":
+        for item in preview["items"]:
+            item["path"] = to_display_path(item["path"])
+            if item["target_path"]:
+                item["target_path"] = to_display_path(item["target_path"])
+    return preview
+
+
 @app.post("/api/image-renames/apply")
 @safe_cluster_mutation
 def api_apply_image_rename_candidates(data: dict = Body(...)):
     """Rename selected image paths and update the database."""
-    folders = [
-        normalize_import_folder_path(path)
-        for path in data.get("folders", [])
-        if isinstance(path, str) and path.strip()
-    ]
-    persons = [
-        person.strip()
-        for person in data.get("persons", [])
-        if isinstance(person, str) and person.strip()
-    ]
-    selected_paths = [
-        normalize_import_folder_path(path)
-        for path in data.get("selected_paths", [])
-        if isinstance(path, str) and path.strip()
-    ]
-    excluded_paths = [
-        normalize_import_folder_path(path)
-        for path in data.get("excluded_paths", [])
-        if isinstance(path, str) and path.strip()
-    ]
-    result = rename_image_locations_to_match_people(
-        selected_paths=selected_paths,
-        rename_all=bool(data.get("rename_all")),
-        excluded_paths=excluded_paths,
-        folders=folders,
-        persons=persons,
-        sort_by=data.get("sort_by", "date"),
-        sort_direction=data.get("sort_direction", "desc"),
-    )
+    selection = _image_rename_selection(data)
+    targets = data.get("confirmed_targets")
+    if targets is not None:
+        if not isinstance(targets, dict) or not all(
+            isinstance(path, str) and path.strip() and isinstance(confirmation, dict)
+            and isinstance(confirmation.get("target_path"), str) and confirmation["target_path"].strip()
+            and isinstance(confirmation.get("source_token"), str)
+            and re.fullmatch(r"[a-f0-9]{64}", confirmation["source_token"])
+            for path, confirmation in targets.items()
+        ):
+            raise HTTPException(status_code=422, detail="Die bestätigten Dateinamen sind ungültig.")
+        selection["confirmed_targets"] = {
+            normalize_import_folder_path(path): normalize_import_folder_path(confirmation["target_path"])
+            for path, confirmation in targets.items()
+        }
+        selection["confirmed_source_tokens"] = {
+            normalize_import_folder_path(path): confirmation["source_token"]
+            for path, confirmation in targets.items()
+        }
+    result = rename_image_locations_to_match_people(**selection)
     notify_clusters_changed("image_rename")
     return result
 

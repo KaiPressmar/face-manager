@@ -26,8 +26,48 @@
   align-self: center;
 }
 
-.rename-review-example {
-  margin-top: 4px;
+.rename-review__targets {
+  display: grid;
+  gap: 8px;
+  max-height: min(40vh, 360px);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.rename-review__targets > li {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.rename-review__targets .rename-review__reason {
+  font-weight: 700;
+}
+
+.rename-review__pages,
+.rename-review .cluster-action-modal__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.rename-review__pages {
+  justify-content: space-between;
+}
+
+@media (max-width: 480px) {
+  .rename-review .rename-file-names {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rename-review .rename-file-names__arrow {
+    display: none;
+  }
 }
 
 .rename-row__unavailable,

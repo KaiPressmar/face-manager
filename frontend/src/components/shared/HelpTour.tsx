@@ -44,7 +44,7 @@ const steps: HelpStep[] = [
     title: "Fotos auf der Karte finden",
     actions: [
       <>Öffne <strong>Karte</strong> und wähle <strong>Standorte</strong>. Wähle einen Punkt auf der Karte, um die Fotos dort zu sehen.</>,
-      <>Wähle unter <strong>Zeitraum</strong> einen Vorschlag oder gib bei <strong>Von</strong> und <strong>Bis</strong> eigene Daten ein.</>,
+      <>Wähle unter <strong>Zeitraum</strong> einen Vorschlag oder gib bei <strong>Von</strong> und <strong>Bis</strong> ein Datum ein, etwa 24.12.2025.</>,
       <>Wähle <strong>Bereich wählen</strong> und ziehe ein Rechteck auf der Karte. Mit <strong>Sichtbaren Bereich wählen</strong> übernimmst du stattdessen den gesamten sichtbaren Ausschnitt.</>,
     ],
     note: <>Auf der Karte erscheinen Fotos mit gespeicherten Standortdaten. Mit <strong>Auswahl löschen</strong> entfernst du den gewählten Bereich.</>,
@@ -69,7 +69,7 @@ const steps: HelpStep[] = [
     actions: [
       <>Öffne in <strong>Karte</strong> den Bereich oder Reiseverlauf, den du abbilden möchtest. Wähle <strong>Bild exportieren</strong>.</>,
       <>Gib einen <strong>Titel</strong> ein und wähle <strong>Format</strong> und <strong>Farbwelt</strong>. Schau dir die Vorschau an.</>,
-      <>Wähle <strong>PNG speichern</strong>. Bei mehreren Seiten kannst du mit <strong>Diese Seite als PNG speichern</strong> jede Seite einzeln speichern.</>,
+      <>Speichere eine Seite als PNG. Bei mehreren Seiten kannst du <strong>Alle Seiten als ZIP speichern</strong> wählen. Entpacke die Datei, um die einzelnen Bilder in dein Fotobuch einzufügen.</>,
     ],
     note: <>Ein PNG ist eine Bilddatei. Du kannst sie in dein Fotobuch einfügen.</>,
     destination: "map",
@@ -92,6 +92,7 @@ const steps: HelpStep[] = [
     actions: [
       <>Öffne <strong>Einstellungen</strong> und wähle <strong>Daten und Wartung</strong>.</>,
       <>Wähle <strong>Sicherung erstellen</strong> und bewahre die Datei an einem Ort auf, den du wiederfindest.</>,
+      <>Wenn du später <strong>Sicherung wiederherstellen</strong> wählst, prüfe in der Vorschau, ob es die richtige Bibliothek ist. Bestätige erst dann.</>,
     ],
     note: <>Die Sicherung enthält die Namen und Zuordnungen, die du in Face Manager gespeichert hast. Sichere deine Fotodateien separat.</>,
     destination: "settings",

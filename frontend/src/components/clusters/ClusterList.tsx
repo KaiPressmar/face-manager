@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { ClusterSummary, FaceReviewGroupSummary } from "../../utils/api";
+import { countWithLabel } from "../../utils/germanFormatting";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
 const REVIEW_GROUP_LABELS: Record<string, string> = {
@@ -270,7 +271,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
           {displayLabel}
         </div>
         <div style={{ opacity: 0.62, fontSize: 12, marginTop: 2 }}>
-          {`${cluster.face_count} Gesichter · Gruppe ${cluster.cluster_id}`}
+          {`${countWithLabel(cluster.face_count, "Gesicht", "Gesichter")} · Gruppe ${cluster.cluster_id}`}
         </div>
       </div>
     );
@@ -278,8 +279,8 @@ const ClusterList: React.FC<ClusterListProps> = ({
 
   const renderCountSummary = (clusterCount: number, faceCount: number) => (
     <div className="cluster-nav-detail-title__meta">
-      <span>{clusterCount} Gesichtsgruppen</span>
-      <span>{faceCount} Gesichter</span>
+      <span>{countWithLabel(clusterCount, "Gesichtsgruppe", "Gesichtsgruppen")}</span>
+      <span>{countWithLabel(faceCount, "Gesicht", "Gesichter")}</span>
     </div>
   );
 
@@ -313,7 +314,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
         </div>
 
         <div className="cluster-nav-search__meta">
-          {mode === "open" && <span>{unknownClusters.length} offene Gesichtsgruppen</span>}
+          {mode === "open" && <span>{countWithLabel(unknownClusters.length, "offene Gesichtsgruppe", "offene Gesichtsgruppen")}</span>}
           {mode === "people" && <span>{personEntries.length} Personen</span>}
           {mode === "archive" && <span>{visibleReviewGroupCount} Kategorien</span>}
         </div>
@@ -373,7 +374,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
                             <span>
                               <span className="cluster-person-browser__person-name">{personName}</span>
                               <span className="cluster-person-browser__person-meta">
-                                {clusters.length} Gesichtsgruppen · {faceCount} Gesichter
+                                {countWithLabel(clusters.length, "Gesichtsgruppe", "Gesichtsgruppen")} · {countWithLabel(faceCount, "Gesicht", "Gesichter")}
                               </span>
                             </span>
                           </span>

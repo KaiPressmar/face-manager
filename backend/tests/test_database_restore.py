@@ -15,8 +15,13 @@ from backend.services import preview_cache_budget as budget
 
 def make_database(path: Path, marker: str) -> None:
     with closing(sqlite3.connect(path)) as connection:
-        for table in ("image", "face", "cluster", "person"):
-            connection.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)")
+        connection.executescript("""
+            CREATE TABLE image (id INTEGER PRIMARY KEY, path TEXT, directory TEXT, filename TEXT);
+            CREATE TABLE face (id INTEGER PRIMARY KEY, image_id INTEGER, cluster_id INTEGER,
+                bbox_x INTEGER, bbox_y INTEGER, bbox_w INTEGER, bbox_h INTEGER);
+            CREATE TABLE cluster (id INTEGER PRIMARY KEY, label TEXT, person_id INTEGER);
+            CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT);
+        """)
         connection.execute("CREATE TABLE marker (value TEXT)")
         connection.execute("INSERT INTO marker VALUES (?)", (marker,))
         connection.commit()
@@ -43,8 +48,36 @@ class DatabaseRestoreTest(unittest.TestCase):
             self.assertEqual(app.api_import_database(incoming.read_bytes()), {"status": "imported"})
 
             self.assertEqual(marker_at(current), "new")
+            backup = app._latest_restore_backup()
+            self.assertIsNotNone(backup)
+            self.assertEqual(marker_at(backup), "old")
+            self.assertEqual(app.api_get_restore_backup(), {"available": True})
             budget._policies.pop(root / "thumbnails")
             self.assertEqual(budget.get_preview_cache_policy(), (None, False))
+
+    def test_restore_preview_checks_schema_and_checksum_before_replacement(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            root = Path(folder)
+            current = root / "database.sqlite"
+            incoming = root / "incoming.sqlite"
+            invalid = root / "invalid.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            with closing(sqlite3.connect(invalid)) as connection:
+                connection.execute("CREATE TABLE image (id INTEGER PRIMARY KEY)")
+            with self.assertRaises(HTTPException) as bad_preview:
+                app.api_preview_database_restore(invalid.read_bytes())
+            self.assertEqual(bad_preview.exception.status_code, 400)
+            preview = app.api_preview_database_restore(incoming.read_bytes())
+            self.assertEqual({key: preview[key] for key in ("photos", "people", "albums")},
+                             {"photos": 0, "people": 0, "albums": 0})
+            make_database(root / "other.sqlite", "other")
+            with self.assertRaises(HTTPException) as changed:
+                app.api_import_database((root / "other.sqlite").read_bytes(), preview["checksum"])
+            self.assertEqual(changed.exception.status_code, 409)
+            self.assertEqual(marker_at(current), "old")
+            self.assertEqual(app.api_get_restore_backup(), {"available": False})
 
     def test_backup_includes_uncheckpointed_wal_changes(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -58,6 +91,19 @@ class DatabaseRestoreTest(unittest.TestCase):
                 with patch.object(app, "get_conn", side_effect=lambda: sqlite3.connect(source_path)):
                     app.snapshot_database_backup(backup_path)
                 self.assertEqual(marker_at(backup_path), "from-wal")
+                self.assertFalse(backup_path.with_name("backup.sqlite-wal").exists())
+                self.assertFalse(backup_path.with_name("backup.sqlite-shm").exists())
+
+    def test_validation_does_not_create_sidecars_for_standalone_wal_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "database.sqlite"
+            make_database(path, "checkpointed")
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+            original = path.read_bytes()
+            self.assertEqual(app.validate_database_file(path)["photos"], 0)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(list(path.parent.iterdir()), [path])
 
     def _isolate_restore(self, patches, current):
         patches.enter_context(patch.object(app, "DB_PATH", str(current)))

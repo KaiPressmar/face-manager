@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
 import { fetchMapPoints, type MapPoint } from "../../utils/api";
 import type { Journey } from "./mapData";
-import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
+import { describeJourneyPlaces, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
 import { journeyStopLabel } from "./MapJourney";
 import { suggestJourneyTransport } from "./journeyTransport";
 import {
@@ -11,6 +11,7 @@ import {
   type AlbumDimensions, type AlbumFormat, type AlbumFormatting, type AlbumTransport, type MapAlbumPage,
 } from "./MapAlbumArtwork";
 import type { MapBounds, MapStyle } from "./WorldMap";
+import { archiveMapAlbumPages, MAX_ALBUM_ARCHIVE_BYTES, MAX_ALBUM_ARCHIVE_PAGES, MAX_ALBUM_PAGE_BYTES } from "./mapAlbumArchive";
 import satelliteSource from "./world-satellite.json";
 
 export interface MapAlbumOpening {
@@ -50,10 +51,12 @@ export interface AlbumDraft {
 }
 
 type AlbumData = { points?: MapPoint[]; places?: JourneyPlace[] };
-type NativeSave = (name: string, data: string) => Promise<{ status: "saved" | "cancelled" | "error"; message?: string }>;
+type NativeSaveResult = { status: "saved" | "cancelled" | "error"; message?: string };
+type NativeAlbumSave = { save_album_png?: (name: string, data: string) => Promise<NativeSaveResult>;
+  save_album_zip?: (name: string, pages: string[]) => Promise<NativeSaveResult> };
 const dateFormatter = new Intl.DateTimeFormat("de-DE", { dateStyle: "long", timeZone: "UTC" });
-const coordinate = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 3 });
-const millimeters = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+const millimeters = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
+const MM_PER_INCH = 25.4;
 const formatOptions = [["a4", "A4 quer"], ["portrait", "A4 hoch"], ["square", "Quadratisch"]] as const;
 const colorFields = [["paper", "Papierfarbe"], ["accent", "Akzentfarbe"], ["land", "Landfarbe"], ["water", "Wasserfarbe"]] as const;
 const day = (value: string) => dateFormatter.format(new Date(value.slice(0, 10) + "T12:00:00Z"));
@@ -112,6 +115,17 @@ function pngBase64(blob: Blob): Promise<string> {
   });
 }
 
+function downloadAlbumFile(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
 function albumPeriod(opening: MapAlbumOpening) {
   const { fromDate, toDate, journey } = opening;
   if (fromDate && toDate) return fromDate === toDate ? day(fromDate) : `${day(fromDate)} – ${day(toDate)}`;
@@ -137,6 +151,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const [format, setFormat] = useState<AlbumFormat>(draft?.format ?? "a4");
   const [width, setWidth] = useState(String(draft?.dimensions.width ?? 3000));
   const [height, setHeight] = useState(String(draft?.dimensions.height ?? 3000));
+  const [sizeUnit, setSizeUnit] = useState<"px" | "mm">("px");
   const [dpi, setDpi] = useState<AlbumDpi>(draft?.dpi ?? 300);
   const [palette, setPalette] = useState<AlbumPalette>(draft?.palette ?? "sand");
   const [accent, setAccent] = useState<AlbumAccent>(draft?.accent ?? "automatic");
@@ -159,15 +174,20 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const [renderError, setRenderError] = useState<{ key: string; text: string }>();
   const [pageIndex, setPageIndex] = useState(0);
   const [preview, setPreview] = useState<{ page: MapAlbumPage; url: string }>();
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState<"page" | "archive">();
+  const [archivePage, setArchivePage] = useState(0);
   const [savingDraft, setSavingDraft] = useState(false);
-  const busy = saving || savingDraft;
+  const busy = Boolean(saving || savingDraft);
   const [saveError, setSaveError] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const active = useRef(true);
   const fileTitle = title.trim();
+  const exportName = fileTitle.replace(/[^\p{L}\p{N} ._-]+/gu, "-").replace(/^\.+|[ .-]+$/g, "").trim() || "Fotokarte";
+  const desktop = (window as Window & { pywebview?: { api?: NativeAlbumSave } }).pywebview?.api;
   const bounds = useViewport ? opening.viewport : opening.bounds;
-  const dimensions = useMemo(() => ({ width: Number(width), height: Number(height) }), [width, height]);
+  const dimensions = useMemo(() => sizeUnit === "mm"
+    ? { width: Math.round(Number(width) * dpi / MM_PER_INCH), height: Math.round(Number(height) * dpi / MM_PER_INCH) }
+    : { width: Number(width), height: Number(height) }, [dpi, height, sizeUnit, width]);
   const size = albumOutputSize(format, dpi, dimensions);
   const availableColorFields = colorFields.filter(([field]) => style !== "satellite" || field === "paper" || field === "accent");
   const invalidColor = availableColorFields.some(([field]) => Boolean(colors[field]?.trim() && !normalizeAlbumColor(colors[field])));
@@ -180,21 +200,22 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const page = pages[pageIndex];
   const previewPage = rendered?.pages[pageIndex] ?? rendered?.pages[0];
   const error = dataError || (renderError?.key === renderKey ? renderError.text : "");
-  const stops = useMemo(() => opening.journey?.stops.map((stop) => {
-    const nearby = data?.places && findNearbyPlace(data.places, stop.latitude, stop.longitude);
-    return {
-      ...stop,
-      title: nearby ? `Bei ${nearby.name}` : `${coordinate.format(stop.latitude)}°, ${coordinate.format(stop.longitude)}°`,
-      subtitle: `${journeyStopLabel(stop)}${stop.uncertain ? " · Zeitfolge unsicher" : ""}`,
-    };
-  }), [opening, data?.places]);
+  const stops = useMemo(() => {
+    if (!opening.journey) return undefined;
+    const places = describeJourneyPlaces(opening.journey.stops, data?.places);
+    return opening.journey.stops.map((stop) => {
+      const location = places.get(stop.id);
+      return { ...stop, title: location?.nearby ? `Bei ${location.nearby.name}` : location?.coordinates ?? `Stopp ${stop.number}`,
+        subtitle: `${location?.sharedName ? `${location.coordinates} · ` : ""}${journeyStopLabel(stop)}${stop.uncertain ? " · Zeitfolge unsicher" : ""}` };
+    });
+  }, [opening, data?.places]);
   const stopsById = useMemo(() => new Map(stops?.map((stop) => [stop.id, stop])), [stops]);
   const legs = useMemo(() => opening.journey?.connections.flatMap((leg) => {
     const start = stopsById.get(leg.from_stop_id);
     const end = stopsById.get(leg.to_stop_id);
     return start && end ? [{ key: legKey(leg), start, end }] : [];
   }), [opening, stopsById]);
-  useModalFocus(dialog, onClose);
+  useModalFocus(dialog, onClose, !busy);
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
@@ -249,15 +270,13 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
 
   const save = async () => {
     if (!page || busy) return;
-    setSaving(true);
+    setSaving("page");
     setSaveError("");
     setConfirmation("");
     try {
       const png = await mapAlbumPageToPng(page);
       if (!active.current) return;
-      const name = fileTitle.replace(/[^\p{L}\p{N} ._-]+/gu, "-").replace(/^\.+|[ .-]+$/g, "").trim() || "Fotokarte";
-      const filename = `${name}${page.total > 1 ? `-${String(page.number).padStart(2, "0")}` : ""}.png`;
-      const desktop = (window as Window & { pywebview?: { api?: { save_album_png?: NativeSave } } }).pywebview?.api;
+      const filename = `${exportName}${page.total > 1 ? `-${String(page.number).padStart(2, "0")}` : ""}.png`;
       if (desktop?.save_album_png) {
         const data = await pngBase64(png);
         if (!active.current) return;
@@ -265,21 +284,62 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         if (result.status === "error") throw new Error(result.message || "Das PNG konnte nicht gespeichert werden.");
         if (active.current && result.status === "saved") setConfirmation("PNG gespeichert.");
       } else {
-        const url = URL.createObjectURL(png);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+        downloadAlbumFile(png, filename);
         setConfirmation("PNG erstellt.");
       }
     } catch (failure) {
       if (active.current) setSaveError(failure instanceof Error ? failure.message : "Das PNG konnte nicht gespeichert werden.");
     } finally {
-      if (active.current) setSaving(false);
+      if (active.current) setSaving(undefined);
     }
+  };
+
+  const saveArchive = async () => {
+    if (busy || pages.length < 2 || pages.length > MAX_ALBUM_ARCHIVE_PAGES) return;
+    setSaving("archive");
+    setSaveError("");
+    setConfirmation("");
+    try {
+      const pngFiles: Blob[] = [];
+      const nativePages: string[] = [];
+      let bytes = 0;
+      for (const [index, currentPage] of pages.entries()) {
+        setArchivePage(index + 1);
+        const png = await mapAlbumPageToPng(currentPage);
+        if (!active.current) return;
+        bytes += png.size;
+        if (png.size > MAX_ALBUM_PAGE_BYTES || bytes > MAX_ALBUM_ARCHIVE_BYTES) {
+          throw new Error("Das ZIP ist zu groß. Speichere die Seiten einzeln.");
+        }
+        if (desktop?.save_album_zip) nativePages.push(await pngBase64(png));
+        else pngFiles.push(png);
+      }
+      if (!active.current) return;
+      const filename = `${exportName}.zip`;
+      if (desktop?.save_album_zip) {
+        const result = await desktop.save_album_zip(filename, nativePages);
+        if (result.status === "error") throw new Error(result.message || "Das ZIP konnte nicht gespeichert werden.");
+        if (active.current && result.status === "saved") setConfirmation("ZIP gespeichert.");
+      } else {
+        const archive = await archiveMapAlbumPages(pngFiles);
+        if (!active.current) return;
+        downloadAlbumFile(archive, filename);
+        setConfirmation("ZIP erstellt.");
+      }
+    } catch (failure) {
+      if (active.current) setSaveError(failure instanceof Error ? failure.message : "Das ZIP konnte nicht gespeichert werden.");
+    } finally {
+      if (active.current) setSaving(undefined);
+    }
+  };
+
+  const changeSizeUnit = (unit: "px" | "mm") => {
+    if (unit === sizeUnit) return;
+    const convert = (value: string, pixels: number) => value ? String(unit === "px" ? pixels : Number((pixels * MM_PER_INCH / dpi).toFixed(2))) : "";
+    setWidth(convert(width, dimensions.width));
+    setHeight(convert(height, dimensions.height));
+    setSizeUnit(unit);
+    setConfirmation("");
   };
 
   const saveDraft = async () => {
@@ -312,7 +372,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     <section ref={dialog} className="gps-album-dialog" role="dialog" aria-modal="true" aria-labelledby="gps-album-title">
       <header className="gps-album-dialog__header">
         <h2 id="gps-album-title">Fotobuchbild erstellen</h2>
-        <button type="button" data-initial-focus onClick={onClose}>Schließen</button>
+        <button type="button" data-initial-focus onClick={onClose} disabled={busy}>Schließen</button>
       </header>
       <div className="gps-album-dialog__editor">
         <fieldset className="gps-album-dialog__options" disabled={busy}>
@@ -326,14 +386,20 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
             <option value="custom">Eigene Größe</option>
           </select></label>
           {format === "custom" && <>
-            <label>Breite (px)<input type="number" min={1200} max={4800} step={1} value={width} onChange={(event) => {
+            <label>Einheit der Bildgröße<select value={sizeUnit} onChange={(event) => changeSizeUnit(event.target.value === "mm" ? "mm" : "px")}>
+              <option value="px">Pixel (px)</option><option value="mm">Millimeter (mm)</option>
+            </select></label>
+            <label>Breite ({sizeUnit})<input type="number" inputMode={sizeUnit === "mm" ? "decimal" : "numeric"}
+              min={sizeUnit === "px" ? 1200 : 0} max={sizeUnit === "px" ? 4800 : undefined} step={sizeUnit === "px" ? 1 : .01} value={width} onChange={(event) => {
               setWidth(event.target.value); setConfirmation("");
             }} aria-invalid={!size} aria-describedby={!size ? "gps-album-dimensions-error" : undefined} /></label>
-            <label>Höhe (px)<input type="number" min={1200} max={4800} step={1} value={height} onChange={(event) => {
+            <label>Höhe ({sizeUnit})<input type="number" inputMode={sizeUnit === "mm" ? "decimal" : "numeric"}
+              min={sizeUnit === "px" ? 1200 : 0} max={sizeUnit === "px" ? 4800 : undefined} step={sizeUnit === "px" ? 1 : .01} value={height} onChange={(event) => {
               setHeight(event.target.value); setConfirmation("");
             }} aria-invalid={!size} aria-describedby={!size ? "gps-album-dimensions-error" : undefined} /></label>
             {!size && <p role="alert" id="gps-album-dimensions-error" className="gps-album-dialog__field-error">
-              Wähle 1200 bis 4800 px pro Seite, höchstens 16 Megapixel und ein Seitenverhältnis zwischen 1 zu 2 und 2 zu 1.
+              {sizeUnit === "mm" ? `Wähle je Kante ${millimeters.format(1200 * MM_PER_INCH / dpi)} bis ${millimeters.format(4800 * MM_PER_INCH / dpi)} mm bei ${dpi} dpi.`
+                : "Wähle je Kante 1200 bis 4800 px."} Verwende höchstens 16 Megapixel und ein Seitenverhältnis zwischen 1 zu 2 und 2 zu 1.
             </p>}
           </>}
           <label>Unterzeile (optional)<input value={subtitle} maxLength={100} onChange={(event) => {
@@ -352,7 +418,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
               {albumDensities.map((density) => <option key={density} value={density}>{density} dpi</option>)}
             </select></label>
             {size && <output className="gps-album-dialog__dimensions">
-              {size.width} × {size.height} px · {millimeters.format(size.width / dpi * 25.4)} × {millimeters.format(size.height / dpi * 25.4)} mm
+              {size.width} × {size.height} px · {millimeters.format(size.width / dpi * MM_PER_INCH)} × {millimeters.format(size.height / dpi * MM_PER_INCH)} mm
             </output>}
           </fieldset>
         </details>
@@ -495,12 +561,16 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         </div>}
         {saveError && <span role="alert">{saveError}</span>}
         {confirmation && <span role="status">{confirmation}</span>}
+        {saving === "archive" && <span role="status">Seite {archivePage} von {pages.length} wird für das ZIP vorbereitet.</span>}
+        {pages.length > MAX_ALBUM_ARCHIVE_PAGES && <span>Mehr als {MAX_ALBUM_ARCHIVE_PAGES} Seiten lassen sich einzeln als PNG speichern.</span>}
         {onSaveDraft && <button type="button" disabled={!canRender || busy} onClick={() => void saveDraft()}>
           {savingDraft ? "Entwurf wird gespeichert …" : "Entwurf im Album speichern"}
         </button>}
-        <button type="button" className="gps-album-dialog__save" disabled={!page || busy} onClick={() => void save()}>
-          {saving ? "PNG wird erstellt …" : pages.length > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
+        <button type="button" className={pages.length < 2 ? "gps-album-dialog__save" : undefined} disabled={!page || busy} onClick={() => void save()}>
+          {saving === "page" ? "PNG wird erstellt …" : pages.length > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
         </button>
+        {pages.length > 1 && pages.length <= MAX_ALBUM_ARCHIVE_PAGES && <button type="button" className="gps-album-dialog__save"
+          disabled={busy} onClick={() => void saveArchive()}>{saving === "archive" ? "ZIP wird erstellt …" : "Alle Seiten als ZIP speichern"}</button>}
       </footer>
     </section>
   </div>;
