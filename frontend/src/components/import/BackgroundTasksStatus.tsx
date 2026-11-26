@@ -26,6 +26,7 @@ import {
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
 import TaskActionIcon from "./TaskActionIcon";
+import { importSkippedImages } from "./importSkippedImages";
 
 type TaskTone = "active" | "waiting" | "completed" | "failed" | "cancelled";
 type TaskKind = "import" | "groups" | "previews";
@@ -119,6 +120,7 @@ function importSummary(job: ImportJob): string {
 }
 
 function importTask(job: ImportJob): BackgroundTaskView {
+  const skipped = importSkippedImages(job);
   const status: Record<ImportJob["status"], string> = {
     queued: "Wartet",
     running: "In Arbeit",
@@ -146,7 +148,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
       : job.status as "queued" | "running" | "paused" | "cancelling",
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
-    summary: importSummary(job),
+    summary: skipped ? `${importSummary(job)} · ${skipped}` : importSummary(job),
     error: readableImportError(job.last_error),
     retryFolder: job.status === "failed" || job.status === "cancelled" || (job.status === "completed" && job.last_error)
       ? job.folder_path

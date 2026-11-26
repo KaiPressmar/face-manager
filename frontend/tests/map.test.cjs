@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { boundsForDrag, boundsForView, gridForSize, markerPixelPosition, normalizedView } =
+const { boundsForDrag, boundsForView, countryLabels, gridForSize, journeyConnectionSegments, layoutMapLabels, markerPixelPosition, normalizedView } =
   require('./load-typescript.cjs')('src/components/map/WorldMap.tsx');
 
 function assertValidBounds(bounds) {
@@ -90,4 +90,45 @@ test('marker positions use north at the top and stay inside the canvas at world 
     markerPixelPosition({ x: 3, y: 0, longitude: 180, latitude: -90 }, bounds, size, grid),
     { x: 177, y: 77 },
   );
+});
+
+test('German place labels defer to zoom, higher-priority labels, and photo markers', () => {
+  const bounds = { west: 0, east: 20, south: 40, north: 50 };
+  const size = { width: 400, height: 200 };
+  const labels = [
+    { id: 'de', name: 'Deutschland', longitude: 10, latitude: 45, kind: 'country', minZoom: 3, priority: 10 },
+    { id: 'c1', name: 'Köln', longitude: 11, latitude: 45, kind: 'city', minZoom: 3, priority: 100 },
+    { id: 'c2', name: 'Bonn', longitude: 15, latitude: 42, kind: 'city', minZoom: 3, priority: 25 },
+    { id: 'c3', name: 'Ulm', longitude: 5, latitude: 42, kind: 'city', minZoom: 8, priority: 25 },
+  ];
+  assert.deepEqual(layoutMapLabels(labels, 2, bounds, size, []), []);
+  assert.deepEqual(layoutMapLabels(labels, 4, bounds, size, [{ x: 300, y: 160 }]).map(({ id }) => id), ['de']);
+  assert.deepEqual(layoutMapLabels(labels, 4, bounds, size, []).map(({ id }) => id), ['de', 'c2']);
+});
+
+test('country lookup keeps German names, aliases, and a valid offline focus', () => {
+  const germany = countryLabels.find(({ code }) => code === 'DEU');
+  assert.equal(germany.name, 'Deutschland');
+  assert.ok(germany.aliases.includes('Germany'));
+  assert.ok(germany.minZoom <= 5);
+  const bounds = boundsForView(normalizedView(germany.focus));
+  assert.ok(germany.longitude > bounds.west && germany.longitude < bounds.east);
+  assert.ok(germany.latitude > bounds.south && germany.latitude < bounds.north);
+  assert.equal(new Set(countryLabels.map(({ code }) => code)).size, countryLabels.length);
+});
+
+test('journey segments maintain travel direction across the date line', () => {
+  const east = { longitude: 170, latitude: 4 };
+  const west = { longitude: -170, latitude: 8 };
+  assert.deepEqual(journeyConnectionSegments({ from: east, to: west }), [
+    { from: east, to: { longitude: 180, latitude: 6 } },
+    { from: { longitude: -180, latitude: 6 }, to: west },
+  ]);
+  assert.deepEqual(journeyConnectionSegments({ from: west, to: east }), [
+    { from: west, to: { longitude: -180, latitude: 6 } },
+    { from: { longitude: 180, latitude: 6 }, to: east },
+  ]);
+  const from = { longitude: 17, latitude: 2 };
+  const to = { longitude: -5, latitude: 10 };
+  assert.deepEqual(journeyConnectionSegments({ from, to }), [{ from, to }]);
 });

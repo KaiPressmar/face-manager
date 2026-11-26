@@ -10,13 +10,14 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, UnidentifiedImageError
 
 from ..db.schema import HASH_CHUNK_SIZE, calculate_file_hash, get_conn, get_file_created_at
 from ..error_logging import configure_error_logging
@@ -25,7 +26,7 @@ from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
 from .image_thumbnails import write_image_thumbnail
 from .preview_cache import get_image_geometry
 from .shared_sync_transport import TransportError
-from .geo import extract_image_metadata, record_image_metadata
+from .geo import CaptureMetadata, extract_image_metadata, record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
     is_confirmed_missing,
@@ -69,6 +70,24 @@ class ImportFailed(RuntimeError):
 
 class SourceChangedError(OSError):
     """Signal that a file no longer matches the version selected for import."""
+
+
+class ImageDecodeError(OSError):
+    """Signal that an accessible file could not be decoded as an image."""
+
+
+class SourceUnavailableError(OSError):
+    """Signal an I/O failure while accessing the source file."""
+
+
+@contextmanager
+def _source_access():
+    try:
+        yield
+    except (SourceUnavailableError, ImageDecodeError, SourceChangedError):
+        raise
+    except OSError as exc:
+        raise SourceUnavailableError(str(exc)) from exc
 
 
 def _file_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -133,12 +152,14 @@ class HashedImage:
     file_size: int
     modified_at_ns: int
     identity: tuple[int, int, int, int, int]
-    metadata: tuple[float | None, float | None, str | None]
+    metadata: CaptureMetadata | tuple[float | None, float | None, str | None]
     geometry: tuple[int, int, int] | None = None
 
     def verify_current(self) -> None:
         source = _filesystem_path(self.normalized_path)
-        if not _matches_imported_identity(source, self.identity):
+        with _source_access():
+            current = _matches_imported_identity(source, self.identity)
+        if not current:
             raise SourceChangedError("Die Datei wurde während des Imports geändert.")
 
 
@@ -176,7 +197,7 @@ class ImagePreparer:
             while chunk := source.read(HASH_CHUNK_SIZE):
                 digest.update(chunk)
             source.seek(0)
-            metadata = extract_image_metadata(source)
+            metadata = extract_image_metadata(source, include_timing=True)
             if _file_identity(os.fstat(source.fileno())) != identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
         result = HashedImage(
@@ -204,13 +225,20 @@ class ImagePreparer:
         Returns:
             RGB image represented as a NumPy array.
         """
-        with open(_filesystem_path(path), "rb") as source:
+        with _source_access(), open(_filesystem_path(path), "rb") as source:
             if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
-            with Image.open(source) as image:
-                if expected is not None:
-                    expected.geometry = get_image_geometry(image)
-                pixels = np.asarray(image.convert("RGB"))
+            try:
+                with Image.open(source) as image:
+                    if expected is not None:
+                        expected.geometry = get_image_geometry(image)
+                    pixels = np.asarray(image.convert("RGB"))
+            except (UnidentifiedImageError, Image.DecompressionBombError, ValueError) as exc:
+                raise ImageDecodeError(str(exc)) from exc
+            except OSError as exc:
+                if exc.errno is not None or getattr(exc, "winerror", None) is not None:
+                    raise
+                raise ImageDecodeError(str(exc)) from exc
             if expected is not None and _file_identity(os.fstat(source.fileno())) != expected.identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
         if expected is not None:
@@ -443,6 +471,8 @@ class ImportProcessor:
             hashed_images = len(unchanged_paths)
             processing_started = False
             successful_images = len(unchanged_paths)
+            unavailable_images = 0
+            unreadable_images = 0
             last_error = None
             if unchanged_paths:
                 progress_callback(
@@ -475,7 +505,8 @@ class ImportProcessor:
                 postponed = False
                 try:
                     if future is not None:
-                        hashed = future.result()
+                        with _source_access():
+                            hashed = future.result()
                     if not self._attach_processed_content(cursor, conn, hashed):
                         shared = expiry is not None or (
                             self.shared_analysis is not None and self.shared_analysis.available_for(hashed.normalized_path)
@@ -565,9 +596,21 @@ class ImportProcessor:
                     successful_images += 1
                 except (ImportCancelled, ImportFailed):
                     raise
-                except OSError as exc:
+                except ImageDecodeError as exc:
                     conn.rollback()
-                    logger.warning("Skipping unavailable or unreadable image %s: %s", image_path, exc)
+                    unreadable_images += 1
+                    logger.warning("Skipping undecodable image %s: %s", image_path, exc)
+                    last_error = f"{image_path}: Die Datei konnte nicht als Bild gelesen werden. {exc}"
+                    progress_callback({"last_error": last_error, "unreadable_images": unreadable_images})
+                except SourceUnavailableError as exc:
+                    conn.rollback()
+                    unavailable_images += 1
+                    logger.warning("Skipping unavailable image %s: %s", image_path, exc)
+                    last_error = f"{image_path}: Auf die Datei konnte nicht zugegriffen werden. {exc}"
+                    progress_callback({"last_error": last_error, "unavailable_images": unavailable_images})
+                except SourceChangedError as exc:
+                    conn.rollback()
+                    logger.warning("Skipping changed image %s: %s", image_path, exc)
                     last_error = f"{image_path}: {exc}"
                     progress_callback({"last_error": last_error})
                 except Exception as exc:

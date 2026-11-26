@@ -13,6 +13,25 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+## [0.16.0] - 2026-11-26
+
+### Neu
+
+- Der Standortverlauf zeigt Stopps und Ortswechsel in zeitlicher Reihenfolge und nennt passende Orte in der Nähe.
+- Die Fotokarte bietet eine Landschaftsansicht und einblendbare Ländernamen.
+- Kartenauswahlen lassen sich als große Galerie öffnen oder zum Filtern in die Bilderbibliothek übernehmen.
+- Kartenausschnitte und Standortverläufe lassen sich als PNG-Bilder fürs Fotobuch speichern. Format, Farben, Bildausschnitt und Beschriftungen sind einstellbar. Für Reiseetappen können Symbole für Verkehrsmittel ergänzt werden.
+
+### Verbessert
+
+- Der Import zeigt getrennt an, wie viele Bilder unlesbar oder nicht erreichbar waren.
+- Bei zu langen Dateinamen kürzt die Vorschau die angehängte Namensliste und behält den ursprünglichen Namensteil bei.
+- Ländergrenzen erleichtern die Orientierung auf der Fotokarte auch offline.
+
+### Behoben
+
+- Gesichtsrahmen erscheinen auch bei älteren Fotos weiter unten in großen Bibliotheken wieder zuverlässig.
+
 ## [0.15.0] - 2026-11-25
 
 ### Verbessert

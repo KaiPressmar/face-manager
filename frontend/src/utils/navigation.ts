@@ -1,4 +1,5 @@
 import type { FaceReviewGroupKey } from "./api";
+import type { GeoPhotoSelection } from "./geoPhotoSelection";
 
 export type AppPage = "people" | "map" | "renaming" | "review" | "settings";
 export type SettingsSection =
@@ -15,6 +16,8 @@ export interface NavigationEntry {
   personName?: string | null;
   reviewView?: "open" | "shared";
   settingsSection?: SettingsSection;
+  geoSelection?: GeoPhotoSelection;
+  geoSelectionEpoch?: number;
 }
 
 const PAGE_SEGMENTS: Record<AppPage, string> = {
@@ -57,14 +60,21 @@ export function navigationHash(entry: NavigationEntry): string {
   if (entry.page === "settings" && entry.settingsSection !== undefined) {
     return `${base}/${entry.settingsSection}`;
   }
+  if (entry.page === "people" && entry.geoSelection) return `${base}/auswahl`;
   return base;
 }
 
 /** Restore a useful view after refresh or a directly opened hash URL. */
-export function parseNavigationHash(hash: string): NavigationEntry {
+export function parseNavigationHash(hash: string, state?: NavigationEntry | null): NavigationEntry {
   const segments = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   if (!Object.prototype.hasOwnProperty.call(PAGES_BY_SEGMENT, segments[0])) return { page: "people" };
   const page = PAGES_BY_SEGMENT[segments[0]];
+
+  // Exact selections can include thousands of photo IDs. Keep the selection
+  // in browser history state so neither the URL nor a copied link contains it.
+  if (page === "people" && segments[1] === "auswahl" && state?.page === "people" && state.geoSelection) {
+    return { page, geoSelection: state.geoSelection, geoSelectionEpoch: state.geoSelectionEpoch };
+  }
 
   if (page === "review" && segments[1] === "gruppe") {
     const rawId = segments[2] ?? "";

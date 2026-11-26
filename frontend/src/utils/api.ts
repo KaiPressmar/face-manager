@@ -1,4 +1,5 @@
 import type { ThemeMode } from "./theme";
+import type { GeoPhotoSelection } from "./geoPhotoSelection";
 
 declare global {
   interface Window {
@@ -21,7 +22,7 @@ function resolveApiBase() {
   return `${window.location.origin}/api`;
 }
 
-const API_BASE = resolveApiBase();
+export const API_BASE = resolveApiBase();
 
 function resolveDisplayPlatform() {
   const userAgentPlatform =
@@ -35,7 +36,7 @@ const DISPLAY_PLATFORM = resolveDisplayPlatform();
 
 export const OPERATION_BLOCKED_EVENT = "face-manager:operation-blocked";
 
-async function apiFetch(input: string, init: RequestInit = {}) {
+export async function apiFetch(input: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set("x-face-manager-display-platform", DISPLAY_PLATFORM);
   const response = await fetch(input, {
@@ -54,7 +55,7 @@ async function apiFetch(input: string, init: RequestInit = {}) {
   return response;
 }
 
-async function readApiError(res: Response, fallback: string) {
+export async function readApiError(res: Response, fallback: string) {
   try {
     const payload = await res.json();
     if (
@@ -354,6 +355,7 @@ export interface FetchImagesParams {
   persons?: string[];
   /** Archived review statuses to include, e.g. "unknown_person"/"not_face". */
   faceStatuses?: string[];
+  selection?: GeoPhotoSelection;
   sortBy?: "date" | "folder";
   sortDirection?: "desc" | "asc";
   limit?: number;
@@ -388,6 +390,8 @@ export interface ImportJob {
   finished_at: string | null;
   total_images: number;
   processed_images: number;
+  unavailable_images?: number;
+  unreadable_images?: number;
   total_faces: number;
   processed_faces: number;
   stage: ImportJobStage | null;
@@ -785,8 +789,13 @@ export async function importDatabase(file: File): Promise<void> {
 }
 
 /** Load one image with its faces, to show a face crop in its full context. */
-export async function fetchImageDetail(imageId: number, signal?: AbortSignal): Promise<FaceImage> {
-  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail`, { signal });
+export async function fetchImageDetail(
+  imageId: number,
+  signal?: AbortSignal,
+  { resolveGeometry = false } = {},
+): Promise<FaceImage> {
+  const query = resolveGeometry ? "?resolve_geometry=true" : "";
+  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail${query}`, { signal });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Das Bild konnte nicht geladen werden."));
   }
@@ -806,10 +815,12 @@ export async function fetchImages({
   folders = [],
   persons = [],
   faceStatuses = [],
+  selection,
   sortBy = "date",
   sortDirection = "desc",
   limit = 40,
   offset = 0,
+  signal,
 }: FetchImagesParams = {}): Promise<ImagePage> {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));
@@ -820,8 +831,22 @@ export async function fetchImages({
   params.set("limit", String(limit));
   params.set("offset", String(offset));
   params.set("all_photos", "true");
-  const query = params.toString();
-  const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
+  let res: Response;
+  if (selection?.image_ids !== undefined) {
+    res = await apiFetch(`${API_BASE}/images/search?${params}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selection }),
+      signal,
+    });
+  } else {
+    if (selection?.bounds) {
+      Object.entries(selection.bounds).forEach(([key, value]) => params.set(key, String(value)));
+    }
+    if (selection?.from_date) params.set("from_date", selection.from_date);
+    if (selection?.to_date) params.set("to_date", selection.to_date);
+    res = await apiFetch(`${API_BASE}/images?${params}`, { signal });
+  }
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Bilder konnten nicht geladen werden."));
   }
@@ -1356,6 +1381,8 @@ export interface ImageRenameCandidate {
   directory: string;
   current_filename: string;
   proposed_filename: string;
+  validation_error?: "filename_too_long" | "invalid_filename" | null;
+  omitted_person_count?: number;
   proposed_path: string;
   detected_person_names: string[];
   current_suffix_person_names: string[];

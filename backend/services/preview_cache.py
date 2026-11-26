@@ -6,6 +6,7 @@ import hashlib
 import os
 import secrets
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -42,10 +43,8 @@ def orient_image(image: Image.Image, orientation: int) -> Image.Image:
     return image.transpose(operation) if operation is not None else image
 
 
-def decode_verified_preview(
-    path: str, content_hash: str
-) -> tuple[Image.Image, tuple[int, int, int]]:
-    """Read an original once and decode the exact bytes checked against its hash."""
+@contextmanager
+def _verified_preview_source(path: str, content_hash: str):
     digest = hashlib.sha256()
     with tempfile.SpooledTemporaryFile(max_size=_SPOOL_MEMORY) as spool:
         with open(filesystem_path(path), "rb") as source:
@@ -55,8 +54,21 @@ def decode_verified_preview(
         if digest.hexdigest() != content_hash:
             raise OSError("Die Originaldatei entspricht nicht dem importierten Bild.")
         spool.seek(0)
-        with Image.open(spool) as image:
-            return image.convert("RGB"), get_image_geometry(image)
+        yield spool
+
+
+def decode_verified_preview(
+    path: str, content_hash: str
+) -> tuple[Image.Image, tuple[int, int, int]]:
+    """Decode the exact original bytes checked against the registered hash."""
+    with _verified_preview_source(path, content_hash) as source, Image.open(source) as image:
+        return image.convert("RGB"), get_image_geometry(image)
+
+
+def read_verified_preview_geometry(path: str, content_hash: str) -> tuple[int, int, int]:
+    """Read geometry from the registered original without decoding pixels."""
+    with _verified_preview_source(path, content_hash) as source, Image.open(source) as image:
+        return get_image_geometry(image)
 
 
 def write_preview_jpeg(

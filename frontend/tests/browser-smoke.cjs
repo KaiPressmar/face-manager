@@ -272,6 +272,13 @@ async function mapFlow(browser, errors) {
   try {
     await page.goto(`${webBase}/#/weltkarte`);
     await waitForCount(85);
+    const borders = page.locator('.gps-map__border');
+    assert.equal(await borders.count(), 2);
+    for (const border of await borders.all()) {
+      assert.ok(await border.evaluate((path) => path.getTotalLength() > 0 &&
+        getComputedStyle(path).pointerEvents === 'none' &&
+        getComputedStyle(path).vectorEffect === 'non-scaling-stroke'));
+    }
     const markers = page.locator('.gps-map__marker');
     await markers.first().waitFor();
     assert.equal(await page.locator('.gps-page__photo').count(), 36);
@@ -308,6 +315,7 @@ async function mapFlow(browser, errors) {
 
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await waitForCount(29);
+    await borders.first().waitFor();
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await page.getByLabel('Bis', { exact: true }).fill('2025-12-31');
     await waitForCount(14);
@@ -540,6 +548,257 @@ async function existingFlow(browser, errors) {
     await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
     await screenshot(page, 'existing-flows');
     console.log('PASS existing flows: library/folder retry, person filter, import, rename, settings, review tabs');
+  } finally {
+    await page.close();
+  }
+}
+
+async function mapSelectionAndJourneyFlow(browser, errors) {
+  const page = await newPage(browser, 1440, 1000, errors);
+  const localOrigin = new URL(webBase).origin;
+  try {
+    await page.route('**/*', (route) =>
+      new URL(route.request().url()).origin === localOrigin ? route.continue() : route.abort());
+    await page.goto(`${webBase}/#/weltkarte`);
+    const results = page.locator('#gps-map-results');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+    await page.getByLabel('Ländernamen anzeigen').check();
+    await page.locator('.gps-map__place-label--country').first().waitFor();
+    const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
+    await page.getByLabel('Kartenstil').selectOption('landscape');
+    await reliefLoaded;
+    await page.locator('.gps-map__relief image').waitFor({ state: 'attached' });
+    await page.getByLabel('Ländernamen anzeigen').uncheck();
+    assert.equal(await page.locator('.gps-map__place-label--country').count(), 0);
+    assert.equal(await page.locator('.gps-map__relief image').count(), 1);
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Welt');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
+    await page.getByRole('button', { name: 'Sichtbaren Bereich wählen' }).click();
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+
+    const exportButton = page.getByRole('button', { name: 'Bild exportieren' });
+    const exportBounds = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18';
+    });
+    await exportButton.click();
+    const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
+    await book.waitFor();
+    const bounds = new URL((await exportBounds).url()).searchParams;
+    assert.equal(bounds.get('west'), '-180', 'Export uses the camera instead of the fixed selection');
+    assert.equal(bounds.get('east'), '180');
+    const bookPreview = book.getByRole('img', { name: 'Vorschau des Fotobuchbildes' });
+    await bookPreview.waitFor();
+    await book.getByLabel('Titel', { exact: true }).fill('Sommer & Meer');
+    await book.getByLabel('Unterzeile (optional)', { exact: true }).fill('Unser Fotoalbum');
+    await book.getByLabel('Format', { exact: true }).selectOption('portrait');
+    await book.getByLabel('Farbwelt', { exact: true }).selectOption('coast');
+    await book.getByText('Darstellung', { exact: true }).click();
+    await book.getByLabel('Kartenstil', { exact: true }).selectOption('standard');
+    const visibleBounds = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18'
+        && url.searchParams.get('west') !== '-180';
+    });
+    await book.getByLabel('Kartenbereich', { exact: true }).selectOption('viewport');
+    await visibleBounds;
+    await book.getByLabel('Bildausschnitt', { exact: true }).selectOption('wide');
+    await book.getByLabel('Markerfarbe', { exact: true }).selectOption('ocean');
+    await bookPreview.waitFor();
+    await page.waitForFunction(() => document.querySelector('.gps-album-dialog__preview img')?.naturalWidth === 2480);
+    const savedBook = page.waitForEvent('download');
+    await book.getByRole('button', { name: 'PNG speichern', exact: true }).click();
+    const image = fs.readFileSync(await (await savedBook).path());
+    assert.equal(image.subarray(1, 4).toString(), 'PNG');
+    assert.deepEqual([image.readUInt32BE(16), image.readUInt32BE(20)], [2480, 3508]);
+    const densityChunk = image.indexOf(Buffer.from('pHYs'));
+    assert.ok(densityChunk > 0);
+    assert.equal(image.readUInt32BE(densityChunk + 4), 11811);
+    await page.keyboard.press('Escape');
+    await book.waitFor({ state: 'hidden' });
+    assert.ok(await exportButton.evaluate((element) => element === document.activeElement));
+    assert.equal(await page.getByLabel('Kartenstil').inputValue(), 'landscape');
+
+    const opener = results.getByRole('button', { name: 'Galerie öffnen' });
+    await opener.click();
+    const grid = page.getByRole('dialog', { name: 'Galerie der Kartenauswahl' });
+    await grid.waitFor();
+    await assertTabTrap(page, grid);
+    const lastTile = grid.locator('[data-gallery-index="35"]');
+    await lastTile.click();
+    const viewer = page.getByRole('dialog', { name: 'Bildansicht' });
+    await viewer.getByText('Foto 36 von 85', { exact: true }).waitFor();
+    await viewer.getByRole('button', { name: 'Nächstes Bild', exact: true }).click();
+    await viewer.getByText('Foto 37 von 85', { exact: true }).waitFor();
+    await viewer.getByRole('button', { name: 'Zurück zur Galerie' }).click();
+    await grid.waitFor();
+    await page.waitForFunction(() => document.activeElement?.getAttribute('data-gallery-index') === '36');
+    const filtered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/images' && url.searchParams.get('west') === '-180' && response.ok();
+    });
+    await grid.getByRole('button', { name: 'In Bilder öffnen' }).click();
+    assert.equal((await (await filtered).json()).total, 85);
+    await page.waitForURL('**/#/bilder/auswahl');
+    await page.goBack();
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+
+    const stop = { id: '1', number: 1, section: 1, latitude: 52.52, longitude: 13.405, start: '2024-01-01T12:00:00', end: '2024-01-01T12:00:00', image_ids: [1], uncertain: false };
+    const next = { ...stop, id: '2', number: 2, latitude: 48.85, longitude: 2.35, start: '2024-01-01T17:00:00', end: '2024-01-01T17:00:00', image_ids: [2] };
+    const revisited = { ...stop, id: '4', number: 3, start: '2024-01-02T08:00:00', end: '2024-01-02T08:00:00', image_ids: [4] };
+    let journeyRequests = 0;
+    await page.route('**/api/map/journey?**', (route) => {
+      journeyRequests += 1;
+      const indexing = journeyRequests === 1;
+      return route.fulfill({ json: {
+        stops: [indexing ? stop : { ...stop, image_ids: [1, 3] }, next, revisited],
+        connections: [{ from: stop, to: next, from_stop_id: stop.id, to_stop_id: next.id },
+          { from: next, to: revisited, from_stop_id: next.id, to_stop_id: revisited.id }], photo_count: indexing ? 3 : 4,
+        missing_location_count: 0, missing_time_count: 0, uncertain_count: 0, indexing,
+      } });
+    });
+    await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
+    await page.locator('.gps-map__journey-line').first().waitFor();
+    await page.getByRole('button', { name: 'Reisestopp 1', exact: true }).press('Enter');
+    await results.getByRole('heading', { name: 'Fotos von Stopp 1' }).waitFor();
+    const activeMarker = page.getByRole('button', { name: 'Reisestopp 1', exact: true });
+    await activeMarker.scrollIntoViewIfNeeded();
+    assert.equal(await activeMarker.evaluate((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return document.elementFromPoint(x + width / 2, y + height / 2)
+        ?.closest('.gps-map__journey-stop')?.getAttribute('aria-label');
+    }), 'Reisestopp 1');
+    const arrows = await page.locator('.gps-map__journey-direction').evaluateAll((paths) =>
+      paths.map((path) => path.getAttribute('transform')?.split(' scale')[0]));
+    assert.equal(new Set(arrows).size, 2, 'Return route direction arrows overlap');
+    await results.getByRole('button', { name: /Berlin-000/ }).waitFor();
+    await results.getByRole('button', { pressed: true }).getByText('Bei Berlin', { exact: true }).waitFor();
+    await exportButton.click();
+    await bookPreview.waitFor();
+    const journeyArtwork = await bookPreview.evaluate((image) => fetch(image.src).then((response) => response.text()));
+    assert.match(journeyArtwork, /Bei Berlin/);
+    assert.match(journeyArtwork, /Bei Paris/, 'Selecting a stop restricted the whole journey export');
+    await book.getByText('Route gestalten', { exact: true }).click();
+    await book.getByRole('combobox', { name: /1\. Bei Berlin → 2\. Bei Paris/ }).selectOption('plane');
+    await book.getByRole('combobox', { name: /2\. Bei Paris → 3\. Bei Berlin/ }).selectOption('train');
+    await book.locator('.gps-album-dialog__preview[aria-busy="false"] img').waitFor();
+    await bookPreview.waitFor();
+    const customized = await bookPreview.evaluate((image) => fetch(image.src).then((response) => response.text()));
+    assert.match(customized, /data-album-transport="plane"/);
+    assert.match(customized, /data-album-transport="train"/);
+    assert.match(customized, /Anreise: Flugzeug/);
+    assert.match(customized, /Anreise: Zug/);
+    await book.getByText('Route gestalten', { exact: true }).click();
+    await screenshot(page, 'map-album');
+    await page.keyboard.press('Escape');
+    await book.waitFor({ state: 'hidden' });
+    await screenshot(page, 'map-journey');
+    await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
+    const exactSelection = page.waitForResponse((response) => response.url().includes('/api/images/search?') && response.ok());
+    await results.getByRole('button', { name: 'In Bilder öffnen' }).click();
+    const exact = await exactSelection;
+    assert.deepEqual(exact.request().postDataJSON().selection.image_ids, [1, 3]);
+    assert.equal((await exact.json()).total, 2);
+
+    await page.route('**/api/map/points?**', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue().catch(() => {});
+    });
+    await page.goto(`${webBase}/#/weltkarte`);
+    await page.reload();
+    await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
+    await page.getByRole('heading', { name: 'Chronologische Stopps' }).waitFor();
+    assert.equal(await page.locator('.gps-page__stat').count(), 0);
+    assert.equal(await page.locator('.gps-page__collection').getByText('…', { exact: true }).count(), 0);
+    console.log('PASS map workspace: offline styles, fullscreen cross-page gallery, filter transfer and exact journey stop photos');
+  } finally {
+    await page.close();
+  }
+}
+
+async function pagedLibraryFacesFlow(browser, errors) {
+  const page = await newPage(browser, 1024, 650, errors);
+  const face = {
+    id: 1, bbox_x: 60, bbox_y: 20, bbox_w: 10, bbox_h: 10,
+    cluster_id: null, person_name: 'Name aus Liste', review_status: 'unknown_person',
+  };
+  const photos = Array.from({ length: 240 }, (_, index) => ({
+    id: index + 1001, filename: `Foto ${index + 1}`, directory: '/fixture', image_path: `/fixture/${index + 1}.jpg`,
+    content_hash: null, created_at: null, image_width: index === 44 ? null : 100, image_height: index === 44 ? null : 100,
+    location_count: 1, locations: [], faces: index === 44 ? [face] : [],
+  }));
+  const target = photos[44];
+  const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
+  let detailRequests = 0;
+  let refreshing = false;
+  const refreshPages = [];
+  try {
+    await page.addInitScript(() => {
+      window.EventSource = class TestEventSource extends EventTarget {
+        constructor() {
+          super();
+          window.pagedLibraryEvents = this;
+          queueMicrotask(() => this.onopen?.(new Event('open')));
+        }
+        close() {}
+      };
+    });
+    await page.route('**/api/images?**', (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = Number(params.get('offset'));
+      const limit = Number(params.get('limit'));
+      if (refreshing && limit > 1) refreshPages.push([offset, limit]);
+      const items = photos.slice(offset, offset + limit).map((photo) =>
+        refreshing && photo.id === 1205 ? { ...photo, filename: 'Aktualisiertes Foto' } : photo);
+      return route.fulfill({ json: { items, offset, limit, total: photos.length, has_more: offset + items.length < photos.length, available_persons: [] } });
+    });
+    await page.route(/\/api\/images\/\d+\/(thumbnail|file)(\?.*)?$/, (route) =>
+      route.fulfill({ contentType: 'image/svg+xml', body: image }));
+    await page.route(`**/api/images/${target.id}/detail?resolve_geometry=true`, (route) => {
+      detailRequests += 1;
+      if (detailRequests === 1) return route.fulfill({ status: 503, json: {} });
+      return route.fulfill({ json: {
+        ...target, image_width: 100, image_height: 100,
+        faces: [{ ...face, bbox_x: 20, person_name: 'Name aus Detail' }, { ...face, id: 2 }],
+      } });
+    });
+
+    await page.goto(`${webBase}/#/bilder`);
+    const cards = page.locator('[data-image-id]');
+    await cards.first().waitFor();
+    const scrollToEnd = () => page.locator('.page-content').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await scrollToEnd();
+    const card = page.locator(`[data-image-id="${target.id}"]`);
+    await card.scrollIntoViewIfNeeded();
+    const box = card.locator('.hologram-box');
+    await box.waitFor();
+    assert.equal(await box.evaluate((element) => element.style.left), '20%');
+    assert.equal(await card.locator('.hologram-overlay').count(), 1);
+    assert.equal(await card.locator('.hologram-label').textContent(), 'Name aus Liste');
+    await card.locator('.image-gallery-card__open').click();
+    const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
+    await gallery.locator('.hologram-box').waitFor();
+    assert.equal(await gallery.locator('.hologram-box').count(), 1);
+    assert.equal(await gallery.locator('.hologram-box').evaluate((element) => element.style.left), '20%');
+    assert.equal(detailRequests, 2);
+    await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
+
+    while (await cards.count() < photos.length) {
+      const before = await cards.count();
+      await scrollToEnd();
+      await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
+    }
+    refreshing = true;
+    await page.evaluate(() => {
+      window.pagedLibraryEvents.dispatchEvent(new MessageEvent('clusters', { data: '{"reason":"assignment"}' }));
+    });
+    await page.getByRole('button', { name: 'Aktualisiertes Foto in Galerie öffnen' }).waitFor();
+    assert.deepEqual(refreshPages, [[0, 200], [200, 40]]);
+    assert.equal(await cards.count(), photos.length);
+    console.log('PASS paged library faces: lazy metadata, gallery, and refresh beyond 200 photos');
   } finally {
     await page.close();
   }
@@ -1048,6 +1307,8 @@ async function selectReviewFaces(dialog, proposal, selection) {
     await collectSourcesFlow(browser, errors);
     await localRecoveryFlow(browser, errors);
     await mapFlow(browser, errors);
+    await mapSelectionAndJourneyFlow(browser, errors);
+    await pagedLibraryFacesFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);

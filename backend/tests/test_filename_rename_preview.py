@@ -1,9 +1,24 @@
 import unittest
+from unittest.mock import patch
 
 from backend.services.storage import build_person_filename_preview
 
 
 class FilenameRenamePreviewTest(unittest.TestCase):
+    def test_windows_preview_shortens_by_whole_names_and_keeps_the_extension(self):
+        stem = "x" * 247
+        names = ["A😀", "Regina"]
+        options = {"block_separator": "_", "joiner": ", ", "filename_limit": 255}
+        with patch("backend.services.storage.os.name", "nt"):
+            preview = build_person_filename_preview(f"{stem}.jpg", names, **options)
+            self.assertEqual(preview["proposed_filename"], f"{stem}_A😀.jpg")
+            self.assertEqual(preview["omitted_person_count"], 1)
+            self.assertIsNone(preview["validation_error"])
+            self.assertIsNone(build_person_filename_preview(preview["proposed_filename"], names, **options))
+
+            overflow = build_person_filename_preview(f"{stem}y.jpg", names, **options)
+            self.assertEqual(overflow["validation_error"], "filename_too_long")
+
     def test_formatted_names_are_recognized_on_the_next_rename(self):
         for separator, joiner in (("_", " und "), ("_", ""), ("", " und ")):
             with self.subTest(separator=separator, joiner=joiner):

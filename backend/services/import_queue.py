@@ -203,6 +203,8 @@ class ImportJob:
         finished_at: UTC timestamp when processing stopped.
         total_images: Number of discovered images.
         processed_images: Number of completed or skipped images.
+        unavailable_images: Image files that could not be accessed.
+        unreadable_images: Accessible files that could not be decoded as images.
         total_faces: Number of faces discovered so far.
         processed_faces: Number of persisted faces.
         last_error: Most recent recoverable or terminal error.
@@ -217,6 +219,8 @@ class ImportJob:
     total_images: int = 0
     hashed_images: int = 0
     processed_images: int = 0
+    unavailable_images: int = 0
+    unreadable_images: int = 0
     total_faces: int = 0
     processed_faces: int = 0
     stage: Optional[str] = None
@@ -329,6 +333,8 @@ class ImportJobRepository:
                     job.total_images = 0
                     job.hashed_images = 0
                     job.processed_images = 0
+                    job.unavailable_images = 0
+                    job.unreadable_images = 0
                     job.total_faces = 0
                     job.processed_faces = 0
                     job.stage = None
@@ -378,6 +384,8 @@ class ImportJobRepository:
                     total_images = ?,
                     hashed_images = ?,
                     processed_images = ?,
+                    unavailable_images = ?,
+                    unreadable_images = ?,
                     total_faces = ?,
                     processed_faces = ?,
                     stage = ?,
@@ -395,6 +403,8 @@ class ImportJobRepository:
                     job.total_images,
                     job.hashed_images,
                     job.processed_images,
+                    job.unavailable_images,
+                    job.unreadable_images,
                     job.total_faces,
                     job.processed_faces,
                     job.stage,
@@ -495,6 +505,8 @@ class ImportJobRepository:
                     total_images INTEGER NOT NULL DEFAULT 0,
                     hashed_images INTEGER NOT NULL DEFAULT 0,
                     processed_images INTEGER NOT NULL DEFAULT 0,
+                    unavailable_images INTEGER NOT NULL DEFAULT 0,
+                    unreadable_images INTEGER NOT NULL DEFAULT 0,
                     total_faces INTEGER NOT NULL DEFAULT 0,
                     processed_faces INTEGER NOT NULL DEFAULT 0,
                     stage TEXT,
@@ -522,6 +534,8 @@ class ImportJobRepository:
                 "stage_total": "INTEGER NOT NULL DEFAULT 0",
                 "current_file": "TEXT",
                 "hashed_images": "INTEGER NOT NULL DEFAULT 0",
+                "unavailable_images": "INTEGER NOT NULL DEFAULT 0",
+                "unreadable_images": "INTEGER NOT NULL DEFAULT 0",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -546,11 +560,11 @@ class ImportJobRepository:
             INSERT INTO import_job(
                 id, folder_path, status, created_at, started_at, finished_at,
                 total_images, processed_images, total_faces, processed_faces,
-                hashed_images,
+                hashed_images, unavailable_images, unreadable_images,
                 stage, stage_started_at, stage_current, stage_total,
                 current_file, last_error, queue_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 folder_path = excluded.folder_path,
                 status = excluded.status,
@@ -560,6 +574,8 @@ class ImportJobRepository:
                 total_images = excluded.total_images,
                 hashed_images = excluded.hashed_images,
                 processed_images = excluded.processed_images,
+                unavailable_images = excluded.unavailable_images,
+                unreadable_images = excluded.unreadable_images,
                 total_faces = excluded.total_faces,
                 processed_faces = excluded.processed_faces,
                 stage = excluded.stage,
@@ -582,6 +598,8 @@ class ImportJobRepository:
                 job.total_faces,
                 job.processed_faces,
                 job.hashed_images,
+                job.unavailable_images,
+                job.unreadable_images,
                 job.stage,
                 job.stage_started_at,
                 job.stage_current,
@@ -612,6 +630,8 @@ class ImportJobRepository:
             total_images=row["total_images"],
             hashed_images=row["hashed_images"],
             processed_images=row["processed_images"],
+            unavailable_images=row["unavailable_images"],
+            unreadable_images=row["unreadable_images"],
             total_faces=row["total_faces"],
             processed_faces=row["processed_faces"],
             stage=row["stage"],

@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
-import { FaceImage, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { FaceImage, fetchImageDetail, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
+import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
 import ImageGrid, {
   type FaceOverlayMode,
@@ -14,6 +15,8 @@ export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
 
 const PAGE_SIZE = 40;
+const REFRESH_PAGE_SIZE = 200;
+const MAX_GEOMETRY_REQUESTS = 4;
 const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
@@ -53,13 +56,43 @@ function persistImageGridSize(size: ImageGridSize) {
   }
 }
 
+interface ResolvedImageGeometry {
+  source: FaceImage;
+  detail: FaceImage;
+}
+
+function applyImageGeometry(image: FaceImage, geometry?: ResolvedImageGeometry): FaceImage {
+  if (!geometry || (image.image_width && image.image_height)) return image;
+  const { source, detail } = geometry;
+  if (source.image_path !== image.image_path || source.content_hash !== image.content_hash ||
+      detail.id !== image.id || detail.content_hash !== image.content_hash ||
+      !detail.image_width || !detail.image_height) return image;
+
+  const originalFaces = new Map(source.faces.map((face) => [face.id, face]));
+  const orientedFaces = new Map(detail.faces.map((face) => [face.id, face]));
+  // Preserve the page's face filters and assignments. A cached correction can
+  // only be reused while the corresponding original coordinates still match.
+  const faces = image.faces.flatMap((face) => {
+    const original = originalFaces.get(face.id);
+    const oriented = orientedFaces.get(face.id);
+    if (!original || !oriented || original.bbox_x !== face.bbox_x || original.bbox_y !== face.bbox_y ||
+        original.bbox_w !== face.bbox_w || original.bbox_h !== face.bbox_h) return [];
+    return [{ ...face, bbox_x: oriented.bbox_x, bbox_y: oriented.bbox_y, bbox_w: oriented.bbox_w, bbox_h: oriented.bbox_h }];
+  });
+  return faces.length === image.faces.length ? {
+    ...image, image_width: detail.image_width, image_height: detail.image_height, faces,
+  } : image;
+}
+
 interface PeoplePageProps {
   active: boolean;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onOpenPeople: () => void;
+  geoSelection?: GeoPhotoSelection;
+  onChangeGeoSelection: (selection?: GeoPhotoSelection) => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople, geoSelection, onChangeGeoSelection }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -86,6 +119,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const latestQueryRef = useRef(0);
+  const lastRequestedGeoSelection = useRef(geoSelection);
   const loadMoreRequestRef = useRef(0);
   const isFetchingFirstPageRef = useRef(true);
   const isMountedRef = useRef(true);
@@ -93,10 +127,64 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const prefetchedPageRef = useRef<ImagePage | null>(null);
   const prefetchedOffsetRef = useRef<number | null>(null);
   const prefetchPromiseRef = useRef<Promise<void> | null>(null);
+  const refreshImagesRequestRef = useRef<AbortController | null>(null);
+  const requestedGeometryRef = useRef(new WeakSet<FaceImage>());
+  const geometryQueueRef = useRef(new Map<number, FaceImage>());
+  const geometryRequestsRef = useRef(new Map<number, AbortController>());
+  const resolvedGeometryRef = useRef(new Map<number, ResolvedImageGeometry>());
   const queryKeyRef = useRef("");
   const pageHeaderRef = useRef<HTMLElement | null>(null);
   const liveRefreshTimerRef = useRef<number | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
+
+  const clearGeometryRequests = useCallback(() => {
+    geometryRequestsRef.current.forEach((request) => request.abort());
+    geometryRequestsRef.current.clear();
+    geometryQueueRef.current.clear();
+    resolvedGeometryRef.current.clear();
+    requestedGeometryRef.current = new WeakSet();
+  }, []);
+
+  const resolveImageGeometry = useCallback(async (image: FaceImage, signal: AbortSignal) => {
+    for (let attempt = 0; attempt < 2 && !signal.aborted; attempt += 1) {
+      try {
+        const detail = await fetchImageDetail(image.id, signal, { resolveGeometry: true });
+        const geometry = { source: image, detail };
+        if (signal.aborted || applyImageGeometry(image, geometry) === image) return;
+        if (image.content_hash) resolvedGeometryRef.current.set(image.id, geometry);
+        setImages((current) => signal.aborted ? current : current.map((item) =>
+          item === image || (image.content_hash && item.id === image.id) ? applyImageGeometry(item, geometry) : item));
+        return;
+      } catch {
+        // A preview can succeed while the geometry request is temporarily busy.
+        if (attempt === 0 && !signal.aborted) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 400));
+        }
+      }
+    }
+  }, []);
+
+  const drainGeometryQueue = useCallback(function drain() {
+    for (const image of geometryQueueRef.current.values()) {
+      if (geometryRequestsRef.current.size >= MAX_GEOMETRY_REQUESTS) return;
+      if (geometryRequestsRef.current.has(image.id)) continue;
+      geometryQueueRef.current.delete(image.id);
+      if (applyImageGeometry(image, resolvedGeometryRef.current.get(image.id)) !== image) continue;
+      const request = new AbortController();
+      geometryRequestsRef.current.set(image.id, request);
+      void resolveImageGeometry(image, request.signal).finally(() => {
+        if (geometryRequestsRef.current.get(image.id) === request) geometryRequestsRef.current.delete(image.id);
+        drain();
+      });
+    }
+  }, [resolveImageGeometry]);
+
+  const requestImageGeometry = useCallback((image: FaceImage) => {
+    if (isFetchingFirstPageRef.current || requestedGeometryRef.current.has(image)) return;
+    requestedGeometryRef.current.add(image);
+    geometryQueueRef.current.set(image.id, image);
+    drainGeometryQueue();
+  }, [drainGeometryQueue]);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -104,8 +192,9 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       isMountedRef.current = false;
       latestQueryRef.current += 1;
       loadMoreRequestRef.current += 1;
+      clearGeometryRequests();
     };
-  }, []);
+  }, [clearGeometryRequests]);
 
   useEffect(() => {
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
@@ -116,10 +205,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       folders: selectedFolders,
       persons: selectedPersons,
       faceStatuses,
+      geoSelection,
       sortBy: groupingMode,
       sortDirection,
     });
-  }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, geoSelection, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   const scheduleNextPagePrefetch = async (
     requestId: number,
@@ -128,11 +218,12 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   ) => {
     if (prefetchPromiseRef.current || prefetchedOffsetRef.current === offset) return;
 
-    const prefetchPromise = (async () => {
+    const prefetchPromise: Promise<void> = (async () => {
       const page = await fetchImages({
         folders: selectedFolders,
         persons: selectedPersons,
         faceStatuses,
+        selection: geoSelection,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -140,6 +231,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       });
       if (
         !isMountedRef.current ||
+        prefetchPromiseRef.current !== prefetchPromise ||
         latestQueryRef.current !== requestId ||
         queryKeyRef.current !== expectedQueryKey ||
         page.offset !== offset
@@ -170,17 +262,27 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       folders: selectedFolders,
       persons: selectedPersons,
       faceStatuses,
+      geoSelection,
       sortBy: groupingMode,
       sortDirection,
     });
     latestQueryRef.current = requestId;
+    clearGeometryRequests();
     queryKeyRef.current = queryKey;
     prefetchedPageRef.current = null;
     prefetchedOffsetRef.current = null;
     prefetchPromiseRef.current = null;
     loadMoreRequestRef.current += 1;
     isFetchingFirstPageRef.current = true;
-    setIsLoading(images.length === 0);
+    const selectionChanged = lastRequestedGeoSelection.current !== geoSelection;
+    lastRequestedGeoSelection.current = geoSelection;
+    if (selectionChanged) {
+      setImages([]);
+      setTotalImages(0);
+      setHasMore(false);
+      pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: 0 });
+    }
+    setIsLoading(selectionChanged || images.length === 0);
     setIsLoadingMore(false);
     setLoadError(false);
     setLoadMoreError(false);
@@ -192,6 +294,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           folders: selectedFolders,
           persons: selectedPersons,
           faceStatuses,
+          selection: geoSelection,
           sortBy: groupingMode,
           sortDirection,
           limit,
@@ -231,11 +334,28 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     return () => {
       isMounted = false;
     };
-  }, [faceStatuses, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
+  }, [clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
     const closeGalleryAfterRestore = (update: { reason?: string }) => {
-      if (update?.reason === "database_import") setGalleryRevision((value) => value + 1);
+      if (update?.reason !== "database_import") return;
+      latestQueryRef.current += 1;
+      loadMoreRequestRef.current += 1;
+      isFetchingFirstPageRef.current = true;
+      loadedCountRef.current = PAGE_SIZE;
+      prefetchedPageRef.current = null;
+      prefetchedOffsetRef.current = null;
+      prefetchPromiseRef.current = null;
+      clearGeometryRequests();
+      refreshImagesRequestRef.current?.abort();
+      setImages([]);
+      setAvailablePersons([]);
+      setTotalImages(0);
+      setLibraryTotal(null);
+      setHasMore(false);
+      setIsLoading(true);
+      setIsLoadingMore(false);
+      setGalleryRevision((value) => value + 1);
     };
     if (!active) {
       // Keep the gallery's image IDs scoped to the current library even while
@@ -266,10 +386,12 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
     const restoreViewportAnchor = (
       anchor: ReturnType<typeof captureViewportAnchor>,
+      requestId: number,
     ) => {
       if (!anchor) return;
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
+          if (!isMounted || latestQueryRef.current !== requestId) return;
           const node = anchor.scroller.querySelector<HTMLElement>(
             `[data-image-id="${anchor.imageId}"]`,
           );
@@ -284,45 +406,59 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
     const refreshVisibleImages = async (preserveViewport = true) => {
       const requestId = latestQueryRef.current;
+      const request = new AbortController();
+      refreshImagesRequestRef.current = request;
       const anchor = preserveViewport ? captureViewportAnchor() : null;
+      const count = loadedCountRef.current;
       try {
-        const page = await fetchImages({
-          folders: selectedFolders,
-          persons: selectedPersons,
-          faceStatuses,
-          sortBy: groupingMode,
-          sortDirection,
-          limit: loadedCountRef.current,
-          offset: 0,
+        const freshById = new Map<number, FaceImage>();
+        let offset = 0;
+        let page: ImagePage;
+        do {
+          page = await fetchImages({
+            folders: selectedFolders,
+            persons: selectedPersons,
+            faceStatuses,
+            selection: geoSelection,
+            sortBy: groupingMode,
+            sortDirection,
+            limit: Math.min(REFRESH_PAGE_SIZE, count - offset),
+            offset,
+            signal: request.signal,
+          });
+          if (request.signal.aborted || !isMounted || latestQueryRef.current !== requestId) return false;
+          page.items.forEach((image) => freshById.set(image.id, image));
+          offset += page.items.length;
+        } while (offset < count && page.items.length > 0 && page.has_more);
+
+        freshById.forEach((image, id) => {
+          freshById.set(id, applyImageGeometry(image, resolvedGeometryRef.current.get(id)));
         });
-        if (!isMounted || latestQueryRef.current !== requestId) return false;
+        const fresh = Array.from(freshById.values());
         // Keep existing cards at their current array index while the user is
         // below the top. New imports are appended to this live snapshot instead
         // of redistributing the masonry columns underneath the user's pointer.
-        if (anchor) {
-          setImages((current) => {
-            const freshById = new Map(page.items.map((image) => [image.id, image]));
-            const stable = current
-              .map((image) => freshById.get(image.id))
-              .filter((image): image is FaceImage => image !== undefined);
-            const knownIds = new Set(stable.map((image) => image.id));
-            return [
-              ...stable,
-              ...page.items.filter((image) => !knownIds.has(image.id)),
-            ];
-          });
-        } else {
-          setImages(page.items);
-        }
+        setImages((current) => {
+          if (request.signal.aborted || !isMounted || latestQueryRef.current !== requestId) return current;
+          if (!anchor) return fresh;
+          const stable = current
+            .map((image) => freshById.get(image.id))
+            .filter((image): image is FaceImage => image !== undefined);
+          const knownIds = new Set(stable.map((image) => image.id));
+          return [
+            ...stable,
+            ...fresh.filter((image) => !knownIds.has(image.id)),
+          ];
+        });
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
         setLoadError(false);
-        restoreViewportAnchor(anchor);
+        restoreViewportAnchor(anchor, requestId);
         prefetchedPageRef.current = null;
         prefetchedOffsetRef.current = null;
         prefetchPromiseRef.current = null;
-        loadedCountRef.current = Math.max(PAGE_SIZE, page.items.length || PAGE_SIZE);
+        loadedCountRef.current = Math.max(PAGE_SIZE, fresh.length);
         if (page.has_more) {
           void scheduleNextPagePrefetch(
             requestId,
@@ -332,17 +468,20 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         }
         return true;
       } catch (error) {
-        if (isMounted && latestQueryRef.current === requestId) {
+        if (!request.signal.aborted && isMounted && latestQueryRef.current === requestId) {
           console.error("Live-Aktualisierung der Bilder fehlgeschlagen:", error);
         }
         return false;
+      } finally {
+        if (refreshImagesRequestRef.current === request) refreshImagesRequestRef.current = null;
       }
     };
 
     const refreshLibraryTotal = async () => {
+      const requestId = latestQueryRef.current;
       try {
         const page = await fetchImages({ limit: 1, offset: 0 });
-        if (isMounted) setLibraryTotal(page.total);
+        if (isMounted && latestQueryRef.current === requestId) setLibraryTotal(page.total);
         return true;
       } catch (error) {
         if (isMounted) console.error("Bibliotheksgröße konnte nicht geladen werden:", error);
@@ -366,12 +505,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         return;
       }
       refreshInFlight = true;
+      const requestId = latestQueryRef.current;
       try {
         const [imagesUpdated, totalUpdated] = await Promise.all([
           refreshVisibleImages(preserveViewport),
           refreshLibraryTotal(),
         ]);
-        if (isMounted) setRefreshError(!imagesUpdated || !totalUpdated);
+        if (isMounted && latestQueryRef.current === requestId) setRefreshError(!imagesUpdated || !totalUpdated);
       } finally {
         refreshInFlight = false;
         if (isMounted && refreshPending) {
@@ -437,6 +577,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
     return () => {
       isMounted = false;
+      refreshImagesRequestRef.current?.abort();
+      refreshImagesRequestRef.current = null;
       if (liveRefreshTimerRef.current !== null) {
         window.clearTimeout(liveRefreshTimerRef.current);
         liveRefreshTimerRef.current = null;
@@ -447,10 +589,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, faceStatuses, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
-    if (!isMountedRef.current || isLoading || isLoadingMore || isFetchingFirstPageRef.current || loadError || !hasMore) return;
+    if (!isMountedRef.current || isLoading || isLoadingMore || isFetchingFirstPageRef.current || refreshImagesRequestRef.current || loadError || !hasMore) return;
     const loadMoreRequest = ++loadMoreRequestRef.current;
     const requestId = latestQueryRef.current;
     const offset = loadedCountRef.current;
@@ -458,9 +600,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       prefetchedOffsetRef.current === offset ? prefetchedPageRef.current : null;
 
     const appendPage = (page: ImagePage) => {
+      const pageItems = page.items.map((image) => applyImageGeometry(image, resolvedGeometryRef.current.get(image.id)));
       setImages((current) => {
         const merged = new Map(current.map((image) => [image.id, image]));
-        page.items.forEach((image) => merged.set(image.id, image));
+        pageItems.forEach((image) => merged.set(image.id, image));
         const next = Array.from(merged.values());
         loadedCountRef.current = next.length;
         return next;
@@ -492,6 +635,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         folders: selectedFolders,
         persons: selectedPersons,
         faceStatuses,
+        selection: geoSelection,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -509,7 +653,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   };
 
   const hasActiveFilters =
-    selectedPersons.length > 0 ||
+    Boolean(geoSelection) || selectedPersons.length > 0 ||
     selectedFolders.length > 0 ||
     faceStatuses.length > 0;
   // Only the unfiltered total can decide whether setup is still required.
@@ -566,6 +710,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     setSelectedPersons([]);
     setSelectedFolders([]);
     setFaceStatuses([]);
+    if (geoSelection) onChangeGeoSelection();
   };
 
   if (libraryIsEmpty) {
@@ -681,6 +826,32 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         </select>
       </LibraryFilterBar>
 
+      {geoSelection && (
+        <div className="active-folder-filters" aria-label="Auswahl aus der Fotokarte">
+          <span>Auswahl aus der Fotokarte</span>
+          {geoSelection.bounds && (
+            <button type="button" aria-label="Kartenausschnitt entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, bounds: undefined })}>
+              Kartenausschnitt <b aria-hidden="true">×</b>
+            </button>
+          )}
+          {(geoSelection.from_date || geoSelection.to_date) && (
+            <button type="button" aria-label="Aufnahmezeitraum entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, from_date: undefined, to_date: undefined })}>
+              {[geoSelection.from_date, geoSelection.to_date]
+                .map((date) => date ? new Date(`${date}T12:00:00`).toLocaleDateString("de-DE") : "offen")
+                .join(" – ")} <b aria-hidden="true">×</b>
+            </button>
+          )}
+          {geoSelection.image_ids && (
+            <button type="button" aria-label="Reisestopp entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, image_ids: undefined })}>
+              Reisestopp <b aria-hidden="true">×</b>
+            </button>
+          )}
+        </div>
+      )}
+
       {selectedFolders.length > 0 && (
         <div className="active-folder-filters">
           <span>Ausgewählte Ordner</span>
@@ -731,15 +902,16 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
       {(!loadError || images.length > 0) && (
         <ImageGrid
+        key={galleryRevision}
         images={images}
         isLoading={isLoading}
         hasMore={hasMore && !loadMoreError && !loadError}
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
         gridSize={imageGridSize}
-        galleryRevision={galleryRevision}
         onNavigateToCluster={onNavigateToCluster}
         onLoadMore={loadMoreImages}
+        onImageGeometryNeeded={requestImageGeometry}
         hasActiveFilters={hasActiveFilters}
         onResetFilters={resetFilters}
         onImageDeleted={(imageId) => {

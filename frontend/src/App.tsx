@@ -7,6 +7,8 @@ import SettingsPage from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
+import { subscribeToTopic } from "./utils/events";
+import { hasGeoPhotoSelection, type GeoPhotoSelection } from "./utils/geoPhotoSelection";
 import WhatsNewModal from "./components/shared/WhatsNewModal";
 import UpdateAvailableModal from "./components/shared/UpdateAvailableModal";
 import {
@@ -41,6 +43,20 @@ const MapPage = lazy(() => import("./components/map/MapPage"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const GEO_SELECTION_EPOCH_KEY = "face-manager:geo-selection-epoch";
+
+function readGeoSelectionEpoch() {
+  try {
+    return Number(window.sessionStorage.getItem(GEO_SELECTION_EPOCH_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readNavigationEntry(geoSelectionEpoch: number): NavigationEntry {
+  const entry = parseNavigationHash(window.location.hash, window.history.state);
+  return entry.geoSelection && entry.geoSelectionEpoch !== geoSelectionEpoch ? { page: "people" } : entry;
+}
 
 type Changelog =
   | { status: "idle" | "loading" }
@@ -67,8 +83,11 @@ const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
 
 const App: React.FC = () => {
   const sharedLibrary = useSharedLibrary();
-  const initialEntry = parseNavigationHash(window.location.hash);
+  const [initialGeoSelectionEpoch] = useState(readGeoSelectionEpoch);
+  const geoSelectionEpoch = useRef(initialGeoSelectionEpoch);
+  const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
+  const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
   const [clusterNavigationTarget, setClusterNavigationTarget] =
     useState<ClusterNavigationTarget | null>(() => {
       if (initialEntry.clusterId !== undefined) {
@@ -116,25 +135,27 @@ const App: React.FC = () => {
       setClusterNavigationTarget(null);
     }
     setSettingsSection(entry.page === "settings" ? entry.settingsSection : undefined);
+    if (entry.page === "people") setGeoSelection(entry.geoSelection);
     setPage(entry.page);
   }, []);
 
   const navigate = useCallback(
-    (entry: NavigationEntry) => {
-      applyEntry(entry);
-      const nextHash = navigationHash(entry);
+    (entry: NavigationEntry, replace = false) => {
+      const nextEntry = entry.geoSelection ? { ...entry, geoSelectionEpoch: geoSelectionEpoch.current } : entry;
+      applyEntry(nextEntry);
+      const nextHash = navigationHash(nextEntry);
       lastAppliedHashRef.current = nextHash;
-      if (window.location.hash === nextHash) {
-        window.history.replaceState(entry, "", nextHash);
+      if (replace || window.location.hash === nextHash) {
+        window.history.replaceState(nextEntry, "", nextHash);
       } else {
-        window.history.pushState(entry, "", nextHash);
+        window.history.pushState(nextEntry, "", nextHash);
       }
     },
     [applyEntry],
   );
 
   useEffect(() => {
-    const entry = parseNavigationHash(window.location.hash);
+    const entry = readNavigationEntry(geoSelectionEpoch.current);
     const canonicalHash = navigationHash(entry);
     lastAppliedHashRef.current = canonicalHash;
     window.history.replaceState(entry, "", canonicalHash);
@@ -243,7 +264,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const restoreFromLocation = () => {
       if (lastAppliedHashRef.current === window.location.hash) return;
-      const entry = parseNavigationHash(window.location.hash);
+      const entry = readNavigationEntry(geoSelectionEpoch.current);
       const canonicalHash = navigationHash(entry);
       lastAppliedHashRef.current = canonicalHash;
       if (canonicalHash !== window.location.hash) {
@@ -260,12 +281,35 @@ const App: React.FC = () => {
     };
   }, [applyEntry]);
 
+  useEffect(() => subscribeToTopic<{ reason?: string }>("clusters", (update) => {
+    if (update?.reason !== "database_import") return;
+    geoSelectionEpoch.current += 1;
+    try {
+      window.sessionStorage.setItem(GEO_SELECTION_EPOCH_KEY, String(geoSelectionEpoch.current));
+    } catch {
+      // History selections are still invalidated in the open application.
+    }
+    if (parseNavigationHash(window.location.hash, window.history.state).geoSelection) {
+      navigate({ page: "people" }, true);
+    } else {
+      setGeoSelection(undefined);
+    }
+  }), [navigate]);
+
   const handleChangePage = useCallback(
     (nextPage: AppPage) => navigate({ page: nextPage }),
     [navigate],
   );
 
   const handleOpenPeople = useCallback(() => navigate({ page: "review", reviewView: "open" }), [navigate]);
+
+  const handleOpenImages = useCallback((selection: GeoPhotoSelection) => {
+    navigate({ page: "people", geoSelection: hasGeoPhotoSelection(selection) ? selection : undefined });
+  }, [navigate]);
+
+  const handleChangeGeoSelection = useCallback((selection?: GeoPhotoSelection) => {
+    navigate({ page: "people", geoSelection: hasGeoPhotoSelection(selection) ? selection : undefined }, true);
+  }, [navigate]);
 
   const handleNavigateToCluster = useCallback(
     (clusterId: number, personName?: string | null) =>
@@ -290,13 +334,15 @@ const App: React.FC = () => {
             active={active}
             onNavigateToCluster={handleNavigateToCluster}
             onOpenPeople={handleOpenPeople}
+            geoSelection={geoSelection}
+            onChangeGeoSelection={handleChangeGeoSelection}
           />
         );
       case "map":
         return (
           <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
             <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} onNavigateToCluster={handleNavigateToCluster} />
+              <MapPage active={active} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
             </Suspense>
           </ErrorBoundary>
         );
