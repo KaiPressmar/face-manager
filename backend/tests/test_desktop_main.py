@@ -114,7 +114,9 @@ class DesktopStartupTests(unittest.TestCase):
         with patch.object(self.desktop, "_start_server", return_value=(server, Mock(), 12345)):
             self.desktop.main()
         save_album_png = window.expose.call_args.args[0]
+        save_album_zip = window.expose.call_args.args[1]
         self.assertEqual(save_album_png.__name__, "save_album_png")
+        self.assertEqual(save_album_zip.__name__, "save_album_zip")
 
         with (tempfile.TemporaryDirectory() as folder,
               patch.object(album_export, "_decode_album_png", return_value=b"png bytes")):
@@ -134,3 +136,15 @@ class DesktopStartupTests(unittest.TestCase):
                 self.assertEqual(destination.read_bytes(), b"png bytes")
                 destination.unlink()
                 window.create_file_dialog.reset_mock()
+
+            archive_path = Path(folder) / "target.zip"
+            window.create_file_dialog.return_value = str(archive_path)
+            window.get_current_url.return_value = "http://external.invalid/"
+            self.assertEqual(save_album_zip("Reise.zip", ["first", "second"])["status"], "error")
+            window.create_file_dialog.assert_not_called()
+            window.get_current_url.return_value = "http://127.0.0.1:12345/#/weltkarte"
+            self.assertEqual(save_album_zip("Reise.zip", ["first", "second"]), {"status": "saved"})
+            window.create_file_dialog.assert_called_once_with(
+                self.desktop.webview.SAVE_DIALOG, save_filename="Reise.zip", file_types=("ZIP (*.zip)",),
+            )
+            self.assertTrue(archive_path.is_file())

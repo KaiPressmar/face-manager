@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { API_BASE, apiFetch, readApiError, type RuntimeInfo } from "../../utils/api";
 import "./runtime-status.css";
 
@@ -79,7 +79,12 @@ function Timings({ details }: { details?: ProviderDetails | null }) {
   </details>;
 }
 
-export default function RuntimeStatus({ runtime, unavailable }: { runtime: RuntimeStatusInfo | null; unavailable: boolean }) {
+export default function RuntimeStatus({ runtime, unavailable, route }: { runtime: RuntimeStatusInfo | null; unavailable: boolean; route: string }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLElement>(null);
+  const panelId = useId();
   const [checking, setChecking] = useState(false);
   const [diagnostic, setDiagnostic] = useState<ProviderDetails | null>(null);
   const [diagnosticError, setDiagnosticError] = useState("");
@@ -90,6 +95,46 @@ export default function RuntimeStatus({ runtime, unavailable }: { runtime: Runti
   const reason = unavailable ? "Der aktuelle Hardwarestatus ist nicht erreichbar."
     : mode === "gpu" && runtime ? `Gesichtserkennung verwendet ${providerName(runtime)}.`
     : REASONS[runtime?.provider_reason ?? ""] ?? (runtime && mode ? `${providerName(runtime)} wird verwendet.` : "Hardwarestatus wird geladen.");
+
+  useEffect(() => setOpen(false), [route]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const position = () => {
+      const anchor = trigger.current?.getBoundingClientRect();
+      if (anchor) panel.current?.style.setProperty("--runtime-panel-top", `${anchor.bottom + 8}px`);
+    };
+    position();
+    panel.current?.focus({ preventScroll: true });
+    window.addEventListener("resize", position);
+    return () => window.removeEventListener("resize", position);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: Event) => {
+      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !root.current?.contains(document.activeElement)) return;
+      event.preventDefault();
+      setOpen(false);
+      trigger.current?.focus();
+    };
+    const navigation = () => setOpen(false);
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("focusin", outside);
+    document.addEventListener("keydown", escape);
+    window.addEventListener("popstate", navigation);
+    window.addEventListener("hashchange", navigation);
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("focusin", outside);
+      document.removeEventListener("keydown", escape);
+      window.removeEventListener("popstate", navigation);
+      window.removeEventListener("hashchange", navigation);
+    };
+  }, [open]);
 
   const startDiagnostic = async () => {
     setChecking(true);
@@ -106,12 +151,14 @@ export default function RuntimeStatus({ runtime, unavailable }: { runtime: Runti
     }
   };
 
-  return <details className="runtime-status">
-    <summary className={`compute-mode-badge compute-mode-badge--${mode ?? "unknown"}`} title={reason} aria-label={`Hardwarestatus: ${label}`}>
+  const outcome = REASONS[diagnostic?.provider_reason ?? ""];
+  return <div className="runtime-status" ref={root}>
+    <button type="button" ref={trigger} className={`compute-mode-badge compute-mode-badge--${mode ?? "unknown"}`}
+      aria-label={`Hardwarestatus: ${label}`} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((value) => !value)}>
       <span className="compute-mode-badge__indicator" aria-hidden="true" />
       <span>{label}</span>
-    </summary>
-    <section className="runtime-status__panel" aria-label="Hardwarestatus">
+    </button>
+    <section className="runtime-status__panel" id={panelId} ref={panel} tabIndex={-1} hidden={!open} aria-label="Hardwarestatus">
       <strong>Gesichtserkennung</strong>
       <p>{reason}</p>
       <Timings details={runtime} />
@@ -121,11 +168,11 @@ export default function RuntimeStatus({ runtime, unavailable }: { runtime: Runti
       </button>}
       {diagnostic && <div className="runtime-status__result">
         <p role={diagnostic.provider_state === "error" ? "alert" : "status"}>
-          {REASONS[diagnostic.provider_reason ?? ""] ?? "Hardwaretest abgeschlossen."}
+          {outcome && outcome !== reason ? outcome : "Hardwaretest abgeschlossen."}
         </p>
         <Timings details={diagnostic} />
       </div>}
       {diagnosticError && <p role="alert">{diagnosticError}</p>}
     </section>
-  </details>;
+  </div>;
 }

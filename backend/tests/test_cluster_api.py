@@ -67,6 +67,17 @@ class ClusterApiTest(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 409)
         accept.assert_called_once_with([decision])
 
+    @patch("backend.app.assign_faces_to_person")
+    @patch("backend.app.get_person_suggestion_epoch", return_value="current-library")
+    def test_batch_assignment_rejects_ids_from_prior_library(self, epoch, assign):
+        with self.assertRaises(HTTPException) as rejected:
+            app.api_batch_update_faces({
+                "action": "assign_person", "face_ids": [22], "person_name": "Andrea",
+                "expected_library_id": "prior-library",
+            })
+        self.assertEqual(rejected.exception.status_code, 409)
+        assign.assert_not_called()
+
     @patch("backend.app.idle_recluster_scheduler")
     @patch("backend.app.auto_cluster_queue")
     @patch("backend.app.schedule_full_recluster")

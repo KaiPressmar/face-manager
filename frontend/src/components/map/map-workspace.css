@@ -34,6 +34,7 @@
 .gps-page__field span, .gps-page__map-head span,
 .gps-page__map-foot, .gps-page__map-foot span:last-child, .gps-page__hint,
 .gps-page__results-hint, .gps-page__collection, .gps-page__pending { color: var(--text-muted); }
+.gps-page__date-help { grid-column: 1 / -1; flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: .8125rem; }
 .gps-results-actions, .gps-selection-gallery__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gps-results-actions { margin: 12px 0; font-size: 12px; }
 .gps-journey__stops { list-style: none; max-height: 300px; overflow: auto; padding: 3px; margin: 8px 0; }
@@ -41,6 +42,7 @@
 .gps-journey__stops button { display: flex; gap: 9px; align-items: center; width: 100%; text-align: left; font-size: 12px; }
 .gps-journey__stops small { display: block; margin-top: 3px; color: var(--text-muted); }
 .gps-journey__stop-number { min-width: 28px; font-weight: 800; text-align: center; }
+.gps-journey__number-label { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
 .gps-journey__notes { padding-left: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .gps-journey__gap { margin: 12px 0 5px; color: var(--text-muted); font-size: 11px; }
 .gps-journey-inference { margin: 10px 0; color: var(--text-muted); font-size: 12px; }

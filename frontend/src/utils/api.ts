@@ -293,6 +293,7 @@ export interface ClusterFace {
   cluster_id: number | null;
   person_name: string | null;
   review_status: FaceReviewStatus;
+  assignment_library_id?: string;
 }
 
 export interface ClusterDetails extends ClusterSummary {
@@ -778,11 +779,13 @@ export async function fetchThumbnailWarmupState(): Promise<ThumbnailWarmupState>
   return await res.json();
 }
 
-export async function importDatabase(file: File): Promise<void> {
+export async function importDatabase(file: File, checksum?: string): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
+  if (checksum) headers["X-Restore-SHA256"] = checksum;
   const res = await apiFetch(`${API_BASE}/database/import`, {
     method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: await file.arrayBuffer(),
+    headers,
+    body: file,
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Sicherung konnte nicht wiederhergestellt werden."));
@@ -930,10 +933,13 @@ function normalizeReviewGroupItem(item: any): FaceReviewGroupSummary {
   };
 }
 
-function normalizeClusterFaceItems(faces: unknown): ClusterFace[] {
+function normalizeClusterFaceItems(faces: unknown, assignmentLibraryId?: unknown): ClusterFace[] {
   return Array.isArray(faces)
     ? (faces as ClusterFace[]).map((face) => ({
         ...face,
+        assignment_library_id: typeof assignmentLibraryId === "string" && assignmentLibraryId
+          ? assignmentLibraryId
+          : undefined,
         person_name:
           typeof face?.person_name === "string" || face?.person_name === null
             ? face.person_name
@@ -972,7 +978,7 @@ export async function fetchClusterOverview(): Promise<ClusterOverview> {
     rawFirst && typeof rawFirst === "object"
       ? {
           ...normalizeClusterSummaryItem(rawFirst),
-          faces: normalizeClusterFaceItems(rawFirst.faces),
+          faces: normalizeClusterFaceItems(rawFirst.faces, payload.assignment_library_id),
         }
       : null;
   return { clusters, review_groups: reviewGroups, first_cluster: firstCluster };
@@ -1004,19 +1010,7 @@ export async function fetchClusterFaces(id: number): Promise<ClusterDetails | nu
           ? (payload as { faces: unknown[] }).faces.length
           : 0),
     ),
-    faces: Array.isArray((payload as { faces?: unknown[] }).faces)
-      ? (payload as { faces: ClusterFace[] }).faces.map((face) => ({
-          ...face,
-          person_name:
-            typeof face?.person_name === "string" || face?.person_name === null
-              ? face.person_name
-              : null,
-          review_status:
-            face?.review_status === "unknown_person" || face?.review_status === "not_face"
-              ? face.review_status
-              : "active",
-        }))
-      : [],
+    faces: normalizeClusterFaceItems(payload.faces, payload.assignment_library_id),
   };
 }
 
@@ -1061,19 +1055,7 @@ export async function fetchFaceReviewGroupFaces(
         (payload as { face_count?: number }).face_count ??
         0,
     ),
-    faces: Array.isArray((payload as { faces?: unknown[] }).faces)
-      ? (payload as { faces: ClusterFace[] }).faces.map((face) => ({
-          ...face,
-          person_name:
-            typeof face?.person_name === "string" || face?.person_name === null
-              ? face.person_name
-              : null,
-          review_status:
-            face?.review_status === "unknown_person" || face?.review_status === "not_face"
-              ? face.review_status
-              : "active",
-        }))
-      : [],
+    faces: normalizeClusterFaceItems(payload.faces, payload.assignment_library_id),
   };
 }
 
@@ -1198,6 +1180,8 @@ export async function batchUpdateFaces(payload: {
   face_ids: number[];
   cluster_id?: number;
   person_name?: string;
+  expected_faces?: Pick<ClusterFace, "id" | "cluster_id" | "review_status" | "person_name">[];
+  expected_library_id?: string;
 }): Promise<{ cluster_id?: number; updated_count?: number }> {
   const res = await apiFetch(`${API_BASE}/faces/batch`, {
     method: "POST",
@@ -1407,6 +1391,20 @@ export interface ApplyImageRenamePayload {
   persons?: string[];
   sort_by?: "date" | "folder";
   sort_direction?: "desc" | "asc";
+  confirmed_targets?: Record<string, { target_path: string; source_token: string }>;
+}
+
+export interface ImageRenamePreviewItem {
+  path: string;
+  target_path: string | null;
+  reason: string | null;
+  source_token: string | null;
+}
+
+export interface ImageRenamePreview {
+  items: ImageRenamePreviewItem[];
+  ready_count: number;
+  skipped_count: number;
 }
 
 export interface ApplyImageRenameResult {
@@ -1422,6 +1420,7 @@ export interface ApplyImageRenameResult {
   errors: {
     path: string;
     reason: string;
+    recovery_path?: string;
   }[];
   renamed_count: number;
   skipped_count: number;
@@ -1490,6 +1489,22 @@ export async function applyImageRenames(
     throw new Error(
       await readApiError(res, "Die Dateinamen konnten nicht aktualisiert werden."),
     );
+  }
+  return await res.json();
+}
+
+export async function previewImageRenames(
+  payload: ApplyImageRenamePayload,
+  signal: AbortSignal,
+): Promise<ImageRenamePreview> {
+  const res = await apiFetch(`${API_BASE}/image-renames/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(await readApiError(res, "Die Dateinamen konnten nicht geprüft werden."));
   }
   return await res.json();
 }

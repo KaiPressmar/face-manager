@@ -1,4 +1,17 @@
 export type JourneyPlace = readonly [latitude: number, longitude: number, name: string];
+const coordinate = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 3 });
+
+export function describeJourneyPlaces(stops: readonly { id: string; latitude: number; longitude: number }[], places?: readonly JourneyPlace[]) {
+  const names = new Map<string, number>();
+  const details = stops.map((stop) => {
+    const nearby = places && findNearbyPlace(places, stop.latitude, stop.longitude);
+    if (nearby) names.set(nearby.name, (names.get(nearby.name) ?? 0) + 1);
+    return [stop.id, { nearby, coordinates: `${coordinate.format(stop.latitude)}°, ${coordinate.format(stop.longitude)}°` }] as const;
+  });
+  return new Map(details.map(([id, detail]) => [id, {
+    ...detail, sharedName: detail.nearby ? (names.get(detail.nearby.name) ?? 0) > 1 : false,
+  }]));
+}
 
 export async function loadJourneyPlaces(): Promise<JourneyPlace[]> {
   const { default: data } = await import("./journey-places.json");

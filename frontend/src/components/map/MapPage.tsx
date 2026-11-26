@@ -14,6 +14,8 @@ import { updatePhotoAlbum, usePhotoAlbums } from "../../utils/photoAlbums";
 import { applyTripSelection, photoIdsForTrip, type TravelHome, type TripSelection } from "./journeyTrips";
 import { fitAlbumJourney } from "./MapAlbumArtwork";
 import { fetchJourney, fetchMapSelection, omitInferredPhotos, type Journey, type JourneyDetail } from "./mapData";
+import { describeMapDates, formatMapDate, parseMapDate } from "./mapDates";
+import { countWithLabel } from "../../utils/germanFormatting";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import { subscribeToTopic } from "../../utils/events";
 import "./map.css";
@@ -27,6 +29,9 @@ const MAP_LIBRARY_EVENTS = new Set([
 const EMPTY_POINTS: MapPoint[] = [];
 const EMPTY_IMAGES: MapImage[] = [];
 type MapResult<T> = { key: string; data: T | null; error: string };
+type DateFields = { from: string; to: string };
+type DateError = { field: keyof DateFields | "both"; text: string };
+const reversedDates: DateError = { field: "both", text: "Das Enddatum muss am oder nach dem Startdatum liegen." };
 type ImagePage = {
   items: MapImage[];
   total: number;
@@ -80,6 +85,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   const [selectMode, setSelectMode] = useState(false);
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [dateDraft, setDateDraft] = useState<DateFields>();
+  const [dateEntryError, setDateEntryError] = useState<DateError>();
   const [datePreset, setDatePreset] = useState("all");
   const [pointsResult, setPointsResult] = useState<MapResult<MapPointsResponse> | null>(null);
   const [imagesResult, setImagesResult] = useState<MapResult<ImagePage> | null>(null);
@@ -103,8 +110,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   const albumPickerOpener = useRef<HTMLElement | null>(null);
   const openedAlbumRoute = useRef<string>();
 
-  const invalidDate = !!(fromDate && toDate && fromDate > toDate);
-  const canLoad = active && !invalidDate;
+  const dateError = dateEntryError ?? (fromDate && toDate && fromDate > toDate ? reversedDates : undefined);
+  const canLoad = active && !dateError;
   const canLoadPoints = canLoad && !isJourney && pointGrid !== null;
   const handleGridChange = useCallback((grid: MapGrid) => {
     setPointGrid((current) => current?.columns === grid.columns && current.rows === grid.rows ? current : grid);
@@ -118,8 +125,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     : REGIONS.find((item) => JSON.stringify(item.view) === JSON.stringify(view))?.label || "custom";
   const queryFrom = isJourney && trip?.day ? trip.day : fromDate;
   const queryTo = isJourney && trip?.day ? trip.day : toDate;
+  const shownDates = dateDraft ?? { from: formatMapDate(queryFrom), to: formatMapDate(queryTo) };
   const dates = { from_date: queryFrom || undefined, to_date: queryTo || undefined, album_id: albumId || undefined };
-  const journeyKey = JSON.stringify([queryFrom, queryTo, region, journeyDetail, albumId, libraryRevision]);
+  // A background refresh can keep displaying the last route for this exact selection.
+  const journeyKey = JSON.stringify([queryFrom, queryTo, region, journeyDetail, albumId]);
   const journeyState = isJourney && canLoad && journeyResult?.key === journeyKey ? journeyResult : null;
   const baseJourney = journeyState?.data;
   const tripsSource = baseJourney ?? (trip ? journeyResult?.data : null);
@@ -177,6 +186,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     setJourneyDetail(target.journey?.detail ?? "trip");
     setFromDate(target.journey?.from_date ?? "");
     setToDate(target.journey?.to_date ?? "");
+    setDateDraft(undefined);
+    setDateEntryError(undefined);
     setDatePreset(target.journey?.from_date || target.journey?.to_date ? "custom" : "all");
   }, [openAlbumId, albums]);
 
@@ -192,7 +203,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
       });
     });
     return () => controller.abort();
-  }, [canLoad, isJourney, queryFrom, queryTo, region, journeyDetail, journeyKey, journeyRetry, albumId]);
+  }, [canLoad, isJourney, queryFrom, queryTo, region, journeyDetail, journeyKey, journeyRetry, albumId, libraryRevision]);
 
   useEffect(() => {
     if (!active || !journey?.indexing || openedGallery) return;
@@ -206,6 +217,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
       if (!update?.reason || !MAP_LIBRARY_EVENTS.has(update.reason)) return;
       if (update.reason === "database_import") {
         clearGallery();
+        setJourneyResult(null);
         setAlbum(null);
         setSaveSelection(undefined);
         setAlbumId("");
@@ -291,7 +303,42 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     return () => window.clearTimeout(timer);
   }, [canLoad, pointKey, filterKey, pointRefresh, points?.indexing, openedGallery, moreLoading, hasExtendedResults]);
 
+  const commitDates = useCallback((draft: DateFields) => {
+    const from = parseMapDate(draft.from);
+    const to = parseMapDate(draft.to);
+    if (from === null || to === null) {
+      setDateEntryError(from === null && to === null
+        ? { field: "both", text: "Gib zwei gültige Kalenderdaten ein." }
+        : from === null ? { field: "from", text: "Gib bei „Von“ ein gültiges Kalenderdatum ein." }
+          : { field: "to", text: "Gib bei „Bis“ ein gültiges Kalenderdatum ein." });
+      return;
+    }
+    if (from && to && from > to) { setDateEntryError(reversedDates); return; }
+    setDateEntryError(undefined);
+    setDateDraft(undefined);
+    setFromDate(from);
+    setToDate(to);
+    setTrip(undefined);
+    setDatePreset(from || to ? "custom" : "all");
+    setJourneyStopId(undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!dateDraft || !active) return;
+    const timeout = window.setTimeout(() => commitDates(dateDraft), 500);
+    return () => window.clearTimeout(timeout);
+  }, [active, commitDates, dateDraft]);
+
+  const editDate = (field: keyof DateFields, value: string) => {
+    setDateEntryError(undefined);
+    setDateDraft({ ...shownDates, [field]: value });
+    setDatePreset("custom");
+  };
+
+  const clearDateDraft = () => { setDateDraft(undefined); setDateEntryError(undefined); };
+
   const setPreset = (value: string) => {
+    clearDateDraft();
     setTrip(undefined);
     setDatePreset(value);
     setJourneyStopId(undefined);
@@ -306,8 +353,9 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     else if (value === "this-year") { setFromDate(`${year}-01-01`); setToDate(`${year}-12-31`); }
     else if (value === "last-year") { setFromDate(`${year - 1}-01-01`); setToDate(`${year - 1}-12-31`); }
   };
-  const dateLabel = [queryFrom, queryTo].map((date) => date ? new Date(`${date}T12:00:00`).toLocaleDateString("de-DE") : "offen").join(" – ");
-  const hasFilters = !!(region || queryFrom || queryTo || view.zoom > 1 || albumId);
+  const dateLabel = describeMapDates(queryFrom, queryTo);
+  const hasFilters = !!(region || queryFrom || queryTo || dateDraft || view.zoom > 1 || albumId);
+  const onlyDates = Boolean(dateLabel && !region && view.zoom === INITIAL_VIEW.zoom && !albumId);
   const selectRegion = (bounds: MapBounds | null, name = "") => {
     setRegion(bounds);
     setRegionName(name);
@@ -329,6 +377,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   };
   const showArea = () => { if (region) frameBounds(region); };
   const changeTrip = (next?: TripSelection) => {
+    clearDateDraft();
     setTrip(next);
     setJourneyStopId(undefined);
     if (!next) return;
@@ -350,6 +399,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   const tripDays = journey?.stops.flatMap((stop) => [stop.start.slice(0, 10), stop.end.slice(0, 10)]).sort();
   const showStopDay = (day: string) => {
     if (trip) { changeTrip({ ...trip, day }); return; }
+    clearDateDraft();
     setFromDate(day);
     setToDate(day);
     setDatePreset("custom");
@@ -377,7 +427,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     const area = journeyStop ? `Stopp ${journeyStop.number}` : region ? "Gewählter Bereich" : "Kartenausschnitt";
     setGallery({ selection, index, items: images, total: imageTotal, cursor: nextCursor ?? null,
       inferredImageIds: journeyStop?.inferred_image_ids,
-      label: fromDate || toDate ? `${area} · ${dateLabel}` : area });
+      label: dateLabel ? `${area} · ${dateLabel}` : area });
   };
   const openInImages = (chosen: GeoPhotoSelection) => {
     clearGallery();
@@ -448,14 +498,23 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
         if (isJourney) selectRegion(item.view === INITIAL_VIEW ? null : boundsForView(item.view), item.label);
       }}><option value="custom" disabled>Eigener Ausschnitt</option>{REGIONS.map((item) => <option key={item.label}>{item.label}</option>)}</select></label>
       <label className="gps-page__field"><span>Zeitraum</span><select aria-label="Zeitraum" value={datePreset} onChange={(event) => setPreset(event.target.value)}><option value="all">Alle Zeiten</option><option value="last-30-days">Letzte 30 Tage</option><option value="this-year">Dieses Jahr</option><option value="last-year">Letztes Jahr</option><option value="custom">Eigener Zeitraum</option></select></label>
-      <label className="gps-page__field"><span>Von</span><input type="date" aria-invalid={invalidDate} aria-describedby={invalidDate ? "gps-date-error" : undefined} value={queryFrom} onChange={(event) => { setTrip(undefined); setFromDate(event.target.value); setDatePreset("custom"); setJourneyStopId(undefined); }} /></label>
-      <label className="gps-page__field"><span>Bis</span><input type="date" aria-invalid={invalidDate} aria-describedby={invalidDate ? "gps-date-error" : undefined} value={queryTo} onChange={(event) => { setTrip(undefined); setToDate(event.target.value); setDatePreset("custom"); setJourneyStopId(undefined); }} /></label>
+      {([["from", "Von"], ["to", "Bis"]] as const).map(([field, label]) => {
+        const invalid = dateError?.field === field || dateError?.field === "both";
+        return <label key={field} className="gps-page__field"><span>{label}</span>
+          <input type="text" inputMode="numeric" autoComplete="off" maxLength={10} placeholder="TT.MM.JJJJ"
+            value={shownDates[field]} aria-invalid={invalid} aria-describedby={`gps-date-help${invalid ? " gps-date-error" : ""}`}
+            onChange={(event) => editDate(field, event.target.value)}
+            onBlur={() => { if (dateDraft) commitDates(dateDraft); }}
+            onKeyDown={(event) => { if (event.key === "Enter" && dateDraft) commitDates(dateDraft); }} />
+        </label>;
+      })}
       {(albums.length > 0 || albumId) && <label className="gps-page__field"><span>Album</span>
         <select aria-label="Album" value={albumId} onChange={(event) => chooseAlbum(event.target.value)}>
           <option value="">Alle Fotos</option>
           {albums.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
         </select></label>}
       <button type="button" className="gps-page__reset" onClick={reset}>Zurücksetzen</button>
+      <p id="gps-date-help" className="gps-page__date-help">Datum eingeben, z. B. 05.07.2025. Die Punkte sind optional. Beide Tage zählen zum Zeitraum.</p>
     </section>
     <div className="gps-map-options" aria-label="Kartendarstellung">
       <div className="gps-map-options__modes" role="group" aria-label="Kartenmodus">
@@ -485,8 +544,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     </div>
     <p className="gps-page__hint">{isJourney
       ? "Wähle einen Zeitraum und bei Bedarf einen Kartenbereich. Den Bereich kannst du auch selbst aufziehen."
-      : "Der Zeitraum bezieht sich auf das Aufnahmedatum. Fotos ohne Aufnahmedatum erscheinen nur ohne Zeitfilter."}</p>
-    {invalidDate && <p id="gps-date-error" className="gps-page__error" role="alert">Das Enddatum muss am oder nach dem Startdatum liegen.</p>}
+      : "Die Fotokarte zeigt Fotos mit gespeichertem Standort. Fotos ohne Aufnahmedatum erscheinen bei „Alle Zeiten“."}</p>
+    {dateError && <p id="gps-date-error" className="gps-page__error" role="alert">{dateError.text}</p>}
 
     {(region || queryFrom || queryTo || selectedAlbum) && <div className="gps-page__filters" aria-label="Aktive Filter">
       <span>Gefiltert nach</span>
@@ -503,8 +562,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
           <div>
             <strong>{isJourney ? "Standortverlauf" : "Standorte"}</strong>
             <span aria-live="polite">{isJourney
-              ? journey ? `${formatCount(journey.stops.length)} ${journey.stops.length === 1 ? "Stopp" : "Stopps"} · ${formatCount(journey.photo_count)} ${journey.photo_count === 1 ? "Foto" : "Fotos"}` : "–"
-              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${formatCount(points.total)} Fotos im sichtbaren Ausschnitt` : "–"}</span>
+              ? journey ? `${countWithLabel(journey.stops.length, "Stopp", "Stopps")} · ${countWithLabel(journey.photo_count, "Foto", "Fotos")}` : "–"
+              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${countWithLabel(points.total, "Foto", "Fotos")} im sichtbaren Ausschnitt` : "–"}</span>
           </div>
           <div className="gps-page__map-actions">
             <button type="button" className={selectMode ? "gps-page__tool--active" : ""} aria-pressed={selectMode} onClick={() => setSelectMode((value) => !value)}>{selectMode ? "Auswahl beenden" : "Bereich wählen"}</button>
@@ -572,7 +631,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
             onClearDates={fromDate || toDate ? () => setPreset("all") : undefined} />}
         </>}
         {(!isJourney || journeyStop) && <>
-        <div className="gps-page__results-head"><div><span className="gps-page__eyebrow">AUSWAHL</span><h2>{journeyStop ? `Fotos von Stopp ${journeyStop.number}` : region ? "Fotos im gewählten Bereich" : "Fotos im Kartenausschnitt"}</h2></div><span role="status">{imagesLoading ? "Lädt …" : imageResult?.data ? `${formatCount(imageTotal)} ${imageTotal === 1 ? "Foto" : "Fotos"}` : "–"}</span></div>
+        <div className="gps-page__results-head"><div><span className="gps-page__eyebrow">AUSWAHL</span><h2>{journeyStop ? `Fotos von Stopp ${journeyStop.number}` : region ? "Fotos im gewählten Bereich" : "Fotos im Kartenausschnitt"}</h2></div><span role="status">{imagesLoading ? "Lädt …" : imageResult?.data ? countWithLabel(imageTotal, "Foto", "Fotos") : "–"}</span></div>
         {!isJourney && <p className="gps-page__results-hint">{region ? "Die Fotos bleiben auf den gewählten Bereich begrenzt." : "Die Fotos passen sich deinem Kartenausschnitt an."}</p>}
         {images.length > 0 && <div className="gps-results-actions">
           {stopDay && (fromDate !== stopDay || fromDate !== toDate) &&
@@ -582,14 +641,24 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
           <button type="button" onClick={(event) => openAlbumPicker(event.currentTarget, selection, imageTotal)}>Zum Album hinzufügen</button>
         </div>}
         {imageResult?.error && <div className="gps-page__error" role="alert">{imageResult.error} <button type="button" onClick={() => { setImageRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
-        {imageResult?.data && !imageResult.error && imageTotal === 0 && <div className="gps-page__empty"><strong>{points?.indexing ? "Deine Fotokarte entsteht gerade." : collection?.located_total === 0 ? "Noch keine Fotos mit Standort." : "Hier sind noch keine Fotos."}</strong><p>{points?.indexing ? "Fotos mit Standort erscheinen automatisch, sobald sie gefunden werden." : collection?.located_total === 0 ? "Sobald Fotos mit gespeicherten Standortdaten hinzugefügt werden, findest du sie hier." : "Wähle einen anderen Kartenausschnitt oder entferne den Zeitfilter."}</p>{hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}</div>}
+        {imageResult?.data && !imageResult.error && imageTotal === 0 && <div className="gps-page__empty">
+          <strong>{points?.indexing ? "Deine Fotokarte entsteht gerade." : collection?.located_total === 0 ? "Noch keine Fotos mit Standort."
+            : onlyDates ? "Keine Fotos mit Standort in diesem Zeitraum." : "Hier sind noch keine Fotos."}</strong>
+          <p>{points?.indexing ? "Fotos mit Standort erscheinen automatisch, sobald sie gefunden werden."
+            : collection?.located_total === 0 ? "Sobald Fotos mit gespeicherten Standortdaten hinzugefügt werden, findest du sie hier."
+              : onlyDates ? "Wähle andere Aufnahmetage oder zeige alle Zeiten." : "Wähle einen anderen Kartenausschnitt oder entferne den Zeitfilter."}</p>
+          {onlyDates ? <button type="button" onClick={() => setPreset("all")}>Alle Zeiten zeigen</button>
+            : hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}
+        </div>}
         {imagesLoading && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
-        <div className="gps-page__grid">{images.map((image, index) => <button type="button" className="gps-page__photo" key={image.id} onClick={(event) => {
-          openGallery(event.currentTarget, index);
-        }} aria-label={`${image.filename || "Foto"} öffnen`} aria-describedby={journeyStop?.inferred_image_ids?.includes(image.id) ? `gps-inference-${image.id}` : undefined}>
-          <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
-          {journeyStop?.inferred_image_ids?.includes(image.id) && <small id={`gps-inference-${image.id}`}>Nach Aufnahmezeit zugeordnet</small>}
-        </button>)}</div>
+        <div className="gps-page__grid">{images.map((image, index) => {
+          const inferred = journeyStop?.inferred_image_ids;
+          return <button type="button" className="gps-page__photo" key={image.id} onClick={(event) => openGallery(event.currentTarget, index)}
+            aria-label={`${image.filename || "Foto"} öffnen`} aria-describedby={inferred?.length ? `gps-location-${image.id}` : undefined}>
+            <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
+            {!!inferred?.length && <small id={`gps-location-${image.id}`}>{inferred.includes(image.id) ? "Nach Aufnahmezeit zugeordnet" : "Mit gespeichertem Standort"}</small>}
+          </button>;
+        })}</div>
         {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
         {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
         </>}
@@ -597,8 +666,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     </div>
     <aside className="gps-page__collection" aria-label="Standortübersicht">
       {!isJourney && <>
-      <span><strong>{collection ? formatCount(collection.located_total) : "…"}</strong> Fotos mit Standort</span>
-      <span><strong>{collection ? formatCount(Math.max(0, collection.library_total - collection.located_total - collection.pending_total)) : "…"}</strong> ohne Standort</span>
+      <span>{collection ? countWithLabel(collection.located_total, "Foto mit Standort", "Fotos mit Standort") : "… Fotos mit Standort"}</span>
+      <span>{collection ? countWithLabel(Math.max(0, collection.library_total - collection.located_total - collection.pending_total), "Foto ohne Standort", "Fotos ohne Standort") : "… Fotos ohne Standort"}</span>
       {!!collection?.pending_total && <span className="gps-page__pending">{formatCount(collection.pending_total)} werden noch geprüft</span>}
       </>}
       <span className="gps-page__privacy">Deine Fotostandorte bleiben privat. Die Karte funktioniert auch offline.</span>

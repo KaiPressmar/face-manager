@@ -9,9 +9,19 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Unter „Daten und Wartung“ kannst du in früheren Sicherungen nachsehen und ein versehentlich wieder benanntes Gesicht erneut aussortieren.
+
 ### Verbessert
 
+- Beim Wiederherstellen einer Sicherung siehst du vorab, welche Bibliothek du übernimmst. Den vorherigen Stand kannst du danach herunterladen.
+- Vor dem Umbenennen siehst du die endgültigen Dateinamen und erkennst belegte Ziele.
+- Fotobuchseiten lassen sich zusammen als ZIP speichern. Eigene Bildmaße kannst du auch in Millimetern eingeben.
+- In der Karte kannst du deutsche Datumsangaben eingeben und erkennst leichter, welche Fotos einem Stopp anhand ihrer Aufnahmezeit zugeordnet wurden.
+
 ### Behoben
+
+- Bei der Namenszuordnung bleibt die Auswahl auf die markierten Gesichter oder die geöffnete Gruppe begrenzt. Eindeutige Widersprüche bei aussortierten Gesichtern korrigiert die App beim Öffnen der Bibliothek.
+- Die Hardwareanzeige erscheint einmal und schließt sich beim Wechsel in einen anderen Bereich.
 
 ## [0.17.0] - 2026-11-26
 

@@ -4,6 +4,7 @@ import {
   fetchImageDetail, imageThumbnailUrl, type FaceImage, type MapImage, type MapImageCursor,
 } from "../../utils/api";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
+import { countWithLabel } from "../../utils/germanFormatting";
 import FullscreenImageGallery from "../people/FullscreenImageGallery";
 import { fetchMapSelection } from "./mapData";
 
@@ -129,7 +130,9 @@ export default function MapGallery({ opening, onClose, onOpenImages, onAddToAlbu
     {openGrid && <section ref={gridRef} hidden={index !== null} className="gps-selection-gallery"
       role="dialog" aria-modal="true" aria-label="Galerie der Kartenauswahl">
       <header className="gps-selection-gallery__header">
-        <div><h2>Galerie der Kartenauswahl</h2><p>{opening.label} · {total.toLocaleString("de-DE")} {total === 1 ? "Foto" : "Fotos"}</p></div>
+        <div><h2>Galerie der Kartenauswahl</h2><p>{opening.label} · {countWithLabel(total, "Foto", "Fotos")}</p>
+          {!!opening.inferredImageIds?.length && <p>Fotos ohne gespeicherten Standort sind nach Aufnahmezeit zugeordnet.</p>}
+        </div>
         <div className="gps-selection-gallery__actions">
           {onOpenImages && <button type="button" onClick={() => onOpenImages(opening.selection)}>In Bilder öffnen</button>}
           {onAddToAlbum && total > 0 && <button type="button" onClick={(event) => onAddToAlbum(event.currentTarget, opening.selection, total)}>Zum Album hinzufügen</button>}
@@ -141,7 +144,7 @@ export default function MapGallery({ opening, onClose, onOpenImages, onAddToAlbu
           {page.items.map((image, position) => <button key={image.id} type="button" className="gps-page__photo"
             data-gallery-index={position} onClick={() => openPhoto(position)} aria-label={`${image.filename || "Foto"} öffnen`}>
             <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
-            {opening.inferredImageIds?.includes(image.id) && <small>Nach Aufnahmezeit zugeordnet</small>}
+            {!!opening.inferredImageIds?.length && <small>{opening.inferredImageIds.includes(image.id) ? "Nach Aufnahmezeit zugeordnet" : "Mit gespeichertem Standort"}</small>}
           </button>)}
         </div>
         {pageError && <p className="gps-page__error" role="alert">{pageError}</p>}

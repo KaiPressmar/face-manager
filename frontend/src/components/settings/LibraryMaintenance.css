@@ -1,0 +1,57 @@
+.settings-card.library-maintenance-dialog {
+  width: min(100%, 36rem);
+  max-height: min(85vh, 100%);
+  gap: 0.9rem;
+  overflow: auto;
+}
+
+.library-maintenance-dialog > h2,
+.library-maintenance-dialog > p {
+  margin: 0;
+}
+
+.library-maintenance-filename {
+  overflow-wrap: anywhere;
+}
+
+.archive-repair-results {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.archive-repair-results > p {
+  margin: 0;
+}
+
+.archive-repair-results > button {
+  justify-self: start;
+}
+
+.archive-repair-faces {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 0.6rem;
+}
+
+.archive-repair-face {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.5rem;
+  border: 1px solid var(--border, #777);
+  border-radius: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.archive-repair-face img {
+  width: 3.25rem;
+  height: 3.25rem;
+  flex: none;
+  border-radius: 0.4rem;
+  object-fit: cover;
+}
+
+.archive-repair-face small {
+  display: block;
+}
