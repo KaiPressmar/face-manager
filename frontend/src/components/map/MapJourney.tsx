@@ -1,4 +1,6 @@
+import { useEffect, useMemo, useState } from "react";
 import type { Journey, JourneyStop } from "./mapData";
+import { findNearbyPlace, type JourneyPlace } from "./journeyPlaces";
 
 const numbers = new Intl.NumberFormat("de-DE");
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
@@ -28,21 +30,48 @@ interface Props {
 }
 
 export default function MapJourney({ journey, selected, onSelect }: Props) {
+  const [places, setPlaces] = useState<readonly JourneyPlace[] | null>(null);
+  const hasStops = journey.stops.length > 0;
+  useEffect(() => {
+    if (!hasStops) return;
+    let active = true;
+    void import("./journey-places.json").then(({ default: data }) => {
+      if (!active) return;
+      setPlaces(data.flatMap<JourneyPlace>(([latitude, longitude, name]) =>
+        typeof latitude === "number" && typeof longitude === "number" && typeof name === "string"
+          ? [[latitude, longitude, name]] : []));
+    }).catch(() => {
+      // Coordinates remain available if the optional place index cannot load.
+    });
+    return () => { active = false; };
+  }, [hasStops]);
+  const nearby = useMemo(() => new Map(journey.stops.map((stop) => [
+    stop.id, places ? findNearbyPlace(places, stop.latitude, stop.longitude) : undefined,
+  ])), [journey.stops, places]);
+
   return <div className="gps-journey">
     <p className="gps-page__results-hint">Die Stopps folgen den Aufnahmezeiten. Gestrichelte Linien verbinden beobachtete Orte in zeitlicher Richtung. Zwischen den Aufnahmen ist der tatsächliche Weg unbekannt.</p>
     {journey.indexing && <p className="gps-page__results-hint" role="status">Aufnahmezeiten werden im Hintergrund geprüft.</p>}
     {journey.stops.length === 0 && <p>In diesem Zeitraum gibt es keine Fotos mit Standort und Aufnahmezeit.</p>}
     <ol aria-label="Chronologische Stopps" className="gps-journey__stops">
-      {journey.stops.map((stop, index) => <li key={stop.id}>
+      {journey.stops.map((stop, index) => {
+        const match = nearby.get(stop.id);
+        return <li key={stop.id}>
         {index > 0 && stop.section !== journey.stops[index - 1].section && <p className="gps-journey__gap">Neuer Abschnitt nach mehr als einem Tag ohne Beobachtung</p>}
         <button type="button" aria-pressed={selected === stop.id} onClick={() => onSelect(stop.id)}>
           <span className="gps-journey__stop-number">{stop.number}</span>
-          <span><strong>{journeyStopLabel(stop)}</strong>
-            <small>{place.format(stop.latitude)}°, {place.format(stop.longitude)}° · {numbers.format(stop.image_ids.length)} {stop.image_ids.length === 1 ? "Foto" : "Fotos"}</small>
+          <span>
+            {match && <strong>Bei {match.name}</strong>}
+            {match ? <small>{journeyStopLabel(stop)}</small> : <strong>{journeyStopLabel(stop)}</strong>}
+            <small>{match
+              ? match.distanceKm < 1 ? "Unter 1 km Entfernung" : `Ca. ${numbers.format(Math.round(match.distanceKm))} km Entfernung`
+              : `${place.format(stop.latitude)}°, ${place.format(stop.longitude)}°`}
+              {" · "}{numbers.format(stop.image_ids.length)} {stop.image_ids.length === 1 ? "Foto" : "Fotos"}</small>
             {stop.uncertain && <small>Reihenfolge unsicher</small>}
           </span>
         </button>
-      </li>)}
+        </li>;
+      })}
     </ol>
     {(journey.missing_location_count > 0 || journey.missing_time_count > 0 || journey.uncertain_count > 0) &&
       <ul className="gps-journey__notes">

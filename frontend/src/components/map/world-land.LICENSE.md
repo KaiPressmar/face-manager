@@ -23,4 +23,9 @@ the same source for use in the overview map.
 1:50m shaded relief and adjusts the grayscale range for blending over land.
 [Natural Earth shaded relief](https://www.naturalearthdata.com/downloads/50m-raster-data/50m-shaded-relief/)
 
+The journey place index keeps populated-place points, sorted by latitude, with
+four decimal places. It uses German names when available and falls back to the
+primary Natural Earth name. Historic places and scientific and meteorological
+stations are omitted. [Natural Earth 1:10m populated places v5.1.2](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-populated-places/)
+
 All datasets ship with the app for offline use. [Natural Earth public-domain terms](https://www.naturalearthdata.com/about/terms-of-use/)

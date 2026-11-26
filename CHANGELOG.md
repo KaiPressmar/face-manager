@@ -9,7 +9,7 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
-- Der Standortverlauf ordnet Fotos nach Aufnahmezeit und zeigt Stopps und Ortswechsel auf der Karte.
+- Der Standortverlauf zeigt Stopps und Ortswechsel in zeitlicher Reihenfolge und nennt passende Orte in der Nähe.
 - Die Fotokarte bietet eine Landschaftsansicht und einblendbare Ländernamen.
 - Kartenauswahlen lassen sich als große Galerie öffnen oder zum Filtern in die Bilderbibliothek übernehmen.
 
