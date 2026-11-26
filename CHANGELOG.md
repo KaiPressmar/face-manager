@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.16.0] - 2026-11-26
+
+### Neu
+
 - Der Standortverlauf zeigt Stopps und Ortswechsel in zeitlicher Reihenfolge und nennt passende Orte in der Nähe.
 - Die Fotokarte bietet eine Landschaftsansicht und einblendbare Ländernamen.
 - Kartenauswahlen lassen sich als große Galerie öffnen oder zum Filtern in die Bilderbibliothek übernehmen.
