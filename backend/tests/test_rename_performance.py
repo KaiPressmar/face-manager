@@ -1,3 +1,4 @@
+import errno
 import os
 import tempfile
 import unittest
@@ -207,6 +208,26 @@ class RenameCandidateQueryTest(unittest.TestCase):
                 self.assertEqual(result["skipped"], [{"path": source, "reason": "invalid_filename"}])
                 self.assertTrue(Path(source).is_file())
                 self.assertFalse(proposed_path.exists())
+
+    def test_overlong_preview_cannot_be_applied_by_bulk_rename(self):
+        with closing(schema.get_conn()) as conn:
+            person = self._cluster(conn, "Regina")
+            _, source = self._photo(conn, "photo.jpg", [person])
+            conn.commit()
+
+        with patch.object(storage, "_rename_filename_limit", return_value=12):
+            candidates, _ = storage.list_filename_rename_candidates()
+            self.assertEqual(candidates[0]["validation_error"], "filename_too_long")
+            result = storage.rename_image_locations_to_match_people(rename_all=True)
+
+        self.assertEqual(result["skipped"], [{"path": source, "reason": "filename_too_long"}])
+        self.assertTrue(Path(source).is_file())
+
+        with patch.object(storage.os, "rename", side_effect=OSError(errno.ENAMETOOLONG, "name too long")):
+            result = storage.rename_image_locations_to_match_people(selected_paths=[source])
+
+        self.assertEqual(result["skipped"], [{"path": source, "reason": "filename_too_long"}])
+        self.assertTrue(Path(source).is_file())
 
     def test_person_filters_casefold_names_and_preserve_multi_person_and_unknown(self):
         with closing(schema.get_conn()) as conn:

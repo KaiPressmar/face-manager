@@ -193,6 +193,85 @@ class ImageDetailWithoutFacesTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(changed.status_code, 200)
             self.assertNotEqual(changed.headers["etag"], etag)
 
+    async def test_locked_geometry_is_available_to_the_library_and_retried_in_background(self):
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch("backend.services.image_thumbnails.get_data_root", side_effect=lambda: Path(temp_dir)),
+            patch.object(app, "_pending_image_geometry", app.OrderedDict()),
+            patch.object(app, "_schedule_image_geometry_retry") as schedule,
+        ):
+            self._prepare_geometry_photo(temp_dir, registered=True)
+            request = SimpleNamespace(headers={})
+            with (
+                patch.object(schema, "DB_PATH", str(Path(temp_dir) / "geometry.sqlite")),
+                closing(schema.get_conn()) as writer,
+            ):
+                writer.execute("BEGIN IMMEDIATE")
+                try:
+                    self.assertEqual((await app.get_image_thumbnail(85, request)).status_code, 200)
+                    self.assertIsNone(app.api_image_detail(request, 85)["image_width"])
+                    with patch.object(app, "_run_source_work", side_effect=AssertionError("original reopened")):
+                        detail = await app.get_image_detail(request, 85, resolve_geometry=True)
+                    self.assertEqual((detail["image_width"], detail["image_height"]), (80, 100))
+                    self.assertEqual(
+                        [(face["review_status"], face["bbox_x"], face["bbox_y"]) for face in detail["faces"]],
+                        [("active", 30, 75), ("unknown_person", 65, 90)],
+                    )
+                    schedule.assert_called()
+                finally:
+                    writer.rollback()
+
+                app._retry_image_geometry()
+                self.assertFalse(app._pending_image_geometry)
+                self.assertEqual(app.api_image_detail(request, 85)["image_width"], 80)
+
+    async def test_geometry_resolves_legacy_and_cached_previews_without_saved_dimensions(self):
+        for registered in (True, False):
+            with self.subTest(registered=registered), tempfile.TemporaryDirectory() as temp_dir:
+                self._prepare_geometry_photo(temp_dir, registered=registered)
+                request = SimpleNamespace(headers={})
+                with (
+                    patch.object(schema, "DB_PATH", str(Path(temp_dir) / "geometry.sqlite")),
+                    patch("backend.services.image_thumbnails.get_data_root", return_value=Path(temp_dir)),
+                ):
+                    with patch.object(app, "_remember_image_geometry"):
+                        self.assertEqual((await app.get_image_thumbnail(85, request)).status_code, 200)
+                    self.assertIsNone(app.api_image_detail(request, 85)["image_width"])
+                    detail = await app.get_image_detail(request, 85, resolve_geometry=True)
+                    self.assertEqual((detail["image_width"], detail["image_height"]), (80, 100))
+                    self.assertEqual(detail["faces"][0]["bbox_x"], 30)
+                    self.assertEqual(
+                        app.api_image_detail(request, 85)["image_width"],
+                        80 if registered else None,
+                    )
+
+    def _prepare_geometry_photo(self, folder: str, *, registered: bool):
+        root = Path(folder)
+        path = root / "legacy.png"
+        exif = Image.Exif()
+        exif[274] = 7
+        Image.new("RGBA", (100, 80), (0, 0, 0, 80)).save(path, exif=exif)
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest() if registered else None
+        storage.app_cache.clear()
+        self.addCleanup(storage.app_cache.clear)
+        with patch.object(schema, "DB_PATH", str(root / "geometry.sqlite")):
+            schema.init_db()
+            with closing(schema.get_conn()) as conn:
+                conn.execute(
+                    "INSERT INTO image(id,path,directory,filename,content_hash) VALUES (85,?,?,?,?)",
+                    (str(path), folder, path.name, content_hash),
+                )
+                conn.execute(
+                    "INSERT INTO image_location(image_id,path,directory,filename) VALUES (85,?,?,?)",
+                    (str(path), folder, path.name),
+                )
+                conn.execute("INSERT INTO face(image_id,bbox_x,bbox_y,bbox_w,bbox_h) VALUES (85,10,20,15,30)")
+                conn.execute(
+                    """INSERT INTO face(image_id,bbox_x,bbox_y,bbox_w,bbox_h,review_status)
+                       VALUES (85,5,5,5,10,'unknown_person')"""
+                )
+                conn.commit()
+
     async def test_late_preview_from_a_replaced_library_does_not_publish(self):
         generation = app._get_media_library_generation()
         reading = threading.Event()

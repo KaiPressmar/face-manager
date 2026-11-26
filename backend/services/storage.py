@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import os
@@ -892,6 +893,8 @@ def build_person_filename_preview(
     detected_names: list[str],
     block_separator: str | None = None,
     joiner: str | None = None,
+    *,
+    filename_limit: int | None = None,
 ):
     """Build a rename preview for one filename based on detected people."""
     ordered_names = _dedupe_names_in_order(detected_names)
@@ -917,10 +920,27 @@ def build_person_filename_preview(
     if not root_stem:
         root_stem = stem
 
-    next_stem = f"{root_stem}{block_separator}{names_text}".strip()
-    next_filename = f"{next_stem}{extension}"
+    next_filename = f"{root_stem}{block_separator}{names_text}".strip() + extension
+    validation_error = None
+    omitted_person_count = 0
+    if filename_limit is not None:
+        validation_error = _rename_filename_error(next_filename, filename_limit)
+        if validation_error == "filename_too_long" and block_separator:
+            # Keep the original text and extension intact. Only propose whole
+            # names. A separator lets later previews recognize the appendix.
+            shortened_stem = f"{root_stem}{block_separator}"
+            for index, name in enumerate(ordered_names):
+                shortened_stem += f"{joiner}{name}" if index else name
+                shortened = shortened_stem.strip() + extension
+                if _rename_filename_error(shortened, filename_limit):
+                    break
+                next_filename = shortened
+                omitted_person_count = len(ordered_names) - index - 1
+                validation_error = None
 
-    if next_filename == filename and current_suffix_names == ordered_names:
+    if next_filename == filename and (
+        current_suffix_names == ordered_names or omitted_person_count
+    ):
         return None
 
     return {
@@ -928,7 +948,32 @@ def build_person_filename_preview(
         "proposed_filename": next_filename,
         "detected_person_names": ordered_names,
         "current_suffix_person_names": current_suffix_names,
+        "validation_error": validation_error,
+        "omitted_person_count": omitted_person_count,
     }
+
+
+def _rename_filename_limit(directory: str) -> int:
+    if os.name == "nt":
+        return 255
+    try:
+        return os.pathconf(directory, "PC_NAME_MAX")
+    except (AttributeError, OSError, ValueError):
+        return 255
+
+
+def _rename_filename_error(filename: str, maximum: int) -> str | None:
+    """Validate the final basename in the filesystem's filename units."""
+    forbidden = '/\\\x00'
+    if os.name == "nt":
+        forbidden += '<>:"|?*'
+    if not filename or filename in {".", ".."} or any(char in forbidden for char in filename):
+        return "invalid_filename"
+    if os.name == "nt":
+        units = len(filename.encode("utf-16-le", errors="surrogatepass")) // 2
+    else:
+        units = len(os.fsencode(filename))
+    return "filename_too_long" if maximum >= 0 and units > maximum else None
 
 
 def _face_row_to_dict(r):
@@ -1609,8 +1654,8 @@ def _normalize_person_filters(persons):
     return normalized
 
 
-def get_image_detail_rows(image_id: int):
-    """Load one image with its active faces, shaped like the image page rows.
+def get_image_detail_rows(image_id: int, *, include_archived: bool = False):
+    """Load one image with its faces, shaped like the image page rows.
 
     Lets the review workspace open the full picture behind a face crop without
     paging through the library. The preferred location is picked the same way
@@ -1658,13 +1703,13 @@ def get_image_detail_rows(image_id: int):
             LEFT JOIN ranked_locations location
               ON location.image_id = i.id AND location.location_rank = 1
             LEFT JOIN face f ON f.image_id = i.id
-              AND f.review_status = ?
+              AND (? OR f.review_status = ?)
             LEFT JOIN cluster c ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
             WHERE i.id = ?
             ORDER BY f.id
             """,
-            (int(image_id), FACE_REVIEW_STATUS_ACTIVE, int(image_id)),
+            (int(image_id), include_archived, FACE_REVIEW_STATUS_ACTIVE, int(image_id)),
         ).fetchall()
     finally:
         conn.close()
@@ -2124,7 +2169,8 @@ def get_image_preview_source(image_id: int):
     conn = get_conn()
     try:
         return conn.execute(
-            "SELECT id AS image_id, content_hash FROM image WHERE id = ?", (image_id,),
+            """SELECT id AS image_id, content_hash, exif_orientation, raw_width, raw_height
+               FROM image WHERE id = ?""", (image_id,),
         ).fetchone()
     finally:
         conn.close()
@@ -2136,7 +2182,8 @@ def get_face_preview_source(face_id: int):
     try:
         return conn.execute(
             """
-            SELECT f.image_id, i.content_hash, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
+            SELECT f.image_id, i.content_hash, i.exif_orientation, i.raw_width, i.raw_height,
+                   f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h
             FROM face f JOIN image i ON i.id = f.image_id
             WHERE f.id = ?
             """,
@@ -2156,7 +2203,8 @@ def save_missing_image_geometry(image_id: int, content_hash: str, geometry: tupl
             """
             UPDATE image SET exif_orientation = ?, raw_width = ?, raw_height = ?
             WHERE id = ? AND content_hash = ?
-              AND (exif_orientation IS NULL OR raw_width IS NULL OR raw_height IS NULL)
+              AND (exif_orientation IS NULL OR exif_orientation NOT BETWEEN 1 AND 8
+                   OR raw_width IS NULL OR raw_width <= 0 OR raw_height IS NULL OR raw_height <= 0)
             """,
             (*geometry, image_id, content_hash),
         )
@@ -4258,15 +4306,20 @@ def _build_filename_rename_candidates_from_rows(
     if current_location_rows:
         grouped_rows.append(current_location_rows)
 
+    filename_limits = {}
     for location_rows in grouped_rows:
         first_row = location_rows[0]
         if not os.path.isfile(filesystem_path(first_row["path"])):
             continue
+        directory = first_row["directory"]
+        if directory not in filename_limits:
+            filename_limits[directory] = _rename_filename_limit(directory)
         preview = build_person_filename_preview(
             first_row["filename"],
             [row["person_name"] for row in location_rows],
             block_separator=block_separator,
             joiner=joiner,
+            filename_limit=filename_limits[directory],
         )
         if not preview:
             continue
@@ -4284,6 +4337,8 @@ def _build_filename_rename_candidates_from_rows(
                 ),
                 "detected_person_names": preview["detected_person_names"],
                 "current_suffix_person_names": preview["current_suffix_person_names"],
+                "validation_error": preview["validation_error"],
+                "omitted_person_count": preview["omitted_person_count"],
             }
         )
     return candidates
@@ -4479,15 +4534,12 @@ def rename_image_locations_to_match_people(
     renamed = []
     skipped = []
     errors = []
-    forbidden_chars = "/\\\x00"
-    if os.name == "nt":
-        forbidden_chars += '<>:"|?*'
-
     for candidate in target_candidates:
         source_path = candidate["path"]
         filename = candidate["proposed_filename"]
-        if not filename or filename in {".", ".."} or any(char in forbidden_chars for char in filename):
-            skipped.append({"path": source_path, "reason": "invalid_filename"})
+        error = _rename_filename_error(filename, _rename_filename_limit(os.path.dirname(source_path)))
+        if error:
+            skipped.append({"path": source_path, "reason": error})
             continue
         target_path = os.path.join(os.path.dirname(source_path), filename)
         if source_path == target_path:
@@ -4505,6 +4557,9 @@ def rename_image_locations_to_match_people(
         try:
             os.rename(source_filesystem_path, target_filesystem_path)
         except OSError as exc:
+            if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+                skipped.append({"path": source_path, "reason": "filename_too_long"})
+                continue
             logger.exception(
                 "Could not rename image from %s to %s",
                 source_path,

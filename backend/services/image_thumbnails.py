@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 
 from ..config import get_data_root
 from .filesystem_paths import filesystem_path
-from .preview_cache import orient_image, write_preview_jpeg
+from .preview_cache import get_image_geometry, orient_image, write_preview_jpeg
 from .preview_cache_budget import preview_exists
 
 IMAGE_THUMBNAIL_MAX_SIZE = 480
@@ -143,15 +143,40 @@ def ensure_image_thumbnail(image_id: int, path: str) -> str:
     during rendering also raises, so pixels are never stored under an obsolete
     source signature.
     """
+    thumbnail, _ = _ensure_image_thumbnail(image_id, path, include_geometry=False)
+    return str(thumbnail)
+
+
+def read_legacy_preview_geometry(image_id: int, path: str) -> tuple[int, int, int] | None:
+    """Read geometry from a source that can supply the legacy thumbnail."""
+    _, geometry = _ensure_image_thumbnail(image_id, path, include_geometry=True)
+    return geometry
+
+
+def _ensure_image_thumbnail(
+    image_id: int, path: str, *, include_geometry: bool,
+) -> tuple[Path, tuple[int, int, int] | None]:
     image_id = int(image_id)
     with _image_locks[image_id % len(_image_locks)]:
         signature = _source_signature(path)
         thumbnail_path = _thumbnail_path(image_id, signature)
+
+        def verify_source():
+            if _source_signature(path) != signature:
+                raise OSError(f"Source image changed while rendering: {path}")
+
+        geometry = None
         if preview_exists(thumbnail_path):
-            return str(thumbnail_path)
+            if include_geometry:
+                with Image.open(signature[0]) as image:
+                    geometry = get_image_geometry(image)
+                verify_source()
+            return thumbnail_path, geometry
 
         with _decode_slots:
             with Image.open(signature[0]) as image:
+                if include_geometry:
+                    geometry = get_image_geometry(image)
                 # JPEG draft mode decodes at a reduced resolution when possible.
                 image.draft("RGB", (IMAGE_THUMBNAIL_MAX_SIZE * 2,) * 2)
                 oriented = ImageOps.exif_transpose(image)
@@ -161,12 +186,8 @@ def ensure_image_thumbnail(image_id: int, path: str) -> str:
                     Image.Resampling.LANCZOS,
                 )
 
-            def verify_source():
-                if _source_signature(path) != signature:
-                    raise OSError(f"Source image changed while rendering: {path}")
-
             write_preview_jpeg(
                 thumbnail, thumbnail_path, IMAGE_THUMBNAIL_QUALITY, before_publish=verify_source
             )
 
-    return str(thumbnail_path)
+    return thumbnail_path, geometry

@@ -11,6 +11,7 @@ import {
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
 import "./ImageGrid.css";
 
 /** Which face markers to draw on a picture. */
@@ -19,6 +20,10 @@ export type FaceOverlayMode = "all" | "assigned" | "none";
 export type ImageGridSize = "xsmall" | "small" | "medium" | "large";
 type PreviewState = { w: number; h: number } | "error";
 
+function needsImageGeometry(image: FaceImage) {
+  return image.faces.length > 0 && (!image.image_width || !image.image_height);
+}
+
 interface ImageGridProps {
   images: FaceImage[];
   isLoading: boolean;
@@ -26,9 +31,9 @@ interface ImageGridProps {
   isLoadingMore: boolean;
   faceOverlayMode: FaceOverlayMode;
   gridSize: ImageGridSize;
-  galleryRevision: number;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onLoadMore: () => void;
+  onImageGeometryNeeded: (image: FaceImage) => void;
   hasActiveFilters: boolean;
   onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
@@ -76,9 +81,9 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   isLoadingMore,
   faceOverlayMode,
   gridSize,
-  galleryRevision,
   onNavigateToCluster,
   onLoadMore,
+  onImageGeometryNeeded,
   hasActiveFilters,
   onResetFilters,
   onImageDeleted,
@@ -89,6 +94,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const fileActionTimerRef = useRef<number | null>(null);
   const [previewStates, setPreviewStates] = useState<Record<string, PreviewState>>({});
+  const loadedPreviewsRef = useRef(new Set<string>());
   const [previewRetries, setPreviewRetries] = useState<Record<string, number>>({});
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
@@ -175,10 +181,14 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     if (galleryImageId !== null && galleryIndex < 0) setGalleryImageId(null);
   }, [images, galleryIndex, galleryImageId]);
 
-  useLayoutEffect(() => {
-    setGalleryImageId(null);
-    setPreviewStates({});
-  }, [galleryRevision]);
+  useEffect(() => {
+    images.forEach((image) => {
+      if (needsImageGeometry(image) && (image.id === galleryImageId ||
+          (faceOverlayMode !== "none" && loadedPreviewsRef.current.has(imageThumbnailUrl(image.id))))) {
+        onImageGeometryNeeded(image);
+      }
+    });
+  }, [faceOverlayMode, galleryImageId, images, onImageGeometryNeeded]);
 
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
@@ -299,8 +309,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
             const previewSrc = imageThumbnailUrl(img.id, previewRetries[previewUrl]);
             const preview = previewStates[previewUrl];
             const previewSize = preview === "error" ? null : preview;
-            const sourceSize = img.image_width && img.image_height
+            const imageSize = img.image_width && img.image_height
               ? { w: img.image_width, h: img.image_height }
+              : null;
+            const sourceSize = imageSize && (!previewSize || img.content_hash ||
+              imageAspectRatiosMatch(imageSize.w, imageSize.h, previewSize.w, previewSize.h))
+              ? imageSize
               : null;
             const size = sourceSize ?? previewSize;
             const aspectRatio = size ? `${size.w} / ${size.h}` : "1/1";
@@ -332,12 +346,17 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                     decoding="async"
                     onLoad={(event) => {
                       const { naturalWidth, naturalHeight } = event.currentTarget;
+                      loadedPreviewsRef.current.add(previewUrl);
                       setPreviewStates((current) => ({
                         ...current,
                         [previewUrl]: { w: naturalWidth, h: naturalHeight },
                       }));
+                      if (faceOverlayMode !== "none" && needsImageGeometry(img)) onImageGeometryNeeded(img);
                     }}
-                    onError={() => setPreviewStates((current) => ({ ...current, [previewUrl]: "error" }))}
+                    onError={() => {
+                      loadedPreviewsRef.current.delete(previewUrl);
+                      setPreviewStates((current) => ({ ...current, [previewUrl]: "error" }));
+                    }}
                     style={{
                       width: "100%",
                       height: "100%",

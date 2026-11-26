@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+from collections import OrderedDict
 from concurrent.futures import Future
 from functools import partial, wraps
 from contextlib import asynccontextmanager
@@ -55,8 +56,10 @@ from .services.desktop import (
     to_display_path,
 )
 from .services.face_thumbnails import ensure_face_thumbnail, get_cached_face_thumbnail, write_face_thumbnail
-from .services.image_thumbnails import ensure_image_thumbnail, get_cached_image_thumbnail, write_image_thumbnail
-from .services.preview_cache import decode_verified_preview
+from .services.image_thumbnails import (
+    ensure_image_thumbnail, get_cached_image_thumbnail, read_legacy_preview_geometry, write_image_thumbnail,
+)
+from .services.preview_cache import decode_verified_preview, read_verified_preview_geometry
 from .services.preview_cache_budget import (
     DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
     get_preview_cache_policy,
@@ -187,6 +190,11 @@ _imports_finalizing = 0
 _database_restore_in_progress = False
 _media_library_lock = threading.Lock()
 _media_library_generation = 0
+_pending_image_geometry: OrderedDict[tuple[int, str], tuple[int, int, int]] = OrderedDict()
+_image_geometry_timer: threading.Timer | None = None
+_IMAGE_GEOMETRY_RETRY_SECONDS = 1.0
+_IMAGE_GEOMETRY_RETRY_BATCH = 32
+_MAX_PENDING_IMAGE_GEOMETRY = 1024
 
 
 def _describe_background_activity() -> str | None:
@@ -1426,6 +1434,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         with _media_library_lock:
             _database_restore_in_progress = restore_gate = True
             _media_library_generation += 1
+            _pending_image_geometry.clear()
         if not shared_library_preview.begin_restore():
             raise HTTPException(
                 status_code=409, detail="Eine Freigabeänderung wird noch bestätigt. Bitte versuche es erneut.",
@@ -2236,12 +2245,60 @@ def _registered_preview(preview_id: int, face: bool):
     )
     content_hash = row["content_hash"]
     cached = _cached_registered_preview(preview_id, content_hash, bbox) if content_hash else None
-    return int(row["image_id"]), content_hash, bbox, cached
+    return int(row["image_id"]), content_hash, bbox, cached, _stored_image_geometry(row) is None
+
+
+def _try_save_image_geometry(key: tuple[int, str], geometry: tuple[int, int, int]) -> bool:
+    try:
+        save_missing_image_geometry(*key, geometry)
+    except sqlite3.Error as exc:
+        message = str(exc).lower()
+        if isinstance(exc, sqlite3.OperationalError) and ("locked" in message or "busy" in message):
+            return False
+        logger.warning("Could not store photo dimensions for image %s", key[0], exc_info=True)
+    return True
+
+
+def _schedule_image_geometry_retry() -> None:
+    global _image_geometry_timer
+    if _image_geometry_timer is None:
+        _image_geometry_timer = threading.Timer(_IMAGE_GEOMETRY_RETRY_SECONDS, _retry_image_geometry)
+        _image_geometry_timer.daemon = True
+        _image_geometry_timer.start()
+
+
+def _retry_image_geometry() -> None:
+    global _image_geometry_timer
+    with _media_library_lock:
+        _image_geometry_timer = None
+        if _database_restore_in_progress:
+            return
+        for key in list(_pending_image_geometry)[:_IMAGE_GEOMETRY_RETRY_BATCH]:
+            if not _try_save_image_geometry(key, _pending_image_geometry[key]):
+                break
+            del _pending_image_geometry[key]
+        if _pending_image_geometry:
+            _schedule_image_geometry_retry()
+
+
+def _remember_image_geometry(
+    image_id: int, content_hash: str, geometry: tuple[int, int, int], generation: int,
+) -> None:
+    key = (image_id, content_hash)
+    with _media_library_lock:
+        if _database_restore_in_progress or generation != _media_library_generation:
+            return
+        if not _pending_image_geometry and _try_save_image_geometry(key, geometry):
+            return
+        _pending_image_geometry[key] = geometry
+        if len(_pending_image_geometry) > _MAX_PENDING_IMAGE_GEOMETRY:
+            _pending_image_geometry.popitem(last=False)
+        _schedule_image_geometry_retry()
 
 
 def _render_registered_preview(
     preview_id: int, image_id: int, content_hash: str | None,
-    bbox: tuple[int, int, int, int] | None, generation: int,
+    bbox: tuple[int, int, int, int] | None, generation: int, needs_geometry: bool,
 ) -> Path:
     _get_media_library_generation(generation)
     if content_hash:
@@ -2278,12 +2335,8 @@ def _render_registered_preview(
                 raise HTTPException(
                     status_code=422, detail="Das Vorschaubild konnte nicht erstellt werden.",
                 ) from exc
-        with _media_library_lock:
-            if not _database_restore_in_progress and generation == _media_library_generation:
-                try:
-                    save_missing_image_geometry(image_id, content_hash, geometry)
-                except sqlite3.Error:
-                    logger.warning("Could not store photo dimensions", exc_info=True)
+        if needs_geometry:
+            _remember_image_geometry(image_id, content_hash, geometry, generation)
         return thumbnail
 
     if failed:
@@ -2293,7 +2346,9 @@ def _render_registered_preview(
 
 async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = False) -> Response:
     generation = _get_media_library_generation()
-    image_id, content_hash, bbox, thumbnail = await run_in_threadpool(_registered_preview, preview_id, face)
+    image_id, content_hash, bbox, thumbnail, needs_geometry = await run_in_threadpool(
+        _registered_preview, preview_id, face,
+    )
     _get_media_library_generation(generation)
     if thumbnail is not None:
         try:
@@ -2305,7 +2360,7 @@ async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = Fa
             _get_media_library_generation(generation)
             return response
     thumbnail = await _run_source_work(
-        partial(_render_registered_preview, preview_id, image_id, content_hash, bbox, generation),
+        partial(_render_registered_preview, preview_id, image_id, content_hash, bbox, generation, needs_geometry),
     )
     _get_media_library_generation(generation)
     try:
@@ -2435,7 +2490,17 @@ def api_start_image_path_cleanup():
         return image_path_cleanup.start("manual")
 
 
-def _group_image_rows(rows, display_platform: str) -> list[dict]:
+def _stored_image_geometry(row) -> tuple[int, int, int] | None:
+    if {"exif_orientation", "raw_width", "raw_height"}.issubset(row.keys()):
+        orientation, width, height = row["exif_orientation"], row["raw_width"], row["raw_height"]
+        if orientation in range(1, 9) and width and height and width > 0 and height > 0:
+            return orientation, width, height
+    return None
+
+
+def _group_image_rows(
+    rows, display_platform: str, *, geometry_override: tuple[int, int, int] | None = None,
+) -> list[dict]:
     """Turn image/face rows into the payload the picture views expect.
 
     Shared by the paged library listing and the single-image lookup so both
@@ -2449,12 +2514,7 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
         path = r["image_path"]
 
         if image_id not in images:
-            orientation, width, height = r["exif_orientation"], r["raw_width"], r["raw_height"]
-            geometry = (
-                (orientation, width, height)
-                if orientation in range(1, 9) and width and height and width > 0 and height > 0
-                else (1, 0, 0)
-            )
+            geometry = geometry_override or _stored_image_geometry(r) or (1, 0, 0)
             geometry_by_id[image_id] = geometry
             orientation, width, height = geometry
             if orientation in {5, 6, 7, 8}:
@@ -2514,17 +2574,69 @@ def _group_image_rows(rows, display_platform: str) -> list[dict]:
     return list(images.values())
 
 
-@app.get("/api/images/{image_id}/detail")
-def api_image_detail(request: Request, image_id: int):
-    """Return one image with its faces so a face crop can be shown in context."""
-    generation = _get_media_library_generation()
-    rows = get_image_detail_rows(image_id)
+def _image_detail_rows(image_id: int, *, include_archived: bool = False):
+    rows = get_image_detail_rows(image_id, include_archived=include_archived)
     if not rows:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    display_platform = get_display_platform(request)
-    image = _group_image_rows(rows, display_platform)[0]
+    return rows
+
+
+def api_image_detail(request: Request, image_id: int):
+    """Return one image with its active faces without consulting the original."""
+    generation = _get_media_library_generation()
+    image = _group_image_rows(_image_detail_rows(image_id), get_display_platform(request))[0]
     _get_media_library_generation(generation)
     return image
+
+
+def _resolve_image_geometry(image_id: int, content_hash: str | None, generation: int):
+    _get_media_library_generation(generation)
+    for location in list_image_locations([image_id]).get(image_id, ()):
+        _get_media_library_generation(generation)
+        path = location["path"]
+        try:
+            if not content_hash:
+                # With no hash, use the same source and version checks as the
+                # thumbnail. Keep the result ephemeral for this response.
+                return read_legacy_preview_geometry(image_id, path), path
+            geometry = read_verified_preview_geometry(path, content_hash)
+        except (OSError, ValueError, Image.DecompressionBombError):
+            continue
+        _remember_image_geometry(image_id, content_hash, geometry, generation)
+        return geometry, path
+    return None, None
+
+
+@app.get("/api/images/{image_id}/detail")
+async def get_image_detail(request: Request, image_id: int, resolve_geometry: bool = False):
+    if not resolve_geometry:
+        return await run_in_threadpool(api_image_detail, request, image_id)
+
+    generation = _get_media_library_generation()
+    load_rows = partial(_image_detail_rows, image_id, include_archived=True)
+    rows = await run_in_threadpool(load_rows)
+    geometry = _stored_image_geometry(rows[0])
+    if geometry is None and any(row["face_id"] is not None for row in rows):
+        content_hash = rows[0]["content_hash"]
+        with _media_library_lock:
+            geometry = _pending_image_geometry.get((image_id, content_hash))
+        if geometry is None:
+            geometry, path = await _run_source_work(
+                partial(_resolve_image_geometry, image_id, content_hash, generation),
+            )
+            rows = await run_in_threadpool(load_rows)
+            if rows[0]["content_hash"] != content_hash:
+                raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
+            if geometry and not content_hash:
+                locations = await run_in_threadpool(list_image_locations, [image_id])
+                if not any(location["path"] == path for location in locations.get(image_id, ())):
+                    geometry = None
+
+    images = await run_in_threadpool(
+        partial(_group_image_rows, rows, get_display_platform(request), geometry_override=geometry),
+    )
+    _get_media_library_generation(generation)
+    return images[0]
 
 
 @app.get("/api/faces/{face_id}/image")

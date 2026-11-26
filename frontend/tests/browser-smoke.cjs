@@ -545,6 +545,91 @@ async function existingFlow(browser, errors) {
   }
 }
 
+async function pagedLibraryFacesFlow(browser, errors) {
+  const page = await newPage(browser, 1024, 650, errors);
+  const face = {
+    id: 1, bbox_x: 60, bbox_y: 20, bbox_w: 10, bbox_h: 10,
+    cluster_id: null, person_name: 'Name aus Liste', review_status: 'unknown_person',
+  };
+  const photos = Array.from({ length: 240 }, (_, index) => ({
+    id: index + 1001, filename: `Foto ${index + 1}`, directory: '/fixture', image_path: `/fixture/${index + 1}.jpg`,
+    content_hash: null, created_at: null, image_width: index === 44 ? null : 100, image_height: index === 44 ? null : 100,
+    location_count: 1, locations: [], faces: index === 44 ? [face] : [],
+  }));
+  const target = photos[44];
+  const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
+  let detailRequests = 0;
+  let refreshing = false;
+  const refreshPages = [];
+  try {
+    await page.addInitScript(() => {
+      window.EventSource = class TestEventSource extends EventTarget {
+        constructor() {
+          super();
+          window.pagedLibraryEvents = this;
+          queueMicrotask(() => this.onopen?.(new Event('open')));
+        }
+        close() {}
+      };
+    });
+    await page.route('**/api/images?**', (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = Number(params.get('offset'));
+      const limit = Number(params.get('limit'));
+      if (refreshing && limit > 1) refreshPages.push([offset, limit]);
+      const items = photos.slice(offset, offset + limit).map((photo) =>
+        refreshing && photo.id === 1205 ? { ...photo, filename: 'Aktualisiertes Foto' } : photo);
+      return route.fulfill({ json: { items, offset, limit, total: photos.length, has_more: offset + items.length < photos.length, available_persons: [] } });
+    });
+    await page.route(/\/api\/images\/\d+\/(thumbnail|file)(\?.*)?$/, (route) =>
+      route.fulfill({ contentType: 'image/svg+xml', body: image }));
+    await page.route(`**/api/images/${target.id}/detail?resolve_geometry=true`, (route) => {
+      detailRequests += 1;
+      if (detailRequests === 1) return route.fulfill({ status: 503, json: {} });
+      return route.fulfill({ json: {
+        ...target, image_width: 100, image_height: 100,
+        faces: [{ ...face, bbox_x: 20, person_name: 'Name aus Detail' }, { ...face, id: 2 }],
+      } });
+    });
+
+    await page.goto(`${webBase}/#/bilder`);
+    const cards = page.locator('[data-image-id]');
+    await cards.first().waitFor();
+    const scrollToEnd = () => page.locator('.page-content').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await scrollToEnd();
+    const card = page.locator(`[data-image-id="${target.id}"]`);
+    await card.scrollIntoViewIfNeeded();
+    const box = card.locator('.hologram-box');
+    await box.waitFor();
+    assert.equal(await box.evaluate((element) => element.style.left), '20%');
+    assert.equal(await card.locator('.hologram-overlay').count(), 1);
+    assert.equal(await card.locator('.hologram-label').textContent(), 'Name aus Liste');
+    await card.locator('.image-gallery-card__open').click();
+    const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
+    await gallery.locator('.hologram-box').waitFor();
+    assert.equal(await gallery.locator('.hologram-box').count(), 1);
+    assert.equal(await gallery.locator('.hologram-box').evaluate((element) => element.style.left), '20%');
+    assert.equal(detailRequests, 2);
+    await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
+
+    while (await cards.count() < photos.length) {
+      const before = await cards.count();
+      await scrollToEnd();
+      await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
+    }
+    refreshing = true;
+    await page.evaluate(() => {
+      window.pagedLibraryEvents.dispatchEvent(new MessageEvent('clusters', { data: '{"reason":"assignment"}' }));
+    });
+    await page.getByRole('button', { name: 'Aktualisiertes Foto in Galerie öffnen' }).waitFor();
+    assert.deepEqual(refreshPages, [[0, 200], [200, 40]]);
+    assert.equal(await cards.count(), photos.length);
+    console.log('PASS paged library faces: lazy metadata, gallery, and refresh beyond 200 photos');
+  } finally {
+    await page.close();
+  }
+}
+
 async function liveWorkflowFlow(browser, errors) {
   // Keep the initial gallery test separate from speculative grid pagination.
   const page = await newPage(browser, 1100, 650, errors);
@@ -1048,6 +1133,7 @@ async function selectReviewFaces(dialog, proposal, selection) {
     await collectSourcesFlow(browser, errors);
     await localRecoveryFlow(browser, errors);
     await mapFlow(browser, errors);
+    await pagedLibraryFacesFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);
     await settingsFlow(browser, errors);
