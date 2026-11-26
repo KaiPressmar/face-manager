@@ -620,6 +620,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await page.locator('.gps-map__journey-stop').first().press('Enter');
     await results.getByRole('heading', { name: 'Fotos von Stopp 1' }).waitFor();
     await results.getByRole('button', { name: /Berlin-000/ }).waitFor();
+    await results.getByText('Bei Berlin', { exact: true }).waitFor();
     await screenshot(page, 'map-journey');
     await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
     const exactSelection = page.waitForResponse((response) => response.url().includes('/api/images/search?') && response.ok());
