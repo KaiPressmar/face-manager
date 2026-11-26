@@ -73,6 +73,8 @@ Open a photo to browse its neighbors, toggle face labels, and find its original 
 
 **Bild exportieren** makes a photo-book PNG from the current map area or the filtered journey. Preview preset or custom dimensions and adjust the print resolution, page colors, text and layout, surrounding area, and marker size. Under **Route gestalten**, assign transport symbols to individual journey legs. Longer stop lists continue on additional pages that can be saved individually.
 
+Use **Alben** in **Bilder** to collect photos and filter the library. You can add photos from the full-screen gallery or a map selection. **Reisen entdecken** suggests itineraries from dated photo locations. Choose a day and review any included transfers before saving a journey as an album. The export dialog can save its editable design to that album. The **Satellit** map uses a bundled NASA overview offline.
+
 ![Offline world map with clustered photo locations, date filters, and photos from the chosen area](docs/screenshots/photo-map.webp)
 
 ### Filename suggestions

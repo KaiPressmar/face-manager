@@ -156,25 +156,29 @@ def _read_capture_time(value: str | None) -> datetime | None:
 
 def list_journey(
     from_date: date | None, to_date: date | None, bounds: GeoBounds | None = None, detail: JourneyDetail = "trip",
+    *, album_id: str | None = None,
 ) -> dict:
-    date_filter, parameters = photo_selection_sql(GeoPhotoSelection(from_date=from_date, to_date=to_date))
+    scope_filter, parameters = photo_selection_sql(GeoPhotoSelection(
+        from_date=from_date, to_date=to_date, album_id=album_id,
+    ))
     area_filter, area_parameters = photo_selection_sql(GeoPhotoSelection(bounds=bounds))
+    undated_filter, undated_parameters = photo_selection_sql(GeoPhotoSelection(bounds=bounds, album_id=album_id))
 
     with closing(get_conn()) as connection:
         connection.execute("BEGIN")
         missing_time = connection.execute(
             f"""SELECT COUNT(*) FROM image i
-                WHERE {_VALID_LOCATION} AND {area_filter} AND captured_at IS NULL""",
-            area_parameters,
+                WHERE {_VALID_LOCATION} AND {undated_filter} AND captured_at IS NULL""",
+            undated_parameters,
         ).fetchone()[0]
         missing_location = connection.execute(
             f"""SELECT COUNT(*) FROM image i
-                WHERE {date_filter} AND COALESCE(({_VALID_LOCATION}), 0) = 0""",
+                WHERE {scope_filter} AND COALESCE(({_VALID_LOCATION}), 0) = 0""",
             parameters,
         ).fetchone()[0]
         rows = connection.execute(
             f"""SELECT id, latitude, longitude, captured_at, captured_at_utc, ({area_filter}) AS in_area
-                FROM image i WHERE {date_filter} AND {_VALID_LOCATION}
+                FROM image i WHERE {scope_filter} AND {_VALID_LOCATION}
                 AND captured_at IS NOT NULL""",
             [*area_parameters, *parameters],
         )
@@ -199,10 +203,10 @@ def list_journey(
 
 def get_journey(
     from_date: date | None = None, to_date: date | None = None,
-    bounds: GeoBounds | None = None, detail: JourneyDetail = "trip",
+    bounds: GeoBounds | None = None, detail: JourneyDetail = "trip", *, album_id: str | None = None,
 ):
     try:
-        validate_photo_selection(GeoPhotoSelection(bounds=bounds, from_date=from_date, to_date=to_date))
+        validate_photo_selection(GeoPhotoSelection(bounds=bounds, from_date=from_date, to_date=to_date, album_id=album_id))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return list_journey(from_date, to_date, bounds, detail)
+    return list_journey(from_date, to_date, bounds, detail, album_id=album_id)

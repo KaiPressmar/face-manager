@@ -37,6 +37,7 @@ interface ImageGridProps {
   hasActiveFilters: boolean;
   onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
+  photoSelection?: { ids: ReadonlySet<number>; onToggle: (id: number) => void };
 }
 
 const BREAKPOINT_COLUMNS: Record<ImageGridSize, Record<string, number>> = {
@@ -87,6 +88,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   hasActiveFilters,
   onResetFilters,
   onImageDeleted,
+  photoSelection,
 }) => {
   const [galleryImageId, setGalleryImageId] = useState<number | null>(null);
   const galleryIndex = galleryImageId === null ? -1 : images.findIndex((image) => image.id === galleryImageId);
@@ -323,7 +325,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
               <div
                 key={img.id}
                 data-image-id={img.id}
-                className="image-gallery-card"
+                className={photoSelection?.ids.has(img.id) ? "image-gallery-card image-gallery-card--selected" : "image-gallery-card"}
                 style={{
                   position: "relative",
                   width: "100%",
@@ -370,10 +372,13 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                 <button
                   type="button"
                   className="image-gallery-card__open"
-                  aria-label={`${img.filename || "Bild"} in Galerie öffnen`}
-                  onClick={() => setGalleryImageId(img.id)}
-                />
-                {preview === "error" && (
+                  aria-label={photoSelection ? `${img.filename || "Bild"} auswählen` : `${img.filename || "Bild"} in Galerie öffnen`}
+                  aria-pressed={photoSelection?.ids.has(img.id)}
+                  onClick={() => photoSelection ? photoSelection.onToggle(img.id) : setGalleryImageId(img.id)}
+                >{photoSelection && <span className="image-gallery-card__selection" aria-hidden="true">
+                  {photoSelection.ids.has(img.id) ? "✓" : "+"}
+                </span>}</button>
+                {preview === "error" && !photoSelection && (
                   <button
                     type="button"
                     className="secondary-button image-gallery-card__retry"
@@ -395,7 +400,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   </button>
                 )}
 
-                <div className="image-file-actions">
+                {!photoSelection && <div className="image-file-actions">
                   <button
                     type="button"
                     title="Vollständigen Dateipfad kopieren"
@@ -414,7 +419,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   >
                     Ordner
                   </button>
-                </div>
+                </div>}
 
                 {img.location_count > 1 && (
                   <span
@@ -425,12 +430,12 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   </span>
                 )}
 
-                {preview !== "error" && <span className="image-open-cue" aria-hidden="true">
+                {preview !== "error" && !photoSelection && <span className="image-open-cue" aria-hidden="true">
                   <span className="image-open-cue__icon">↗</span>
                   <span>Vollbild öffnen</span>
                 </span>}
 
-                {faceOverlayMode !== "none" &&
+                {!photoSelection && faceOverlayMode !== "none" &&
                   sourceSize && previewSize &&
                   (() => {
                     const visibleFaces = img.faces.filter(

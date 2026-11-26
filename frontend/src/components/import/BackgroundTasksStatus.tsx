@@ -10,6 +10,9 @@ import {
   deleteAutoClusterHistoryEntry,
   deleteImportHistoryEntry,
   deleteThumbnailWarmupHistory,
+  fetchImagePathCleanup,
+  fetchUpdateDownloadState,
+  ImagePathCleanupStatus,
   ImportJob,
   ImportQueueState,
   pauseAutoClusterTask,
@@ -23,8 +26,10 @@ import {
   SharedLibraryState,
   ThumbnailWarmupState,
   ThumbnailWarmupTask,
+  UpdateDownloadState,
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
+import { navigationHash } from "../../utils/navigation";
 import TaskActionIcon from "./TaskActionIcon";
 import { importSkippedImages } from "./importSkippedImages";
 
@@ -57,6 +62,7 @@ export type BackgroundTaskView = {
   etaSeconds: number | null;
   elapsedSeconds: number | null;
   finishedAt: string | null;
+  details?: { href: string; label: string };
 };
 
 const TERMINAL_IMPORT_STATUSES = new Set<ImportJob["status"]>([
@@ -88,6 +94,56 @@ function folderName(path: string) {
 function boundedProgress(current: number, total: number): number | null {
   if (total <= 0) return null;
   return Math.max(0, Math.min(100, (current / total) * 100));
+}
+
+const activityNumber = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+
+function pathCleanupTask(task: ImagePathCleanupStatus | null): BackgroundTaskView | null {
+  if (!task || task.status === "idle") return null;
+  const { status, scanned_paths: scanned, unavailable_paths: unavailable, removed_paths: removed } = task;
+  if (status === "completed" && task.reason !== "manual" && removed === 0) return null;
+  const counts = [
+    `${activityNumber.format(scanned)} ${scanned === 1 ? "Dateipfad" : "Dateipfade"} geprüft`,
+    unavailable > 0 ? `${activityNumber.format(unavailable)} nicht erreichbar` : "",
+    removed > 0 ? `${activityNumber.format(removed)} entfernt` : "",
+  ].filter(Boolean).join(" · ");
+  const labels = { queued: "Wartet", running: "In Arbeit", completed: "Abgeschlossen", failed: "Nicht abgeschlossen" };
+  return {
+    id: "library:path-cleanup", sourceId: "path-cleanup", kind: "library",
+    controlState: status === "queued" || status === "running" ? status : "terminal",
+    title: "Dateipfade prüfen", status: labels[status],
+    summary: status === "queued" ? "Beginnt, sobald andere wichtige Aufgaben fertig sind."
+      : status === "failed" ? "Die Pfadprüfung konnte nicht abgeschlossen werden."
+      : status === "running" && scanned === 0 ? "Dateipfade werden geprüft." : counts,
+    tone: status === "queued" ? "waiting" : status === "running" ? "active" : status,
+    progress: null, etaSeconds: null, elapsedSeconds: null, finishedAt: task.completed_at,
+    details: { href: navigationHash({ page: "settings", settingsSection: "daten" }), label: "Pfadprüfung ansehen" },
+  };
+}
+
+function updateDownloadTask(task: UpdateDownloadState | null): BackgroundTaskView | null {
+  if (!task || task.status === "idle") return null;
+  const downloaded = task.downloaded_bytes ?? 0;
+  const total = task.total_bytes ?? 0;
+  const percent = boundedProgress(downloaded, total);
+  const megabytes = (bytes: number) => activityNumber.format(bytes / 1_000_000);
+  const running = task.status === "downloading";
+  const verifying = running && percent === 100;
+  const title = task.version ? `Update ${task.version}` : "Update";
+  return {
+    id: "library:update-download", sourceId: "update-download", kind: "library",
+    controlState: running ? "running" : "terminal", title,
+    status: verifying ? "Wird geprüft" : running ? "Wird heruntergeladen" : task.status === "ready" ? "Bereit" : "Nicht abgeschlossen",
+    summary: verifying ? "Die heruntergeladene Datei wird überprüft."
+      : running && total > 0 ? `${megabytes(downloaded)} von ${megabytes(total)} MB geladen`
+      : running && downloaded > 0 ? `${megabytes(downloaded)} MB geladen`
+      : running ? "Der Download wird vorbereitet."
+      : task.status === "ready" ? "Der Download ist geprüft und steht zur Installation bereit."
+      : "Der Download konnte nicht abgeschlossen werden.",
+    tone: running ? "active" : task.status === "ready" ? "completed" : "failed",
+    progress: running && !verifying ? percent : null, etaSeconds: null, elapsedSeconds: null, finishedAt: null,
+    details: { href: navigationHash({ page: "settings", settingsSection: "updates" }), label: "Update-Einstellungen öffnen" },
+  };
 }
 
 function importProgress(job: ImportJob): number | null {
@@ -403,6 +459,8 @@ const BackgroundTasksStatus: React.FC<{
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
   const [libraryTasks, setLibraryTasks] = useState<BackgroundTaskView[]>([]);
+  const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
+  const [updateDownload, setUpdateDownload] = useState<UpdateDownloadState | null>(null);
   const [sessionHistory, setSessionHistory] = useState<BackgroundTaskView[]>([]);
   const [connectionError, setConnectionError] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
@@ -418,6 +476,12 @@ const BackgroundTasksStatus: React.FC<{
   const dismissedLibraryIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    let mounted = true;
+    let receivedPathEvent = false;
+    let receivedUpdateEvent = false;
+    let lastPathState: ImagePathCleanupStatus | null = null;
+    let discardedPathId: string | null = null;
+    let pathTimer: number | undefined;
     const unsubscribeImports = subscribeToTopic<ImportQueueState>("imports", (next) => {
       const terminalIds = new Set(
         next.jobs.filter((job) => TERMINAL_IMPORT_STATUSES.has(job.status)).map((job) => job.id),
@@ -478,14 +542,61 @@ const BackgroundTasksStatus: React.FC<{
         .sort((left, right) => (right.finishedAt ?? "").localeCompare(left.finishedAt ?? "")).slice(0, 8));
       if (newlyFinished) setUnseenFinished((count) => count + newlyFinished);
     });
+    const showPathCleanup = (state: ImagePathCleanupStatus) => {
+      if (discardedPathId !== null && state.started_at === discardedPathId) return;
+      const transition = lastPathState?.status !== state.status || lastPathState.started_at !== state.started_at;
+      lastPathState = state;
+      if (transition) {
+        window.clearTimeout(pathTimer);
+        pathTimer = undefined;
+        setPathCleanup(state);
+      } else {
+        pathTimer ??= window.setTimeout(() => {
+          pathTimer = undefined;
+          setPathCleanup(lastPathState);
+        }, 400);
+      }
+    };
+    const unsubscribePaths = subscribeToTopic<ImagePathCleanupStatus>("image-path-cleanup", (state) => {
+      receivedPathEvent = true;
+      showPathCleanup(state);
+    });
+    const unsubscribeUpdates = subscribeToTopic<UpdateDownloadState>("update-download", (state) => {
+      receivedUpdateEvent = true;
+      setUpdateDownload(state);
+    });
+    const unsubscribeRestore = subscribeToTopic<{ reason?: string }>("clusters", (update) => {
+      if (update.reason !== "database_import") return;
+      receivedPathEvent = true;
+      discardedPathId = lastPathState?.started_at ?? discardedPathId;
+      lastPathState = null;
+      window.clearTimeout(pathTimer);
+      pathTimer = undefined;
+      setPathCleanup(null);
+    });
+    void fetchImagePathCleanup().then((state) => {
+      if (mounted && !receivedPathEvent) showPathCleanup(state);
+    }).catch(() => {});
+    void fetchUpdateDownloadState().then((state) => {
+      if (mounted && !receivedUpdateEvent) setUpdateDownload(state);
+    }).catch(() => {});
     return () => {
+      mounted = false;
+      window.clearTimeout(pathTimer);
       unsubscribeImports();
       unsubscribeClustering();
       unsubscribeThumbnails();
       unsubscribeStatus();
       unsubscribeLibrary();
+      unsubscribePaths();
+      unsubscribeUpdates();
+      unsubscribeRestore();
     };
   }, []);
+
+  const localActivities = useMemo(() => [pathCleanupTask(pathCleanup), updateDownloadTask(updateDownload)]
+    .filter((task): task is BackgroundTaskView => task !== null), [pathCleanup, updateDownload]);
+  const passiveNotes = localActivities.filter((task) => task.controlState === "terminal");
 
   const activeTasks = useMemo(() => {
     const tasks = queue?.jobs
@@ -501,8 +612,8 @@ const BackgroundTasksStatus: React.FC<{
     ) {
       tasks.push(thumbnailTask(thumbnails));
     }
-    return tasks.concat(libraryTasks);
-  }, [clustering, queue, thumbnails, libraryTasks]);
+    return tasks.concat(libraryTasks, localActivities.filter((task) => task.controlState !== "terminal"));
+  }, [clustering, queue, thumbnails, libraryTasks, localActivities]);
 
   const history = useMemo(() => {
     const imported = queue?.jobs
@@ -515,7 +626,7 @@ const BackgroundTasksStatus: React.FC<{
       .slice(0, 8);
   }, [queue, sessionHistory]);
 
-  const totalEta = calculateOverallEta(queue, clustering, thumbnails);
+  const totalEta = activeTasks.some((task) => task.kind === "library") ? null : calculateOverallEta(queue, clustering, thumbnails);
   const runningCount = activeTasks.filter((task) => task.tone === "active").length;
   const waitingCount = activeTasks.length - runningCount;
   const parallelImports = queue?.running_count ?? queue?.active_job_ids?.length ?? 0;
@@ -669,7 +780,7 @@ const BackgroundTasksStatus: React.FC<{
         : "Aktivitäten";
   const compactEta =
     activeTasks.length > 0
-      ? libraryTasks.length ? "Im Hintergrund" : formatFriendlyDuration(totalEta) ?? "Zeit wird berechnet"
+      ? formatFriendlyDuration(totalEta) ?? "Im Hintergrund"
       : sharedCount ? sharedStatus : "Bereit";
 
   return (
@@ -706,8 +817,8 @@ const BackgroundTasksStatus: React.FC<{
                   : sharedCount ? "Hier findest du den Stand der gemeinsamen Ordner." : "Aktuell ist keine Aufgabe offen."}
               </p>
             </div>
-            {activeTasks.length > 0 && libraryTasks.length === 0 && (
-              <span>{formatFriendlyDuration(totalEta) ? `Noch ca. ${formatFriendlyDuration(totalEta)}` : "Restzeit wird berechnet"}</span>
+            {totalEta !== null && activeTasks.length > 0 && (
+              <span>Noch ca. {formatFriendlyDuration(totalEta)}</span>
             )}
           </header>
 
@@ -730,15 +841,25 @@ const BackgroundTasksStatus: React.FC<{
                     onPause={task.kind === "library" ? undefined : () => void controlTask(task, "pause")}
                     onResume={task.kind === "library" ? undefined : () => void controlTask(task, "resume")}
                     onCancel={task.kind === "library" ? undefined : () => void controlTask(task, "cancel")}
+                    onOpenDetails={() => setIsPinned(false)}
                   />
                 ))}
               </div>
               {parallelImports > 1 && (
                 <p className="activity-center__parallel-note">
-                  {parallelImports} Bilderordner werden gleichzeitig verarbeitet. Die angezeigte Gesamtzeit berücksichtigt das bereits.
+                  {parallelImports} Bilderordner werden gleichzeitig verarbeitet.
                 </p>
               )}
             </div>
+          )}
+
+          {passiveNotes.length > 0 && (
+            <section className="activity-center__section" aria-label="Wartung und Updates">
+              <div className="activity-center__section-title">Wartung und Updates</div>
+              <div className="activity-center__tasks">
+                {passiveNotes.map((task) => <TaskRow key={task.id} task={task} onOpenDetails={() => setIsPinned(false)} />)}
+              </div>
+            </section>
           )}
 
           {sharedCount > 0 && (
@@ -820,6 +941,7 @@ const TaskRow: React.FC<{
   onCancel?: () => void;
   onRetry?: () => void;
   onDelete?: () => void;
+  onOpenDetails?: () => void;
 }> = ({
   task,
   history = false,
@@ -829,6 +951,7 @@ const TaskRow: React.FC<{
   onCancel,
   onRetry,
   onDelete,
+  onOpenDetails,
 }) => {
   const duration = formatFriendlyDuration(history ? task.elapsedSeconds : task.etaSeconds);
   return (
@@ -856,6 +979,7 @@ const TaskRow: React.FC<{
         {history && duration && <span>Dauer: {duration}</span>}
       </div>
       <div className="activity-task__actions">
+        {task.details && <a href={task.details.href} onClick={onOpenDetails}>{task.details.label}</a>}
         {history && onRetry && (
           <button type="button" disabled={busy} onClick={onRetry}>
             Ordner erneut prüfen

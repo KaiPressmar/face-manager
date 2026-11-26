@@ -349,6 +349,30 @@ def _create_image_location_table(cur):
     )
 
 
+def _create_album_tables(cur):
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS album (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            cover_image_id INTEGER REFERENCES image(id) ON DELETE SET NULL,
+            journey TEXT,
+            layout_draft TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS album_photo (
+            album_id TEXT NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+            image_id INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (album_id, image_id)
+        )"""
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_album_photo_image ON album_photo(image_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_album_photo_position ON album_photo(album_id, position, image_id)")
+
+
 def calculate_file_hash(path: str):
     """Calculate a streaming SHA-256 digest.
 
@@ -466,6 +490,20 @@ def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
     )
 
 
+def _merge_duplicate_album_photos(cur, canonical_id, duplicate_id):
+    cur.execute(
+        """INSERT INTO album_photo (album_id, image_id, position)
+           SELECT album_id, ?, position FROM album_photo WHERE image_id = ?
+           ON CONFLICT (album_id, image_id) DO UPDATE
+           SET position = MIN(album_photo.position, excluded.position)""",
+        (canonical_id, duplicate_id),
+    )
+    cur.execute(
+        "UPDATE album SET cover_image_id = ? WHERE cover_image_id = ?",
+        (canonical_id, duplicate_id),
+    )
+
+
 def _migrate_image_locations(conn, *, scan_sources: bool):
     """Migrate legacy image paths and merge duplicate content.
 
@@ -539,6 +577,7 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
         for duplicate_id in duplicate_ids:
             _merge_duplicate_image_faces(cur, canonical_id, duplicate_id)
             _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id)
+            _merge_duplicate_album_photos(cur, canonical_id, duplicate_id)
             cur.execute(
                 "UPDATE image_location SET image_id = ? WHERE image_id = ?",
                 (canonical_id, duplicate_id),
@@ -872,6 +911,7 @@ def _initialize_schema(conn, *, scan_sources: bool):
         _create_face_table(cur)
     _ensure_face_review_columns(cur)
 
+    _create_album_tables(cur)
     _migrate_image_locations(conn, scan_sources=scan_sources)
     _create_import_job_table(cur)
     _create_app_settings_table(cur)

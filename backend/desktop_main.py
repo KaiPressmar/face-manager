@@ -8,6 +8,11 @@ if __name__ == "__main__" and getattr(sys, "frozen", False) and sys.argv[1:2] ==
 
     sys.exit(shared_sync_worker_main(sys.argv[2:]))
 
+if __name__ == "__main__" and getattr(sys, "frozen", False) and sys.argv[1:2] == ["--gpu-diagnostic-worker"]:
+    from backend.services.gpu_diagnostics import diagnostic_worker_main
+
+    sys.exit(diagnostic_worker_main(sys.argv[2:]))
+
 import threading
 import time
 import traceback

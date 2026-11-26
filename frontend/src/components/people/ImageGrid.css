@@ -34,6 +34,33 @@
   outline-offset: -3px;
 }
 
+.image-gallery-card__open[aria-pressed] {
+  z-index: 5;
+}
+
+.image-gallery-card--selected .image-gallery-card__open {
+  box-shadow: inset 0 0 0 3px var(--accent);
+}
+
+.image-gallery-card__selection {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.image-gallery-card__open[aria-pressed="true"] .image-gallery-card__selection {
+  border: 2px solid var(--accent);
+}
+
 .image-gallery-card .hologram-box:not(.hologram-box--interactive),
 .image-gallery-card .hologram-label:disabled {
   pointer-events: none;

@@ -6,6 +6,17 @@ const { albumOutputSize, buildMapAlbumArtwork, fitAlbumJourney, normalizeAlbumCo
 const world = { west: -180, east: 180, south: -90, north: 90 };
 const artwork = { format: 'a4', title: 'Berlin & Paris <2026>', bounds: world, style: 'standard' };
 
+test('unavailable satellite imagery falls back to attributed vector artwork', async () => {
+  // No browser raster decoder is available in this runner.
+  const [page] = await buildMapAlbumArtwork({ ...artwork, style: 'satellite',
+    points: [{ latitude: 48.86, longitude: 2.35, count: 5 }],
+  });
+  assert.equal(page.satelliteFallback, true);
+  assert.match(page.svg, /Kartendaten von Natural Earth/);
+  assert.doesNotMatch(page.svg, /NASA Earth Observatory|data-album-satellite/);
+  assert.match(page.svg, /data-album-marker="5"/);
+});
+
 test('print presets preserve physical dimensions across resolutions and constrain custom sizes', async () => {
   assert.deepEqual(albumOutputSize('a4', 150), { width: 1754, height: 1240 });
   assert.deepEqual(albumOutputSize('portrait', 400), { width: 3307, height: 4677 });
@@ -69,6 +80,15 @@ test('album covers fit dateline crossings and connections without wrapping acros
   const wholeRoute = fitAlbumJourney(around, connections);
   assert.equal(wholeRoute.west, -180);
   assert.equal(wholeRoute.east, 180);
+});
+
+test('city-day fitting accepts a tighter minimum without changing the print default', () => {
+  const stops = [{ latitude: 48.86, longitude: 2.35 }];
+  const full = fitAlbumJourney(stops, []);
+  const close = fitAlbumJourney(stops, [], .012);
+  assert.ok(full.east - full.west > 1.99);
+  assert.ok(close.east - close.west < .025);
+  assert.ok(close.north > stops[0].latitude && close.south < stops[0].latitude);
 });
 
 test('album artwork keeps exact print dimensions and escapes text for standalone SVG previews', async () => {

@@ -34,12 +34,13 @@ export interface Journey {
 export type JourneyDetail = "trip" | "city";
 
 export async function fetchJourney(
-  from: string, to: string, bounds: MapBounds | null, detail: JourneyDetail, signal: AbortSignal,
+  from: string, to: string, bounds: MapBounds | null, detail: JourneyDetail, signal: AbortSignal, albumId = "",
 ): Promise<Journey> {
   const query = new URLSearchParams();
   if (from) query.set("from_date", from);
   if (to) query.set("to_date", to);
   if (detail === "city") query.set("detail", detail);
+  if (albumId) query.set("album_id", albumId);
   if (bounds) {
     for (const [edge, value] of Object.entries(bounds)) query.set(edge, String(value));
   }
@@ -53,7 +54,7 @@ export async function fetchMapSelection(
 ): Promise<MapImagesResponse> {
   if (!selection.image_ids) {
     return fetchMapImages({
-      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, ...cursor, limit,
+      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, album_id: selection.album_id, ...cursor, limit,
     }, signal);
   }
   const query = new URLSearchParams({ limit: String(limit) });

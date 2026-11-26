@@ -381,28 +381,28 @@ class GeoBackfill:
 geo_backfill = GeoBackfill(background_activities)
 
 
-def _filter_sql(west, east, south, north, from_date, to_date):
-    return photo_selection_sql(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date))
+def _filter_sql(west, east, south, north, from_date, to_date, album_id=None):
+    return photo_selection_sql(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date, album_id=album_id))
 
 
-def _status(conn):
-    library_total = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
-    located_total = conn.execute(
-        "SELECT COUNT(*) FROM image WHERE latitude IS NOT NULL AND longitude IS NOT NULL"
-    ).fetchone()[0]
-    pending_total = conn.execute(
-        "SELECT COUNT(*) FROM image WHERE metadata_scanned_at IS NULL"
-    ).fetchone()[0]
-    return dict(library_total=library_total, located_total=located_total,
-                pending_total=pending_total, indexing=geo_backfill.indexing)
+def _status(conn, album_id=None):
+    where, parameters = photo_selection_sql(GeoPhotoSelection(album_id=album_id))
+    totals = conn.execute(
+        f"""SELECT COUNT(*) AS library_total,
+                   COUNT(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 END) AS located_total,
+                   COUNT(CASE WHEN metadata_scanned_at IS NULL THEN 1 END) AS pending_total
+            FROM image i WHERE {where}""",
+        parameters,
+    ).fetchone()
+    return {**dict(totals), "indexing": geo_backfill.indexing}
 
 
 def list_map_points(
     west, east, south, north, from_date=None, to_date=None, zoom=2,
-    grid_columns=MAP_GRID_SIZE, grid_rows=MAP_GRID_SIZE,
+    grid_columns=MAP_GRID_SIZE, grid_rows=MAP_GRID_SIZE, *, album_id=None,
 ):
     """Aggregate a viewport into cells indexed from its southwest corner."""
-    where, params = _filter_sql(west, east, south, north, from_date, to_date)
+    where, params = _filter_sql(west, east, south, north, from_date, to_date, album_id)
     span_lon = east - west if east >= west else (180 - west) + (east + 180)
     span_lat = north - south
     cell_lon = span_lon / grid_columns or 1
@@ -445,7 +445,7 @@ def list_map_points(
             ))
         return dict(
             points=points, total=sum(point["count"] for point in points),
-            grid_columns=grid_columns, grid_rows=grid_rows, **_status(conn),
+            grid_columns=grid_columns, grid_rows=grid_rows, **_status(conn, album_id),
         )
     finally:
         conn.close()
@@ -453,11 +453,11 @@ def list_map_points(
 
 def list_map_images(
     west, east, south, north, from_date=None, to_date=None, limit=40, offset=0,
-    before_id=None, before_captured_at=None,
+    before_id=None, before_captured_at=None, *, album_id=None,
 ):
     """Return canonical geotagged images and a cursor for the next page."""
     return list_selected_map_images(
-        GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date),
+        GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date, album_id=album_id),
         limit, offset, before_id, before_captured_at,
     )
 

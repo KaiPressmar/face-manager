@@ -11,6 +11,7 @@ import FaceOverlay from "./FaceOverlay";
 import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import AlbumPickerDialog from "../shared/AlbumPickerDialog";
 import "./FullscreenImageGallery.css";
 
 interface GalleryFace {
@@ -116,6 +117,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const [measuredImage, setMeasuredImage] = useState<{ url: string; width: number; height: number } | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
+  const [albumPhotoId, setAlbumPhotoId] = useState<number>();
   const stageRef = useRef<HTMLElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalFocus(dialogRef, onClose, !isDeleting);
@@ -235,13 +237,14 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   };
 
   return (
-    <div
+    <><div
       ref={dialogRef}
       tabIndex={-1}
       className="fullscreen-gallery"
       role="dialog"
       aria-modal="true"
       aria-label="Bildansicht"
+      aria-hidden={albumPhotoId !== undefined || undefined}
       aria-busy={isDeleting}
       onKeyDown={(event) => {
         if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
@@ -288,6 +291,10 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           <button type="button" onClick={copyImage} disabled={originalUnavailable} title="Bildinhalt in die Zwischenablage kopieren">
             <span aria-hidden="true">⧉</span>
             Bild kopieren
+          </button>
+          <button type="button" disabled={isDeleting || sequence?.loading} onClick={() => setAlbumPhotoId(image.id)}>
+            <span aria-hidden="true">＋</span>
+            Zum Album
           </button>
           <button type="button" className={image.locations.length ? "gallery-action--in-locations" : undefined} onClick={() => void copyImagePath()} title="Vollständigen Dateipfad kopieren">
             <span aria-hidden="true">⌘</span>
@@ -494,6 +501,9 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
         </div>
       )}
     </div>
+    {albumPhotoId !== undefined && <AlbumPickerDialog imageIds={[albumPhotoId]}
+      onClose={() => setAlbumPhotoId(undefined)} onSaved={(album) => setMessage(`Im Album „${album.name}“ gespeichert`)} />}
+    </>
   );
 };
 

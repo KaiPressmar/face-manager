@@ -70,6 +70,7 @@ interface LibraryFilterBarProps {
   faceStatuses?: string[];
   onFaceStatusesChange?: (statuses: string[]) => void;
   onResetFilters?: () => void;
+  actions?: React.ReactNode;
 
   /** Optional extra compact control, e.g. the face-overlay toggle. */
   children?: React.ReactNode;
@@ -90,6 +91,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
   faceStatuses,
   onFaceStatusesChange,
   onResetFilters,
+  actions,
   children,
 }) => {
   const [search, setSearch] = useState("");
@@ -204,6 +206,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
             </div>
           </div>
 
+          {actions && <div className="filter-bar__tool-group-controls">{actions}</div>}
           {children && (
             <details className="filter-bar__view">
               <summary className="filter-bar__control">Ansicht</summary>

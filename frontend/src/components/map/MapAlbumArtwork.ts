@@ -1,5 +1,6 @@
 import type { JourneyConnection, MapBounds, MapStyle } from "./WorldMap";
 import countries from "./world-countries.json";
+import satelliteSource from "./world-satellite.json";
 import overviewWater from "./world-water-overview.json";
 
 interface AlbumPosition {
@@ -93,6 +94,7 @@ export interface MapAlbumPage {
   number: number;
   total: number;
   dpi: AlbumDpi;
+  satelliteFallback?: boolean;
 }
 
 interface Pixel {
@@ -224,7 +226,7 @@ const xml = (value: string) => value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
 /** Return the smallest longitude arc containing all stops and observed connections. */
-export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: readonly JourneyConnection[]): MapBounds {
+export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: readonly JourneyConnection[], minimumPadding = 1): MapBounds {
   const spans = stops.map(({ longitude }) => {
     const start = turn(longitude + 180);
     return { start, end: start };
@@ -264,8 +266,9 @@ export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: re
   connections.forEach(({ from, to }) => { measure(from); measure(to); });
   const longitudeSpan = 360 - gap;
   const latitudeSpan = north - south;
-  const longitudePadding = Math.max(1, longitudeSpan * zoomInset);
-  const latitudePadding = Math.max(1, latitudeSpan * zoomInset);
+  const padding = Number.isFinite(minimumPadding) ? Math.max(.0001, minimumPadding) : 1;
+  const longitudePadding = Math.max(padding, longitudeSpan * zoomInset);
+  const latitudePadding = Math.max(padding, latitudeSpan * zoomInset);
   return longitudeSpan + longitudePadding * 2 >= 360
     ? { west: -180, east: 180, south: Math.max(-90, south - latitudePadding), north: Math.min(90, north + latitudePadding) }
     : { west: west - longitudePadding, east: west + longitudeSpan + longitudePadding,
@@ -390,9 +393,10 @@ function frameShape(frame: Frame, attrs: string) {
 
 type Detail = typeof import("./world-detail.json");
 
-function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, relief: string, palette: Palette) {
+function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, raster: string, palette: Palette) {
   const scale = 360 / (bounds.east - bounds.west);
   const landscape = style === "landscape";
+  const satellite = style === "satellite";
   const reliefOpacity = number(.57 * Math.min(1, Math.sqrt(6 / scale)));
   const waters = [
     ...overviewWater.rivers, ...detail.rivers,
@@ -402,12 +406,16 @@ function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyl
     ...overviewWater.lakes, ...detail.lakes,
   ].filter(({ minZoom }) => minZoom <= scale * 1.7).map(({ path }) =>
     `<path d="${path}" fill="${palette.lake}" fill-rule="evenodd"/>`).join("");
+  const base = satellite
+    ? `<image data-album-satellite="true" href="${raster}" width="${atlasWidth}" height="${atlasHeight}" preserveAspectRatio="none"/>`
+    : `<use href="#album-land" fill="${landscape ? palette.reliefLand : palette.land}" stroke="${palette.shore}" stroke-width="2.4"/>
+      ${raster ? `<image href="${raster}" width="${atlasWidth}" height="${atlasHeight}" preserveAspectRatio="none" clip-path="url(#album-land-clip)" opacity="${reliefOpacity}" style="mix-blend-mode:multiply"/>` : ""}`
+      + waters + lakes;
+  const border = satellite ? "#f2e8c8" : palette.border;
   const tile = `<g id="album-atlas">
-    <use href="#album-land" fill="${landscape ? palette.reliefLand : palette.land}" stroke="${palette.shore}" stroke-width="2.4"/>
-    ${relief ? `<image href="${relief}" width="1000" height="500" preserveAspectRatio="none" clip-path="url(#album-land-clip)" opacity="${reliefOpacity}" style="mix-blend-mode:multiply"/>` : ""}
-    ${waters}${lakes}
-    <path d="${detail.borders.international}" fill="none" stroke="${palette.border}" stroke-opacity=".75" stroke-width="2" vector-effect="non-scaling-stroke"/>
-    <path d="${detail.borders.other}" fill="none" stroke="${palette.border}" stroke-opacity=".58" stroke-width="1.7" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>
+    ${base}
+    <path d="${detail.borders.international}" fill="none" stroke="${border}" stroke-opacity=".75" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <path d="${detail.borders.other}" fill="none" stroke="${border}" stroke-opacity=".58" stroke-width="1.7" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>
   </g>`;
   const minTile = Math.floor((bounds.west + 180) / 360);
   const maxTile = Math.ceil((bounds.east + 180) / 360) - 1;
@@ -417,8 +425,8 @@ function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyl
     <svg x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}"
       viewBox="${atlasX(bounds.west)} ${atlasY(bounds.north)} ${atlasX(bounds.east) - atlasX(bounds.west)} ${atlasY(bounds.south) - atlasY(bounds.north)}" preserveAspectRatio="none">
       <defs>
-        <path id="album-land" d="${detail.land}" fill-rule="evenodd" clip-rule="evenodd" vector-effect="non-scaling-stroke"/>
-        <clipPath id="album-land-clip"><use href="#album-land"/></clipPath>
+        ${!satellite ? `<path id="album-land" d="${detail.land}" fill-rule="evenodd" clip-rule="evenodd" vector-effect="non-scaling-stroke"/>` : ""}
+        ${landscape ? `<clipPath id="album-land-clip"><use href="#album-land"/></clipPath>` : ""}
         ${tile}
       </defs>
       ${tiles}
@@ -551,16 +559,40 @@ function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel 
   }).join("");
 }
 
-async function readRelief() {
-  const response = await fetch(new URL("map/world-relief.webp", document.baseURI));
-  if (!response.ok) throw new Error("Das Geländerelief konnte nicht geladen werden.");
+const embeddedRasters = new Map<"landscape" | "satellite", Promise<string>>();
+
+async function embedMapRaster(style: "landscape" | "satellite") {
+  const asset = style === "satellite" ? satelliteSource.path : "map/world-relief.webp";
+  const response = await fetch(new URL(asset, document.baseURI));
+  if (!response.ok) throw new Error("Die Kartenebene konnte nicht geladen werden.");
   const data = await response.blob();
+  if (style === "satellite") {
+    const url = URL.createObjectURL(data);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Das Geländerelief konnte nicht gelesen werden."));
-    reader.readAsDataURL(data);
+    reader.onerror = () => reject(new Error("Die Kartenebene konnte nicht gelesen werden."));
+    reader.readAsDataURL(new Blob([data], { type: "image/webp" }));
   });
+}
+
+function readMapRaster(style: "landscape" | "satellite") {
+  const cached = embeddedRasters.get(style);
+  if (cached) return cached;
+  const embedded = embedMapRaster(style).catch((error) => {
+    embeddedRasters.delete(style);
+    throw error;
+  });
+  embeddedRasters.set(style, embedded);
+  return embedded;
 }
 
 export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise<MapAlbumPage[]> {
@@ -574,10 +606,14 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const transportOnly = input.showStopsList === false;
   const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode) : stops;
   const connections = input.connections ?? [];
-  const [{ default: detail }, relief] = await Promise.all([
+  const [{ default: detail }, raster] = await Promise.all([
     import("./world-detail.json"),
-    input.style === "landscape" ? readRelief() : Promise.resolve(""),
+    input.style === "satellite" ? readMapRaster("satellite").catch(() => "")
+      : input.style === "landscape" ? readMapRaster("landscape") : Promise.resolve(""),
   ]);
+  const satelliteFallback = input.style === "satellite" && !raster;
+  const style = satelliteFallback ? "standard" : input.style;
+  const mapPalette = style === "satellite" ? { ...palette, labelInk: "#f4f0de", labelHalo: "#17211b" } : palette;
   const head = header(input, layout, palette);
   const columns = input.formatting?.listColumns ?? 2;
   const availableRows = Math.max(1, Math.floor((height - 305 - head.mapTop - mapHeight) / 112));
@@ -613,8 +649,8 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const markers = albumMarkers(input, bounds, frame, palette);
   const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "")}</clipPath></defs>
     <g clip-path="url(#album-map-clip)">
-      ${baseMap(detail, frame, bounds, input.style, relief, palette)}
-      ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, palette) : ""}
+      ${baseMap(detail, frame, bounds, style, raster, mapPalette)}
+      ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, mapPalette) : ""}
       ${journeyLines(connections, bounds, frame, palette)}${markers.svg}
     </g>
     ${frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
@@ -631,12 +667,14 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
     const footer = `<line x1="${margin}" x2="${width - margin}" y1="${height - 147}" y2="${height - 147}" stroke="${palette.rule}" stroke-width="2"/>
       ${text(margin, height - 92, continuation ? "Fotokarte · Stationen" : "Kartendaten von Natural Earth", `fill="${palette.muted}" font-family="${sans}" font-size="31"`)}
       ${legend ? text(margin + 515, height - 92, legend, `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
+      ${!continuation && style === "satellite" ? text(margin, height - 47, `Satellitenbild von ${satelliteSource.name}`,
+        `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
       ${pageNumber ? text(width - margin, height - 92, pageNumber, `fill="${palette.ink}" font-family="${sans}" font-size="31" text-anchor="end"`) : ""}`;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
       <title>${xml(input.title.trim() || "Meine Fotokarte")}</title>
       ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly, palette, input.formatting)}${footer}
     </svg>`;
-    return { svg, ...size, dpi, number: index + 1, total: groups.length };
+    return { svg, ...size, dpi, number: index + 1, total: groups.length, ...(!continuation && satelliteFallback && { satelliteFallback }) };
   });
 }
 

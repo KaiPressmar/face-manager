@@ -4,6 +4,9 @@ import borders from "./world-borders.json";
 import countries from "./world-countries.json";
 import land from "./world-land.json";
 import overviewWater from "./world-water-overview.json";
+import satelliteSource from "./world-satellite.json";
+
+export { satelliteSource };
 
 type DetailedCartography = typeof import("./world-detail.json");
 
@@ -25,7 +28,7 @@ export interface MapGrid {
   rows: number;
 }
 
-export type MapStyle = "standard" | "landscape";
+export type MapStyle = "standard" | "landscape" | "satellite";
 
 interface GeographicPosition {
   longitude: number;
@@ -283,6 +286,10 @@ const WorldMap: React.FC<Props> = ({
 }) => {
   const landClipId = `gps-map-land-${useId()}`;
   const landscape = style === "landscape";
+  const satellite = style === "satellite";
+  const [satelliteState, setSatelliteState] = useState<"loading" | "ready" | "failed">("loading");
+  const satelliteVisible = satellite && satelliteState === "ready";
+  useEffect(() => { if (!satellite) setSatelliteState("loading"); }, [satellite]);
   const detailed = view.zoom >= DETAIL_ZOOM;
   const requiresDetailedMap = landscape || detailed;
   const [detail, setDetail] = useState<DetailedCartography | null>(null);
@@ -467,7 +474,7 @@ const WorldMap: React.FC<Props> = ({
         <button type="button" aria-label="Weltkarte anzeigen" title="Weltkarte anzeigen" onClick={() => onViewChange({ longitude: 0, latitude: 0, zoom: 1 })}>⌖</button>
       </div>
       <div className="gps-map__canvas">
-      <svg ref={svgRef} className={`gps-map__svg${selectionMode ? " gps-map__svg--select" : ""}${landscape ? " gps-map__svg--landscape" : ""}`}
+      <svg ref={svgRef} className={`gps-map__svg${selectionMode ? " gps-map__svg--select" : ""}${landscape ? " gps-map__svg--landscape" : ""}${satelliteVisible ? " gps-map__svg--satellite" : ""}`}
         viewBox={`${vb.x} ${vb.y} ${vb.width} ${vb.height}`} preserveAspectRatio="none"
         role="group" aria-label="Weltkarte mit Fotostandorten" tabIndex={0}
         aria-describedby="gps-map-keyboard-hint"
@@ -509,12 +516,16 @@ const WorldMap: React.FC<Props> = ({
           <defs><clipPath id={landClipId}><path d={coastPath} clipRule="evenodd" /></clipPath></defs>
           <image href="./map/world-relief.webp" width={WIDTH} height={HEIGHT} preserveAspectRatio="none" clipPath={`url(#${landClipId})`} />
         </g>}
-        <g aria-hidden="true" className="gps-map__water">
+        {satellite && satelliteState !== "failed" && <image aria-hidden="true" className="gps-map__satellite"
+          href={`./${satelliteSource.path}`} width={WIDTH} height={HEIGHT} preserveAspectRatio="none"
+          visibility={satelliteVisible ? "visible" : "hidden"}
+          onLoad={() => setSatelliteState("ready")} onError={() => setSatelliteState("failed")} />}
+        {!satelliteVisible && <g aria-hidden="true" className="gps-map__water">
           {rivers.filter((layer) => layer.minZoom <= zoom).map((layer) =>
             <path key={layer.minZoom} d={layer.path} className="gps-map__river" />)}
           {lakes.filter((layer) => layer.minZoom <= zoom).map((layer) =>
             <path key={layer.minZoom} d={layer.path} className="gps-map__lake" fillRule="evenodd" />)}
-        </g>
+        </g>}
         <g aria-hidden="true" className="gps-map__borders">
           <path d={detailed && detail ? detail.borders.international : countryBorders} className="gps-map__border" />
           <path d={detailed && detail ? detail.borders.other : otherBorders} className="gps-map__border gps-map__border--other" />
@@ -575,6 +586,9 @@ const WorldMap: React.FC<Props> = ({
         </g>)}
       </svg>
       </div>
+      {satellite && satelliteState === "failed" && <p role="status" className="gps-map__raster-status">
+        Satellitenbild nicht verfügbar. Die Standardkarte wird angezeigt.
+      </p>}
     </div>
   );
 };

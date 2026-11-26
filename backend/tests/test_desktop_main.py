@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from backend.app import app  # Load shared dependencies before substituting native WebView.
+from backend.services import album_export
 
 
 def load_desktop():
@@ -116,7 +117,7 @@ class DesktopStartupTests(unittest.TestCase):
         self.assertEqual(save_album_png.__name__, "save_album_png")
 
         with (tempfile.TemporaryDirectory() as folder,
-              patch("backend.services.album_export._decode_album_png", return_value=b"png bytes")):
+              patch.object(album_export, "_decode_album_png", return_value=b"png bytes")):
             for wrap in (lambda path: path, lambda path: (path,)):
                 destination = Path(folder) / "target.png"
                 window.create_file_dialog.return_value = wrap(str(destination))

@@ -15,6 +15,8 @@ export type EventTopic =
   | "autocluster"
   | "thumbnail-warmup"
   | "background-activities"
+  | "image-path-cleanup"
+  | "update-download"
   | "person-suggestions"
   | "clusters";
 
@@ -34,6 +36,8 @@ const ALL_TOPICS: EventTopic[] = [
   "autocluster",
   "thumbnail-warmup",
   "background-activities",
+  "image-path-cleanup",
+  "update-download",
   "person-suggestions",
   "clusters",
 ];

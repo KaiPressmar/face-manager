@@ -75,3 +75,35 @@
   .gps-page__privacy{flex-basis:100%}
 }
 @media(prefers-reduced-motion:reduce){.gps-page__skeletons>div{animation:none}.gps-page__photo img{transition:none}}
+.gps-map-discovery {
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 12px;
+}
+.gps-map-discovery summary { cursor: pointer; padding: 9px 12px; font-weight: 650; }
+.gps-map-discovery__content { display: grid; gap: 8px; padding: 0 12px 10px; }
+.gps-map-discovery__content p { margin: 0; color: var(--text-muted); line-height: 1.5; }
+.gps-map-discovery__actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.gps-map-discovery input, .gps-map-discovery select, .gps-map-discovery button {
+  min-height: 36px;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+.gps-map-discovery label { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.gps-map-discovery input[type="checkbox"] { min-height: auto; }
+.gps-map-discovery__places { display: grid; gap: 4px; max-height: 190px; overflow: auto; }
+.gps-map-discovery__places > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.gps-map-discovery__places button { text-align: left; }
+.gps-map-discovery__places small { display: block; color: var(--text-muted); }
+@media (max-width: 540px) {
+  .gps-map-discovery input, .gps-map-discovery select, .gps-map-discovery button { min-height: 44px; }
+  .gps-map-discovery input[type="checkbox"] { min-height: auto; }
+}

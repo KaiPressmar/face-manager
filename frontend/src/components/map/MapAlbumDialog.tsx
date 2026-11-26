@@ -8,9 +8,10 @@ import { suggestJourneyTransport } from "./journeyTransport";
 import {
   albumAccents, albumDensities, albumOutputSize, albumPaletteColors, albumTransports, buildMapAlbumArtwork,
   mapAlbumPageToPng, normalizeAlbumColor, type AlbumAccent, type AlbumCustomColors, type AlbumDpi,
-  type AlbumFormat, type AlbumFormatting, type AlbumTransport, type MapAlbumPage,
+  type AlbumDimensions, type AlbumFormat, type AlbumFormatting, type AlbumTransport, type MapAlbumPage,
 } from "./MapAlbumArtwork";
 import type { MapBounds, MapStyle } from "./WorldMap";
+import satelliteSource from "./world-satellite.json";
 
 export interface MapAlbumOpening {
   bounds: MapBounds;
@@ -21,9 +22,33 @@ export interface MapAlbumOpening {
   fromDate: string;
   toDate: string;
   journey?: Journey;
+  albumId?: string;
+  draft?: unknown;
 }
 
 type AlbumPalette = "sand" | "coast";
+
+export interface AlbumDraft {
+  version: 1;
+  title: string;
+  subtitle: string;
+  format: AlbumFormat;
+  dimensions: AlbumDimensions;
+  dpi: AlbumDpi;
+  palette: AlbumPalette;
+  accent: AlbumAccent;
+  colors: AlbumCustomColors;
+  formatting: AlbumFormatting;
+  contextPercent: number;
+  markerScale: number;
+  useViewport: boolean;
+  transports: Partial<Record<string, AlbumTransport>>;
+  style: MapStyle;
+  showNames: boolean;
+  showPeriod: boolean;
+  showStopsList: boolean;
+}
+
 type AlbumData = { points?: MapPoint[]; places?: JourneyPlace[] };
 type NativeSave = (name: string, data: string) => Promise<{ status: "saved" | "cancelled" | "error"; message?: string }>;
 const dateFormatter = new Intl.DateTimeFormat("de-DE", { dateStyle: "long", timeZone: "UTC" });
@@ -33,6 +58,46 @@ const formatOptions = [["a4", "A4 quer"], ["portrait", "A4 hoch"], ["square", "Q
 const colorFields = [["paper", "Papierfarbe"], ["accent", "Akzentfarbe"], ["land", "Landfarbe"], ["water", "Wasserfarbe"]] as const;
 const day = (value: string) => dateFormatter.format(new Date(value.slice(0, 10) + "T12:00:00Z"));
 const legKey = (leg: { from_stop_id: string; to_stop_id: string }) => `${leg.from_stop_id}:${leg.to_stop_id}`;
+const isChoice = <Choice extends string,>(choices: readonly Choice[], value: unknown): value is Choice =>
+  choices.some((choice) => choice === value);
+
+function readAlbumDraft(value: unknown) {
+  if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1) return undefined;
+  const draft = value as Partial<AlbumDraft>;
+  const colors = Object.fromEntries(colorFields.flatMap(([field]) => {
+    const value = draft.colors?.[field];
+    return typeof value === "string" && normalizeAlbumColor(value) ? [[field, value]] : [];
+  }));
+  const transports = Object.fromEntries(Object.entries(draft.transports ?? {}).filter(([, value]) =>
+    typeof value === "string" && Object.prototype.hasOwnProperty.call(albumTransports, value)));
+  const titleScale = draft.formatting?.titleScale;
+  const formatting: AlbumFormatting = {
+    typeface: draft.formatting?.typeface === "sans" ? "sans" : "serif",
+    alignment: draft.formatting?.alignment === "center" ? "center" : "left",
+    titleScale: typeof titleScale === "number" && Number.isFinite(titleScale) ? Math.min(130, Math.max(75, titleScale)) : 100,
+    margins: isChoice(["narrow", "wide"], draft.formatting?.margins) ? draft.formatting.margins : "normal",
+    listColumns: draft.formatting?.listColumns === 1 ? 1 : 2,
+  };
+  const dpi = draft.dpi && albumDensities.includes(draft.dpi) ? draft.dpi : 300;
+  return {
+    ...draft, colors, transports, formatting, dpi,
+    title: typeof draft.title === "string" ? draft.title.slice(0, 72) : undefined,
+    subtitle: typeof draft.subtitle === "string" ? draft.subtitle.slice(0, 100) : undefined,
+    format: isChoice(["custom", "square", "portrait"], draft.format) ? draft.format : "a4" as const,
+    dimensions: albumOutputSize("custom", dpi, draft.dimensions) ?? { width: 3000, height: 3000 },
+    style: isChoice(["standard", "landscape", "satellite"], draft.style) ? draft.style : undefined,
+    palette: draft.palette === "coast" ? "coast" as const : "sand" as const,
+    accent: isChoice(Object.keys(albumAccents) as AlbumAccent[], draft.accent) ? draft.accent : "automatic" as const,
+    contextPercent: typeof draft.contextPercent === "number" && Number.isFinite(draft.contextPercent)
+      ? Math.max(0, Math.min(100, draft.contextPercent)) : 0,
+    markerScale: typeof draft.markerScale === "number" && Number.isFinite(draft.markerScale)
+      ? Math.max(70, Math.min(140, draft.markerScale)) : 100,
+    useViewport: draft.useViewport === true,
+    showNames: typeof draft.showNames === "boolean" ? draft.showNames : undefined,
+    showPeriod: draft.showPeriod !== false,
+    showStopsList: draft.showStopsList !== false,
+  };
+}
 
 function pngBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -61,35 +126,42 @@ function albumPeriod(opening: MapAlbumOpening) {
   return undefined;
 }
 
-export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbumOpening; onClose: () => void }) {
+export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
+  opening: MapAlbumOpening; onClose: () => void; onSaveDraft?: (draft: AlbumDraft) => Promise<void>;
+}) {
   const dialog = useRef<HTMLElement>(null);
   const defaultTitle = opening.journey ? "Mein Reiseverlauf" : "Meine Fotokarte";
-  const [title, setTitle] = useState(defaultTitle);
-  const [subtitle, setSubtitle] = useState("");
-  const [format, setFormat] = useState<AlbumFormat>("a4");
-  const [width, setWidth] = useState("3000");
-  const [height, setHeight] = useState("3000");
-  const [dpi, setDpi] = useState<AlbumDpi>(300);
-  const [palette, setPalette] = useState<AlbumPalette>("sand");
-  const [accent, setAccent] = useState<AlbumAccent>("automatic");
-  const [colors, setColors] = useState<AlbumCustomColors>({});
-  const [formatting, setFormatting] = useState<AlbumFormatting>({});
-  const [contextPercent, setContextPercent] = useState(0);
-  const [markerScale, setMarkerScale] = useState(100);
-  const [useViewport, setUseViewport] = useState(false);
-  const [transports, setTransports] = useState<Partial<Record<string, AlbumTransport>>>({});
-  const [style, setStyle] = useState(opening.style);
-  const [showNames, setShowNames] = useState(opening.showCountryNames);
-  const [showPeriod, setShowPeriod] = useState(true);
-  const [showStopsList, setShowStopsList] = useState(true);
+  const draft = useMemo(() => readAlbumDraft(opening.draft), [opening.draft]);
+  const [title, setTitle] = useState(draft?.title ?? defaultTitle);
+  const [subtitle, setSubtitle] = useState(draft?.subtitle ?? "");
+  const [format, setFormat] = useState<AlbumFormat>(draft?.format ?? "a4");
+  const [width, setWidth] = useState(String(draft?.dimensions.width ?? 3000));
+  const [height, setHeight] = useState(String(draft?.dimensions.height ?? 3000));
+  const [dpi, setDpi] = useState<AlbumDpi>(draft?.dpi ?? 300);
+  const [palette, setPalette] = useState<AlbumPalette>(draft?.palette ?? "sand");
+  const [accent, setAccent] = useState<AlbumAccent>(draft?.accent ?? "automatic");
+  const [colors, setColors] = useState<AlbumCustomColors>(draft?.colors ?? {});
+  const [formatting, setFormatting] = useState<AlbumFormatting>(draft?.formatting ?? {});
+  const [contextPercent, setContextPercent] = useState(draft?.contextPercent ?? 0);
+  const [markerScale, setMarkerScale] = useState(draft?.markerScale ?? 100);
+  const [useViewport, setUseViewport] = useState(Boolean(opening.hasSelection && draft?.useViewport));
+  const [transports, setTransports] = useState<Partial<Record<string, AlbumTransport>>>(draft?.transports ?? {});
+  const [style, setStyle] = useState(draft?.style ?? opening.style);
+  const [showNames, setShowNames] = useState(draft?.showNames ?? opening.showCountryNames);
+  const [showPeriod, setShowPeriod] = useState(draft?.showPeriod ?? true);
+  const [showStopsList, setShowStopsList] = useState(draft?.showStopsList ?? true);
   const [data, setData] = useState<AlbumData | null>(null);
   const [retry, setRetry] = useState(0);
   const [dataError, setDataError] = useState("");
-  const [rendered, setRendered] = useState<{ key: string; pages: MapAlbumPage[] } | null>(null);
+  const [rendered, setRendered] = useState<{
+    key: string; opening: MapAlbumOpening; data: AlbumData; pages: MapAlbumPage[];
+  } | null>(null);
   const [renderError, setRenderError] = useState<{ key: string; text: string }>();
   const [pageIndex, setPageIndex] = useState(0);
   const [preview, setPreview] = useState<{ page: MapAlbumPage; url: string }>();
   const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const busy = saving || savingDraft;
   const [saveError, setSaveError] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const active = useRef(true);
@@ -97,12 +169,14 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
   const bounds = useViewport ? opening.viewport : opening.bounds;
   const dimensions = useMemo(() => ({ width: Number(width), height: Number(height) }), [width, height]);
   const size = albumOutputSize(format, dpi, dimensions);
-  const invalidColor = Object.values(colors).some((value) => value.trim() && !normalizeAlbumColor(value));
+  const availableColorFields = colorFields.filter(([field]) => style !== "satellite" || field === "paper" || field === "accent");
+  const invalidColor = availableColorFields.some(([field]) => Boolean(colors[field]?.trim() && !normalizeAlbumColor(colors[field])));
   const canRender = Boolean(fileTitle && size && !invalidColor);
   const defaultColors = albumPaletteColors(palette, accent, Boolean(opening.journey), style);
   const renderKey = JSON.stringify([fileTitle, subtitle, format, dimensions, dpi, palette, accent, colors, formatting, style,
     showNames, showPeriod, showStopsList, contextPercent, markerScale, useViewport, transports, retry]);
-  const pages = canRender && rendered?.key === renderKey ? rendered.pages : [];
+  const pages = canRender && rendered?.key === renderKey && rendered.opening === opening && rendered.data === data
+    ? rendered.pages : [];
   const page = pages[pageIndex];
   const previewPage = rendered?.pages[pageIndex] ?? rendered?.pages[0];
   const error = dataError || (renderError?.key === renderKey ? renderError.text : "");
@@ -131,7 +205,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
     const request: Promise<AlbumData> = opening.journey
       ? loadJourneyPlaces().then((places) => ({ places })).catch(() => ({}))
       : fetchMapPoints({ ...bounds, from_date: opening.fromDate || undefined,
-        to_date: opening.toDate || undefined, grid_columns: 18, grid_rows: 12 }, controller.signal)
+        to_date: opening.toDate || undefined, album_id: opening.albumId, grid_columns: 18, grid_rows: 12 }, controller.signal)
         .then(({ points }) => ({ points }));
     void request.then((value) => {
       if (!controller.signal.aborted) setData(value);
@@ -156,7 +230,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         if (current) {
           setRenderError(undefined);
           setPageIndex((index) => Math.min(index, pages.length - 1));
-          setRendered({ key: renderKey, pages });
+          setRendered({ key: renderKey, opening, data, pages });
         }
       }).catch((failure) => {
         if (current) setRenderError({ key: renderKey, text: failure instanceof Error ? failure.message : "Die Vorschau konnte nicht erstellt werden." });
@@ -174,7 +248,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
   }, [previewPage]);
 
   const save = async () => {
-    if (!page || saving) return;
+    if (!page || busy) return;
     setSaving(true);
     setSaveError("");
     setConfirmation("");
@@ -208,6 +282,22 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
     }
   };
 
+  const saveDraft = async () => {
+    if (!onSaveDraft || !canRender || busy) return;
+    setSavingDraft(true);
+    setSaveError("");
+    setConfirmation("");
+    try {
+      await onSaveDraft({ version: 1, title: fileTitle, subtitle: subtitle.trim(), format, dimensions, dpi, palette, accent,
+        colors, formatting, contextPercent, markerScale, useViewport, transports, style, showNames, showPeriod, showStopsList });
+      if (active.current) setConfirmation("Entwurf im Album gespeichert.");
+    } catch (failure) {
+      if (active.current) setSaveError(failure instanceof Error ? failure.message : "Der Entwurf konnte nicht gespeichert werden.");
+    } finally {
+      if (active.current) setSavingDraft(false);
+    }
+  };
+
   const changeColor = (field: keyof AlbumCustomColors, value: string) => {
     setColors((previous) => ({ ...previous, [field]: value }));
     setConfirmation("");
@@ -225,7 +315,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         <button type="button" data-initial-focus onClick={onClose}>Schließen</button>
       </header>
       <div className="gps-album-dialog__editor">
-        <fieldset className="gps-album-dialog__options" disabled={saving}>
+        <fieldset className="gps-album-dialog__options" disabled={busy}>
           <label>Titel<input required aria-invalid={!fileTitle} value={title} maxLength={72} onChange={(event) => {
             setTitle(event.target.value); setConfirmation("");
           }} /></label>
@@ -255,7 +345,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         </fieldset>
         <details className="gps-album-dialog__details">
           <summary tabIndex={0}>Bildgröße und Auflösung</summary>
-          <fieldset disabled={saving}>
+          <fieldset disabled={busy}>
             <label><span id="gps-album-dpi">Druckauflösung</span><select aria-labelledby="gps-album-dpi" value={dpi} onChange={(event) => {
               setDpi(Number(event.target.value) as AlbumDpi); setConfirmation("");
             }}>
@@ -268,10 +358,10 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         </details>
         <details className="gps-album-dialog__details">
           <summary tabIndex={0}>Darstellung</summary>
-          <fieldset disabled={saving}>
+          <fieldset disabled={busy}>
             <label><span id="gps-album-style">Kartenstil</span><select aria-labelledby="gps-album-style" value={style} onChange={(event) => {
-              setStyle(event.target.value === "landscape" ? "landscape" : "standard"); setConfirmation("");
-            }}><option value="standard">Standard</option><option value="landscape">Landschaft</option></select></label>
+              setStyle(event.target.value as MapStyle); setConfirmation("");
+            }}><option value="standard">Standard</option><option value="landscape">Landschaft</option><option value="satellite">Satellit</option></select></label>
             <label><span id="gps-album-frame">Bildausschnitt</span><select aria-labelledby="gps-album-frame" value={contextPercent === 0 ? "close" : contextPercent === 52 ? "wide" : "custom"} onChange={(event) => {
               setContextPercent(event.target.value === "wide" ? 52 : event.target.value === "custom" ? 25 : 0); setConfirmation("");
             }}><option value="close">{opening.journey ? "Ganze Reise einrahmen" : "Eng einrahmen"}</option>
@@ -304,8 +394,8 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         </details>
         <details className="gps-album-dialog__details gps-album-dialog__colors">
           <summary tabIndex={0}>Eigene Farben</summary>
-          <fieldset disabled={saving}>
-            {colorFields.map(([field, label]) => {
+          <fieldset disabled={busy}>
+            {availableColorFields.map(([field, label]) => {
               const draft = colors[field] ?? "";
               const selected = normalizeAlbumColor(draft);
               return <div className="gps-album-dialog__color" key={field}>
@@ -329,7 +419,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         </details>
         <details className="gps-album-dialog__details">
           <summary tabIndex={0}>Schrift und Layout</summary>
-          <fieldset disabled={saving}>
+          <fieldset disabled={busy}>
             <label>Schrift<select aria-label="Schrift" value={formatting.typeface ?? "serif"} onChange={(event) => {
               changeFormatting("typeface", event.target.value === "sans" ? "sans" : "serif");
             }}><option value="serif">Klassisch (Serifen)</option><option value="sans">Modern (serifenlos)</option></select></label>
@@ -351,7 +441,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
         {Boolean(legs?.length) && <details className="gps-album-dialog__details gps-album-dialog__route">
           <summary tabIndex={0}>Route gestalten</summary>
           <p>Verkehrsmittel pro Etappe wählen. Vorschläge beruhen auf Luftlinie und Aufnahmezeiten.</p>
-          <fieldset disabled={saving} aria-label="Verkehrsmittel pro Etappe">
+          <fieldset disabled={busy} aria-label="Verkehrsmittel pro Etappe">
             {legs?.map(({ key, start, end }) => {
               const controlId = `gps-album-transport-${key}`;
               const hint = !transports[key] ? suggestJourneyTransport(start, end) : undefined;
@@ -382,6 +472,9 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
       </div>
       <div className="gps-album-dialog__preview" aria-busy={canRender && !page && !error}>
         {fileTitle && !error && preview && preview.page === previewPage && <img src={preview.url} alt="Vorschau des Fotobuchbildes" />}
+        {page?.satelliteFallback && <p role="status">Satellitenbild nicht verfügbar. Die Standardkarte wird verwendet.</p>}
+        {style === "satellite" && page?.number === 1 && !page.satelliteFallback &&
+          <a className="gps-map__credit" href={satelliteSource.url} target="_blank" rel="noreferrer">{satelliteSource.name}</a>}
         {!fileTitle && <p role="status">Gib einen Titel für das Fotobuchbild ein.</p>}
         {fileTitle && !size && <p>Prüfe die Bildgröße.</p>}
         {fileTitle && invalidColor && <p>Prüfe die Hexcodes unter „Eigene Farben“.</p>}
@@ -392,17 +485,20 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
       </div>
       <footer className="gps-album-dialog__footer">
         {pages.length > 1 && <div role="group" aria-label="Fotobuchseiten" className="gps-album-dialog__pages">
-          <button type="button" aria-label="Vorherige Seite" disabled={saving || pageIndex === 0} onClick={() => {
+          <button type="button" aria-label="Vorherige Seite" disabled={busy || pageIndex === 0} onClick={() => {
             setPageIndex((index) => index - 1); setConfirmation("");
           }}>‹</button>
           <span>Seite {pageIndex + 1} von {pages.length}</span>
-          <button type="button" aria-label="Nächste Seite" disabled={saving || pageIndex >= pages.length - 1} onClick={() => {
+          <button type="button" aria-label="Nächste Seite" disabled={busy || pageIndex >= pages.length - 1} onClick={() => {
             setPageIndex((index) => index + 1); setConfirmation("");
           }}>›</button>
         </div>}
         {saveError && <span role="alert">{saveError}</span>}
         {confirmation && <span role="status">{confirmation}</span>}
-        <button type="button" className="gps-album-dialog__save" disabled={!page || saving} onClick={() => void save()}>
+        {onSaveDraft && <button type="button" disabled={!canRender || busy} onClick={() => void saveDraft()}>
+          {savingDraft ? "Entwurf wird gespeichert …" : "Entwurf im Album speichern"}
+        </button>}
+        <button type="button" className="gps-album-dialog__save" disabled={!page || busy} onClick={() => void save()}>
           {saving ? "PNG wird erstellt …" : pages.length > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
         </button>
       </footer>
