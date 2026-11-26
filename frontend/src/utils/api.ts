@@ -263,6 +263,7 @@ export interface FaceImage {
     cluster_id: number | null;
     person_name: string | null;
     review_status: FaceReviewStatus;
+    is_manual?: true;
   }[];
 }
 
@@ -845,6 +846,7 @@ export async function fetchImages({
     }
     if (selection?.from_date) params.set("from_date", selection.from_date);
     if (selection?.to_date) params.set("to_date", selection.to_date);
+    if (selection?.album_id) params.set("album_id", selection.album_id);
     res = await apiFetch(`${API_BASE}/images?${params}`, { signal });
   }
   if (!res.ok) {
@@ -1500,6 +1502,7 @@ export interface MapFilters {
   north?: number;
   from_date?: string;
   to_date?: string;
+  album_id?: string;
 }
 
 export interface MapPoint {

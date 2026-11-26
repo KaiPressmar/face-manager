@@ -29,7 +29,7 @@ tests, and release or maintenance work here—not in the in-app changelog.
 
 - [ ] `./scripts/check-all.sh` passes locally
 - [ ] User-facing behavior was tested where applicable
-- [ ] Documentation was updated where applicable
+- [ ] README, screenshots, and in-app help were checked and updated where applicable
 - [ ] User-visible outcomes are covered under `CHANGELOG.md` → `Unreleased`; internal-only details remain in this PR
 - [ ] `VERSION` was changed only when preparing a release
 - [ ] A release PR follows the release checklist in `CONTRIBUTING.md`

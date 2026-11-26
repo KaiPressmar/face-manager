@@ -1,5 +1,7 @@
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import Layout from "./components/layout/Layout";
+import type { TopbarAction } from "./components/layout/Topbar";
+import type { HelpDestination, HelpTopic } from "./components/shared/HelpTour";
 import PeoplePage from "./components/people/PeoplePage";
 import ClusterPage from "./components/clusters/ClusterPage";
 import ImageRenamePage from "./components/renaming/ImageRenamePage";
@@ -40,10 +42,24 @@ export interface ClusterNavigationTarget {
 }
 
 const MapPage = lazy(() => import("./components/map/MapPage"));
+const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const GEO_SELECTION_EPOCH_KEY = "face-manager:geo-selection-epoch";
+const HELP_INVITATION_KEY = "face-manager:help-introduction-v1";
+
+function helpInvitationSeen() {
+  try { return localStorage.getItem(HELP_INVITATION_KEY) === "seen"; } catch { return false; }
+}
+
+const helpTopicForPage: Record<AppPage, HelpTopic> = {
+  people: "photos", map: "map", review: "people", renaming: "files", settings: "settings",
+};
+
+function focusHelpButton() {
+  window.requestAnimationFrame(() => document.getElementById("app-help-trigger")?.focus());
+}
 
 function readGeoSelectionEpoch() {
   try {
@@ -88,6 +104,7 @@ const App: React.FC = () => {
   const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
+  const [mapAlbumId, setMapAlbumId] = useState(initialEntry.mapAlbumId);
   const [clusterNavigationTarget, setClusterNavigationTarget] =
     useState<ClusterNavigationTarget | null>(() => {
       if (initialEntry.clusterId !== undefined) {
@@ -109,6 +126,23 @@ const App: React.FC = () => {
   const [showChangelog, setShowChangelog] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [showUpdate, setShowUpdate] = useState(false);
+  const [initialNotesChecked, setInitialNotesChecked] = useState(false);
+  const [introSeen, setIntroSeen] = useState(helpInvitationSeen);
+  const [helpTopic, setHelpTopic] = useState<HelpTopic | null>(null);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [topbarAction, setTopbarAction] = useState<TopbarAction>();
+  const helpSequence = useRef(0);
+
+  const dismissIntroduction = () => {
+    setIntroSeen(true);
+    try { localStorage.setItem(HELP_INVITATION_KEY, "seen"); } catch { /* Keep the choice in this session. */ }
+  };
+  const showHelp = (topic: HelpTopic) => { dismissIntroduction(); setHelpTopic(topic); };
+  const queuedDialog = showReleaseNotes || showChangelog || showUpdate;
+  const closeHelp = () => {
+    setHelpTopic(null);
+    if (!queuedDialog) focusHelpButton();
+  };
 
   // Pages are mounted lazily on first visit and then kept alive, so returning
   // to a page is instant and preserves its scroll position and state instead
@@ -136,6 +170,7 @@ const App: React.FC = () => {
     }
     setSettingsSection(entry.page === "settings" ? entry.settingsSection : undefined);
     if (entry.page === "people") setGeoSelection(entry.geoSelection);
+    if (entry.page === "map") setMapAlbumId(entry.mapAlbumId);
     setPage(entry.page);
   }, []);
 
@@ -228,6 +263,9 @@ const App: React.FC = () => {
       })
       .catch(() => {
         // Release notes must never prevent the application from starting.
+      })
+      .finally(() => {
+        if (!cancelled) setInitialNotesChecked(true);
       });
     return () => {
       cancelled = true;
@@ -289,8 +327,11 @@ const App: React.FC = () => {
     } catch {
       // History selections are still invalidated in the open application.
     }
-    if (parseNavigationHash(window.location.hash, window.history.state).geoSelection) {
+    const current = parseNavigationHash(window.location.hash, window.history.state);
+    if (current.geoSelection) {
       navigate({ page: "people" }, true);
+    } else if (current.mapAlbumId) {
+      navigate({ page: "map" }, true);
     } else {
       setGeoSelection(undefined);
     }
@@ -326,6 +367,24 @@ const App: React.FC = () => {
     [navigate],
   );
 
+  const openHelpDestination = (destination: HelpDestination) => {
+    setHelpTopic(null);
+    if (destination === "import" || destination === "activities") {
+      if (destination === "import") setImportDialogOpen(true);
+      setTopbarAction({ destination, sequence: ++helpSequence.current });
+      return;
+    }
+    navigate(destination === "review" ? { page: "review", reviewView: "open" }
+      : destination === "settings" ? { page: "settings", settingsSection: "daten" }
+        : { page: destination });
+    if (queuedDialog) return;
+    window.requestAnimationFrame(() => {
+      const content = document.querySelector<HTMLElement>(".page-pane--active .page-content");
+      const target = content?.querySelector<HTMLElement>("h1") ?? content;
+      if (target) { target.tabIndex = -1; target.focus(); }
+    });
+  };
+
   const renderPage = (target: AppPage, active: boolean): React.ReactNode => {
     switch (target) {
       case "people":
@@ -336,13 +395,14 @@ const App: React.FC = () => {
             onOpenPeople={handleOpenPeople}
             geoSelection={geoSelection}
             onChangeGeoSelection={handleChangeGeoSelection}
+            onOpenAlbumMap={(id) => navigate({ page: "map", mapAlbumId: id })}
           />
         );
       case "map":
         return (
           <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
             <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
+              <MapPage active={active} openAlbumId={mapAlbumId} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
             </Suspense>
           </ErrorBoundary>
         );
@@ -383,6 +443,21 @@ const App: React.FC = () => {
         sharedLibraryReadError={sharedLibrary.readError}
         onChangePage={handleChangePage}
         onShowReleaseNotes={openFullChangelog}
+        onShowHelp={() => showHelp(helpTopicForPage[page])}
+        onImportStateChange={setImportDialogOpen}
+        topbarAction={topbarAction}
+        invitation={initialNotesChecked && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
+          <aside className="help-invitation" aria-labelledby="help-invitation-title">
+            <div>
+              <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
+              <p>Wir zeigen dir die ersten Schritte. Du findest die Einführung auch jederzeit unter „Hilfe“.</p>
+            </div>
+            <div className="help-invitation__actions">
+              <button type="button" onClick={() => showHelp("photos")}>Einführung starten</button>
+              <button type="button" onClick={() => { dismissIntroduction(); focusHelpButton(); }}>Später</button>
+            </div>
+          </aside>
+        )}
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
@@ -398,7 +473,10 @@ const App: React.FC = () => {
           },
         )}
       </Layout>
-      {showReleaseNotes && unseenReleases.length > 0 && (
+      {helpTopic && <Suspense fallback={null}>
+        <HelpTour initialTopic={helpTopic} onClose={closeHelp} onOpenPage={openHelpDestination} />
+      </Suspense>}
+      {!helpTopic && !importDialogOpen && showReleaseNotes && unseenReleases.length > 0 && (
         <WhatsNewModal
           releases={unseenReleases}
           variant="whats-new"
@@ -409,7 +487,7 @@ const App: React.FC = () => {
           }}
         />
       )}
-      {showChangelog && (
+      {!helpTopic && !importDialogOpen && showChangelog && (
         <WhatsNewModal
           releases={changelog.status === "loaded" ? changelog.releases : []}
           variant="history"
@@ -419,7 +497,7 @@ const App: React.FC = () => {
           onClose={() => setShowChangelog(false)}
         />
       )}
-      {showUpdate && availableUpdate && !showReleaseNotes && !showChangelog && (
+      {!helpTopic && !importDialogOpen && showUpdate && availableUpdate && !showReleaseNotes && !showChangelog && (
         <UpdateAvailableModal
           update={availableUpdate}
           onClose={() => setShowUpdate(false)}

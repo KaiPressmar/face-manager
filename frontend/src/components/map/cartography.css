@@ -29,11 +29,31 @@
   stroke-opacity: .57;
 }
 
+.gps-map__svg--satellite {
+  --map-label: #f4f0de;
+  --map-city-label: #f1f4ee;
+  --map-label-outline: #17211b;
+}
+
+.gps-map__svg--satellite .gps-map__border {
+  stroke: #f2e8c8;
+  stroke-opacity: .66;
+}
+
 .gps-map__labels,
 .gps-map__relief,
 .gps-map__water,
+.gps-map__satellite,
 .gps-map__journey-route {
   pointer-events: none;
+}
+
+.gps-map__raster-status {
+  margin: 0;
+  padding: 8px 13px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
 }
 
 .gps-map__relief image {

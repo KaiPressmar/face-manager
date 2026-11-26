@@ -171,6 +171,14 @@ classification from the PR body. User-visible application changes must update
 creating noisy in-app release notes. Missing or contradictory classifications
 fail **Metadata and scripts**.
 
+### Keep the README and in-app help current
+
+Review the README, screenshots, and related in-app help whenever a user-facing
+workflow or label changes. Update the affected material in the same pull request.
+Use the labels people see in the app and short German instructions. Replace
+screenshots when the controls or steps they illustrate change. Mention in the
+pull request what you checked and which material you updated.
+
 ### 4. Open a pull request into `develop`
 
 ```bash
@@ -280,6 +288,8 @@ Open exactly one pull request with:
 Confirm that the pull request contains all commits intended for the release,
 the three canonical version files and dated changelog section contain the
 selected version, and all CI plus **Require develop as source** checks pass.
+Walk through the affected README examples and in-app help in the release build.
+Check the screenshot captions and links against the visible interface.
 
 Merge the release pull request with a merge commit. This preserves the release
 boundary and records the complete `develop` history in `main`.

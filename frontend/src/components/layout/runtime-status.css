@@ -1,0 +1,55 @@
+.runtime-status {
+  position: relative;
+}
+
+.runtime-status > .compute-mode-badge {
+  display: inline-flex;
+  cursor: pointer;
+  list-style: none;
+}
+
+.runtime-status > summary::-webkit-details-marker {
+  display: none;
+}
+
+.runtime-status__panel {
+  position: absolute;
+  z-index: 12;
+  inset-block-start: calc(100% + 8px);
+  inset-inline-end: 0;
+  width: min(19rem, calc(100vw - 4.5rem));
+  max-height: min(24rem, calc(100dvh - 5rem));
+  overflow: auto;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+  color: var(--text);
+  box-shadow: 0 12px 30px rgb(0 0 0 / 22%);
+  text-align: start;
+}
+
+.runtime-status__panel p,
+.runtime-status__timings dl {
+  margin: 7px 0;
+}
+
+.runtime-status__timings {
+  margin-bottom: 9px;
+  font-size: .875rem;
+}
+
+.runtime-status__timings summary {
+  cursor: pointer;
+}
+
+.runtime-status__timings dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.runtime-status__timings dd {
+  margin: 0;
+  white-space: nowrap;
+}

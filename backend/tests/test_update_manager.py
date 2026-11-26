@@ -122,6 +122,44 @@ class UpdateMetadataTest(unittest.TestCase):
 
 
 class UpdateDownloadTest(unittest.TestCase):
+    def test_activity_reports_bounded_progress_and_verified_completion(self):
+        snapshots = []
+        manager = UpdateManager(snapshots.append)
+        content = b"a" * (2 * 1024 * 1024)
+        manager._cached_result, manager._candidate = parse_latest_release(
+            release_payload(content=content), "1.1.0", "cpu"
+        )
+        checksum = hashlib.sha256(content).hexdigest()
+
+        def immediate_worker(*, target, args, **_options):
+            class Worker:
+                def start(self):
+                    target(*args)
+
+            return Worker()
+
+        with tempfile.TemporaryDirectory() as folder, patch(
+            "backend.services.update_manager.threading.Thread", side_effect=immediate_worker
+        ), patch.object(manager, "_fetch_checksum", return_value=checksum), patch.object(
+            manager, "_request", return_value=FakeResponse(content, "https://objects.githubusercontent.com/installer")
+        ), patch("backend.services.update_manager.time.monotonic", side_effect=[10.0, 10.1, 10.8, 10.9, 11.0]):
+            self.assertEqual(manager.start_download("1.2.0", Path(folder))["status"], "ready")
+
+        self.assertEqual([snapshot["status"] for snapshot in snapshots], ["downloading", "downloading", "downloading", "ready"])
+        self.assertEqual([snapshot["downloaded_bytes"] for snapshot in snapshots], [0, 0, len(content) // 2, len(content)])
+        self.assertEqual(snapshots[-1]["total_bytes"], len(content))
+        self.assertNotIn("path", snapshots[-1])
+        self.assertNotIn("sha256", snapshots[-1])
+
+    def test_activity_error_hides_private_download_error_details(self):
+        snapshots = []
+        manager = UpdateManager(snapshots.append)
+        _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")
+        manager._set_download_error(candidate, OSError("private folder name"))
+
+        self.assertEqual(snapshots, [{"status": "error", "version": "1.2.0"}])
+        self.assertIn("private folder name", manager.download_state()["error"])
+
     def test_directory_failure_leaves_a_retryable_error(self):
         manager = UpdateManager()
         _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")

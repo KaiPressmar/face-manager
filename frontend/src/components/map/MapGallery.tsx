@@ -14,16 +14,18 @@ export interface MapGalleryOpening {
   cursor: MapImageCursor | null;
   index: number | null;
   label: string;
+  inferredImageIds?: readonly number[];
 }
 
 interface Props {
   opening: MapGalleryOpening;
   onClose: () => void;
   onOpenImages?: (selection: GeoPhotoSelection) => void;
+  onAddToAlbum?: (opener: HTMLElement, selection: GeoPhotoSelection, photoCount: number) => void;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
 }
 
-export default function MapGallery({ opening, onClose, onOpenImages, onNavigateToCluster }: Props) {
+export default function MapGallery({ opening, onClose, onOpenImages, onAddToAlbum, onNavigateToCluster }: Props) {
   const [page, setPage] = useState(opening);
   const [index, setIndex] = useState(opening.index);
   const [pending, setPending] = useState(false);
@@ -130,6 +132,7 @@ export default function MapGallery({ opening, onClose, onOpenImages, onNavigateT
         <div><h2>Galerie der Kartenauswahl</h2><p>{opening.label} · {total.toLocaleString("de-DE")} {total === 1 ? "Foto" : "Fotos"}</p></div>
         <div className="gps-selection-gallery__actions">
           {onOpenImages && <button type="button" onClick={() => onOpenImages(opening.selection)}>In Bilder öffnen</button>}
+          {onAddToAlbum && total > 0 && <button type="button" onClick={(event) => onAddToAlbum(event.currentTarget, opening.selection, total)}>Zum Album hinzufügen</button>}
           <button type="button" data-initial-focus onClick={onClose}>Galerie schließen</button>
         </div>
       </header>
@@ -138,6 +141,7 @@ export default function MapGallery({ opening, onClose, onOpenImages, onNavigateT
           {page.items.map((image, position) => <button key={image.id} type="button" className="gps-page__photo"
             data-gallery-index={position} onClick={() => openPhoto(position)} aria-label={`${image.filename || "Foto"} öffnen`}>
             <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
+            {opening.inferredImageIds?.includes(image.id) && <small>Nach Aufnahmezeit zugeordnet</small>}
           </button>)}
         </div>
         {pageError && <p className="gps-page__error" role="alert">{pageError}</p>}

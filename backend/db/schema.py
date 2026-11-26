@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..config import DB_PATH
 from ..error_logging import configure_error_logging
+from ..services.face_geometry import face_boxes_overlap
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.db")
@@ -349,6 +350,30 @@ def _create_image_location_table(cur):
     )
 
 
+def _create_album_tables(cur):
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS album (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            cover_image_id INTEGER REFERENCES image(id) ON DELETE SET NULL,
+            journey TEXT,
+            layout_draft TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+    cur.execute(
+        """CREATE TABLE IF NOT EXISTS album_photo (
+            album_id TEXT NOT NULL REFERENCES album(id) ON DELETE CASCADE,
+            image_id INTEGER NOT NULL REFERENCES image(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (album_id, image_id)
+        )"""
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_album_photo_image ON album_photo(image_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_album_photo_position ON album_photo(album_id, position, image_id)")
+
+
 def calculate_file_hash(path: str):
     """Calculate a streaming SHA-256 digest.
 
@@ -386,37 +411,81 @@ def _face_box(face):
     return None
 
 
+def _manual_pair_compatible(manual, automatic):
+    """Keep a distinct explicit review, assignment, or custom label."""
+    if automatic["review_status"] != manual["review_status"]:
+        return False
+    if manual["person_id"] == automatic["person_id"] and manual["label"] == automatic["label"]:
+        return True
+    has_default_label = automatic["label"] in (
+        None, f'Cluster {automatic["cluster_id"]}', "Neue Gesichtsgruppe",
+    )
+    return has_default_label and automatic["person_id"] in (None, manual["person_id"])
+
+
 def _merge_duplicate_image_faces(cur, canonical_id, duplicate_id):
     """Keep distinct or conflicting face records when collapsing image aliases."""
     faces = cur.execute(
         """SELECT f.id, f.image_id, f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
-                  f.review_status, f.embedding, c.id AS cluster_id, c.person_id, c.label
+                  f.review_status, f.is_manual, f.embedding, c.id AS cluster_id, c.person_id, c.label
            FROM face f LEFT JOIN cluster c ON c.id = f.cluster_id
            WHERE f.image_id IN (?, ?) ORDER BY f.id""",
         (canonical_id, duplicate_id),
     ).fetchall()
     canonical_by_box = {}
+    alias_by_box = {}
     for face in faces:
-        if face["image_id"] == canonical_id and (box := _face_box(face)) is not None:
-            canonical_by_box.setdefault(box, []).append(face)
+        box = _face_box(face)
+        if box is not None:
+            by_box = canonical_by_box if face["image_id"] == canonical_id else alias_by_box
+            by_box.setdefault(box, []).append(face)
 
     default_annotation = (FACE_REVIEW_STATUS_ACTIVE, None, None)
     paired = set()
+    has_manual_face = any(face["is_manual"] for face in faces)
     for face in faces:
         if face["image_id"] != duplicate_id:
             continue
-        matches = canonical_by_box.get(_face_box(face), ())
+        box = _face_box(face)
+        matches = canonical_by_box.get(box, ())
+        if has_manual_face and box is not None and not matches and len(alias_by_box[box]) == 1:
+            # Different boxes may describe the same face. Only coalesce
+            # manual/automatic pairs with a unique match in both directions.
+            matches = [
+                candidate for other_box, candidates in canonical_by_box.items()
+                if face_boxes_overlap(box, other_box, minimum_iou=0.55)
+                for candidate in candidates
+            ]
+            if len(matches) == 1:
+                candidate = matches[0]
+                reverse_matches = sum(
+                    len(incoming) for alias_box, incoming in alias_by_box.items()
+                    if face_boxes_overlap(_face_box(candidate), alias_box, minimum_iou=0.55)
+                )
+                if reverse_matches != 1 or candidate["is_manual"] == face["is_manual"]:
+                    matches = ()
         if len(matches) == 1 and matches[0]["id"] not in paired:
             canonical = matches[0]
             existing = (canonical["review_status"], canonical["person_id"], canonical["label"])
             incoming = (face["review_status"], face["person_id"], face["label"])
-            if existing == incoming or default_annotation in (existing, incoming):
-                if existing == default_annotation and incoming != existing:
+            compatible = existing == incoming or default_annotation in (existing, incoming)
+            if canonical["is_manual"] != face["is_manual"]:
+                manual, automatic = (canonical, face) if canonical["is_manual"] else (face, canonical)
+                compatible = _manual_pair_compatible(manual, automatic)
+            if compatible:
+                if face["is_manual"] and not canonical["is_manual"]:
+                    # Keep the manual id (and its associated crop) and exact
+                    # user-selected geometry when its automatic counterpart matched.
+                    cur.execute("DELETE FROM face WHERE id = ?", (canonical["id"],))
+                    cur.execute("UPDATE face SET image_id = ? WHERE id = ?", (canonical_id, face["id"]))
+                    paired.add(canonical["id"])
+                    continue
+                if not canonical["is_manual"] and existing == default_annotation and incoming != existing:
                     cur.execute(
                         "UPDATE face SET cluster_id = ?, review_status = ? WHERE id = ?",
                         (face["cluster_id"], face["review_status"], canonical["id"]),
                     )
-                if canonical["embedding"] is None and face["embedding"] is not None:
+                if not canonical["is_manual"] and canonical["embedding"] is None and face["embedding"] is not None:
                     cur.execute(
                         "UPDATE face SET embedding = ? WHERE id = ?",
                         (face["embedding"], canonical["id"]),
@@ -463,6 +532,20 @@ def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
            WHERE id = ?""",
         (latitude, longitude, captured_at, timing["captured_at_utc"], timing["capture_time_source"],
          scanned_at, *geometry, canonical_id),
+    )
+
+
+def _merge_duplicate_album_photos(cur, canonical_id, duplicate_id):
+    cur.execute(
+        """INSERT INTO album_photo (album_id, image_id, position)
+           SELECT album_id, ?, position FROM album_photo WHERE image_id = ?
+           ON CONFLICT (album_id, image_id) DO UPDATE
+           SET position = MIN(album_photo.position, excluded.position)""",
+        (canonical_id, duplicate_id),
+    )
+    cur.execute(
+        "UPDATE album SET cover_image_id = ? WHERE cover_image_id = ?",
+        (canonical_id, duplicate_id),
     )
 
 
@@ -539,6 +622,7 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
         for duplicate_id in duplicate_ids:
             _merge_duplicate_image_faces(cur, canonical_id, duplicate_id)
             _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id)
+            _merge_duplicate_album_photos(cur, canonical_id, duplicate_id)
             cur.execute(
                 "UPDATE image_location SET image_id = ? WHERE image_id = ?",
                 (canonical_id, duplicate_id),
@@ -575,6 +659,7 @@ def _create_face_table(cur, table_name="face"):
             cluster_id INTEGER,
             review_status TEXT NOT NULL DEFAULT '{FACE_REVIEW_STATUS_ACTIVE}',
             embedding BLOB,
+            is_manual INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE,
             FOREIGN KEY(cluster_id) REFERENCES cluster(id)
         )
@@ -595,6 +680,8 @@ def _ensure_face_review_columns(cur):
             ADD COLUMN review_status TEXT NOT NULL DEFAULT '{FACE_REVIEW_STATUS_ACTIVE}'
             """
         )
+    if "is_manual" not in columns:
+        cur.execute("ALTER TABLE face ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0")
     placeholders = ",".join("?" for _ in VALID_FACE_REVIEW_STATUSES)
     cur.execute(
         f"""
@@ -872,6 +959,7 @@ def _initialize_schema(conn, *, scan_sources: bool):
         _create_face_table(cur)
     _ensure_face_review_columns(cur)
 
+    _create_album_tables(cur)
     _migrate_image_locations(conn, scan_sources=scan_sources)
     _create_import_job_table(cur)
     _create_app_settings_table(cur)

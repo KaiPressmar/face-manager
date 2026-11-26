@@ -18,6 +18,7 @@ export interface NavigationEntry {
   settingsSection?: SettingsSection;
   geoSelection?: GeoPhotoSelection;
   geoSelectionEpoch?: number;
+  mapAlbumId?: string;
 }
 
 const PAGE_SEGMENTS: Record<AppPage, string> = {
@@ -61,6 +62,7 @@ export function navigationHash(entry: NavigationEntry): string {
     return `${base}/${entry.settingsSection}`;
   }
   if (entry.page === "people" && entry.geoSelection) return `${base}/auswahl`;
+  if (entry.page === "map" && entry.mapAlbumId) return `${base}/album/${entry.mapAlbumId}`;
   return base;
 }
 
@@ -74,6 +76,9 @@ export function parseNavigationHash(hash: string, state?: NavigationEntry | null
   // in browser history state so neither the URL nor a copied link contains it.
   if (page === "people" && segments[1] === "auswahl" && state?.page === "people" && state.geoSelection) {
     return { page, geoSelection: state.geoSelection, geoSelectionEpoch: state.geoSelectionEpoch };
+  }
+  if (page === "map" && segments[1] === "album" && /^[a-f0-9]{32}$/.test(segments[2] ?? "")) {
+    return { page, mapAlbumId: segments[2] };
   }
 
   if (page === "review" && segments[1] === "gruppe") {

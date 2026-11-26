@@ -1,5 +1,6 @@
 import type { JourneyConnection, MapBounds, MapStyle } from "./WorldMap";
 import countries from "./world-countries.json";
+import satelliteSource from "./world-satellite.json";
 import overviewWater from "./world-water-overview.json";
 
 interface AlbumPosition {
@@ -38,16 +39,45 @@ export const albumAccents = {
   plum: { name: "Pflaume", color: "#713f69" },
 } as const;
 export type AlbumAccent = keyof typeof albumAccents;
+export type AlbumFormat = "a4" | "portrait" | "square" | "custom";
+export const albumDensities = [150, 240, 300, 400] as const;
+export type AlbumDpi = (typeof albumDensities)[number];
+
+export interface AlbumDimensions {
+  width: number;
+  height: number;
+}
+
+export interface AlbumCustomColors {
+  paper?: string;
+  accent?: string;
+  land?: string;
+  water?: string;
+}
+
+export interface AlbumFormatting {
+  typeface?: "serif" | "sans";
+  alignment?: "left" | "center";
+  titleScale?: number;
+  margins?: "narrow" | "normal" | "wide";
+  listColumns?: 1 | 2;
+}
 
 export interface MapAlbumArtworkInput {
-  format: "a4" | "portrait" | "square";
+  format: AlbumFormat;
+  dimensions?: AlbumDimensions;
+  dpi?: AlbumDpi;
   title: string;
   subtitle?: string;
   period?: string;
   style: MapStyle;
   palette?: "sand" | "coast";
   accent?: AlbumAccent;
+  colors?: AlbumCustomColors;
+  formatting?: AlbumFormatting;
   wideFrame?: boolean;
+  contextPercent?: number;
+  markerScale?: number;
   showCountryNames?: boolean;
   showStopsList?: boolean;
   bounds: MapBounds;
@@ -63,6 +93,8 @@ export interface MapAlbumPage {
   width: number;
   number: number;
   total: number;
+  dpi: AlbumDpi;
+  satelliteFallback?: boolean;
 }
 
 interface Pixel {
@@ -81,22 +113,103 @@ const palettes = {
   coast: { paper: "#f0f5f6", ink: "#223b45", muted: "#405e69", rule: "#b1c4cb", routeInk: "#8d4939", mapInk: "#244f66",
     sea: "#d0e5ee", land: "#e3e9d9", reliefLand: "#d7e4cf", lake: "#a9c9d6", river: "#729fae", shore: "#96aea9", border: "#718d88", labelHalo: "#edf4ec" },
 } as const;
-type Palette = Record<keyof typeof palettes.sand, string>;
+type Palette = Record<keyof typeof palettes.sand | "labelInk", string>;
 export function albumAccentColor(palette: keyof typeof palettes, accent: AlbumAccent, forJourney: boolean) {
   return albumAccents[accent].color || palettes[palette][forJourney ? "routeInk" : "mapInk"];
+}
+
+export function albumPaletteColors(palette: keyof typeof palettes, accent: AlbumAccent, forJourney: boolean, style: MapStyle) {
+  const { paper, land, reliefLand, sea } = palettes[palette];
+  return { paper, land: style === "landscape" ? reliefLand : land, water: sea, accent: albumAccentColor(palette, accent, forJourney) };
+}
+
+export function normalizeAlbumColor(value?: string) {
+  const hex = value?.trim().replace(/^#/, "").toLowerCase() ?? "";
+  if (/^[0-9a-f]{6}$/.test(hex)) return `#${hex}`;
+  if (/^[0-9a-f]{3}$/.test(hex)) return `#${[...hex].map((digit) => digit.repeat(2)).join("")}`;
+  return undefined;
+}
+
+function luminance(color: string) {
+  return [.2126, .7152, .0722].reduce((total, factor, index) => {
+    const channel = parseInt(color.slice(1 + index * 2, 3 + index * 2), 16) / 255;
+    return total + factor * (channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4);
+  }, 0);
+}
+
+function contrast(first: string, second: string) {
+  const a = luminance(first), b = luminance(second);
+  return (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+}
+
+function readableOn(background: string, preferred: string, minimum = 4.5) {
+  if (contrast(background, preferred) >= minimum) return preferred;
+  return contrast(background, "#000000") > contrast(background, "#ffffff") ? "#000000" : "#ffffff";
+}
+
+function tintForOutline(background: string, target: string, minimum: number) {
+  if (contrast(background, target) >= minimum) return target;
+  const edge = readableOn(background, target, minimum);
+  return "#" + [1, 3, 5].map((position) => {
+    const from = parseInt(background.slice(position, position + 2), 16);
+    const to = parseInt(edge.slice(position, position + 2), 16);
+    return Math.round(from + (to - from) * .28).toString(16).padStart(2, "0");
+  }).join("");
+}
+
+function artworkPalette(input: MapAlbumArtworkInput): Palette {
+  const basePalette = input.palette ?? "sand";
+  const base = palettes[basePalette];
+  const paper = normalizeAlbumColor(input.colors?.paper);
+  const accent = normalizeAlbumColor(input.colors?.accent);
+  const land = normalizeAlbumColor(input.colors?.land);
+  const water = normalizeAlbumColor(input.colors?.water);
+  const labelInk = land ? readableOn(land, base.ink) : base.ink;
+  return {
+    ...base,
+    ...(paper && { paper, ink: readableOn(paper, base.ink), muted: readableOn(paper, base.muted), rule: readableOn(paper, base.rule, 1.4) }),
+    ...(land && { land, reliefLand: land, shore: tintForOutline(land, base.shore, 1.6), border: tintForOutline(land, base.border, 2) }),
+    ...(water && { sea: water, lake: water }),
+    labelInk,
+    labelHalo: land ? readableOn(labelInk, base.labelHalo) : base.labelHalo,
+    routeInk: accent ?? albumAccentColor(basePalette, input.accent ?? "automatic", true),
+    mapInk: accent ?? albumAccentColor(basePalette, input.accent ?? "automatic", false),
+  };
 }
 const serif = "Georgia, 'Times New Roman', serif";
 const sans = "Arial, Helvetica, sans-serif";
 const zoomInset = 0.12;
 const atlasWidth = 1000;
 const atlasHeight = 500;
-const printerPixelsPerMeter = 11811;
 const layouts = {
   a4: { width: 3508, height: 2480, margin: 156, mapHeight: 1370, firstStops: 4, continuedStops: 16 },
   portrait: { width: 2480, height: 3508, margin: 145, mapHeight: 1500, firstStops: 14, continuedStops: 26 },
   square: { width: 3000, height: 3000, margin: 150, mapHeight: 1510, firstStops: 8, continuedStops: 20 },
 } as const;
-type Layout = (typeof layouts)[keyof typeof layouts];
+type Layout = Record<keyof typeof layouts.a4, number>;
+
+export function albumOutputSize(format: AlbumFormat, dpi: AlbumDpi, dimensions?: AlbumDimensions): AlbumDimensions | null {
+  if (!albumDensities.includes(dpi)) return null;
+  if (format !== "custom") {
+    const { width, height } = layouts[format];
+    return { width: Math.round(width * dpi / 300), height: Math.round(height * dpi / 300) };
+  }
+  if (!dimensions) return null;
+  const { width, height } = dimensions;
+  if (![width, height].every((side) => Number.isInteger(side) && side >= 1200 && side <= 4800) ||
+      width * height > 16_000_000 || width > height * 2 || height > width * 2) return null;
+  return dimensions;
+}
+
+function drawingLayout(format: AlbumFormat, dimensions: AlbumDimensions, marginStyle: AlbumFormatting["margins"]): Layout {
+  const ratio = dimensions.width / dimensions.height;
+  const base = layouts[format === "custom" ? ratio > 1.2 ? "a4" : ratio < 1 / 1.2 ? "portrait" : "square" : format];
+  const scale = Math.min(base.width, base.height) / Math.min(dimensions.width, dimensions.height);
+  const margin = Math.round(base.margin * (marginStyle === "narrow" ? .67 : marginStyle === "wide" ? 1.45 : 1));
+  return format === "custom" ? {
+    ...base, width: Math.round(dimensions.width * scale), height: Math.round(dimensions.height * scale), margin,
+  } : { ...base, margin };
+}
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 const turn = (longitude: number) => ((longitude % 360) + 360) % 360;
@@ -113,7 +226,7 @@ const xml = (value: string) => value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
 /** Return the smallest longitude arc containing all stops and observed connections. */
-export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: readonly JourneyConnection[]): MapBounds {
+export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: readonly JourneyConnection[], minimumPadding = 1): MapBounds {
   const spans = stops.map(({ longitude }) => {
     const start = turn(longitude + 180);
     return { start, end: start };
@@ -153,8 +266,9 @@ export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: re
   connections.forEach(({ from, to }) => { measure(from); measure(to); });
   const longitudeSpan = 360 - gap;
   const latitudeSpan = north - south;
-  const longitudePadding = Math.max(1, longitudeSpan * zoomInset);
-  const latitudePadding = Math.max(1, latitudeSpan * zoomInset);
+  const padding = Number.isFinite(minimumPadding) ? Math.max(.0001, minimumPadding) : 1;
+  const longitudePadding = Math.max(padding, longitudeSpan * zoomInset);
+  const latitudePadding = Math.max(padding, latitudeSpan * zoomInset);
   return longitudeSpan + longitudePadding * 2 >= 360
     ? { west: -180, east: 180, south: Math.max(-90, south - latitudePadding), north: Math.min(90, north + latitudePadding) }
     : { west: west - longitudePadding, east: west + longitudeSpan + longitudePadding,
@@ -198,10 +312,11 @@ function text(x: number, y: number, value: string, attrs: string) {
   return `<text x="${number(x)}" y="${number(y)}" ${attrs}>${xml(value)}</text>`;
 }
 
-function titleLines(title: string, width: number) {
+function titleLines(title: string, width: number, scale: number) {
   const words = title.trim().split(/\s+/);
-  const longTitle = textWidth(title, 145) > width;
-  if (!longTitle) return { lines: [title], size: 145 };
+  const preferred = Math.round(145 * scale);
+  const longTitle = textWidth(title, preferred) > width;
+  if (!longTitle) return { lines: [title], size: preferred };
   const characters = Array.from(title);
   const midpoint = Math.ceil(characters.length / 2);
   const balanced = words.slice(1).map((_, index) => [
@@ -210,14 +325,19 @@ function titleLines(title: string, width: number) {
     const widest = (parts: string[]) => Math.max(...parts.map((line) => textWidth(line, 1)));
     return !best || widest(lines) < widest(best) ? lines : best;
   }, null) ?? [characters.slice(0, midpoint).join(""), characters.slice(midpoint).join("")];
-  const size = Math.floor(Math.min(117, ...balanced.map((line) => width * .98 / Math.max(1, textWidth(line, 1)))));
+  const size = Math.floor(Math.min(117 * scale, ...balanced.map((line) => width * .98 / Math.max(1, textWidth(line, 1)))));
   return { lines: balanced, size };
 }
 
 function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted, rule }: Palette) {
   const { height, width, margin } = layout;
   const title = input.title.trim() || "Meine Fotokarte";
-  const { lines, size } = titleLines(title, width - 2 * margin);
+  const formatting = input.formatting;
+  const typeface = formatting?.typeface === "sans" ? sans : serif;
+  const centered = formatting?.alignment === "center";
+  const x = centered ? width / 2 : margin;
+  const textAnchor = centered ? 'text-anchor="middle"' : '';
+  const { lines, size } = titleLines(title, width - 2 * margin, clamp(formatting?.titleScale ?? 100, 75, 130) / 100);
   const titleTop = 124;
   let lastBaseline = titleTop + size * (1 + (lines.length - 1) * .99);
   const captions = [input.subtitle, input.period].flatMap((value) => {
@@ -225,31 +345,34 @@ function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted
     if (!caption) return [];
     const captionSize = Math.min(44, (width - margin * 2 - 8) / Math.max(1, textWidth(caption, 1)));
     lastBaseline += Math.max(57, captionSize + 17);
-    return [text(margin + 3, lastBaseline, caption, `fill="${muted}" font-family="${sans}" font-size="${number(captionSize)}"`)];
+    return [text(x + (centered ? 0 : 3), lastBaseline, caption, `fill="${muted}" font-family="${sans}" font-size="${number(captionSize)}" ${textAnchor}`)];
   });
   const divider = number(lastBaseline + 40);
   return {
     mapTop: divider + 45,
     svg: `<rect width="${width}" height="${height}" fill="${paper}"/>
-      ${lines.map((line, index) => text(margin, titleTop + size * (1 + index * .99), line,
-        `fill="${ink}" font-family="${serif}" font-size="${size}" font-weight="600"`)).join("")}
+      ${lines.map((line, index) => text(x, titleTop + size * (1 + index * .99), line,
+        `fill="${ink}" font-family="${typeface}" font-size="${size}" font-weight="600" ${textAnchor}`)).join("")}
       ${captions.join("")}
       <line x1="${margin}" x2="${width - margin}" y1="${divider}" y2="${divider}" stroke="${rule}" stroke-width="2"/>`,
   };
 }
 
 function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number, bottom: number, continued: boolean,
-  transportOnly: boolean, { ink, muted, rule, routeInk }: Palette) {
+  transportOnly: boolean, { ink, muted, rule, routeInk, paper }: Palette, formatting?: AlbumFormatting) {
   if (!stops.length) return "";
   const { margin, width } = layout;
   const heading = transportOnly ? "Verkehrsmittel nach Zielstopp" : continued ? "Weitere Stationen" : "Stationen";
-  const columnWidth = (width - margin * 2 - 68) / 2;
-  const rowHeight = Math.min(161, (bottom - top - 87) / Math.ceil(stops.length / 2));
-  return text(margin, top + 47, heading, `fill="${ink}" font-family="${serif}" font-size="58"`) +
+  const columns = formatting?.listColumns ?? 2;
+  const typeface = formatting?.typeface === "sans" ? sans : serif;
+  const numberInk = readableOn(paper, routeInk);
+  const columnWidth = (width - margin * 2 - (columns - 1) * 68) / columns;
+  const rowHeight = Math.min(161, (bottom - top - 87) / Math.ceil(stops.length / columns));
+  return text(margin, top + 47, heading, `fill="${ink}" font-family="${typeface}" font-size="58"`) +
     stops.map((stop, index) => {
-      const col = index % 2;
+      const col = index % columns;
       const x = margin + col * (columnWidth + 68);
-      const y = top + 81 + Math.floor(index / 2) * rowHeight;
+      const y = top + 81 + Math.floor(index / columns) * rowHeight;
       const label = stop.title.trim() || `Stopp ${stop.number}`;
       const titleSize = Math.min(48, (columnWidth - 105) / Math.max(1, textWidth(label, 1)));
       const arrival = stop.arrivalMode ? `Anreise: ${albumTransports[stop.arrivalMode].label}` : "";
@@ -257,7 +380,7 @@ function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number
       const subSize = Math.min(33, (columnWidth - 105) / Math.max(1, textWidth(subtitle, 1)));
       return `<g data-album-stop="${xml(stop.id)}">
         <line x1="${number(x)}" x2="${number(x + columnWidth)}" y1="${number(y)}" y2="${number(y)}" stroke="${rule}" stroke-width="2"/>
-        ${text(x + 1, y + 52, String(stop.number), `fill="${routeInk}" font-family="${serif}" font-size="48" font-weight="600"`)}
+        ${text(x + 1, y + 52, String(stop.number), `fill="${numberInk}" font-family="${typeface}" font-size="48" font-weight="600"`)}
         ${text(x + 90, y + 49, label, `fill="${ink}" font-family="${sans}" font-size="${number(titleSize)}" font-weight="600"`)}
         ${subtitle ? text(x + 90, y + 90, subtitle, `fill="${muted}" font-family="${sans}" font-size="${number(subSize)}"`) : ""}
       </g>`;
@@ -270,9 +393,10 @@ function frameShape(frame: Frame, attrs: string) {
 
 type Detail = typeof import("./world-detail.json");
 
-function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, relief: string, palette: Palette) {
+function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, raster: string, palette: Palette) {
   const scale = 360 / (bounds.east - bounds.west);
   const landscape = style === "landscape";
+  const satellite = style === "satellite";
   const reliefOpacity = number(.57 * Math.min(1, Math.sqrt(6 / scale)));
   const waters = [
     ...overviewWater.rivers, ...detail.rivers,
@@ -282,12 +406,16 @@ function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyl
     ...overviewWater.lakes, ...detail.lakes,
   ].filter(({ minZoom }) => minZoom <= scale * 1.7).map(({ path }) =>
     `<path d="${path}" fill="${palette.lake}" fill-rule="evenodd"/>`).join("");
+  const base = satellite
+    ? `<image data-album-satellite="true" href="${raster}" width="${atlasWidth}" height="${atlasHeight}" preserveAspectRatio="none"/>`
+    : `<use href="#album-land" fill="${landscape ? palette.reliefLand : palette.land}" stroke="${palette.shore}" stroke-width="2.4"/>
+      ${raster ? `<image href="${raster}" width="${atlasWidth}" height="${atlasHeight}" preserveAspectRatio="none" clip-path="url(#album-land-clip)" opacity="${reliefOpacity}" style="mix-blend-mode:multiply"/>` : ""}`
+      + waters + lakes;
+  const border = satellite ? "#f2e8c8" : palette.border;
   const tile = `<g id="album-atlas">
-    <use href="#album-land" fill="${landscape ? palette.reliefLand : palette.land}" stroke="${palette.shore}" stroke-width="2.4"/>
-    ${relief ? `<image href="${relief}" width="1000" height="500" preserveAspectRatio="none" clip-path="url(#album-land-clip)" opacity="${reliefOpacity}" style="mix-blend-mode:multiply"/>` : ""}
-    ${waters}${lakes}
-    <path d="${detail.borders.international}" fill="none" stroke="${palette.border}" stroke-opacity=".75" stroke-width="2" vector-effect="non-scaling-stroke"/>
-    <path d="${detail.borders.other}" fill="none" stroke="${palette.border}" stroke-opacity=".58" stroke-width="1.7" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>
+    ${base}
+    <path d="${detail.borders.international}" fill="none" stroke="${border}" stroke-opacity=".75" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <path d="${detail.borders.other}" fill="none" stroke="${border}" stroke-opacity=".58" stroke-width="1.7" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>
   </g>`;
   const minTile = Math.floor((bounds.west + 180) / 360);
   const maxTile = Math.ceil((bounds.east + 180) / 360) - 1;
@@ -297,8 +425,8 @@ function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyl
     <svg x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}"
       viewBox="${atlasX(bounds.west)} ${atlasY(bounds.north)} ${atlasX(bounds.east) - atlasX(bounds.west)} ${atlasY(bounds.south) - atlasY(bounds.north)}" preserveAspectRatio="none">
       <defs>
-        <path id="album-land" d="${detail.land}" fill-rule="evenodd" clip-rule="evenodd" vector-effect="non-scaling-stroke"/>
-        <clipPath id="album-land-clip"><use href="#album-land"/></clipPath>
+        ${!satellite ? `<path id="album-land" d="${detail.land}" fill-rule="evenodd" clip-rule="evenodd" vector-effect="non-scaling-stroke"/>` : ""}
+        ${landscape ? `<clipPath id="album-land-clip"><use href="#album-land"/></clipPath>` : ""}
         ${tile}
       </defs>
       ${tiles}
@@ -333,6 +461,8 @@ function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds
   const center = (bounds.west + bounds.east) / 2;
   const badges: string[] = [];
   const used: Pixel[] = [];
+  const underlay = readableOn(routeInk, paper, 3);
+  const badgeInk = readableOn(paper, routeInk);
   const lines = connections.flatMap(({ from, to, transport }) => {
     const base = nearLongitude(from.longitude, center);
     const finish = base + direction(from.longitude, to.longitude);
@@ -347,7 +477,7 @@ function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds
       const angle = number(Math.atan2(dy, dx) * 180 / Math.PI);
       const x = number(a.x + dx * .62), y = number(a.y + dy * .62);
       const line = `<line x1="${number(a.x)}" y1="${number(a.y)}" x2="${number(b.x)}" y2="${number(b.y)}"`;
-      return [{ a, dx, dy, length, svg: `${line} stroke="${paper}" stroke-width="16" stroke-linecap="round"/>
+      return [{ a, dx, dy, length, svg: `${line} stroke="${underlay}" stroke-width="16" stroke-linecap="round"/>
         ${line} data-album-connection="true"
         stroke="${routeInk}" stroke-width="10" stroke-dasharray="17 19" stroke-linecap="round"/>
         ${length > 132 ? `<path d="M-13 -12 L4 0 L-13 12" fill="none" stroke="${routeInk}" stroke-width="9"
@@ -364,7 +494,7 @@ function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds
       if (position) {
         used.push(position);
         badges.push(`<g data-album-transport="${transport}"><circle cx="${position.x}" cy="${position.y}" r="29"
-          fill="${paper}" stroke="${routeInk}" stroke-width="4"/>${transportIcon(transport, position.x, position.y, routeInk, 37)}</g>`);
+          fill="${paper}" stroke="${badgeInk}" stroke-width="4"/>${transportIcon(transport, position.x, position.y, badgeInk, 37)}</g>`);
       }
     }
     return segments.map(({ svg }) => svg);
@@ -382,9 +512,12 @@ function albumMarkers(input: MapAlbumArtworkInput, bounds: MapBounds, frame: Fra
   const stops = input.stops ?? [];
   const points = stops.length ? stops.map((stop) => ({ ...stop, label: String(stop.number) }))
     : (input.points ?? []).map((point, index) => ({ ...point, label: String(point.count ?? index + 1) }));
-  const radius = points.length > 100 ? 30 : 41;
+  const radius = number((points.length > 100 ? 30 : 41) * clamp(input.markerScale ?? 100, 70, 140) / 100);
   const placed: Pixel[] = [];
   const center = (bounds.west + bounds.east) / 2;
+  const color = stops.length ? routeInk : mapInk;
+  const markerInk = readableOn(paper, color);
+  const ring = contrast(paper, color) >= 3 ? "" : `stroke="${markerInk}" stroke-width="10"`;
   const svg = points.map((point) => {
     const origin = mapPixel(bounds, frame, nearLongitude(point.longitude, center), point.latitude);
     if (!inside(origin, frame)) return "";
@@ -397,18 +530,18 @@ function albumMarkers(input: MapAlbumArtworkInput, bounds: MapBounds, frame: Fra
         y: clamp(origin.y, frame.y + radius + 10, frame.y + frame.height - radius - 10) };
     placed.push(candidate);
     const { x, y } = candidate;
-    const color = stops.length ? routeInk : mapInk;
     const fontSize = Math.min(radius, radius * 2.55 / point.label.length);
     return `<g data-album-marker="${xml(point.label)}">
       ${x !== origin.x || y !== origin.y ? `<line x1="${number(origin.x)}" y1="${number(origin.y)}" x2="${number(x)}" y2="${number(y)}" stroke="${color}" stroke-width="4"/>` : ""}
+      ${ring ? `<circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="none" ${ring}/>` : ""}
       <circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="${paper}" stroke="${color}" stroke-width="6"/>
-      ${text(x, y + fontSize * .34, point.label, `fill="${color}" text-anchor="middle" font-family="${sans}" font-weight="700" font-size="${number(fontSize)}"`)}
+      ${text(x, y + fontSize * .34, point.label, `fill="${markerInk}" text-anchor="middle" font-family="${sans}" font-weight="700" font-size="${number(fontSize)}"`)}
     </g>`;
   }).join("");
   return { svg, positions: placed.map((position) => ({ ...position, radius })) };
 }
 
-function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel & { radius: number })[], { ink, labelHalo }: Palette) {
+function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel & { radius: number })[], { labelInk, labelHalo }: Palette) {
   const center = (bounds.west + bounds.east) / 2;
   const zoom = 360 / (bounds.east - bounds.west);
   const used = markers.map(({ x, y, radius }) => ({ left: x - radius - 12, right: x + radius + 12,
@@ -421,45 +554,74 @@ function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel 
     if (!inside({ x: box.left, y: box.top }, frame, 11) || !inside({ x: box.right, y: box.bottom }, frame, 11)) return "";
     if (used.some((area) => box.left < area.right && box.right > area.left && box.top < area.bottom && box.bottom > area.top)) return "";
     used.push(box);
-    return text(x, y + 11, country.label, `fill="${ink}" paint-order="stroke" stroke="${labelHalo}" stroke-width="6"
+    return text(x, y + 11, country.label, `fill="${labelInk}" paint-order="stroke" stroke="${labelHalo}" stroke-width="6"
       stroke-linejoin="round" text-anchor="middle" font-family="${sans}" font-weight="600" font-size="35"`);
   }).join("");
 }
 
-async function readRelief() {
-  const response = await fetch(new URL("map/world-relief.webp", document.baseURI));
-  if (!response.ok) throw new Error("Das Geländerelief konnte nicht geladen werden.");
+const embeddedRasters = new Map<"landscape" | "satellite", Promise<string>>();
+
+async function embedMapRaster(style: "landscape" | "satellite") {
+  const asset = style === "satellite" ? satelliteSource.path : "map/world-relief.webp";
+  const response = await fetch(new URL(asset, document.baseURI));
+  if (!response.ok) throw new Error("Die Kartenebene konnte nicht geladen werden.");
   const data = await response.blob();
+  if (style === "satellite") {
+    const url = URL.createObjectURL(data);
+    try {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Das Geländerelief konnte nicht gelesen werden."));
-    reader.readAsDataURL(data);
+    reader.onerror = () => reject(new Error("Die Kartenebene konnte nicht gelesen werden."));
+    reader.readAsDataURL(new Blob([data], { type: "image/webp" }));
   });
 }
 
+function readMapRaster(style: "landscape" | "satellite") {
+  const cached = embeddedRasters.get(style);
+  if (cached) return cached;
+  const embedded = embedMapRaster(style).catch((error) => {
+    embeddedRasters.delete(style);
+    throw error;
+  });
+  embeddedRasters.set(style, embedded);
+  return embedded;
+}
+
 export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise<MapAlbumPage[]> {
-  const layout = layouts[input.format];
-  const basePalette = input.palette ?? "sand";
-  const accent = input.accent ?? "automatic";
-  const palette = {
-    ...palettes[basePalette],
-    routeInk: albumAccentColor(basePalette, accent, true),
-    mapInk: albumAccentColor(basePalette, accent, false),
-  };
-  const { width, height, margin, mapHeight, firstStops, continuedStops } = layout;
+  const dpi = input.dpi ?? 300;
+  const size = albumOutputSize(input.format, dpi, input.dimensions);
+  if (!size) throw new Error("Die Bildgröße wird nicht unterstützt.");
+  const layout = drawingLayout(input.format, size, input.formatting?.margins);
+  const palette = artworkPalette(input);
+  const { width, height, margin, mapHeight } = layout;
   const stops = input.stops ?? [];
   const transportOnly = input.showStopsList === false;
   const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode) : stops;
   const connections = input.connections ?? [];
-  const [{ default: detail }, relief] = await Promise.all([
+  const [{ default: detail }, raster] = await Promise.all([
     import("./world-detail.json"),
-    input.style === "landscape" ? readRelief() : Promise.resolve(""),
+    input.style === "satellite" ? readMapRaster("satellite").catch(() => "")
+      : input.style === "landscape" ? readMapRaster("landscape") : Promise.resolve(""),
   ]);
+  const satelliteFallback = input.style === "satellite" && !raster;
+  const style = satelliteFallback ? "standard" : input.style;
+  const mapPalette = style === "satellite" ? { ...palette, labelInk: "#f4f0de", labelHalo: "#17211b" } : palette;
   const head = header(input, layout, palette);
+  const columns = input.formatting?.listColumns ?? 2;
+  const availableRows = Math.max(1, Math.floor((height - 305 - head.mapTop - mapHeight) / 112));
+  const firstStops = Math.min(availableRows, Math.ceil(layout.firstStops / 2)) * columns;
+  const continuedStops = Math.min(Math.ceil(layout.continuedStops / 2), Math.floor((height - 299 - head.mapTop) / 112)) * columns;
   const availableHeight = height - head.mapTop - 245;
   const frameWidth = width - 2 * margin;
-  const coverRows = Math.ceil(Math.min(listedStops.length, firstStops) / 2);
+  const coverRows = Math.ceil(Math.min(listedStops.length, firstStops) / columns);
   const frameHeight = coverRows
     ? Math.max(mapHeight, Math.min(frameWidth * 1.05, availableHeight - 72 - coverRows * 142))
     : Math.min(availableHeight, frameWidth * .78);
@@ -469,8 +631,9 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
     ? fitAlbumJourney(stops, connections) : input.bounds;
   const wraps = rawSubject.west > rawSubject.east;
   const subject = wraps ? { ...rawSubject, east: rawSubject.east + 360 } : rawSubject;
-  const longitudePadding = input.wideFrame ? (subject.east - subject.west) * .26 : 0;
-  const latitudePadding = input.wideFrame ? (subject.north - subject.south) * .26 : 0;
+  const padding = clamp(input.contextPercent ?? (input.wideFrame ? 52 : 0), 0, 100) / 200;
+  const longitudePadding = (subject.east - subject.west) * padding;
+  const latitudePadding = (subject.north - subject.south) * padding;
   const bounds = fitFrame({
     west: input.fitJourney || wraps ? subject.west - longitudePadding : Math.max(-180, subject.west - longitudePadding),
     east: input.fitJourney || wraps ? subject.east + longitudePadding : Math.min(180, subject.east + longitudePadding),
@@ -486,8 +649,8 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const markers = albumMarkers(input, bounds, frame, palette);
   const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "")}</clipPath></defs>
     <g clip-path="url(#album-map-clip)">
-      ${baseMap(detail, frame, bounds, input.style, relief, palette)}
-      ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, palette) : ""}
+      ${baseMap(detail, frame, bounds, style, raster, mapPalette)}
+      ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, mapPalette) : ""}
       ${journeyLines(connections, bounds, frame, palette)}${markers.svg}
     </g>
     ${frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
@@ -504,20 +667,23 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
     const footer = `<line x1="${margin}" x2="${width - margin}" y1="${height - 147}" y2="${height - 147}" stroke="${palette.rule}" stroke-width="2"/>
       ${text(margin, height - 92, continuation ? "Fotokarte · Stationen" : "Kartendaten von Natural Earth", `fill="${palette.muted}" font-family="${sans}" font-size="31"`)}
       ${legend ? text(margin + 515, height - 92, legend, `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
+      ${!continuation && style === "satellite" ? text(margin, height - 47, `Satellitenbild von ${satelliteSource.name}`,
+        `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
       ${pageNumber ? text(width - margin, height - 92, pageNumber, `fill="${palette.ink}" font-family="${sans}" font-size="31" text-anchor="end"`) : ""}`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
       <title>${xml(input.title.trim() || "Meine Fotokarte")}</title>
-      ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly, palette)}${footer}
+      ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly, palette, input.formatting)}${footer}
     </svg>`;
-    return { svg, width, height, number: index + 1, total: groups.length };
+    return { svg, ...size, dpi, number: index + 1, total: groups.length, ...(!continuation && satelliteFallback && { satelliteFallback }) };
   });
 }
 
-function densityChunk() {
+function densityChunk(dpi: AlbumDpi) {
   const chunk = new Uint8Array(21);
   const view = new DataView(chunk.buffer);
   view.setUint32(0, 9);
   chunk.set([112, 72, 89, 115], 4); // pHYs
+  const printerPixelsPerMeter = Math.round(dpi / .0254);
   view.setUint32(8, printerPixelsPerMeter);
   view.setUint32(12, printerPixelsPerMeter);
   chunk[16] = 1;
@@ -530,8 +696,8 @@ function densityChunk() {
   return chunk;
 }
 
-/** Set the PNG pixel density to 300 dpi so print applications use the intended dimensions. */
-export async function setMapAlbumPngDensity(png: Blob): Promise<Blob> {
+/** Set the PNG pixel density so print applications use the intended dimensions. */
+export async function setMapAlbumPngDensity(png: Blob, dpi: AlbumDpi = 300): Promise<Blob> {
   const data = await png.arrayBuffer();
   const view = new DataView(data);
   const chunks: BlobPart[] = [data.slice(0, 8)];
@@ -541,7 +707,7 @@ export async function setMapAlbumPngDensity(png: Blob): Promise<Blob> {
     const end = offset + 12 + length;
     if (end > data.byteLength) throw new Error("Die PNG-Datei ist unvollständig.");
     if (type !== 0x70485973) chunks.push(data.slice(offset, end)); // pHYs
-    if (type === 0x49484452) chunks.push(densityChunk()); // IHDR
+    if (type === 0x49484452) chunks.push(densityChunk(dpi)); // IHDR
     offset = end;
   }
   return new Blob(chunks, { type: "image/png" });
@@ -563,7 +729,7 @@ export async function mapAlbumPageToPng(page: MapAlbumPage): Promise<Blob> {
       if (blob) resolve(blob);
       else reject(new Error("Die PNG-Datei konnte nicht erstellt werden."));
     }, "image/png"));
-    return await setMapAlbumPngDensity(png);
+    return await setMapAlbumPngDensity(png, page.dpi);
   } finally {
     URL.revokeObjectURL(url);
     canvas.width = 0;

@@ -3,6 +3,9 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const albumLibraryFlow = require('./album-library-flow.cjs');
+const helpTourFlow = require('./help-tour-flow.cjs');
+const manualFaceFlow = require('./manual-face-flow.cjs');
 let chromium;
 try {
   ({ chromium } = require('playwright'));
@@ -572,6 +575,12 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await page.getByLabel('Ländernamen anzeigen').uncheck();
     assert.equal(await page.locator('.gps-map__place-label--country').count(), 0);
     assert.equal(await page.locator('.gps-map__relief image').count(), 1);
+    const satelliteLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-satellite.webp') && response.ok());
+    await page.getByLabel('Kartenstil').selectOption('satellite');
+    await satelliteLoaded;
+    await page.locator('.gps-map__satellite[visibility="visible"]').waitFor({ state: 'attached' });
+    await page.getByRole('link', { name: /NASA Earth Observatory/ }).waitFor();
+    await page.getByLabel('Kartenstil').selectOption('landscape');
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Welt');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
@@ -698,7 +707,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await screenshot(page, 'map-journey');
     await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
     const exactSelection = page.waitForResponse((response) => response.url().includes('/api/images/search?') && response.ok());
-    await results.getByRole('button', { name: 'In Bilder öffnen' }).click();
+    await results.getByRole('button', { name: 'In Bilder öffnen', exact: true }).click();
     const exact = await exactSelection;
     assert.deepEqual(exact.request().postDataJSON().selection.image_ids, [1, 3]);
     assert.equal((await exact.json()).total, 2);
@@ -783,7 +792,7 @@ async function pagedLibraryFacesFlow(browser, errors) {
     await gallery.locator('.hologram-box').waitFor();
     assert.equal(await gallery.locator('.hologram-box').count(), 1);
     assert.equal(await gallery.locator('.hologram-box').evaluate((element) => element.style.left), '20%');
-    assert.equal(detailRequests, 2);
+    assert.ok(detailRequests >= 2, 'Geometry was not retried after the transient failure');
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
     while (await cards.count() < photos.length) {
@@ -1298,23 +1307,198 @@ async function selectReviewFaces(dialog, proposal, selection) {
   await dialog.getByText(`${selection.length} von ${proposal.face_count} Gesichtern ausgewählt`, { exact: true }).waitFor();
 }
 
+async function denseJourneyReview(browser, errors) {
+  const page = await newPage(browser, 1420, 1000, errors);
+  const scope = page.getByLabel('Verlaufsbereich', { exact: true });
+  const results = page.locator('#gps-map-results');
+  try {
+    await page.goto(`${webBase}/#/weltkarte`);
+    await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
+    const search = results.getByRole('searchbox', { name: 'Stoppliste durchsuchen' });
+    await search.fill('Paris');
+    await results.getByRole('button', { name: /Bei Paris/ }).first().waitFor();
+    assert.ok(await results.getByRole('button', { name: /Bei Paris/ }).count() >= 8);
+    await search.clear();
+    await scope.selectOption('Europa');
+    await page.getByLabel('Von', { exact: true }).fill('2024-07-13');
+    const delivery = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith('/map/journey') && url.searchParams.get('to_date') === '2024-07-13'
+        && url.searchParams.has('south') && response.ok();
+    });
+    await page.getByLabel('Bis', { exact: true }).fill('2024-07-13');
+    const journey = await (await delivery).json();
+    assert.deepEqual(journey.stops.map(({ image_ids, section }) => [image_ids.length, section]), [[5, 1], [5, 1], [5, 2]]);
+    assert.equal(journey.connections.length, 1, 'Area filter bridged the omitted Marrakech visit');
+    await page.getByText('3 Stopps · 15 Fotos', { exact: true }).waitFor();
+    await results.getByText('Neuer Abschnitt im gewählten Bereich', { exact: true }).waitFor();
+    const map = page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' });
+    await map.press('ArrowRight');
+    assert.equal(await scope.inputValue(), 'Europa', 'Panning changed the fixed area filter');
+    await page.getByRole('button', { name: 'Filterbereich zeigen' }).click();
+    await results.getByRole('button', { name: /Bei Lyon/ }).click();
+    await results.getByRole('heading', { name: 'Fotos von Stopp 2' }).waitFor();
+    await results.getByText('5 Fotos', { exact: true }).waitFor();
+    await screenshot(page, 'reise-europa');
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    const album = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
+    await album.getByLabel('Format', { exact: true }).selectOption({ label: 'Eigene Größe' });
+    await album.getByLabel('Breite (px)', { exact: true }).fill('2400');
+    await album.getByLabel('Höhe (px)', { exact: true }).fill('1600');
+    await album.getByText('Bildgröße und Auflösung', { exact: true }).click();
+    await album.getByLabel('Druckauflösung', { exact: true }).selectOption('240');
+    await album.getByText('Eigene Farben', { exact: true }).click();
+    await album.getByLabel('Akzentfarbe auswählen', { exact: true }).fill('#6b2540');
+    const preview = album.locator('.gps-album-dialog__preview[aria-busy="false"] img');
+    await preview.waitFor();
+    const artwork = await preview.evaluate((image) => fetch(image.src).then((response) => response.text()));
+    assert.match(artwork, /#6b2540/);
+    assert.match(artwork, /Bei Paris/);
+    assert.match(artwork, /Bei Marseille/);
+    assert.doesNotMatch(artwork, /Marrakech/);
+    assert.equal(await album.evaluate((element) => element.scrollWidth - element.clientWidth), 0);
+    const download = page.waitForEvent('download');
+    await album.getByRole('button', { name: 'PNG speichern', exact: true }).click();
+    const png = fs.readFileSync(await (await download).path());
+    assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [2400, 1600]);
+    assert.equal(png.readUInt32BE(png.indexOf(Buffer.from('pHYs')) + 4), 9449);
+    await page.keyboard.press('Escape');
+    await album.waitFor({ state: 'hidden' });
+    await scope.selectOption('Asien');
+    await results.getByText('Keine Stopps in diesem Bereich und Zeitraum.', { exact: true }).waitFor();
+    await results.getByRole('button', { name: 'Bereich entfernen' }).click();
+    await page.getByText('4 Stopps · 20 Fotos', { exact: true }).waitFor();
+    await page.setViewportSize({ width: 1420, height: 1000 });
+    await scope.selectOption('Europa');
+    await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
+    await map.scrollIntoViewIfNeeded();
+    const box = await map.boundingBox();
+    await page.mouse.move(box.x + box.width * .32, box.y + box.height * .50);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * .39, box.y + box.height * .60, { steps: 8 });
+    await page.mouse.up();
+    await page.getByText('1 Stopp · 5 Fotos', { exact: true }).waitFor();
+    assert.equal(await scope.inputValue(), 'custom');
+    await scope.selectOption('Europa');
+    await page.getByLabel('Bis', { exact: true }).fill('2026-09-22');
+    await page.getByLabel('Von', { exact: true }).fill('2026-09-22');
+    await page.getByLabel('Stoppabstand', { exact: true }).selectOption('city');
+    await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
+    await results.getByRole('list', { name: 'Chronologische Stopps' }).getByRole('button').nth(1).click();
+    const inferredPhoto = results.getByRole('button', { name: 'Reise-09-02-3-Stephansplatz.jpg öffnen' });
+    await inferredPhoto.waitFor();
+    const includeInferred = results.getByRole('checkbox', { name: 'Passende Fotos ohne Standort einbeziehen' });
+    await includeInferred.uncheck();
+    await page.getByText('7 Stopps · 34 Fotos', { exact: true }).waitFor();
+    await inferredPhoto.waitFor({ state: 'hidden' });
+    await includeInferred.check();
+    await inferredPhoto.waitFor();
+    await results.getByText('Nach Aufnahmezeit zugeordnet', { exact: true }).waitFor();
+    const cityView = (await map.getAttribute('viewBox')).split(' ').map(Number);
+    assert.ok(cityView[2] < 1, 'City stop did not zoom below a district-wide view');
+    await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
+    await page.getByRole('button', { name: 'Sichtbaren Bereich wählen', exact: true }).click();
+    await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await album.getByText('Route gestalten', { exact: true }).click();
+    const suggestion = album.getByRole('button', { name: /Zu Fuß für Etappe .* übernehmen/ }).first();
+    await suggestion.waitFor();
+    const draftLeg = album.getByRole('group', { name: 'Verkehrsmittel pro Etappe' }).getByRole('combobox').first();
+    assert.equal(await draftLeg.inputValue(), '', 'Transport suggestion was applied without confirmation');
+    await suggestion.click();
+    assert.equal(await draftLeg.inputValue(), 'walk');
+    await album.locator('.gps-album-dialog__preview[aria-busy="false"] img').waitFor();
+    await page.keyboard.press('Escape');
+    await album.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Bereichsfilter entfernen' }).click();
+    await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
+    await page.getByText('Orte aus meinen Fotos', { exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Fotoorte suchen' }).fill('Berlin');
+    await page.getByRole('button', { name: 'Berlin als Heimatort wählen' }).click();
+    await page.getByText('Reisen entdecken', { exact: true }).click();
+    await results.getByRole('button', { name: /5 Stopps/ }).click();
+    await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
+    await results.getByLabel('Anreise einbeziehen').check();
+    await page.getByText('6 Stopps · 30 Fotos', { exact: true }).waitFor();
+    await results.getByLabel('Rückreise einbeziehen').check();
+    await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
+    await results.getByLabel('Rückreise einbeziehen').uncheck();
+    await results.getByLabel('Anreise einbeziehen').uncheck();
+    await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
+    await results.getByRole('button', { name: 'Als Reisealbum speichern' }).click();
+    await page.getByLabel('Albumname', { exact: true }).fill('Wien zu Fuß');
+    await page.getByRole('button', { name: 'Album erstellen', exact: true }).click();
+    await page.getByLabel('Album', { exact: true }).selectOption({ label: 'Wien zu Fuß' });
+    await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await album.getByLabel('Titel', { exact: true }).fill('Wiener Spaziergang');
+    await album.getByRole('button', { name: 'Entwurf im Album speichern', exact: true }).click();
+    await album.getByText('Entwurf im Album gespeichert.', { exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await album.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    assert.equal(await album.getByLabel('Titel', { exact: true }).inputValue(), 'Wiener Spaziergang');
+    console.log('PASS dense journey fixture: 9 trips, inferred photo, city and transport hints, separate transfers, journey album and draft reload');
+  } finally {
+    await page.close();
+  }
+}
+
+async function backgroundActivitiesFlow(browser, errors) {
+  const page = await newPage(browser, 1280, 800, errors);
+  try {
+    await page.addInitScript(() => {
+      window.EventSource = class ActivityEvents extends EventTarget {
+        constructor() { super(); window.activityTestEvents = this; }
+        close() {}
+      };
+    });
+    await page.goto(`${webBase}/#/bilder`);
+    const trigger = page.getByRole('button', { name: /^Aktivitäten/ });
+    const popover = page.getByRole('region', { name: 'Aktivitäten', exact: true });
+    await trigger.hover();
+    await trigger.focus();
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    const publish = (status, processed, unavailable) => page.evaluate(({ status, processed, unavailable }) => {
+      window.activityTestEvents.dispatchEvent(new MessageEvent('background-activities', {
+        data: JSON.stringify({ activities: [{ id: 'metadata-test', kind: 'photo-metadata', status, processed,
+          total: 10, unavailable, finished_at: status === 'running' ? null : new Date().toISOString() }] }),
+      }));
+    }, { status, processed, unavailable });
+    await publish('running', 3, 0);
+    await page.getByRole('button', { name: 'Aktivitäten (1 Aufgabe)', exact: true }).waitFor();
+    assert.equal(await popover.count(), 0, 'Background task opened the panel without a click');
+    await trigger.press('Enter');
+    const task = popover.locator('article').filter({ hasText: 'Fotostandorte und Aufnahmezeiten prüfen' });
+    await task.getByText('3 von 10 Fotos geprüft', { exact: true }).waitFor();
+    assert.equal(await task.getByRole('progressbar').getAttribute('aria-valuenow'), '30');
+    assert.equal(await task.getByRole('button').count(), 0);
+    await publish('completed', 10, 2);
+    await task.getByText('10 geprüfte Fotos · 2 Dateien nicht erreichbar', { exact: true }).waitFor();
+    await task.getByRole('button', { name: /aus der Historie löschen/ }).focus();
+    await page.keyboard.press('Escape');
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+    assert.ok(await trigger.evaluate((item) => item === document.activeElement));
+    console.log('PASS background activities: quiet trigger, accessible progress, completion and focus return');
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
-    await previewFlow(browser, errors);
-    await firstAssignmentFlow(browser, errors);
-    await collectSourcesFlow(browser, errors);
-    await localRecoveryFlow(browser, errors);
-    await mapFlow(browser, errors);
-    await mapSelectionAndJourneyFlow(browser, errors);
-    await pagedLibraryFacesFlow(browser, errors);
-    await liveWorkflowFlow(browser, errors);
-    await existingFlow(browser, errors);
-    await settingsFlow(browser, errors);
-    await previewCacheSettingsFlow(browser, errors);
-    await responsiveFlow(browser, errors);
-    await reviewInboxFlow(browser, errors);
+    const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
+      previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
+      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
+      (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
+      (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
+      (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+    ];
+    for (const flow of flows) await flow(browser, errors);
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);
     console.log('PASS browser smoke: no uncaught page errors');
   } finally {

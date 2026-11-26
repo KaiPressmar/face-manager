@@ -3,8 +3,9 @@ export interface GeoPhotoSelection {
   from_date?: string;
   to_date?: string;
   image_ids?: number[];
+  album_id?: string;
 }
 
 export function hasGeoPhotoSelection(selection?: GeoPhotoSelection): selection is GeoPhotoSelection {
-  return Boolean(selection && (selection.bounds || selection.from_date || selection.to_date || selection.image_ids));
+  return Boolean(selection && (selection.bounds || selection.from_date || selection.to_date || selection.image_ids || selection.album_id));
 }

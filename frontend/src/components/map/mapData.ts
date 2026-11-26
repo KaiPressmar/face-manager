@@ -1,5 +1,6 @@
 import { API_BASE, apiFetch, fetchMapImages, readApiError, type MapImageCursor, type MapImagesResponse } from "../../utils/api";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
+import type { MapBounds } from "./WorldMap";
 
 export interface JourneyStop {
   id: string;
@@ -12,6 +13,7 @@ export interface JourneyStop {
   start_utc?: string | null;
   end_utc?: string | null;
   image_ids: number[];
+  inferred_image_ids?: number[];
   uncertain: boolean;
 }
 
@@ -25,17 +27,41 @@ export interface Journey {
   connections: { from: JourneyPoint; to: JourneyPoint; from_stop_id: string; to_stop_id: string }[];
   photo_count: number;
   missing_location_count: number;
+  inferred_location_count?: number;
   missing_time_count: number;
   uncertain_count: number;
   indexing: boolean;
 }
 
+export type JourneyDetail = "trip" | "city";
+
+export function omitInferredPhotos(journey: Journey): Journey {
+  const count = journey.inferred_location_count ?? 0;
+  if (!count) return journey;
+  return {
+    ...journey,
+    photo_count: journey.photo_count - count,
+    missing_location_count: journey.missing_location_count + count,
+    inferred_location_count: 0,
+    stops: journey.stops.map((stop) => {
+      if (!stop.inferred_image_ids?.length) return stop;
+      const inferred = new Set(stop.inferred_image_ids);
+      return { ...stop, image_ids: stop.image_ids.filter((id) => !inferred.has(id)), inferred_image_ids: [] };
+    }),
+  };
+}
+
 export async function fetchJourney(
-  from: string, to: string, signal: AbortSignal,
+  from: string, to: string, bounds: MapBounds | null, detail: JourneyDetail, signal: AbortSignal, albumId = "",
 ): Promise<Journey> {
   const query = new URLSearchParams();
   if (from) query.set("from_date", from);
   if (to) query.set("to_date", to);
+  if (detail === "city") query.set("detail", detail);
+  if (albumId) query.set("album_id", albumId);
+  if (bounds) {
+    for (const [edge, value] of Object.entries(bounds)) query.set(edge, String(value));
+  }
   const response = await apiFetch(`${API_BASE}/map/journey?${query}`, { signal });
   if (!response.ok) throw new Error(await readApiError(response, "Der Standortverlauf konnte nicht geladen werden."));
   return response.json();
@@ -46,7 +72,7 @@ export async function fetchMapSelection(
 ): Promise<MapImagesResponse> {
   if (!selection.image_ids) {
     return fetchMapImages({
-      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, ...cursor, limit,
+      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, album_id: selection.album_id, ...cursor, limit,
     }, signal);
   }
   const query = new URLSearchParams({ limit: String(limit) });

@@ -1,9 +1,11 @@
 import errno
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
+import struct
 from collections import defaultdict
 from contextlib import closing
 from itertools import groupby
@@ -36,6 +38,7 @@ from ..models.clustering import (
 )
 from .cache import app_cache
 from .filesystem_paths import filesystem_path
+from .face_geometry import face_boxes_overlap
 from .geo_query import GeoPhotoSelection, photo_selection_sql
 
 configure_error_logging()
@@ -1699,7 +1702,8 @@ def get_image_detail_rows(image_id: int, *, include_archived: bool = False):
                 f.bbox_h,
                 f.cluster_id,
                 p.name AS person_name,
-                f.review_status
+                f.review_status,
+                f.is_manual
             FROM image i
             LEFT JOIN ranked_locations location
               ON location.image_id = i.id AND location.location_rank = 1
@@ -2199,6 +2203,83 @@ def get_face_preview_source(face_id: int):
         ).fetchone()
     finally:
         conn.close()
+
+
+class ManualFaceConflictError(ValueError):
+    """A photo or an existing face conflicts with a new manual mark."""
+
+
+def _recorded_face_boxes(conn, image_id: int, *, include_not_faces: bool):
+    boxes = []
+    for row in conn.execute(
+        "SELECT bbox_x, bbox_y, bbox_w, bbox_h, review_status FROM face WHERE image_id = ? ORDER BY id",
+        (image_id,),
+    ):
+        if not include_not_faces and row["review_status"] == FACE_REVIEW_STATUS_NOT_FACE:
+            continue
+        try:
+            box = tuple(_safe_float(row[key]) for key in ("bbox_x", "bbox_y", "bbox_w", "bbox_h"))
+        except (TypeError, ValueError, OverflowError, struct.error):
+            continue
+        if all(map(math.isfinite, box)) and min(box[2:]) > 0:
+            boxes.append(box)
+    return boxes
+
+
+def get_recorded_face_boxes(image_id: int):
+    """Return the raw rectangles used to suppress repeat detection suggestions."""
+    with closing(get_conn()) as conn:
+        return _recorded_face_boxes(conn, image_id, include_not_faces=True)
+
+
+def create_manual_face(
+    image_id: int,
+    content_hash: str | None,
+    geometry: tuple[int, int, int],
+    box: tuple[int, int, int, int],
+    person_name: str,
+    *,
+    source_path: str | None = None,
+) -> tuple[int, int]:
+    """Persist a named face and its registered raw coordinate system atomically."""
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        image = cur.execute(
+            "SELECT content_hash, exif_orientation, raw_width, raw_height FROM image WHERE id = ?",
+            (image_id,),
+        ).fetchone()
+        if image is None:
+            raise LookupError("Das Bild wurde nicht gefunden.")
+        if image["content_hash"] != content_hash or (source_path is not None and cur.execute(
+            "SELECT 1 FROM image_location WHERE image_id = ? AND path = ?", (image_id, source_path),
+        ).fetchone() is None):
+            raise ManualFaceConflictError("Das Bild wurde geändert. Bitte lade es erneut.")
+
+        registered = tuple(image[key] for key in ("exif_orientation", "raw_width", "raw_height"))
+        if all(type(value) is int for value in registered) and registered[0] in range(1, 9) and min(registered[1:]) > 0:
+            if registered != geometry:
+                raise ManualFaceConflictError("Die Bildausrichtung wurde geändert. Bitte lade das Bild erneut.")
+        else:
+            cur.execute(
+                "UPDATE image SET exif_orientation = ?, raw_width = ?, raw_height = ? WHERE id = ?",
+                (*geometry, image_id),
+            )
+
+        if any(face_boxes_overlap(box, other) for other in _recorded_face_boxes(conn, image_id, include_not_faces=False)):
+            raise ManualFaceConflictError("Dort ist bereits ein Gesicht markiert. Wähle einen anderen Bereich oder prüfe die vorhandene Markierung.")
+
+        person_id = _resolve_person_id(cur, person_name)
+        cur.execute(
+            """INSERT INTO face(image_id, bbox_x, bbox_y, bbox_w, bbox_h, review_status, is_manual)
+               VALUES (?, ?, ?, ?, ?, ?, 1)""",
+            (image_id, *box, FACE_REVIEW_STATUS_ACTIVE),
+        )
+        face_id = int(cur.lastrowid)
+        cluster_id = _create_cluster_for_faces(cur, [face_id], person_id=person_id)
+
+    invalidate_image_query_cache()
+    return face_id, cluster_id
 
 
 def save_missing_image_geometry(image_id: int, content_hash: str, geometry: tuple[int, int, int]) -> None:
