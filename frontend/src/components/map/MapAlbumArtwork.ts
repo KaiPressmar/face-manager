@@ -82,6 +82,9 @@ const palettes = {
     sea: "#d0e5ee", land: "#e3e9d9", reliefLand: "#d7e4cf", lake: "#a9c9d6", river: "#729fae", shore: "#96aea9", border: "#718d88", labelHalo: "#edf4ec" },
 } as const;
 type Palette = Record<keyof typeof palettes.sand, string>;
+export function albumAccentColor(palette: keyof typeof palettes, accent: AlbumAccent, forJourney: boolean) {
+  return albumAccents[accent].color || palettes[palette][forJourney ? "routeInk" : "mapInk"];
+}
 const serif = "Georgia, 'Times New Roman', serif";
 const sans = "Arial, Helvetica, sans-serif";
 const zoomInset = 0.12;
@@ -437,9 +440,13 @@ async function readRelief() {
 
 export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise<MapAlbumPage[]> {
   const layout = layouts[input.format];
-  const basePalette = palettes[input.palette ?? "sand"];
-  const accent = albumAccents[input.accent ?? "automatic"].color;
-  const palette = { ...basePalette, routeInk: accent || basePalette.routeInk, mapInk: accent || basePalette.mapInk };
+  const basePalette = input.palette ?? "sand";
+  const accent = input.accent ?? "automatic";
+  const palette = {
+    ...palettes[basePalette],
+    routeInk: albumAccentColor(basePalette, accent, true),
+    mapInk: albumAccentColor(basePalette, accent, false),
+  };
   const { width, height, margin, mapHeight, firstStops, continuedStops } = layout;
   const stops = input.stops ?? [];
   const transportOnly = input.showStopsList === false;

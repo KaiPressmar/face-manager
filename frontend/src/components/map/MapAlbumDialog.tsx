@@ -5,7 +5,7 @@ import type { Journey } from "./mapData";
 import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
 import { journeyStopLabel } from "./MapJourney";
 import {
-  albumAccents, albumTransports, buildMapAlbumArtwork, mapAlbumPageToPng,
+  albumAccentColor, albumAccents, albumTransports, buildMapAlbumArtwork, mapAlbumPageToPng,
   type AlbumAccent, type AlbumTransport, type MapAlbumPage,
 } from "./MapAlbumArtwork";
 import type { MapBounds, MapStyle } from "./WorldMap";
@@ -233,7 +233,7 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
               setUseViewport(event.target.value === "viewport"); setConfirmation("");
             }}><option value="selection">Gewählter Bereich</option><option value="viewport">Sichtbarer Bereich</option></select></label>}
           <label><span id="gps-album-accent">{opening.journey ? "Routenfarbe" : "Markerfarbe"}</span>
-            <span className="gps-album-dialog__swatch" aria-hidden="true" style={{ backgroundColor: albumAccents[accent].color || undefined }} />
+            <span className="gps-album-dialog__swatch" aria-hidden="true" style={{ backgroundColor: albumAccentColor(palette, accent, Boolean(opening.journey)) }} />
             <select aria-labelledby="gps-album-accent" value={accent} onChange={(event) => {
               setAccent(event.target.value as AlbumAccent); setConfirmation("");
             }}>{Object.entries(albumAccents).map(([value, { name }]) => <option key={value} value={value}>{name}</option>)}</select></label>
