@@ -222,7 +222,7 @@ class CaptureClockTest(unittest.TestCase):
             self._save_photo(photo, offset="+02:00")
             metadata = extract_image_metadata(photo, include_timing=True)
             self.assertEqual(metadata[2:], (
-                "2024-01-02T00:45:00", "2024-01-01T22:45:00.000000+00:00", "exif_offset",
+                "2024-01-02T00:45:00", "2024-01-01T22:45:00.000000+00:00", "exif_original_offset",
             ))
             self._save_photo(photo, gps_hour=22, gps_date=False)
             self.assertEqual(extract_image_metadata(photo, include_timing=True)[2:],
@@ -302,7 +302,7 @@ class CaptureClockTest(unittest.TestCase):
                        FROM image ORDER BY id"""
                 ).fetchall()
                 self.assertEqual(tuple(rows[0]), (52.5, 13.4, "2024-01-02T00:45:00", None, "unavailable", "2024-01-02T01:00:00"))
-                self.assertEqual(tuple(rows[1][3:]), ("2024-01-01T22:45:00.000000+00:00", "exif_offset", "2024-01-02T01:00:00"))
+                self.assertEqual(tuple(rows[1][3:]), ("2024-01-01T22:45:00.000000+00:00", "exif_original_offset", "2024-01-02T01:00:00"))
             self.assertEqual(list_journey(day, day)["uncertain_count"], 1)
             disconnected.rename(offline)
             for _ in range(2):
@@ -310,7 +310,7 @@ class CaptureClockTest(unittest.TestCase):
                 worker._run()
             with closing(schema.get_conn()) as connection:
                 rows = connection.execute("SELECT captured_at_utc, capture_time_source FROM image ORDER BY id").fetchall()
-                self.assertEqual([tuple(row) for row in rows], [("2024-01-01T22:45:00.000000+00:00", "exif_offset")] * 2)
+                self.assertEqual([tuple(row) for row in rows], [("2024-01-01T22:45:00.000000+00:00", "exif_original_offset")] * 2)
             result = list_journey(day, day)
             self.assertEqual(result["uncertain_count"], 0)
             self.assertEqual(result["stops"][0]["image_ids"], [1, 2])
@@ -348,8 +348,8 @@ class CaptureClockTest(unittest.TestCase):
             with closing(schema.get_conn()) as connection:
                 rows = connection.execute("SELECT captured_at_utc, capture_time_source FROM image ORDER BY id").fetchall()
             self.assertEqual([tuple(row) for row in rows], [
-                ("2024-01-01T22:45:00.000000+00:00", "exif_offset"),
-                ("2024-01-01T21:45:00.000000+00:00", "exif_offset"),
+                ("2024-01-01T22:45:00.000000+00:00", "exif_original_offset"),
+                ("2024-01-01T21:45:00.000000+00:00", "exif_original_offset"),
                 (None, "local"),
             ])
 

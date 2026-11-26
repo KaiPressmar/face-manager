@@ -13,6 +13,7 @@ Requests, nicht in diese Versionshinweise.
 - Die Karte bietet eine Offline-Satellitenansicht sowie eine Auswahl aus den Orten deiner Fotos.
 - Reisevorschläge lassen sich nach Tagen und mit oder ohne An- und Rückreise ansehen und als Reisealbum speichern.
 - Unter „Hilfe“ findest du eine kurze Einführung zu Bildern, Personen, Karte, Reisealben, Fotobuch und Aktivitäten.
+
 ### Verbessert
 
 - Im Standortverlauf lassen sich Zeitraum und Kartenausschnitt kombinieren und wiederkehrende Orte in der Stoppliste leichter finden.
@@ -23,8 +24,11 @@ Requests, nicht in diese Versionshinweise.
 - Aktivitäten zeigt auch die Pfadprüfung und den Fortschritt von Update-Downloads.
 - Ob die Gesichtserkennung die Grafikkarte oder den Prozessor verwendet, siehst du oben in der Anwendung.
 - Fotobuchentwürfe lassen sich im Album speichern und später weiter gestalten.
+- Der Standortverlauf kann einzelne Fotos ohne Standort einem passenden Stopp zuordnen. Du erkennst sie am Hinweis zur Aufnahmezeit und kannst sie ausblenden.
 
 ### Behoben
+
+- Beim Einlesen bleibt die Aufnahmezeit eines Scans offen, wenn nur der Zeitpunkt der Digitalisierung bekannt ist.
 
 ## [0.16.0] - 2026-11-26
 

@@ -41,15 +41,18 @@ def seed_journeys(conn, root: Path, now: str) -> int:
         for stop, ((city, latitude, longitude), minute) in enumerate(zip(stops, offsets), 1):
             for picture in range(5):
                 captured = start + timedelta(minutes=minute + picture * 5)
+                missing_location = day == "2026-09-22" and stop == 2 and picture == 2
+                coordinates = (None, None) if missing_location else (latitude + picture * .0002, longitude)
+                time_source = "exif_original_offset" if missing_location else "gps_utc"
                 path = root / f"Reise-{trip:02d}-{stop:02d}-{picture + 1}-{city}.jpg"
                 with Image.new("RGB", (320, 240), (42 + 21 * trip, 75 + 13 * stop, 115 + 18 * picture)) as image:
                     ImageDraw.Draw(image).text((18, 34), f"{city} · {captured.date()}", fill="#ffffff")
                     image.save(path, "JPEG")
                 cursor = conn.execute(
                     """INSERT INTO image(path, directory, filename, latitude, longitude, captured_at, captured_at_utc,
-                       capture_time_source, metadata_scanned_at, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'gps_utc', ?, ?)""",
-                    (str(path), str(root), path.name, latitude + picture * .0002, longitude,
-                     captured.replace(tzinfo=None).isoformat(), captured.isoformat(), now, now),
+                       capture_time_source, metadata_scanned_at, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (str(path), str(root), path.name, *coordinates, captured.replace(tzinfo=None).isoformat(),
+                     captured.isoformat(), time_source, now, now),
                 )
                 info = path.stat()
                 conn.execute(

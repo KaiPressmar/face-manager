@@ -14,6 +14,7 @@ export interface MapGalleryOpening {
   cursor: MapImageCursor | null;
   index: number | null;
   label: string;
+  inferredImageIds?: readonly number[];
 }
 
 interface Props {
@@ -140,6 +141,7 @@ export default function MapGallery({ opening, onClose, onOpenImages, onAddToAlbu
           {page.items.map((image, position) => <button key={image.id} type="button" className="gps-page__photo"
             data-gallery-index={position} onClick={() => openPhoto(position)} aria-label={`${image.filename || "Foto"} öffnen`}>
             <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
+            {opening.inferredImageIds?.includes(image.id) && <small>Nach Aufnahmezeit zugeordnet</small>}
           </button>)}
         </div>
         {pageError && <p className="gps-page__error" role="alert">{pageError}</p>}

@@ -23,7 +23,8 @@ from .geo_query import GeoBounds, GeoPhotoSelection, photo_selection_sql
 
 logger = logging.getLogger("face_manager.geo")
 _GPS_TAG = 34853
-_DATE_OFFSET_TAGS = ((36867, 36881), (36868, 36882))  # Original, then digitized.
+_ORIGINAL_DATE_TAG = 36867
+_ORIGINAL_OFFSET_TAG = 36881
 _MAX_CLOCK_DISAGREEMENT = timedelta(minutes=5)
 _MAX_CLOCK_OFFSET = timedelta(hours=14)
 _BATCH_SIZE = 32
@@ -69,28 +70,26 @@ def _exif_text(value):
 
 
 def _camera_time(exif, exif_ifd):
-    for date_tag, offset_tag in _DATE_OFFSET_TAGS:
-        raw = _exif_text(exif_ifd.get(date_tag) or exif.get(date_tag))
-        try:
-            local = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
-        except ValueError:
-            continue
-        # Use the offset paired with the selected capture timestamp.
-        offset = _exif_text(exif_ifd.get(offset_tag) or exif.get(offset_tag))
-        if not re.fullmatch(r"[+-][0-9]{2}:[0-9]{2}", offset) or offset == "-00:00":
-            return local, None
-        hours, minutes = int(offset[1:3]), int(offset[4:])
-        if minutes >= 60 or hours * 60 + minutes > 14 * 60:
-            return local, None
-        delta = timedelta(hours=hours, minutes=minutes)
-        if offset[0] == "-":
-            delta = -delta
-        try:
-            utc = local.replace(tzinfo=timezone(delta)).astimezone(timezone.utc)
-        except OverflowError:
-            utc = None
-        return local, utc
-    return None, None
+    # The digitized date can describe a recent scan of an old photograph.
+    raw = _exif_text(exif_ifd.get(_ORIGINAL_DATE_TAG) or exif.get(_ORIGINAL_DATE_TAG))
+    try:
+        local = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None, None
+    offset = _exif_text(exif_ifd.get(_ORIGINAL_OFFSET_TAG) or exif.get(_ORIGINAL_OFFSET_TAG))
+    if not re.fullmatch(r"[+-][0-9]{2}:[0-9]{2}", offset) or offset == "-00:00":
+        return local, None
+    hours, minutes = int(offset[1:3]), int(offset[4:])
+    if minutes >= 60 or hours * 60 + minutes > 14 * 60:
+        return local, None
+    delta = timedelta(hours=hours, minutes=minutes)
+    if offset[0] == "-":
+        delta = -delta
+    try:
+        utc = local.replace(tzinfo=timezone(delta)).astimezone(timezone.utc)
+    except OverflowError:
+        utc = None
+    return local, utc
 
 
 def _gps_utc_time(gps):
@@ -120,7 +119,7 @@ def _capture_time(exif, exif_ifd, gps):
             return local.isoformat(timespec="seconds"), None, "conflict"
     instant = offset_utc or gps_utc
     if instant:
-        source = "exif_offset" if offset_utc else "gps_utc"
+        source = "exif_original_offset" if offset_utc else "gps_utc"
         # Preserve the camera's calendar day. GPS supplies a UTC date only
         # when there is no camera timestamp at all.
         wall_time = local or instant.replace(tzinfo=None)
@@ -464,7 +463,7 @@ def list_map_images(
 
 def list_selected_map_images(selection, limit=40, offset=0, before_id=None, before_captured_at=None):
     """Return a cursor page for a map selection, including an exact stop's IDs."""
-    where, params = photo_selection_sql(selection, require_coordinates=True)
+    where, params = photo_selection_sql(selection, require_coordinates=selection.image_ids is None)
     page_where = where
     page_params = list(params)
     if before_id is not None:
