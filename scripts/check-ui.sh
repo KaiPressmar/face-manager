@@ -67,7 +67,9 @@ cleanup() {
 }
 trap cleanup EXIT
 cd "$PROJECT_ROOT"
-"$PYTHON" scripts/ui-fixture.py "$SMOKE_TMP/data"
+fixture_options=()
+if [[ "${UI_SMOKE_JOURNEY_ONLY:-0}" == "1" ]]; then fixture_options+=(--journey); fi
+"$PYTHON" scripts/ui-fixture.py "$SMOKE_TMP/data" "${fixture_options[@]}"
 FACE_MANAGER_DATA_DIR="$SMOKE_TMP/data" "$PYTHON" -m uvicorn backend.app:app --host 127.0.0.1 --port "$API_PORT" >"$SMOKE_TMP/api.log" 2>&1 &
 API_PID=$!
 (cd frontend && FACE_MANAGER_VITE_API_TARGET="http://127.0.0.1:$API_PORT" exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$WEB_PORT" --strictPort) >"$SMOKE_TMP/vite.log" 2>&1 &

@@ -11,11 +11,13 @@ import sqlite3
 import threading
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
+from typing import Callable, NamedTuple
+from uuid import uuid4
 
 from PIL import Image
 
 from ..db.schema import HASH_CHUNK_SIZE, get_conn
+from .background_activities import ActivityStatus, BackgroundActivities, BackgroundActivity, background_activities
 from .filesystem_paths import filesystem_path
 from .geo_query import GeoBounds, GeoPhotoSelection, photo_selection_sql
 
@@ -26,6 +28,9 @@ _MAX_CLOCK_DISAGREEMENT = timedelta(minutes=5)
 _MAX_CLOCK_OFFSET = timedelta(hours=14)
 _BATCH_SIZE = 32
 MAP_GRID_SIZE = 32
+PHOTO_METADATA_ACTIVITY = "photo-metadata"
+_PENDING_METADATA = """metadata_scanned_at IS NULL
+                       OR (capture_time_source IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL)"""
 _LOCATION_IDENTITY_COLUMNS = ("file_device", "file_inode", "file_size", "modified_at_ns", "file_changed_at_ns")
 
 
@@ -171,9 +176,9 @@ def record_image_metadata(cursor, image_id, path, *, metadata=None):
     _save_capture_metadata(cursor, image_id, capture)
 
 
-def _save_capture_metadata(connection, image_id, metadata: CaptureMetadata):
+def _save_capture_metadata(connection, image_id, metadata: CaptureMetadata) -> int:
     scanned_at = "missing" if metadata.capture_time_source == "unavailable" else datetime.now().isoformat()
-    connection.execute(
+    return connection.execute(
         """UPDATE image SET latitude = COALESCE(latitude, ?),
                   longitude = COALESCE(longitude, ?), captured_at = COALESCE(captured_at, ?),
                   captured_at_utc = CASE WHEN captured_at IS NULL OR captured_at = ?
@@ -189,7 +194,7 @@ def _save_capture_metadata(connection, image_id, metadata: CaptureMetadata):
         (metadata.latitude, metadata.longitude, metadata.captured_at, metadata.captured_at,
          metadata.captured_at_utc, metadata.captured_at, metadata.capture_time_source,
          metadata.capture_time_source, scanned_at, image_id),
-    )
+    ).rowcount
 
 
 def _source_identity(stat):
@@ -237,9 +242,10 @@ def _legacy_capture(row, candidates, stop_event: threading.Event) -> CaptureMeta
 class GeoBackfill:
     """Low priority, resumable scan of legacy images in small transactions."""
 
-    def __init__(self):
+    def __init__(self, activities: BackgroundActivities | None = None):
         self._stop = threading.Event()
         self._thread = None
+        self._activities = activities
 
     @property
     def indexing(self):
@@ -258,41 +264,78 @@ class GeoBackfill:
             self._thread.join()
 
     def _run(self):
-        retry_missing = True
-        while not self._stop.is_set():
-            try:
-                with closing(get_conn()) as conn:
-                    if retry_missing:
-                        # Retry unavailable files once each run, for example
-                        # after a disconnected library volume returns.
-                        conn.execute(
-                            "UPDATE image SET metadata_scanned_at = NULL WHERE metadata_scanned_at = 'missing'"
-                        )
-                        conn.execute(
-                            "UPDATE image SET capture_time_source = NULL WHERE capture_time_source = 'unavailable'"
-                        )
-                        conn.commit()
-                        retry_missing = False
-                    if not self._scan_batch(conn):
-                        return
-            except sqlite3.OperationalError as exc:
-                # A competing writer can time out the background scan.
-                # Leave the current row pending so it can be retried.
-                code = getattr(exc, "sqlite_errorcode", None)
-                if code is None:  # Python 3.10 does not expose SQLite result codes.
-                    locked = "is locked" in str(exc) or str(exc) == "database is busy"
-                else:
-                    locked = (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                if not locked:
-                    logger.exception("Could not index photo metadata")
-                    return
-            self._stop.wait(0.1)
+        activity_id = None
+        processed = total = unavailable = 0
+        status: ActivityStatus = "completed"
 
-    def _scan_batch(self, conn):
+        def publish(activity_status: ActivityStatus, finished_at: str | None = None) -> None:
+            if self._activities is not None and activity_id is not None:
+                self._activities.update(BackgroundActivity(
+                    activity_id, PHOTO_METADATA_ACTIVITY, activity_status, processed,
+                    processed if activity_status == "completed" else max(total, processed),
+                    unavailable, finished_at,
+                ))
+
+        def committed(file_unavailable: bool) -> None:
+            nonlocal activity_id, processed, unavailable
+            processed += 1
+            unavailable += file_unavailable
+            if self._activities is not None and activity_id is None:
+                activity_id = uuid4().hex
+            publish("running")
+
+        retry_missing = True
+        counted_pending = self._activities is None
+        try:
+            while not self._stop.is_set():
+                try:
+                    with closing(get_conn()) as conn:
+                        if retry_missing:
+                            # Retry unavailable files once each run, for example
+                            # after a disconnected library volume returns.
+                            conn.execute(
+                                "UPDATE image SET metadata_scanned_at = NULL WHERE metadata_scanned_at = 'missing'"
+                            )
+                            conn.execute(
+                                "UPDATE image SET capture_time_source = NULL WHERE capture_time_source = 'unavailable'"
+                            )
+                            conn.commit()
+                            retry_missing = False
+                        if not counted_pending:
+                            total = conn.execute(f"SELECT COUNT(*) FROM image WHERE {_PENDING_METADATA}").fetchone()[0]
+                            counted_pending = True
+                            if total:
+                                activity_id = uuid4().hex
+                                publish("running")
+                        if not self._scan_batch(conn, committed):
+                            break
+                except sqlite3.OperationalError as exc:
+                    # Leave work pending when a competing writer times out the scan.
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    if code is None:  # Python 3.10 does not expose SQLite result codes.
+                        locked = "is locked" in str(exc) or str(exc) == "database is busy"
+                    else:
+                        locked = (code & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                    if not locked:
+                        raise
+                self._stop.wait(0.1)
+        except Exception:
+            status = "failed"
+            logger.exception("Could not index photo metadata")
+        else:
+            if self._stop.is_set():
+                status = "cancelled"
+        finally:
+            if activity_id is not None and self._activities is not None:
+                if status == "completed" and processed == 0:
+                    self._activities.discard(PHOTO_METADATA_ACTIVITY, activity_id)
+                else:
+                    publish(status, datetime.now(timezone.utc).isoformat())
+
+    def _scan_batch(self, conn, committed: Callable[[bool], None]):
         rows = conn.execute(
-            """SELECT id, path, content_hash, latitude, longitude, captured_at, metadata_scanned_at FROM image
-               WHERE metadata_scanned_at IS NULL
-                  OR (capture_time_source IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL)
+            f"""SELECT id, path, content_hash, latitude, longitude, captured_at, metadata_scanned_at FROM image
+               WHERE {_PENDING_METADATA}
                ORDER BY id LIMIT ?""",
             (_BATCH_SIZE,),
         ).fetchall()
@@ -328,12 +371,14 @@ class GeoBackfill:
                 metadata = CaptureMetadata(None, None, row["captured_at"], None, "conflict")
             if self._stop.is_set():
                 break
-            _save_capture_metadata(conn, row["id"], metadata)
+            changed_rows = _save_capture_metadata(conn, row["id"], metadata)
             conn.commit()
+            if changed_rows:
+                committed(metadata.capture_time_source == "unavailable")
         return bool(rows)
 
 
-geo_backfill = GeoBackfill()
+geo_backfill = GeoBackfill(background_activities)
 
 
 def _filter_sql(west, east, south, north, from_date, to_date):

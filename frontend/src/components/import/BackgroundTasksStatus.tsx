@@ -29,8 +29,18 @@ import TaskActionIcon from "./TaskActionIcon";
 import { importSkippedImages } from "./importSkippedImages";
 
 type TaskTone = "active" | "waiting" | "completed" | "failed" | "cancelled";
-type TaskKind = "import" | "groups" | "previews";
+type TaskKind = "import" | "groups" | "previews" | "library";
 type TaskControlState = "queued" | "running" | "paused" | "cancelling" | "terminal";
+
+interface LibraryActivity {
+  id: string;
+  kind: "photo-metadata";
+  status: "running" | "completed" | "failed" | "cancelled";
+  processed: number;
+  total: number;
+  unavailable: number;
+  finished_at: string | null;
+}
 
 export type BackgroundTaskView = {
   id: string;
@@ -296,6 +306,27 @@ function thumbnailTask(task: ThumbnailWarmupTask): BackgroundTaskView {
   };
 }
 
+const activityCount = new Intl.NumberFormat("de-DE");
+
+function photoMetadataTask(activity: LibraryActivity): BackgroundTaskView {
+  const running = activity.status === "running";
+  const tone: TaskTone = activity.status === "running" ? "active" : activity.status;
+  const status = { running: "In Arbeit", completed: "Abgeschlossen", failed: "Nicht abgeschlossen", cancelled: "Unterbrochen" };
+  const checked = activityCount.format(activity.processed);
+  const summary = running
+    ? `${checked} von ${activityCount.format(activity.total)} Fotos geprüft`
+    : `${checked} geprüfte Fotos`;
+  return {
+    id: `library:${activity.id}`, sourceId: activity.id, kind: "library",
+    controlState: running ? "running" : "terminal",
+    title: "Fotostandorte und Aufnahmezeiten prüfen", status: status[activity.status], tone,
+    summary: activity.unavailable ? `${summary} · ${activityCount.format(activity.unavailable)} Dateien nicht erreichbar` : summary,
+    error: activity.status === "failed" ? "Die Prüfung konnte nicht abgeschlossen werden." : null,
+    progress: running ? boundedProgress(activity.processed, activity.total) : null,
+    etaSeconds: null, elapsedSeconds: null, finishedAt: activity.finished_at,
+  };
+}
+
 /**
  * Calculate time until all coordinated work is done.
  *
@@ -365,25 +396,26 @@ const SHARED_ACTIVITY_STATUS = {
 };
 
 const BackgroundTasksStatus: React.FC<{
-  openImportsRequest?: number;
   sharedLibrary?: SharedLibraryState | null;
   sharedLibraryReadError?: string | null;
-}> = ({ openImportsRequest = 0, sharedLibrary, sharedLibraryReadError }) => {
+}> = ({ sharedLibrary, sharedLibraryReadError }) => {
   const [queue, setQueue] = useState<ImportQueueState | null>(null);
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
+  const [libraryTasks, setLibraryTasks] = useState<BackgroundTaskView[]>([]);
   const [sessionHistory, setSessionHistory] = useState<BackgroundTaskView[]>([]);
   const [connectionError, setConnectionError] = useState(false);
-  const [isHovered, setIsHovered] = useState(false);
-  const [hasFocus, setHasFocus] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const [unseenFinished, setUnseenFinished] = useState(0);
   const [retriedImports, setRetriedImports] = useState<Set<string>>(() => new Set());
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
   const knownImportTerminalIds = useRef<Set<string> | null>(null);
   const previousClusterState = useRef<string | null>(null);
   const previousThumbnailState = useRef<string | null>(null);
+  const activeLibraryIds = useRef<Set<string>>(new Set());
+  const dismissedLibraryIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unsubscribeImports = subscribeToTopic<ImportQueueState>("imports", (next) => {
@@ -435,11 +467,23 @@ const BackgroundTasksStatus: React.FC<{
     const unsubscribeStatus = subscribeToConnectionStatus((status) => {
       setConnectionError(status === "closed");
     });
+    const unsubscribeLibrary = subscribeToTopic<{ activities: LibraryActivity[] }>("background-activities", ({ activities }) => {
+      const views = activities.filter((activity) => activity.kind === "photo-metadata").map(photoMetadataTask);
+      const active = views.filter((task) => task.controlState !== "terminal");
+      const finished = views.filter((task) => task.controlState === "terminal" && !dismissedLibraryIds.current.has(task.id));
+      const newlyFinished = finished.filter((task) => activeLibraryIds.current.has(task.id)).length;
+      activeLibraryIds.current = new Set(active.map((task) => task.id));
+      setLibraryTasks(active);
+      setSessionHistory((current) => [...finished, ...current.filter((entry) => entry.kind !== "library")]
+        .sort((left, right) => (right.finishedAt ?? "").localeCompare(left.finishedAt ?? "")).slice(0, 8));
+      if (newlyFinished) setUnseenFinished((count) => count + newlyFinished);
+    });
     return () => {
       unsubscribeImports();
       unsubscribeClustering();
       unsubscribeThumbnails();
       unsubscribeStatus();
+      unsubscribeLibrary();
     };
   }, []);
 
@@ -457,8 +501,8 @@ const BackgroundTasksStatus: React.FC<{
     ) {
       tasks.push(thumbnailTask(thumbnails));
     }
-    return tasks;
-  }, [clustering, queue, thumbnails]);
+    return tasks.concat(libraryTasks);
+  }, [clustering, queue, thumbnails, libraryTasks]);
 
   const history = useMemo(() => {
     const imported = queue?.jobs
@@ -475,14 +519,10 @@ const BackgroundTasksStatus: React.FC<{
   const runningCount = activeTasks.filter((task) => task.tone === "active").length;
   const waitingCount = activeTasks.length - runningCount;
   const parallelImports = queue?.running_count ?? queue?.active_job_ids?.length ?? 0;
-  const open = isHovered || hasFocus || isPinned;
+  const open = isPinned;
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const retryInFlight = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (openImportsRequest > 0) setIsPinned(true);
-  }, [openImportsRequest]);
 
   const retryImport = async (task: BackgroundTaskView) => {
     if (!task.retryFolder || busyTaskId !== null || retryInFlight.current) return;
@@ -522,7 +562,7 @@ const BackgroundTasksStatus: React.FC<{
           : action === "resume"
             ? resumeAutoClusterTask(task.sourceId)
             : cancelAutoClusterTask(task.sourceId));
-      } else {
+      } else if (task.kind === "previews") {
         await (action === "pause"
           ? pauseThumbnailWarmup()
           : action === "resume"
@@ -554,8 +594,11 @@ const BackgroundTasksStatus: React.FC<{
           await deleteAutoClusterHistoryEntry(task.sourceId);
         }
         setSessionHistory((current) => current.filter((entry) => entry.id !== task.id));
-      } else {
+      } else if (task.kind === "previews") {
         await deleteThumbnailWarmupHistory();
+        setSessionHistory((current) => current.filter((entry) => entry.id !== task.id));
+      } else {
+        dismissedLibraryIds.current.add(task.id);
         setSessionHistory((current) => current.filter((entry) => entry.id !== task.id));
       }
     } catch (error) {
@@ -581,6 +624,7 @@ const BackgroundTasksStatus: React.FC<{
         cleanup.push(deleteThumbnailWarmupHistory());
       }
       await Promise.allSettled(cleanup);
+      sessionHistory.filter((task) => task.kind === "library").forEach((task) => dismissedLibraryIds.current.add(task.id));
       setSessionHistory([]);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Die Historie konnte nicht gelöscht werden.");
@@ -599,7 +643,9 @@ const BackgroundTasksStatus: React.FC<{
       if (!rootRef.current?.contains(event.target as Node | null)) setIsPinned(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setIsPinned(false);
+      if (event.key !== "Escape") return;
+      setIsPinned(false);
+      if (rootRef.current?.contains(document.activeElement)) triggerRef.current?.focus();
     };
     document.addEventListener("pointerdown", closeOnOutsideClick);
     document.addEventListener("keydown", closeOnEscape);
@@ -615,8 +661,6 @@ const BackgroundTasksStatus: React.FC<{
     ? "Letzter bekannter Stand"
     : sharedCount === 1 ? SHARED_ACTIVITY_STATUS[sharedFolders[0].status] : `${sharedCount} gemeinsame Ordner`;
   const sharedConflicts = sharedLibrary?.conflict_count ?? sharedLibrary?.conflicts?.length ?? 0;
-  if (!connectionError && !sharedCount && activeTasks.length === 0 && history.length === 0) return null;
-
   const compactLabel =
     activeTasks.length > 0
       ? `${activeTasks.length} ${activeTasks.length === 1 ? "Aufgabe" : "Aufgaben"}`
@@ -625,27 +669,23 @@ const BackgroundTasksStatus: React.FC<{
         : "Aktivitäten";
   const compactEta =
     activeTasks.length > 0
-      ? formatFriendlyDuration(totalEta) ?? "Zeit wird berechnet"
+      ? libraryTasks.length ? "Im Hintergrund" : formatFriendlyDuration(totalEta) ?? "Zeit wird berechnet"
       : sharedCount ? sharedStatus : "Bereit";
 
   return (
     <div
       ref={rootRef}
       className={`activity-center${open ? " activity-center--open" : ""}`}
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-      onFocusCapture={() => setHasFocus(true)}
-      onBlurCapture={(event) => {
-        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) setHasFocus(false);
-      }}
     >
       <button
+        ref={triggerRef}
         type="button"
         className={`activity-center__trigger${activeTasks.length > 0 ? " activity-center__trigger--busy" : ""}`}
         aria-expanded={open}
         aria-controls="activity-center-popover"
+        aria-label={activeTasks.length ? `Aktivitäten (${compactLabel})` : "Aktivitäten"}
         onClick={() => setIsPinned((current) => !current)}
-        title="Details beim Darüberfahren oder per Klick anzeigen"
+        title="Aktivitäten öffnen"
       >
         <span className="activity-center__indicator" aria-hidden="true" />
         <span className="activity-center__trigger-copy">
@@ -666,7 +706,7 @@ const BackgroundTasksStatus: React.FC<{
                   : sharedCount ? "Hier findest du den Stand der gemeinsamen Ordner." : "Aktuell ist keine Aufgabe offen."}
               </p>
             </div>
-            {activeTasks.length > 0 && (
+            {activeTasks.length > 0 && libraryTasks.length === 0 && (
               <span>{formatFriendlyDuration(totalEta) ? `Noch ca. ${formatFriendlyDuration(totalEta)}` : "Restzeit wird berechnet"}</span>
             )}
           </header>
@@ -687,9 +727,9 @@ const BackgroundTasksStatus: React.FC<{
                     key={task.id}
                     task={task}
                     busy={busyTaskId === task.id}
-                    onPause={() => void controlTask(task, "pause")}
-                    onResume={() => void controlTask(task, "resume")}
-                    onCancel={() => void controlTask(task, "cancel")}
+                    onPause={task.kind === "library" ? undefined : () => void controlTask(task, "pause")}
+                    onResume={task.kind === "library" ? undefined : () => void controlTask(task, "resume")}
+                    onCancel={task.kind === "library" ? undefined : () => void controlTask(task, "cancel")}
                   />
                 ))}
               </div>
@@ -812,7 +852,7 @@ const TaskRow: React.FC<{
         </div>
       )}
       <div className="activity-task__meta">
-        <span>{history ? finishedLabel(task.finishedAt) : duration ? `Fertig in ca. ${duration}` : "Zeit wird berechnet"}</span>
+        <span>{history ? finishedLabel(task.finishedAt) : duration ? `Fertig in ca. ${duration}` : task.kind === "library" ? "" : "Zeit wird berechnet"}</span>
         {history && duration && <span>Dauer: {duration}</span>}
       </div>
       <div className="activity-task__actions">

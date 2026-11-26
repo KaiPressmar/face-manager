@@ -25,7 +25,6 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
   // lives here and is reachable from every view instead of behind a page.
   const [showImport, setShowImport] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
-  const [openImportsRequest, setOpenImportsRequest] = useState(0);
   const importNoticeTimer = useRef<number>();
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
 
@@ -123,7 +122,7 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
             <span className="topbar-import-button__icon" aria-hidden="true">＋</span>
             <span className="topbar-import-button__label">Bilder hinzufügen</span>
           </button>
-          <BackgroundTasksStatus openImportsRequest={openImportsRequest} sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
+          <BackgroundTasksStatus sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
           {importNotice && (
             <span className="topbar-import-notice" role="status">
               {importNotice}
@@ -157,7 +156,6 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
           onClose={(started) => {
             setShowImport(false);
             if (started) {
-              setOpenImportsRequest((current) => current + 1);
               setImportNotice("Import eingereiht");
               window.clearTimeout(importNoticeTimer.current);
               importNoticeTimer.current = window.setTimeout(() => setImportNotice(null), 6000);

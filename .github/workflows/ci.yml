@@ -106,7 +106,9 @@ jobs:
           PYTHON_BIN: python
           NODE_PATH: ${{ runner.temp }}/face-manager-ui-tools/node_modules
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/face-manager-browsers
-        run: ./scripts/check-ui.sh
+        run: |
+          ./scripts/check-ui.sh
+          UI_SMOKE_JOURNEY_ONLY=1 ./scripts/check-ui.sh
 
   frontend:
     name: Frontend

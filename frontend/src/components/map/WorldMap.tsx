@@ -58,6 +58,7 @@ const MARKER_CELL_PADDING = MARKER_HIT_RADIUS + 1;
 const MIN_CELL_SIZE = MARKER_CELL_PADDING * 2;
 const MAX_GRID_SIZE = 32;
 const DETAIL_ZOOM = 2.25;
+const MAX_ZOOM = 16384;
 const JOURNEY_STOP_RADIUS = 14;
 const projectX = (longitude: number) => ((longitude + 180) / 360) * WIDTH;
 const projectY = (latitude: number) => ((90 - latitude) / 180) * HEIGHT;
@@ -79,7 +80,7 @@ export function boundsForView(view: MapView): MapBounds {
 }
 
 export function normalizedView(view: MapView): MapView {
-  const zoom = clamp(view.zoom, 1, 128);
+  const zoom = clamp(view.zoom, 1, MAX_ZOOM);
   const width = WIDTH / zoom;
   const height = HEIGHT / zoom;
   return {
@@ -432,7 +433,9 @@ const WorldMap: React.FC<Props> = ({
     ...view, longitude: view.longitude + dx * (360 / view.zoom), latitude: view.latitude + dy * (180 / view.zoom),
   }));
 
-  const selectionRect = selection && projectBounds(selection);
+  const selectionRects = !selection ? [] : selection.west > selection.east
+    ? [projectBounds({ ...selection, east: 180 }), projectBounds({ ...selection, west: -180 })]
+    : [projectBounds(selection)];
   const activeRect = selectionMode && dragBounds && projectBounds(dragBounds);
   const markerInteractions = (activate: () => void) => ({
     onPointerUp: (event: React.PointerEvent<SVGGElement>) => {
@@ -455,7 +458,7 @@ const WorldMap: React.FC<Props> = ({
   return (
     <div className="gps-map__viewport">
       <div className="gps-map__controls" role="group" aria-label="Kartensteuerung">
-        <button type="button" aria-label="Vergrößern" title="Vergrößern" disabled={view.zoom >= 128} onClick={() => onViewChange(normalizedView({ ...view, zoom: view.zoom * 1.5 }))}>+</button>
+        <button type="button" aria-label="Vergrößern" title="Vergrößern" disabled={view.zoom >= MAX_ZOOM} onClick={() => onViewChange(normalizedView({ ...view, zoom: view.zoom * 1.5 }))}>+</button>
         <button type="button" aria-label="Verkleinern" title="Verkleinern" disabled={view.zoom <= 1} onClick={() => onViewChange(normalizedView({ ...view, zoom: view.zoom / 1.5 }))}>−</button>
         <button type="button" aria-label="Nach Norden verschieben" title="Nach Norden" onClick={() => pan(0, 0.2)}>↑</button>
         <button type="button" aria-label="Nach Westen verschieben" title="Nach Westen" onClick={() => pan(-0.2, 0)}>←</button>
@@ -538,7 +541,7 @@ const WorldMap: React.FC<Props> = ({
             </g>;
           })}
         </g>}
-        {selectionRect && <rect {...selectionRect} className="gps-map__selection" />}
+        {selectionRects.map((rectangle) => <rect key={rectangle.x} {...rectangle} className="gps-map__selection" />)}
         {activeRect && <rect {...activeRect} className="gps-map__selection gps-map__selection--drag" />}
         {grid && markers.map(({ marker, x, y }) => {
           const radius = clamp(11 + Math.log10(marker.count + 1) * 3, 12, 18);

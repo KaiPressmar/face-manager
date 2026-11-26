@@ -4,9 +4,11 @@ import { fetchMapPoints, type MapPoint } from "../../utils/api";
 import type { Journey } from "./mapData";
 import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
 import { journeyStopLabel } from "./MapJourney";
+import { suggestJourneyTransport } from "./journeyTransport";
 import {
-  albumAccentColor, albumAccents, albumTransports, buildMapAlbumArtwork, mapAlbumPageToPng,
-  type AlbumAccent, type AlbumTransport, type MapAlbumPage,
+  albumAccents, albumDensities, albumOutputSize, albumPaletteColors, albumTransports, buildMapAlbumArtwork,
+  mapAlbumPageToPng, normalizeAlbumColor, type AlbumAccent, type AlbumCustomColors, type AlbumDpi,
+  type AlbumFormat, type AlbumFormatting, type AlbumTransport, type MapAlbumPage,
 } from "./MapAlbumArtwork";
 import type { MapBounds, MapStyle } from "./WorldMap";
 
@@ -21,12 +23,14 @@ export interface MapAlbumOpening {
   journey?: Journey;
 }
 
-type AlbumFormat = "a4" | "portrait" | "square";
 type AlbumPalette = "sand" | "coast";
 type AlbumData = { points?: MapPoint[]; places?: JourneyPlace[] };
 type NativeSave = (name: string, data: string) => Promise<{ status: "saved" | "cancelled" | "error"; message?: string }>;
 const dateFormatter = new Intl.DateTimeFormat("de-DE", { dateStyle: "long", timeZone: "UTC" });
 const coordinate = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 3 });
+const millimeters = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+const formatOptions = [["a4", "A4 quer"], ["portrait", "A4 hoch"], ["square", "Quadratisch"]] as const;
+const colorFields = [["paper", "Papierfarbe"], ["accent", "Akzentfarbe"], ["land", "Landfarbe"], ["water", "Wasserfarbe"]] as const;
 const day = (value: string) => dateFormatter.format(new Date(value.slice(0, 10) + "T12:00:00Z"));
 const legKey = (leg: { from_stop_id: string; to_stop_id: string }) => `${leg.from_stop_id}:${leg.to_stop_id}`;
 
@@ -63,9 +67,15 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
   const [title, setTitle] = useState(defaultTitle);
   const [subtitle, setSubtitle] = useState("");
   const [format, setFormat] = useState<AlbumFormat>("a4");
+  const [width, setWidth] = useState("3000");
+  const [height, setHeight] = useState("3000");
+  const [dpi, setDpi] = useState<AlbumDpi>(300);
   const [palette, setPalette] = useState<AlbumPalette>("sand");
   const [accent, setAccent] = useState<AlbumAccent>("automatic");
-  const [wideFrame, setWideFrame] = useState(false);
+  const [colors, setColors] = useState<AlbumCustomColors>({});
+  const [formatting, setFormatting] = useState<AlbumFormatting>({});
+  const [contextPercent, setContextPercent] = useState(0);
+  const [markerScale, setMarkerScale] = useState(100);
   const [useViewport, setUseViewport] = useState(false);
   const [transports, setTransports] = useState<Partial<Record<string, AlbumTransport>>>({});
   const [style, setStyle] = useState(opening.style);
@@ -85,9 +95,14 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
   const active = useRef(true);
   const fileTitle = title.trim();
   const bounds = useViewport ? opening.viewport : opening.bounds;
-  const renderKey = JSON.stringify([fileTitle, subtitle, format, palette, accent, style, showNames, showPeriod,
-    showStopsList, wideFrame, useViewport, transports, retry]);
-  const pages = rendered?.key === renderKey ? rendered.pages : [];
+  const dimensions = useMemo(() => ({ width: Number(width), height: Number(height) }), [width, height]);
+  const size = albumOutputSize(format, dpi, dimensions);
+  const invalidColor = Object.values(colors).some((value) => value.trim() && !normalizeAlbumColor(value));
+  const canRender = Boolean(fileTitle && size && !invalidColor);
+  const defaultColors = albumPaletteColors(palette, accent, Boolean(opening.journey), style);
+  const renderKey = JSON.stringify([fileTitle, subtitle, format, dimensions, dpi, palette, accent, colors, formatting, style,
+    showNames, showPeriod, showStopsList, contextPercent, markerScale, useViewport, transports, retry]);
+  const pages = canRender && rendered?.key === renderKey ? rendered.pages : [];
   const page = pages[pageIndex];
   const previewPage = rendered?.pages[pageIndex] ?? rendered?.pages[0];
   const error = dataError || (renderError?.key === renderKey ? renderError.text : "");
@@ -127,13 +142,13 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
   }, [opening, bounds, retry]);
 
   useEffect(() => {
-    if (!data || !fileTitle) return;
+    if (!data || !canRender) return;
     let current = true;
     const timer = window.setTimeout(() => {
       const arrivals = new Map(legs?.map((leg) => [leg.end.id, transports[leg.key]]));
       void buildMapAlbumArtwork({
-        format, title: fileTitle, subtitle: subtitle.trim(), period: showPeriod ? albumPeriod(opening) : undefined,
-        palette, accent, style, showCountryNames: showNames, showStopsList, bounds, wideFrame,
+        format, dimensions, dpi, title: fileTitle, subtitle: subtitle.trim(), period: showPeriod ? albumPeriod(opening) : undefined,
+        palette, accent, colors, formatting, style, showCountryNames: showNames, showStopsList, bounds, contextPercent, markerScale,
         points: data.points, stops: stops?.map((stop) => ({ ...stop, arrivalMode: arrivals.get(stop.id) })),
         connections: opening.journey?.connections.map((leg) => ({ ...leg, transport: transports[legKey(leg)] })),
         fitJourney: Boolean(opening.journey),
@@ -148,8 +163,8 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
       });
     }, 120);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [data, fileTitle, format, opening, palette, accent, style, showNames, showPeriod, showStopsList, subtitle,
-    renderKey, bounds, wideFrame, stops, legs, transports]);
+  }, [data, canRender, fileTitle, format, dimensions, dpi, opening, palette, accent, colors, formatting, style,
+    showNames, showPeriod, showStopsList, subtitle, renderKey, bounds, contextPercent, markerScale, stops, legs, transports]);
 
   useEffect(() => {
     if (!previewPage) return;
@@ -193,81 +208,184 @@ export default function MapAlbumDialog({ opening, onClose }: { opening: MapAlbum
     }
   };
 
+  const changeColor = (field: keyof AlbumCustomColors, value: string) => {
+    setColors((previous) => ({ ...previous, [field]: value }));
+    setConfirmation("");
+  };
+
+  const changeFormatting = <Key extends keyof AlbumFormatting,>(field: Key, value: AlbumFormatting[Key]) => {
+    setFormatting((previous) => ({ ...previous, [field]: value }));
+    setConfirmation("");
+  };
+
   return <div className="gps-album-overlay">
     <section ref={dialog} className="gps-album-dialog" role="dialog" aria-modal="true" aria-labelledby="gps-album-title">
       <header className="gps-album-dialog__header">
         <h2 id="gps-album-title">Fotobuchbild erstellen</h2>
         <button type="button" data-initial-focus onClick={onClose}>Schließen</button>
       </header>
-      <fieldset className="gps-album-dialog__options" disabled={saving}>
-        <label>Titel<input required aria-invalid={!fileTitle} value={title} maxLength={72} onChange={(event) => {
-          setTitle(event.target.value); setConfirmation("");
-        }} /></label>
-        <label><span id="gps-album-format">Format</span><select aria-labelledby="gps-album-format" value={format} onChange={(event) => {
-          const next = event.target.value;
-          setFormat(next === "square" || next === "portrait" ? next : "a4"); setConfirmation(""); setPageIndex(0);
-        }}>
-          <option value="a4">A4 quer · 3508 × 2480 px</option>
-          <option value="portrait">A4 hoch · 2480 × 3508 px</option>
-          <option value="square">Quadratisch · 3000 × 3000 px</option>
-        </select></label>
-        <label>Unterzeile (optional)<input value={subtitle} maxLength={100} onChange={(event) => {
-          setSubtitle(event.target.value); setConfirmation("");
-        }} /></label>
-        <label><span id="gps-album-palette">Farbwelt</span><select aria-labelledby="gps-album-palette" value={palette} onChange={(event) => {
-          setPalette(event.target.value === "coast" ? "coast" : "sand"); setConfirmation("");
-        }}><option value="sand">Sand &amp; Salbei</option><option value="coast">Küste &amp; Schiefer</option></select></label>
-      </fieldset>
-      <details className="gps-album-dialog__details">
-        <summary tabIndex={0}>Darstellung</summary>
-        <fieldset disabled={saving}>
-          <label><span id="gps-album-style">Kartenstil</span><select aria-labelledby="gps-album-style" value={style} onChange={(event) => {
-            setStyle(event.target.value === "landscape" ? "landscape" : "standard"); setConfirmation("");
-          }}><option value="standard">Standard</option><option value="landscape">Landschaft</option></select></label>
-          <label><span id="gps-album-frame">Bildausschnitt</span><select aria-labelledby="gps-album-frame" value={wideFrame ? "wide" : "close"} onChange={(event) => {
-            setWideFrame(event.target.value === "wide"); setConfirmation("");
-          }}><option value="close">{opening.journey ? "Ganze Reise einrahmen" : "Eng einrahmen"}</option>
-            <option value="wide">Mehr Umgebung</option></select></label>
-          {!opening.journey && opening.hasSelection && <label><span id="gps-album-area">Kartenbereich</span>
-            <select aria-labelledby="gps-album-area" value={useViewport ? "viewport" : "selection"} onChange={(event) => {
-              setUseViewport(event.target.value === "viewport"); setConfirmation("");
-            }}><option value="selection">Gewählter Bereich</option><option value="viewport">Sichtbarer Bereich</option></select></label>}
-          <label><span id="gps-album-accent">{opening.journey ? "Routenfarbe" : "Markerfarbe"}</span>
-            <span className="gps-album-dialog__swatch" aria-hidden="true" style={{ backgroundColor: albumAccentColor(palette, accent, Boolean(opening.journey)) }} />
-            <select aria-labelledby="gps-album-accent" value={accent} onChange={(event) => {
-              setAccent(event.target.value as AlbumAccent); setConfirmation("");
-            }}>{Object.entries(albumAccents).map(([value, { name }]) => <option key={value} value={value}>{name}</option>)}</select></label>
-          <label><input type="checkbox" checked={showNames} onChange={(event) => {
-            setShowNames(event.target.checked); setConfirmation("");
-          }} /> Ländernamen</label>
-          <label><input type="checkbox" checked={showPeriod} onChange={(event) => {
-            setShowPeriod(event.target.checked); setConfirmation("");
-          }} /> Zeitraum unter dem Titel</label>
-          {opening.journey && <label><input type="checkbox" checked={showStopsList} onChange={(event) => {
-            setShowStopsList(event.target.checked); setConfirmation(""); setPageIndex(0);
-          }} /> Stoppliste</label>}
+      <div className="gps-album-dialog__editor">
+        <fieldset className="gps-album-dialog__options" disabled={saving}>
+          <label>Titel<input required aria-invalid={!fileTitle} value={title} maxLength={72} onChange={(event) => {
+            setTitle(event.target.value); setConfirmation("");
+          }} /></label>
+          <label><span id="gps-album-format">Format</span><select aria-labelledby="gps-album-format" value={format} onChange={(event) => {
+            setFormat(event.target.value as AlbumFormat); setConfirmation(""); setPageIndex(0);
+          }}>
+            {formatOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            <option value="custom">Eigene Größe</option>
+          </select></label>
+          {format === "custom" && <>
+            <label>Breite (px)<input type="number" min={1200} max={4800} step={1} value={width} onChange={(event) => {
+              setWidth(event.target.value); setConfirmation("");
+            }} aria-invalid={!size} aria-describedby={!size ? "gps-album-dimensions-error" : undefined} /></label>
+            <label>Höhe (px)<input type="number" min={1200} max={4800} step={1} value={height} onChange={(event) => {
+              setHeight(event.target.value); setConfirmation("");
+            }} aria-invalid={!size} aria-describedby={!size ? "gps-album-dimensions-error" : undefined} /></label>
+            {!size && <p role="alert" id="gps-album-dimensions-error" className="gps-album-dialog__field-error">
+              Wähle 1200 bis 4800 px pro Seite, höchstens 16 Megapixel und ein Seitenverhältnis zwischen 1 zu 2 und 2 zu 1.
+            </p>}
+          </>}
+          <label>Unterzeile (optional)<input value={subtitle} maxLength={100} onChange={(event) => {
+            setSubtitle(event.target.value); setConfirmation("");
+          }} /></label>
+          <label><span id="gps-album-palette">Farbwelt</span><select aria-labelledby="gps-album-palette" value={palette} onChange={(event) => {
+            setPalette(event.target.value === "coast" ? "coast" : "sand"); setConfirmation("");
+          }}><option value="sand">Sand &amp; Salbei</option><option value="coast">Küste &amp; Schiefer</option></select></label>
         </fieldset>
-      </details>
-      {Boolean(legs?.length) && <details className="gps-album-dialog__details gps-album-dialog__route">
-        <summary tabIndex={0}>Route gestalten</summary>
-        <p>Verkehrsmittel pro Etappe wählen. Die Linien verbinden Fotoorte.</p>
-        <fieldset disabled={saving} aria-label="Verkehrsmittel pro Etappe">
-          {legs?.map(({ key, start, end }) => <label key={key}>
-            <span id={`gps-album-leg-${key}`}>{start.number}. {start.title} → {end.number}. {end.title}</span>
-            <select aria-labelledby={`gps-album-leg-${key}`} value={transports[key] ?? ""} onChange={(event) => {
-              const mode = event.target.value as AlbumTransport | "";
-              setTransports((before) => ({ ...before, [key]: mode || undefined }));
-              setConfirmation("");
-            }}><option value="">Nicht angegeben</option>
-              {Object.entries(albumTransports).map(([value, { label }]) => <option key={value} value={value}>{label}</option>)}
-            </select>
-          </label>)}
-        </fieldset>
-      </details>}
-      <div className="gps-album-dialog__preview" aria-busy={Boolean(fileTitle) && !page && !error}>
+        <details className="gps-album-dialog__details">
+          <summary tabIndex={0}>Bildgröße und Auflösung</summary>
+          <fieldset disabled={saving}>
+            <label><span id="gps-album-dpi">Druckauflösung</span><select aria-labelledby="gps-album-dpi" value={dpi} onChange={(event) => {
+              setDpi(Number(event.target.value) as AlbumDpi); setConfirmation("");
+            }}>
+              {albumDensities.map((density) => <option key={density} value={density}>{density} dpi</option>)}
+            </select></label>
+            {size && <output className="gps-album-dialog__dimensions">
+              {size.width} × {size.height} px · {millimeters.format(size.width / dpi * 25.4)} × {millimeters.format(size.height / dpi * 25.4)} mm
+            </output>}
+          </fieldset>
+        </details>
+        <details className="gps-album-dialog__details">
+          <summary tabIndex={0}>Darstellung</summary>
+          <fieldset disabled={saving}>
+            <label><span id="gps-album-style">Kartenstil</span><select aria-labelledby="gps-album-style" value={style} onChange={(event) => {
+              setStyle(event.target.value === "landscape" ? "landscape" : "standard"); setConfirmation("");
+            }}><option value="standard">Standard</option><option value="landscape">Landschaft</option></select></label>
+            <label><span id="gps-album-frame">Bildausschnitt</span><select aria-labelledby="gps-album-frame" value={contextPercent === 0 ? "close" : contextPercent === 52 ? "wide" : "custom"} onChange={(event) => {
+              setContextPercent(event.target.value === "wide" ? 52 : event.target.value === "custom" ? 25 : 0); setConfirmation("");
+            }}><option value="close">{opening.journey ? "Ganze Reise einrahmen" : "Eng einrahmen"}</option>
+              <option value="wide">Mehr Umgebung</option><option value="custom">Individuell</option></select></label>
+            <label className="gps-album-dialog__slider"><span>Umgebung</span><input type="range" min={0} max={100} value={contextPercent} onChange={(event) => {
+              setContextPercent(Number(event.target.value)); setConfirmation("");
+            }} aria-label="Umgebung" aria-valuetext={`${contextPercent} Prozent`} /><span aria-hidden="true">{contextPercent} %</span></label>
+            <label className="gps-album-dialog__slider"><span>Markergröße</span><input type="range" min={70} max={140} value={markerScale} onChange={(event) => {
+              setMarkerScale(Number(event.target.value)); setConfirmation("");
+            }} aria-label="Markergröße" aria-valuetext={`${markerScale} Prozent`} /><span aria-hidden="true">{markerScale} %</span></label>
+            {!opening.journey && opening.hasSelection && <label><span id="gps-album-area">Kartenbereich</span>
+              <select aria-labelledby="gps-album-area" value={useViewport ? "viewport" : "selection"} onChange={(event) => {
+                setUseViewport(event.target.value === "viewport"); setConfirmation("");
+              }}><option value="selection">Gewählter Bereich</option><option value="viewport">Sichtbarer Bereich</option></select></label>}
+            <label><span id="gps-album-accent">{opening.journey ? "Routenfarbe" : "Markerfarbe"}</span>
+              <span className="gps-album-dialog__swatch" aria-hidden="true" style={{ backgroundColor: normalizeAlbumColor(colors.accent) ?? defaultColors.accent }} />
+              <select aria-labelledby="gps-album-accent" value={accent} onChange={(event) => {
+                setAccent(event.target.value as AlbumAccent); changeColor("accent", "");
+              }}>{Object.entries(albumAccents).map(([value, { name }]) => <option key={value} value={value}>{name}</option>)}</select></label>
+            <label><input type="checkbox" checked={showNames} onChange={(event) => {
+              setShowNames(event.target.checked); setConfirmation("");
+            }} /> Ländernamen</label>
+            <label><input type="checkbox" checked={showPeriod} onChange={(event) => {
+              setShowPeriod(event.target.checked); setConfirmation("");
+            }} /> Zeitraum unter dem Titel</label>
+            {opening.journey && <label><input type="checkbox" checked={showStopsList} onChange={(event) => {
+              setShowStopsList(event.target.checked); setConfirmation(""); setPageIndex(0);
+            }} /> Stoppliste</label>}
+          </fieldset>
+        </details>
+        <details className="gps-album-dialog__details gps-album-dialog__colors">
+          <summary tabIndex={0}>Eigene Farben</summary>
+          <fieldset disabled={saving}>
+            {colorFields.map(([field, label]) => {
+              const draft = colors[field] ?? "";
+              const selected = normalizeAlbumColor(draft);
+              return <div className="gps-album-dialog__color" key={field}>
+                <span>{label}</span>
+                <input type="color" aria-label={`${label} auswählen`} value={selected ?? defaultColors[field]}
+                  onChange={(event) => changeColor(field, event.target.value)} />
+                <input type="text" aria-label={`${label} als Hexcode`} value={draft} maxLength={7}
+                  placeholder={defaultColors[field]} autoComplete="off" spellCheck={false}
+                  aria-invalid={Boolean(draft.trim() && !selected)}
+                  aria-describedby={invalidColor ? "gps-album-colors-error" : undefined}
+                  onChange={(event) => changeColor(field, event.target.value)} />
+              </div>;
+            })}
+            {invalidColor && <p role="alert" id="gps-album-colors-error" className="gps-album-dialog__field-error">
+              Gib einen Hexcode mit drei oder sechs Stellen ein, etwa #3B91A8.
+            </p>}
+            <button type="button" disabled={!Object.values(colors).some(Boolean)} onClick={() => {
+              setColors({}); setConfirmation("");
+            }}>Eigene Farben zurücksetzen</button>
+          </fieldset>
+        </details>
+        <details className="gps-album-dialog__details">
+          <summary tabIndex={0}>Schrift und Layout</summary>
+          <fieldset disabled={saving}>
+            <label>Schrift<select aria-label="Schrift" value={formatting.typeface ?? "serif"} onChange={(event) => {
+              changeFormatting("typeface", event.target.value === "sans" ? "sans" : "serif");
+            }}><option value="serif">Klassisch (Serifen)</option><option value="sans">Modern (serifenlos)</option></select></label>
+            <label>Titelausrichtung<select aria-label="Titelausrichtung" value={formatting.alignment ?? "left"} onChange={(event) => {
+              changeFormatting("alignment", event.target.value === "center" ? "center" : "left");
+            }}><option value="left">Links</option><option value="center">Zentriert</option></select></label>
+            <label className="gps-album-dialog__slider"><span>Titelgröße</span><input type="range" min={75} max={130}
+              value={formatting.titleScale ?? 100} aria-label="Titelgröße" aria-valuetext={`${formatting.titleScale ?? 100} Prozent`}
+              onChange={(event) => changeFormatting("titleScale", Number(event.target.value))} />
+              <span aria-hidden="true">{formatting.titleScale ?? 100} %</span></label>
+            <label>Seitenränder<select aria-label="Seitenränder" value={formatting.margins ?? "normal"} onChange={(event) => {
+              changeFormatting("margins", event.target.value as AlbumFormatting["margins"]);
+            }}><option value="narrow">Schmal</option><option value="normal">Normal</option><option value="wide">Breit</option></select></label>
+            {opening.journey && showStopsList && <label>Spalten der Stoppliste<select aria-label="Spalten der Stoppliste" value={formatting.listColumns ?? 2} onChange={(event) => {
+              changeFormatting("listColumns", event.target.value === "1" ? 1 : 2);
+            }}><option value="1">Eine Spalte</option><option value="2">Zwei Spalten</option></select></label>}
+          </fieldset>
+        </details>
+        {Boolean(legs?.length) && <details className="gps-album-dialog__details gps-album-dialog__route">
+          <summary tabIndex={0}>Route gestalten</summary>
+          <p>Verkehrsmittel pro Etappe wählen. Vorschläge beruhen auf Luftlinie und Aufnahmezeiten.</p>
+          <fieldset disabled={saving} aria-label="Verkehrsmittel pro Etappe">
+            {legs?.map(({ key, start, end }) => {
+              const controlId = `gps-album-transport-${key}`;
+              const hint = !transports[key] ? suggestJourneyTransport(start, end) : undefined;
+              const changeTransport = (mode?: AlbumTransport) => {
+                setTransports((before) => ({ ...before, [key]: mode }));
+                setConfirmation("");
+              };
+              return <div key={key}><label>
+              <span id={`gps-album-leg-${key}`}>{start.number}. {start.title} → {end.number}. {end.title}</span>
+              <select id={controlId} aria-labelledby={`gps-album-leg-${key}`} value={transports[key] ?? ""} onChange={(event) => {
+                changeTransport(event.target.value ? event.target.value as AlbumTransport : undefined);
+              }}><option value="">Nicht angegeben</option>
+                {Object.entries(albumTransports).map(([value, { label }]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              </label>
+              {hint && <p className="gps-album-dialog__transport-hint">
+                {hint === "road-or-rail" ? "Auto oder Zug möglich" : `${albumTransports[hint].label} möglich`}
+                {hint !== "road-or-rail" && <button type="button" onClick={() => {
+                  changeTransport(hint);
+                  document.getElementById(controlId)?.focus();
+                }}
+                  aria-label={`${albumTransports[hint].label} für Etappe ${start.number} bis ${end.number} übernehmen`}>Übernehmen</button>}
+              </p>}
+              </div>;
+            })}
+          </fieldset>
+        </details>}
+      </div>
+      <div className="gps-album-dialog__preview" aria-busy={canRender && !page && !error}>
         {fileTitle && !error && preview && preview.page === previewPage && <img src={preview.url} alt="Vorschau des Fotobuchbildes" />}
         {!fileTitle && <p role="status">Gib einen Titel für das Fotobuchbild ein.</p>}
-        {fileTitle && !page && !error && !preview && <p role="status">Vorschau wird erstellt …</p>}
+        {fileTitle && !size && <p>Prüfe die Bildgröße.</p>}
+        {fileTitle && invalidColor && <p>Prüfe die Hexcodes unter „Eigene Farben“.</p>}
+        {canRender && !page && !error && !preview && <p role="status">Vorschau wird erstellt …</p>}
         {error && <p role="alert">{error}{" "}<button type="button" onClick={() => {
           setData(null); setRenderError(undefined); setRetry((value) => value + 1);
         }}>Erneut versuchen</button></p>}

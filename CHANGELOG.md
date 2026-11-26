@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Im Standortverlauf lassen sich Zeitraum und Kartenausschnitt kombinieren und wiederkehrende Orte in der Stoppliste leichter finden.
+- Im Stadtmodus zeigt die Karte auch kurze Ortswechsel und lässt sich bis ins Stadtviertel vergrößern.
+- Fotobuchbilder lassen sich mit eigenen Farben, Bildmaßen und Druckauflösungen gestalten und in Schrift und Seitenaufteilung anpassen.
+- Beim Gestalten einer Reise schlägt die App bei passenden Entfernungen und Zeiten mögliche Verkehrsmittel vor.
+- Unter Aktivitäten siehst du, wie weit die Prüfung von Fotostandorten und Aufnahmezeiten ist. Die Übersicht öffnet sich per Klick.
+
 ### Behoben
 
 ## [0.16.0] - 2026-11-26

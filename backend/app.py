@@ -87,9 +87,10 @@ from .services.shared_sync_import import SharedImportAnalysis
 from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
-from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points, list_selected_map_images
+from .services.background_activities import background_activities
+from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_selected_map_images
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
-from .services.journey import get_journey
+from .services.journey import JourneyDetail, get_journey
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -1498,6 +1499,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         if restore_gate:
             if replaced:
                 invalidate_person_suggestion_epoch()
+                background_activities.discard(PHOTO_METADATA_ACTIVITY)
             face_thumbnail_warmup_queue.invalidate_library()
             with _media_library_lock:
                 _database_restore_in_progress = False
@@ -2699,6 +2701,14 @@ def _validate_map_bounds(west, east, south, north, from_date, to_date):
     _validated_photo_selection(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date))
 
 
+def _optional_map_bounds(west, east, south, north) -> GeoBounds | None:
+    if all(value is None for value in (west, east, south, north)):
+        return None
+    if west is None or east is None or south is None or north is None:
+        raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
+    return GeoBounds(west, east, south, north)
+
+
 def _validate_map_cursor(offset, before_id, before_captured_at):
     if before_id is None and before_captured_at is not None:
         raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
@@ -2768,10 +2778,18 @@ def get_selected_map_images(
 
 
 @app.get("/api/map/journey")
-def get_map_journey(from_date: date | None = None, to_date: date | None = None):
+def get_map_journey(
+    from_date: date | None = None,
+    to_date: date | None = None,
+    west: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    east: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    south: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    north: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    detail: JourneyDetail = "trip",
+):
     """Return observed journey groups for the specified capture period."""
     generation = _get_media_library_generation()
-    result = get_journey(from_date, to_date)
+    result = get_journey(from_date, to_date, _optional_map_bounds(west, east, south, north), detail)
     _get_media_library_generation(generation)
     return result
 
@@ -2807,11 +2825,7 @@ def get_images(
     Returns:
         Paginated image dictionaries containing nested face data.
     """
-    bounds = None
-    if any(value is not None for value in (west, east, south, north)):
-        if west is None or east is None or south is None or north is None:
-            raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
-        bounds = GeoBounds(west, east, south, north)
+    bounds = _optional_map_bounds(west, east, south, north)
     selection = None
     if bounds or from_date or to_date:
         selection = _validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date))

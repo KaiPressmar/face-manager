@@ -18,7 +18,10 @@ from .filesystem_paths import filesystem_path
 
 logger = logging.getLogger("face_manager.album_export")
 
-_PAGE_SIZES = {(3508, 2480), (2480, 3508), (3000, 3000)}
+# Match the size limits of the browser artwork renderer.
+_MIN_PAGE_EDGE = 1200
+_MAX_PAGE_EDGE = 4800
+_MAX_PAGE_PIXELS = 16_000_000
 _MAX_PNG_BYTES = 40 * 1024 * 1024
 _MAX_ENCODED_LENGTH = ((_MAX_PNG_BYTES + 2) // 3) * 4
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -44,7 +47,10 @@ def _decode_album_png(encoded: str) -> bytes:
         if len(data) > _MAX_PNG_BYTES or not data.startswith(_PNG_SIGNATURE):
             raise ValueError("Invalid PNG signature or size")
         with Image.open(BytesIO(data), formats=("PNG",)) as image:
-            if image.size not in _PAGE_SIZES:
+            width, height = image.size
+            short, long = sorted((width, height))
+            if not (_MIN_PAGE_EDGE <= short <= long <= _MAX_PAGE_EDGE
+                    and long <= 2 * short and width * height <= _MAX_PAGE_PIXELS):
                 raise ValueError("Invalid album page dimensions")
             image.verify()
         return data
