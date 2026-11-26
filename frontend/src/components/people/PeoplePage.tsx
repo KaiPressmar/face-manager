@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FaceImage, fetchImageDetail, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
@@ -12,6 +12,8 @@ import FolderPickerModal from "../shared/FolderPickerModal";
 import AlbumPickerDialog, { AlbumLibraryDialog } from "../shared/AlbumPickerDialog";
 import { removePhotoAlbumImages, updatePhotoAlbum, usePhotoAlbums, type PhotoAlbum } from "../../utils/photoAlbums";
 import { subscribeToTopic } from "../../utils/events";
+import type { NavigateToFaceGroup } from "./FaceOverlay";
+import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
 
 export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
@@ -63,6 +65,18 @@ interface ResolvedImageGeometry {
   detail: FaceImage;
 }
 
+interface PhotoWorkspace {
+  folders: string[];
+  persons: string[];
+  statuses: string[];
+  sortBy: ImageGroupingMode;
+  sortDirection: SortDirection;
+  queryKey: string;
+  loadedCount: number;
+  scrollTop: number;
+  selection?: number[];
+}
+
 function applyImageGeometry(image: FaceImage, geometry?: ResolvedImageGeometry): FaceImage {
   if (!geometry || (image.image_width && image.image_height)) return image;
   const { source, detail } = geometry;
@@ -88,7 +102,7 @@ function applyImageGeometry(image: FaceImage, geometry?: ResolvedImageGeometry):
 
 interface PeoplePageProps {
   active: boolean;
-  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  onNavigateToCluster: NavigateToFaceGroup;
   onOpenPeople: () => void;
   geoSelection?: GeoPhotoSelection;
   onChangeGeoSelection: (selection?: GeoPhotoSelection) => void;
@@ -130,6 +144,12 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [libraryTotal, setLibraryTotal] = useState<number | null>(null);
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [displayedQueryKey, setDisplayedQueryKey] = useState("");
+  const requestedQueryKey = useMemo(() => JSON.stringify({
+    folders: selectedFolders, persons: selectedPersons, faceStatuses, geoSelection,
+    sortBy: groupingMode, sortDirection,
+  }), [faceStatuses, geoSelection, groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  const staleResults = displayedQueryKey !== requestedQueryKey;
   const latestQueryRef = useRef(0);
   const lastRequestedGeoSelection = useRef(geoSelection);
   const loadMoreRequestRef = useRef(0);
@@ -146,8 +166,37 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const resolvedGeometryRef = useRef(new Map<number, ResolvedImageGeometry>());
   const queryKeyRef = useRef("");
   const pageHeaderRef = useRef<HTMLElement | null>(null);
+  const pendingResume = useRef<Pick<PhotoWorkspace, "queryKey" | "loadedCount" | "scrollTop" | "selection">>();
   const liveRefreshTimerRef = useRef<number | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
+
+  const { checkpoint } = useWorkspaceNavigation<PhotoWorkspace>("people", {
+    capture: () => {
+      const resume = pendingResume.current?.queryKey === requestedQueryKey ? pendingResume.current : undefined;
+      return {
+        folders: selectedFolders, persons: selectedPersons, statuses: faceStatuses,
+        sortBy: groupingMode, sortDirection, queryKey: requestedQueryKey,
+        loadedCount: resume?.loadedCount ?? images.length,
+        scrollTop: resume?.scrollTop ?? pageHeaderRef.current?.closest(".page-content")?.scrollTop ?? 0,
+        selection: resume?.selection ?? (selectedAlbumImages && displayedQueryKey === requestedQueryKey
+          ? [...selectedAlbumImages] : undefined),
+      };
+    },
+    restore: (snapshot) => {
+      pendingResume.current = snapshot;
+      setSelectedFolders(snapshot?.folders ?? []);
+      setSelectedPersons(snapshot?.persons ?? []);
+      setFaceStatuses(snapshot?.statuses ?? []);
+      setGroupingMode(snapshot?.sortBy ?? "date");
+      setSortDirection(snapshot?.sortDirection ?? "desc");
+      setSelectedAlbumImages(null);
+      setAlbumPickerIds(null);
+      setShowAlbumLibrary(false);
+      setShowFolderFilter(false);
+      setShowImport(false);
+      setGalleryRevision((value) => value + 1);
+    },
+  });
 
   const clearGeometryRequests = useCallback(() => {
     geometryRequestsRef.current.forEach((request) => request.abort());
@@ -212,17 +261,6 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     loadedCountRef.current = Math.max(PAGE_SIZE, images.length || PAGE_SIZE);
   }, [images.length]);
 
-  useEffect(() => {
-    queryKeyRef.current = JSON.stringify({
-      folders: selectedFolders,
-      persons: selectedPersons,
-      faceStatuses,
-      geoSelection,
-      sortBy: groupingMode,
-      sortDirection,
-    });
-  }, [faceStatuses, geoSelection, groupingMode, selectedFolders, selectedPersons, sortDirection]);
-
   const scheduleNextPagePrefetch = async (
     requestId: number,
     offset: number,
@@ -270,14 +308,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   useEffect(() => {
     let isMounted = true;
     const requestId = latestQueryRef.current + 1;
-    const queryKey = JSON.stringify({
-      folders: selectedFolders,
-      persons: selectedPersons,
-      faceStatuses,
-      geoSelection,
-      sortBy: groupingMode,
-      sortDirection,
-    });
+    const queryKey = requestedQueryKey;
     latestQueryRef.current = requestId;
     clearGeometryRequests();
     queryKeyRef.current = queryKey;
@@ -289,43 +320,50 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     const selectionChanged = lastRequestedGeoSelection.current !== geoSelection;
     lastRequestedGeoSelection.current = geoSelection;
     if (selectionChanged) {
-      setImages([]);
-      setTotalImages(0);
-      setHasMore(false);
       pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: 0 });
     }
-    setIsLoading(selectionChanged || images.length === 0);
+    setIsLoading(true);
     setIsLoadingMore(false);
     setLoadError(false);
     setLoadMoreError(false);
     setRefreshError(false);
 
-    const loadImages = async (limit: number) => {
+    const resume = pendingResume.current?.queryKey === queryKey ? pendingResume.current : undefined;
+    pendingResume.current = resume;
+    const loadImages = async () => {
       try {
-        const page = await fetchImages({
-          folders: selectedFolders,
-          persons: selectedPersons,
-          faceStatuses,
-          selection: geoSelection,
-          sortBy: groupingMode,
-          sortDirection,
-          limit,
-          offset: 0,
-        });
-        if (!isMounted || latestQueryRef.current !== requestId) return;
+        const targetCount = Math.max(PAGE_SIZE, resume?.loadedCount ?? 0);
+        const items: FaceImage[] = [];
+        let page: ImagePage;
+        do {
+          page = await fetchImages({
+            folders: selectedFolders, persons: selectedPersons, faceStatuses, selection: geoSelection,
+            sortBy: groupingMode, sortDirection,
+            limit: Math.min(REFRESH_PAGE_SIZE, targetCount - items.length), offset: items.length,
+          });
+          if (!isMounted || latestQueryRef.current !== requestId) return;
+          items.push(...page.items);
+        } while (items.length < targetCount && page.items.length > 0 && page.has_more);
 
-        setImages(page.items);
+        setImages(items);
+        setDisplayedQueryKey(queryKey);
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
         setHasMore(page.has_more);
         setLoadError(false);
-        setSelectedPersons((current) => {
-          const next = current.filter((person) =>
-            page.available_persons.includes(person),
-          );
-          return next.length === current.length ? current : next;
-        });
-        loadedCountRef.current = Math.max(PAGE_SIZE, page.items.length || PAGE_SIZE);
+        loadedCountRef.current = Math.max(PAGE_SIZE, items.length);
+        if (resume && pendingResume.current === resume) {
+          if (resume.selection) {
+            const confirmed = new Set(items.map((image) => image.id));
+            setSelectedAlbumImages(new Set(resume.selection.filter((id) => confirmed.has(id))));
+          }
+          window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+            if (isMounted && latestQueryRef.current === requestId && pendingResume.current === resume) {
+              pendingResume.current = undefined;
+              pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: resume.scrollTop });
+            }
+          }));
+        }
         if (page.has_more) {
           void scheduleNextPagePrefetch(requestId, loadedCountRef.current, queryKey);
         }
@@ -341,7 +379,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       }
     };
 
-    void loadImages(PAGE_SIZE);
+    void loadImages();
 
     return () => {
       isMounted = false;
@@ -363,8 +401,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       prefetchedOffsetRef.current = null;
       prefetchPromiseRef.current = null;
       clearGeometryRequests();
+      pendingResume.current = undefined;
       refreshImagesRequestRef.current?.abort();
       setImages([]);
+      setDisplayedQueryKey("");
       setShowAlbumLibrary(false);
       setAlbumPickerIds(null);
       setSelectedAlbumImages(null);
@@ -472,6 +512,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         });
         setAvailablePersons(page.available_persons);
         setTotalImages(page.total);
+        setDisplayedQueryKey(requestedQueryKey);
         setHasMore(page.has_more);
         setLoadError(false);
         restoreViewportAnchor(anchor, requestId);
@@ -612,7 +653,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   }, [active, clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
-    if (!isMountedRef.current || isLoading || isLoadingMore || isFetchingFirstPageRef.current || refreshImagesRequestRef.current || loadError || !hasMore) return;
+    if (!isMountedRef.current || staleResults || isLoading || isLoadingMore || isFetchingFirstPageRef.current || refreshImagesRequestRef.current || loadError || !hasMore) return;
     const loadMoreRequest = ++loadMoreRequestRef.current;
     const requestId = latestQueryRef.current;
     const offset = loadedCountRef.current;
@@ -728,12 +769,14 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     }} />
   );
   const resetFilters = () => {
+    pendingResume.current = undefined;
     setSelectedPersons([]);
     setSelectedFolders([]);
     setFaceStatuses([]);
     if (geoSelection) onChangeGeoSelection();
   };
-  const setAlbumFilter = (album?: PhotoAlbum) => {
+  const setAlbumFilter = (album?: PhotoAlbum, record = false) => {
+    if (record && album?.id !== albumId) checkpoint();
     setShowAlbumLibrary(false);
     onChangeGeoSelection({ ...geoSelection, album_id: album?.id });
   };
@@ -752,7 +795,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     });
   };
   const updateActiveAlbum = async (action: "cover" | "remove") => {
-    if (!albumId || !selectedAlbumImages?.size || albumMutation.current) return;
+    if (!albumId || !selectedAlbumImages?.size || albumMutation.current || staleResults || isLoading || loadError) return;
     const ids = [...selectedAlbumImages];
     if (action === "cover" && ids.length !== 1) return;
     if (action === "remove" && !window.confirm(
@@ -781,13 +824,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const albumDialogs = <>
     {showAlbumLibrary && albumPickerIds === null && <AlbumLibraryDialog
       albums={albums} loading={albumsLoading} error={albumsError} reload={reloadAlbums} activeAlbumId={albumId}
-      onClose={() => setShowAlbumLibrary(false)} onSelect={setAlbumFilter}
+      onClose={() => setShowAlbumLibrary(false)} onSelect={(album) => setAlbumFilter(album, true)}
       onCreate={() => setAlbumPickerIds([])}
       onDeleted={(id) => { if (albumId === id) setAlbumFilter(); }}
     />}
     {albumPickerIds !== null && <AlbumPickerDialog imageIds={albumPickerIds}
       onClose={() => setAlbumPickerIds(null)} onSaved={(album) => {
-        if (albumPickerIds.length === 0) setAlbumFilter(album);
+        if (albumPickerIds.length === 0) setAlbumFilter(album, true);
         setSelectedAlbumImages(null);
         setAlbumStatus({ text: `Album „${album.name}“ gespeichert.` });
       }} />}
@@ -809,7 +852,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
             <button className="neon-button" onClick={() => setShowImport(true)} type="button">
               {importPending ? "Weitere Ordner hinzufügen" : "Bilderordner auswählen"}
             </button>
-            <button className="secondary-button" type="button" onClick={openAlbumLibrary}>Alben</button>
+            <button className="text-button collection-start__albums" type="button" onClick={openAlbumLibrary}>Alben öffnen</button>
           </div>
           <ul className="collection-start__steps">
             <li><strong>Doppelte Fotos zusammenfassen</strong><span>Identische Dateien erscheinen einmal. Alle Speicherorte bleiben erhalten.</span></li>
@@ -845,9 +888,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         }}
         selectedFolderCount={selectedFolders.length}
         onOpenFolderFilter={() => setShowFolderFilter(true)}
-        resultCount={isLoading || (loadError && !images.length) ? null : totalImages}
+        resultCount={isLoading || staleResults || loadError ? null : totalImages}
         totalCount={libraryTotal}
         resultNoun="Bilder"
+        resultSingular="Bild"
+        resultsUnavailable={loadError}
         faceStatuses={faceStatuses}
         onFaceStatusesChange={setFaceStatuses}
         onResetFilters={hasActiveFilters ? resetFilters : undefined}
@@ -855,7 +900,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           <button type="button" className={`filter-bar__control${albumId ? " filter-bar__control--active" : ""}`}
             onClick={openAlbumLibrary}>Alben</button>
           {images.length > 0 && <button type="button" className="filter-bar__control"
-            aria-pressed={selectedAlbumImages !== null} disabled={albumPending || isLoading}
+            aria-pressed={selectedAlbumImages !== null} disabled={albumPending || staleResults || isLoading || loadError}
             onClick={() => {
               setAlbumStatus(undefined);
               setSelectedAlbumImages(selectedAlbumImages ? null : new Set());
@@ -912,9 +957,9 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           }
           title="Welche Gesichter im Bild markiert werden"
         >
-          <option value="all">Alle Gesichter markieren</option>
-          <option value="assigned">Nur zugewiesene markieren</option>
-          <option value="none">Keine Markierungen</option>
+          <option value="all">Alle Gesichtsrahmen anzeigen</option>
+          <option value="assigned">Nur Rahmen zugeordneter Gesichter</option>
+          <option value="none">Keine Gesichtsrahmen anzeigen</option>
         </select>
       </LibraryFilterBar>
 
@@ -954,14 +999,14 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
       {selectedAlbumImages && <div className="active-folder-filters" aria-label="Fotoauswahl für Alben">
         <span role="status">{selectedCount.toLocaleString("de-DE")} ausgewählt</span>
-        <button type="button" disabled={albumPending || isLoading}
+        <button type="button" disabled={albumPending || staleResults || isLoading || loadError}
           onClick={() => setSelectedAlbumImages(new Set(images.map((image) => image.id)))}>Geladene Fotos auswählen</button>
-        <button type="button" disabled={albumPending || selectedCount === 0}
+        <button type="button" disabled={albumPending || staleResults || isLoading || loadError || selectedCount === 0}
           onClick={() => setAlbumPickerIds([...selectedAlbumImages])}>Zum Album hinzufügen</button>
         {albumId && <>
-          {selectedCount === 1 && <button type="button" disabled={albumPending}
+          {selectedCount === 1 && <button type="button" disabled={albumPending || staleResults || isLoading || loadError}
             onClick={() => void updateActiveAlbum("cover")}>Als Titelbild festlegen</button>}
-          <button type="button" disabled={albumPending || selectedCount === 0}
+          <button type="button" disabled={albumPending || staleResults || isLoading || loadError || selectedCount === 0}
             onClick={() => void updateActiveAlbum("remove")}>Aus Album entfernen</button>
         </>}
       </div>}
@@ -992,12 +1037,13 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
       {loadError && (
         <div className="image-grid-status" role="alert">
-          Bilder konnten nicht geladen werden. {images.length > 0 && "Bereits angezeigte Bilder bleiben erhalten. "}
+          Die Auswahl konnte nicht geladen werden. {images.length > 0 && "Der letzte geladene Stand bleibt sichtbar. "}
           <button type="button" onClick={() => setRetryLoad((value) => value + 1)}>
-            Erneut versuchen
+            Erneut laden
           </button>
         </div>
       )}
+      {isLoading && images.length > 0 && <p className="image-grid-status" role="status">Bilder werden aktualisiert …</p>}
       {refreshError && !loadError && (
         <div className="image-grid-status" role="alert">
           Die Bibliothek konnte nicht aktualisiert werden.{" "}
@@ -1019,8 +1065,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         <ImageGrid
         key={galleryRevision}
         images={images}
-        isLoading={isLoading}
-        hasMore={hasMore && !loadMoreError && !loadError}
+        isLoading={(isLoading || staleResults) && images.length === 0}
+        interactionsDisabled={staleResults || isLoading || loadError}
+        isUpdating={isLoading}
+        hasMore={hasMore && !staleResults && !loadMoreError && !loadError}
         isLoadingMore={isLoadingMore}
         faceOverlayMode={faceOverlayMode}
         gridSize={imageGridSize}

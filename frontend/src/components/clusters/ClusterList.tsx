@@ -29,6 +29,8 @@ interface ClusterListProps {
   archiveSections?: ArchiveSectionSummary[];
   activeArchiveSectionKey?: string | null;
   onSelectArchiveSection?: (sectionKey: string) => void;
+  searchTerm: string;
+  onSearch: (value: string) => void;
   isLoading: boolean;
 }
 
@@ -44,13 +46,14 @@ const ClusterList: React.FC<ClusterListProps> = ({
   archiveSections = [],
   activeArchiveSectionKey = null,
   onSelectArchiveSection,
+  searchTerm,
+  onSearch,
   isLoading,
 }) => {
   const safeClusters = Array.isArray(clusters) ? clusters : [];
-  const clusterRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const clusterRefs = useRef<Record<number, HTMLButtonElement | null>>({});
   const [openSectionKey, setOpenSectionKey] = useState<string | null>(null);
   const [expandedPersonNames, setExpandedPersonNames] = useState<Record<string, boolean>>({});
-  const [searchTerm, setSearchTerm] = useState("");
   const [visibleOpenCount, setVisibleOpenCount] = useState(LIST_BATCH_SIZE);
   const [visiblePersonCount, setVisiblePersonCount] = useState(LIST_BATCH_SIZE);
 
@@ -241,8 +244,9 @@ const ClusterList: React.FC<ClusterListProps> = ({
     const isSelected = selected === cluster.cluster_id;
     const displayLabel = cluster.cluster_label?.trim() || `Gesichtsgruppe ${cluster.cluster_id}`;
     return (
-      <div
+      <button
         key={cluster.cluster_id}
+        type="button"
         className={`neon-card cluster-person-browser__cluster-card${isSelected ? " neon-card--active" : ""}`}
         ref={(node) => {
           clusterRefs.current[cluster.cluster_id] = node;
@@ -256,24 +260,16 @@ const ClusterList: React.FC<ClusterListProps> = ({
           overflow: "visible",
           textAlign: "left",
         }}
-        role="button"
-        tabIndex={0}
         aria-pressed={isSelected}
         onClick={() => onSelect(cluster.cluster_id)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onSelect(cluster.cluster_id);
-          }
-        }}
       >
-        <div style={{ fontSize: 13, fontWeight: 700, color: isSelected ? "var(--text-strong)" : "var(--text)" }}>
+        <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: isSelected ? "var(--text-strong)" : "var(--text)" }}>
           {displayLabel}
-        </div>
-        <div style={{ opacity: 0.62, fontSize: 12, marginTop: 2 }}>
-          {`${countWithLabel(cluster.face_count, "Gesicht", "Gesichter")} · Gruppe ${cluster.cluster_id}`}
-        </div>
-      </div>
+        </span>
+        <span style={{ display: "block", color: "var(--muted)", fontSize: 13, marginTop: 2 }}>
+          {countWithLabel(cluster.face_count, "Gesicht", "Gesichter")}
+        </span>
+      </button>
     );
   };
 
@@ -304,7 +300,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
             <span className="cluster-nav-search__label">Suche</span>
             <input
               value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
+              onChange={(event) => onSearch(event.target.value)}
               placeholder={mode === "people" ? "Person suchen" : "Gesichtsgruppe suchen"}
               className="cluster-nav-search__input"
               type="search"
@@ -315,8 +311,8 @@ const ClusterList: React.FC<ClusterListProps> = ({
 
         <div className="cluster-nav-search__meta">
           {mode === "open" && <span>{countWithLabel(unknownClusters.length, "offene Gesichtsgruppe", "offene Gesichtsgruppen")}</span>}
-          {mode === "people" && <span>{personEntries.length} Personen</span>}
-          {mode === "archive" && <span>{visibleReviewGroupCount} Kategorien</span>}
+          {mode === "people" && <span>{countWithLabel(personEntries.length, "Person", "Personen")}</span>}
+          {mode === "archive" && <span>{countWithLabel(visibleReviewGroupCount, "Kategorie", "Kategorien")}</span>}
         </div>
       </section>
 
@@ -436,6 +432,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
                         key={section.key}
                         type="button"
                         className={`neon-card${isActiveSection ? " neon-card--active" : ""}`}
+                        aria-current={isActiveSection ? "true" : undefined}
                         onClick={() => onSelectArchiveSection?.(section.key)}
                         style={{
                           width: "100%",

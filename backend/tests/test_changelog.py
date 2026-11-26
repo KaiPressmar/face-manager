@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,16 +118,29 @@ class ChangelogTest(unittest.TestCase):
         )
         self.assertTrue(all(release["sections"] for release in versions))
 
-    def _current_changelog(self, changelog, version, last_seen):
+    def _current_changelog(self, changelog, version, last_seen, *, has_photos=False):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "CHANGELOG.md"
             path.write_text(changelog, encoding="utf-8")
+            database = path.with_suffix(".sqlite")
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("CREATE TABLE image (id INTEGER PRIMARY KEY)")
+                if has_photos:
+                    connection.execute("INSERT INTO image (id) VALUES (1)")
+                connection.commit()
+            finally:
+                connection.close()
             with patch.object(app_module, "APP_VERSION", version), patch.object(
                 app_module, "get_changelog_path", return_value=path
             ), patch.object(
                 app_module,
                 "get_last_seen_changelog_version",
                 return_value=last_seen,
+            ), patch.object(
+                app_module,
+                "get_conn",
+                side_effect=lambda: sqlite3.connect(database),
             ):
                 return app_module.api_current_changelog()
 
@@ -134,6 +148,7 @@ class ChangelogTest(unittest.TestCase):
         response = self._current_changelog(MULTI_VERSION_CHANGELOG, "1.2.0", None)
 
         self.assertFalse(response["seen"])
+        self.assertTrue(response["fresh_install"])
         self.assertEqual(
             [release["version"] for release in response["versions"]],
             ["1.2.0"],
@@ -143,6 +158,7 @@ class ChangelogTest(unittest.TestCase):
         response = self._current_changelog(MULTI_VERSION_CHANGELOG, "1.2.0", "1.0.0")
 
         self.assertFalse(response["seen"])
+        self.assertFalse(response["fresh_install"])
         self.assertEqual(
             [release["version"] for release in response["versions"]],
             ["1.2.0", "1.1.0"],
@@ -152,6 +168,13 @@ class ChangelogTest(unittest.TestCase):
         response = self._current_changelog(MULTI_VERSION_CHANGELOG, "1.2.0", "1.2.0")
 
         self.assertTrue(response["seen"])
+
+    def test_current_changelog_retains_upgrade_notice_for_older_nonempty_library(self):
+        response = self._current_changelog(
+            MULTI_VERSION_CHANGELOG, "1.2.0", None, has_photos=True,
+        )
+        self.assertFalse(response["seen"])
+        self.assertFalse(response["fresh_install"])
 
     def test_full_changelog_api_returns_all_released_versions(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

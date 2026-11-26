@@ -1,6 +1,6 @@
 {
   "name": "face-manager-ui",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "private": true,
   "engines": {
     "node": ">=20"

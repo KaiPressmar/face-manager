@@ -21,7 +21,7 @@ from ..db import schema
 from ..db.schema import get_conn
 from .cache import app_cache
 from .desktop import normalize_import_folder_path
-from .events import event_hub
+from .events import event_hub, publish_cluster_change
 from .shared_sync_apply import (
     apply_unambiguous, compare_for_scope, confirmed_conflict_head, is_competing_assignment_available, is_conflict_person_available,
     resolve_competing_face_conflict, resolve_face_conflict, scoped_snapshot,
@@ -937,7 +937,9 @@ class SharedLibraryPreview:
                     stats["applied"] = stats.get("applied", 0) + applied
                     invalidate_image_query_cache()
                     app_cache.clear()
-                    event_hub.publish("clusters", {"reason": "shared_library_apply"})
+                    with self._lock:
+                        if self._current(revision):
+                            publish_cluster_change("shared_library_apply")
             except (TypeError, ValueError):
                 logger.warning("Skipped an unsupported shared photo snapshot in batch %d", batch)
                 continue
@@ -1017,7 +1019,9 @@ class SharedLibraryPreview:
             if result == "applied":
                 invalidate_image_query_cache()
                 app_cache.clear()
-                event_hub.publish("clusters", {"reason": "shared_library_resolution"})
+                with self._lock:
+                    if self._current(revision):
+                        publish_cluster_change("shared_library_resolution")
             selected = state.get("staged_choice")
             if selected and entry.producer == device_id and result != "ignored":
                 _, _, side, case, _, _, _ = selected

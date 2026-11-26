@@ -4,7 +4,7 @@ Face Manager ordnet deine Fotos auf deinem Gerät. Du kannst Gesichtern Namen ge
 
 [Download](#download-und-installation) · [Erste Schritte](#erste-schritte) · [Bebilderte Tour](#bebilderte-tour) · [Datenschutz](#daten-und-datenschutz) · [Quellcode](#aus-dem-quellcode-starten)
 
-![Bilderbibliothek mit Personenfiltern und KI-generierten Demofotos](docs/screenshots/photo-library.webp)
+![Neuer Ansichtsverlauf und Fotokarte mit ausgewähltem Reisezeitraum](docs/screenshots/navigation-0180.webp)
 
 <a id="download-and-install"></a>
 
@@ -37,7 +37,9 @@ Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub
 2. Öffne **Personen → Ohne Namen** und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
 3. In **Bilder** kannst du nach Personen, Ordnern oder Alben filtern. Unter **Karte** findest du Fotos mit gespeicherten Aufnahmeorten.
 
-Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst.
+Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel über die Seitenleiste bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite.
+
+Über **Schnellwechsel** oder **Strg+K** findest du Bereiche auch anhand von Suchbegriffen wie „Reise“ oder „Sicherung“.
 
 <a id="app-tour"></a>
 
@@ -59,7 +61,7 @@ Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. Öffne in **B
 <details>
 <summary>Personen und Dateinamen</summary>
 
-Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person. **Dateinamen** zeigt dir vor dem Umbenennen den aktuellen und den vorgeschlagenen Namen.
+Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. Nach einer unterstützten lokalen Namenszuordnung oder Archivaktion kannst du die Änderung rückgängig machen und wiederholen. Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person. Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgesehenen Namen.
 
 ![Gesichter prüfen mit einer vorgeschlagenen Zuordnung und Vergleichsfotos](docs/screenshots/people-review.webp)
 
@@ -82,8 +84,6 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 
 ![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite-017.webp)
 
-![Reiseverlauf in der Landschaftsansicht mit nummerierten Stopps und Datumsfiltern](docs/screenshots/journey-017.webp)
-
 ![Reisealbum „Sommer in Frankreich“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
 
 </details>
@@ -93,7 +93,7 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 
 Öffne in **Karte** die gewünschte Auswahl und wähle **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
 
-![Fotobuchvorschau mit Kartenroute, Gestaltungsmöglichkeiten und Speicherschaltflächen](docs/screenshots/photobook-017.webp)
+![Fotobuchvorschau mit Wiener Reiseverlauf, Format und Druckmaß](docs/screenshots/photobook-0180.webp)
 
 ![Mehrseitiges Fotobuch mit Vorschau und gemeinsamem ZIP-Export](docs/screenshots/photobook-zip-0171.webp)
 
@@ -105,6 +105,8 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
 
 ![Hilfe mit dem Thema „Fotos auf der Karte finden“, Themenauswahl und direktem Einstieg](docs/screenshots/help-017.webp)
+
+![Schnellwechsel mit Suchfeld und fünf Arbeitsbereichen](docs/screenshots/quick-switch-0180.webp)
 
 ![Aktivitäten mit laufendem Import, Standortprüfung und einem abgeschlossenen Import](docs/screenshots/activities-017.webp)
 

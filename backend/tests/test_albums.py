@@ -45,7 +45,9 @@ class AlbumsTest(unittest.TestCase):
         self._photos([(1, 0, 0, None), (2, 0, 0, None), (3, 0, 0, None)])
         with patch.object(app.event_hub, "publish") as event:
             album = app.create_album(app._AlbumCreateBody(name="  Urlaub  ", image_ids=[3, 1, 3]))
-            event.assert_called_once_with("clusters", {"reason": "albums_changed"})
+            event.assert_called_once_with("clusters", {
+                "reason": "albums_changed", "library_id": app.get_person_suggestion_epoch(),
+            })
         album_id = album["id"]
         self.assertEqual((album["name"], album["photo_count"], album["cover_image_id"]), ("Urlaub", 2, 3))
         self.assertEqual(app.get_album(album_id), album)

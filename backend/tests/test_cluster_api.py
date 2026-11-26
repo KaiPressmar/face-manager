@@ -283,12 +283,12 @@ class ClusterApiTest(unittest.TestCase):
 
     @patch("backend.app.mark_cluster_assignments_dirty")
     @patch("backend.app.schedule_version_clustering_upgrade", return_value=False)
-    @patch.object(app, "event_hub")
+    @patch.object(app.event_hub, "publish")
     @patch.object(app, "import_queue")
     def test_import_completion_requests_idle_reclustering(
         self,
         import_queue,
-        event_hub,
+        publish,
         schedule_version_upgrade,
         mark_dirty,
     ):
@@ -303,10 +303,10 @@ class ClusterApiTest(unittest.TestCase):
 
         mark_dirty.assert_called_once_with("import_completed")
         schedule_version_upgrade.assert_called_once_with()
-        self.assertEqual(event_hub.publish.call_count, 3)
-        event_hub.publish.assert_any_call(
+        self.assertEqual(publish.call_count, 3)
+        publish.assert_any_call(
             "clusters",
-            {"reason": "import_completed"},
+            {"reason": "import_completed", "library_id": app.get_person_suggestion_epoch()},
         )
 
     @patch.object(app, "auto_cluster_queue")

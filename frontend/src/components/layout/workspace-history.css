@@ -1,0 +1,38 @@
+.workspace-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  padding: 4px clamp(8px, 2vw, 24px);
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-history button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: .875rem;
+}
+
+.workspace-history button:not(:disabled):hover { border-color: var(--border-strong); }
+.workspace-history button:disabled { color: var(--text-muted); opacity: .58; cursor: default; }
+.workspace-history__reset { margin-inline-start: auto; }
+
+.workspace-history__notice {
+  margin: 4px clamp(8px, 2vw, 24px);
+  color: var(--text);
+  font-size: .875rem;
+}
+
+@media (pointer: coarse) {
+  .workspace-history button { min-height: 44px; }
+}

@@ -12,7 +12,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from functools import partial, wraps
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, closing, nullcontext
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -95,6 +95,7 @@ from .services.preview_cache_budget import (
 )
 from .services.filesystem_paths import filesystem_path
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
+from .services.face_action_history import FaceActionConflict, face_action_history, replay_face_action
 from .services.cache import app_cache
 from .services.autocluster_queue import (
     AutoClusterQueue,
@@ -103,7 +104,7 @@ from .services.autocluster_queue import (
     PRIORITY_STARTUP_REPAIR,
     PRIORITY_VERSION_UPGRADE,
 )
-from .services.events import TrailingThrottle, event_hub
+from .services.events import TrailingThrottle, event_hub, publish_cluster_change
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.shared_libraries import shared_library_preview
@@ -372,7 +373,13 @@ def notify_clusters_changed(reason: str) -> None:
     """
     if reason != "background_progress":
         shared_library_preview.library_changed()
-    event_hub.publish("clusters", {"reason": reason})
+    _publish_active_cluster_change(reason)
+
+
+def _publish_active_cluster_change(reason: str) -> None:
+    with _media_library_lock:
+        if not _database_restore_in_progress:
+            publish_cluster_change(reason)
 
 
 def _publish_background_cluster_progress() -> None:
@@ -858,9 +865,14 @@ def api_current_changelog():
     After an update that skipped several releases the user must see every
     intermediate version's notes, not only the newest. On a fresh install
     (no recorded last-seen version) only the running version is offered so the
-    first launch does not dump the entire history.
+    first launch does not dump the entire history. An empty first library is
+    marked separately so the UI can give the import and help entry priority.
     """
     last_seen = get_last_seen_changelog_version()
+    fresh_install = False
+    if last_seen is None:
+        with closing(get_conn()) as connection:
+            fresh_install = connection.execute("SELECT 1 FROM image LIMIT 1").fetchone() is None
     try:
         document = load_changelog(get_changelog_path())
     except (ChangelogError, OSError):
@@ -902,6 +914,7 @@ def api_current_changelog():
     return {
         "versions": versions,
         "seen": last_seen == APP_VERSION,
+        "fresh_install": fresh_install,
     }
 
 
@@ -1900,6 +1913,16 @@ async def api_events():
     )
 
 
+@app.get("/api/library-identity")
+def api_library_identity(response: Response):
+    """Return the current library epoch even when the latest event was coalesced."""
+    generation = _get_media_library_generation()
+    identity = get_person_suggestion_epoch()
+    _get_media_library_generation(generation)
+    response.headers["Cache-Control"] = "no-store"
+    return {"library_id": identity}
+
+
 @app.delete("/api/imports/history")
 def api_delete_import_history():
     return {"removed_count": import_queue.clear_history()}
@@ -2222,6 +2245,55 @@ def _expected_face_assignments(rows):
     return expected
 
 
+_SHARED_FACE_HISTORY_BLOCK = "Rückgängig und Wiederholen sind bei schreibend abgeglichenen Fotoordnern deaktiviert."
+
+
+@app.get("/api/faces/action-history")
+def api_face_action_history():
+    generation = _get_media_library_generation()
+    library_id = get_person_suggestion_epoch()
+    with shared_library_preview.local_face_history_allowed() as allowed:
+        result = face_action_history(library_id, blocked_reason=None if allowed else _SHARED_FACE_HISTORY_BLOCK)
+    _get_media_library_generation(generation)
+    return result
+
+
+class _FaceActionReplay(BaseModel):
+    action_id: str = Field(min_length=1, max_length=64)
+    library_id: str = Field(min_length=1, max_length=64)
+    revision: int = Field(ge=0)
+
+
+def _replay_face_action(selection: _FaceActionReplay, *, redo: bool):
+    _get_media_library_generation()
+    if selection.library_id != get_person_suggestion_epoch():
+        raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade den Änderungsverlauf neu.")
+    with shared_library_preview.local_face_history_allowed() as allowed:
+        if not allowed:
+            raise HTTPException(status_code=409, detail=_SHARED_FACE_HISTORY_BLOCK)
+        try:
+            result = replay_face_action(selection.action_id, selection.revision, selection.library_id, redo=redo)
+        except FaceActionConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    reset_import_resources()
+    reason = "redo_face_action" if redo else "undo_face_action"
+    mark_cluster_assignments_dirty(reason)
+    notify_clusters_changed(reason)
+    return result
+
+
+@app.post("/api/faces/action-history/undo")
+@safe_cluster_mutation
+def api_undo_face_action(selection: _FaceActionReplay):
+    return _replay_face_action(selection, redo=False)
+
+
+@app.post("/api/faces/action-history/redo")
+@safe_cluster_mutation
+def api_redo_face_action(selection: _FaceActionReplay):
+    return _replay_face_action(selection, redo=True)
+
+
 @app.post("/api/faces/batch")
 @safe_cluster_mutation
 def api_batch_update_faces(data: dict = Body(...)):
@@ -2236,24 +2308,32 @@ def api_batch_update_faces(data: dict = Body(...)):
         elif action == "create_cluster":
             cluster_id = create_cluster_from_faces(face_ids)
             response = {"status": "ok", "cluster_id": cluster_id}
-        elif action == "assign_person":
-            person_name = data.get("person_name") or data.get("personName")
-            if not person_name or not str(person_name).strip():
-                raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
+        elif action in {"assign_person", "mark_unknown_person", "mark_not_face"}:
+            _get_media_library_generation()
             expected_library_id = data.get("expected_library_id")
             if expected_library_id is not None and expected_library_id != get_person_suggestion_epoch():
                 raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade die Gesichtsauswahl neu.")
             expected_faces = _expected_face_assignments(data.get("expected_faces"))
-            cluster_id = assign_faces_to_person(face_ids, str(person_name), **(
-                {"expected_faces": expected_faces} if expected_faces is not None else {}
-            ))
-            response = {"status": "ok", "cluster_id": cluster_id}
-        elif action == "mark_unknown_person":
-            updated = mark_faces_with_review_status(face_ids, "unknown_person")
-            response = {"status": "ok", "updated_count": updated}
-        elif action == "mark_not_face":
-            updated = mark_faces_with_review_status(face_ids, "not_face")
-            response = {"status": "ok", "updated_count": updated}
+            with shared_library_preview.local_face_history_allowed() as record_history:
+                if action == "assign_person":
+                    person_name = data.get("person_name") or data.get("personName")
+                    if not person_name or not str(person_name).strip():
+                        raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
+                    result = assign_faces_to_person(
+                        face_ids, str(person_name), expected_faces=expected_faces, record_history=record_history,
+                    )
+                    response_field = "cluster_id"
+                else:
+                    status = "unknown_person" if action == "mark_unknown_person" else "not_face"
+                    result = mark_faces_with_review_status(
+                        face_ids, status, expected_faces=expected_faces, record_history=record_history,
+                    )
+                    response_field = "updated_count"
+            if record_history:
+                value, history_action = result
+                response = {"status": "ok", response_field: value, "history_action": history_action}
+            else:
+                response = {"status": "ok", response_field: result}
         elif action == "restore_to_manual_review":
             updated = restore_faces_to_manual_review(face_ids)
             response = {"status": "ok", "updated_count": updated}
@@ -3200,7 +3280,7 @@ def _album_call(operation, *args, write=False, **kwargs):
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         _get_media_library_generation(generation)
         if write:
-            event_hub.publish("clusters", {"reason": "albums_changed"})
+            _publish_active_cluster_change("albums_changed")
         return result
 
 

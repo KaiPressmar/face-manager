@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { registerNavigationDialog, topNavigationDialog as activeModal } from "../utils/navigationOverlays";
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -7,16 +8,6 @@ const isVisible = (element: HTMLElement) =>
   element.getClientRects().length > 0 &&
   getComputedStyle(element).visibility === "visible" &&
   !element.closest('[inert], [aria-hidden="true"]');
-
-const activeModal = () => {
-  const dialogs = Array.from(
-    document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'),
-  );
-  for (let index = dialogs.length - 1; index >= 0; index -= 1) {
-    if (isVisible(dialogs[index])) return dialogs[index];
-  }
-  return undefined;
-};
 
 const canFocus = (element: HTMLElement) => isVisible(element) && !element.matches(":disabled");
 
@@ -57,6 +48,9 @@ export function useModalFocus(
 
   useEffect(() => {
     if (!active) return;
+    const unregister = registerNavigationDialog(dialogRef, () => {
+      if (canCloseRef.current) onCloseRef.current();
+    });
     // A page can request a dialog before its async data has arrived. Read the
     // live ref for every event rather than capturing a missing or replaced node.
     const onKeyDown = (event: KeyboardEvent) => {
@@ -96,6 +90,7 @@ export function useModalFocus(
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("focusin", onFocusIn, true);
     return () => {
+      unregister();
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("focusin", onFocusIn, true);
       if (openerRef.current?.isConnected && canFocus(openerRef.current)) openerRef.current.focus();
