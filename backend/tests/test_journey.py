@@ -30,6 +30,10 @@ class JourneyTest(unittest.TestCase):
         self.assertEqual([stop["image_ids"] for stop in result["stops"]], [[1, 2], [3], [4]])
         self.assertEqual(len(result["connections"]), 2)
         self.assertEqual(result["connections"][0]["from"]["longitude"], 0)
+        self.assertEqual(
+            [(leg["from_stop_id"], leg["to_stop_id"]) for leg in result["connections"]],
+            [("1", "3"), ("3", "4")],
+        )
 
     def test_dateline_neighbours_group_and_gaps_break_only_after_twenty_four_hours(self):
         result = build_journey([

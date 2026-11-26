@@ -579,6 +579,49 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
 
+    const exportButton = page.getByRole('button', { name: 'Bild exportieren' });
+    const exportBounds = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18';
+    });
+    await exportButton.click();
+    const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
+    await book.waitFor();
+    const bounds = new URL((await exportBounds).url()).searchParams;
+    assert.equal(bounds.get('west'), '-180', 'Export uses the camera instead of the fixed selection');
+    assert.equal(bounds.get('east'), '180');
+    const bookPreview = book.getByRole('img', { name: 'Vorschau des Fotobuchbildes' });
+    await bookPreview.waitFor();
+    await book.getByLabel('Titel', { exact: true }).fill('Sommer & Meer');
+    await book.getByLabel('Unterzeile (optional)', { exact: true }).fill('Unser Fotoalbum');
+    await book.getByLabel('Format', { exact: true }).selectOption('portrait');
+    await book.getByLabel('Farbwelt', { exact: true }).selectOption('coast');
+    await book.getByText('Darstellung', { exact: true }).click();
+    await book.getByLabel('Kartenstil', { exact: true }).selectOption('standard');
+    const visibleBounds = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18'
+        && url.searchParams.get('west') !== '-180';
+    });
+    await book.getByLabel('Kartenbereich', { exact: true }).selectOption('viewport');
+    await visibleBounds;
+    await book.getByLabel('Bildausschnitt', { exact: true }).selectOption('wide');
+    await book.getByLabel('Markerfarbe', { exact: true }).selectOption('ocean');
+    await bookPreview.waitFor();
+    await page.waitForFunction(() => document.querySelector('.gps-album-dialog__preview img')?.naturalWidth === 2480);
+    const savedBook = page.waitForEvent('download');
+    await book.getByRole('button', { name: 'PNG speichern', exact: true }).click();
+    const image = fs.readFileSync(await (await savedBook).path());
+    assert.equal(image.subarray(1, 4).toString(), 'PNG');
+    assert.deepEqual([image.readUInt32BE(16), image.readUInt32BE(20)], [2480, 3508]);
+    const densityChunk = image.indexOf(Buffer.from('pHYs'));
+    assert.ok(densityChunk > 0);
+    assert.equal(image.readUInt32BE(densityChunk + 4), 11811);
+    await page.keyboard.press('Escape');
+    await book.waitFor({ state: 'hidden' });
+    assert.ok(await exportButton.evaluate((element) => element === document.activeElement));
+    assert.equal(await page.getByLabel('Kartenstil').inputValue(), 'landscape');
+
     const opener = results.getByRole('button', { name: 'Galerie öffnen' });
     await opener.click();
     const grid = page.getByRole('dialog', { name: 'Galerie der Kartenauswahl' });
@@ -590,7 +633,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await viewer.getByText('Foto 36 von 85', { exact: true }).waitFor();
     await viewer.getByRole('button', { name: 'Nächstes Bild', exact: true }).click();
     await viewer.getByText('Foto 37 von 85', { exact: true }).waitFor();
-    await page.keyboard.press('Escape');
+    await viewer.getByRole('button', { name: 'Zurück zur Galerie' }).click();
     await grid.waitFor();
     await page.waitForFunction(() => document.activeElement?.getAttribute('data-gallery-index') === '36');
     const filtered = page.waitForResponse((response) => {
@@ -605,22 +648,53 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
 
     const stop = { id: '1', number: 1, section: 1, latitude: 52.52, longitude: 13.405, start: '2024-01-01T12:00:00', end: '2024-01-01T12:00:00', image_ids: [1], uncertain: false };
     const next = { ...stop, id: '2', number: 2, latitude: 48.85, longitude: 2.35, start: '2024-01-01T17:00:00', end: '2024-01-01T17:00:00', image_ids: [2] };
+    const revisited = { ...stop, id: '4', number: 3, start: '2024-01-02T08:00:00', end: '2024-01-02T08:00:00', image_ids: [4] };
     let journeyRequests = 0;
     await page.route('**/api/map/journey?**', (route) => {
       journeyRequests += 1;
       const indexing = journeyRequests === 1;
       return route.fulfill({ json: {
-        stops: [indexing ? stop : { ...stop, image_ids: [1, 3] }, next],
-        connections: [{ from: stop, to: next }], photo_count: indexing ? 2 : 3,
+        stops: [indexing ? stop : { ...stop, image_ids: [1, 3] }, next, revisited],
+        connections: [{ from: stop, to: next, from_stop_id: stop.id, to_stop_id: next.id },
+          { from: next, to: revisited, from_stop_id: next.id, to_stop_id: revisited.id }], photo_count: indexing ? 3 : 4,
         missing_location_count: 0, missing_time_count: 0, uncertain_count: 0, indexing,
       } });
     });
     await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
     await page.locator('.gps-map__journey-line').first().waitFor();
-    await page.locator('.gps-map__journey-stop').first().press('Enter');
+    await page.getByRole('button', { name: 'Reisestopp 1', exact: true }).press('Enter');
     await results.getByRole('heading', { name: 'Fotos von Stopp 1' }).waitFor();
+    const activeMarker = page.getByRole('button', { name: 'Reisestopp 1', exact: true });
+    await activeMarker.scrollIntoViewIfNeeded();
+    assert.equal(await activeMarker.evaluate((element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      return document.elementFromPoint(x + width / 2, y + height / 2)
+        ?.closest('.gps-map__journey-stop')?.getAttribute('aria-label');
+    }), 'Reisestopp 1');
+    const arrows = await page.locator('.gps-map__journey-direction').evaluateAll((paths) =>
+      paths.map((path) => path.getAttribute('transform')?.split(' scale')[0]));
+    assert.equal(new Set(arrows).size, 2, 'Return route direction arrows overlap');
     await results.getByRole('button', { name: /Berlin-000/ }).waitFor();
-    await results.getByText('Bei Berlin', { exact: true }).waitFor();
+    await results.getByRole('button', { pressed: true }).getByText('Bei Berlin', { exact: true }).waitFor();
+    await exportButton.click();
+    await bookPreview.waitFor();
+    const journeyArtwork = await bookPreview.evaluate((image) => fetch(image.src).then((response) => response.text()));
+    assert.match(journeyArtwork, /Bei Berlin/);
+    assert.match(journeyArtwork, /Bei Paris/, 'Selecting a stop restricted the whole journey export');
+    await book.getByText('Route gestalten', { exact: true }).click();
+    await book.getByRole('combobox', { name: /1\. Bei Berlin → 2\. Bei Paris/ }).selectOption('plane');
+    await book.getByRole('combobox', { name: /2\. Bei Paris → 3\. Bei Berlin/ }).selectOption('train');
+    await book.locator('.gps-album-dialog__preview[aria-busy="false"] img').waitFor();
+    await bookPreview.waitFor();
+    const customized = await bookPreview.evaluate((image) => fetch(image.src).then((response) => response.text()));
+    assert.match(customized, /data-album-transport="plane"/);
+    assert.match(customized, /data-album-transport="train"/);
+    assert.match(customized, /Anreise: Flugzeug/);
+    assert.match(customized, /Anreise: Zug/);
+    await book.getByText('Route gestalten', { exact: true }).click();
+    await screenshot(page, 'map-album');
+    await page.keyboard.press('Escape');
+    await book.waitFor({ state: 'hidden' });
     await screenshot(page, 'map-journey');
     await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
     const exactSelection = page.waitForResponse((response) => response.url().includes('/api/images/search?') && response.ok());
@@ -628,6 +702,17 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const exact = await exactSelection;
     assert.deepEqual(exact.request().postDataJSON().selection.image_ids, [1, 3]);
     assert.equal((await exact.json()).total, 2);
+
+    await page.route('**/api/map/points?**', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue().catch(() => {});
+    });
+    await page.goto(`${webBase}/#/weltkarte`);
+    await page.reload();
+    await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
+    await page.getByRole('heading', { name: 'Chronologische Stopps' }).waitFor();
+    assert.equal(await page.locator('.gps-page__stat').count(), 0);
+    assert.equal(await page.locator('.gps-page__collection').getByText('…', { exact: true }).count(), 0);
     console.log('PASS map workspace: offline styles, fullscreen cross-page gallery, filter transfer and exact journey stop photos');
   } finally {
     await page.close();

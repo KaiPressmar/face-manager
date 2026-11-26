@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ def load_desktop():
     source = Path(__file__).resolve().parents[1] / "desktop_main.py"
     spec = importlib.util.spec_from_file_location("face_manager_desktop_test", source)
     module = importlib.util.module_from_spec(spec)
-    webview = SimpleNamespace(create_window=Mock(), start=Mock())
+    webview = SimpleNamespace(create_window=Mock(), start=Mock(), SAVE_DIALOG=30)
     with patch.dict(sys.modules, {"webview": webview}):
         spec.loader.exec_module(module)
     return module
@@ -105,3 +106,30 @@ class DesktopStartupTests(unittest.TestCase):
         stop.assert_called_once_with()
         self.assertTrue(server.should_exit)
         thread.join.assert_called_once_with(timeout=10)
+
+    def test_export_bridge_only_saves_from_the_app_and_handles_native_picker_results(self):
+        server = SimpleNamespace(should_exit=False)
+        window = self.desktop.webview.create_window.return_value
+        with patch.object(self.desktop, "_start_server", return_value=(server, Mock(), 12345)):
+            self.desktop.main()
+        save_album_png = window.expose.call_args.args[0]
+        self.assertEqual(save_album_png.__name__, "save_album_png")
+
+        with (tempfile.TemporaryDirectory() as folder,
+              patch("backend.services.album_export._decode_album_png", return_value=b"png bytes")):
+            for wrap in (lambda path: path, lambda path: (path,)):
+                destination = Path(folder) / "target.png"
+                window.create_file_dialog.return_value = wrap(str(destination))
+                window.get_current_url.return_value = "http://external.invalid/"
+                self.assertEqual(save_album_png("Album.png", "payload")["status"], "error")
+                self.assertFalse(destination.exists())
+                window.create_file_dialog.assert_not_called()
+
+                window.get_current_url.return_value = "http://127.0.0.1:12345/#/weltkarte"
+                self.assertEqual(save_album_png("Album.png", "payload"), {"status": "saved"})
+                window.create_file_dialog.assert_called_once_with(
+                    self.desktop.webview.SAVE_DIALOG, save_filename="Album.png", file_types=("PNG (*.png)",),
+                )
+                self.assertEqual(destination.read_bytes(), b"png bytes")
+                destination.unlink()
+                window.create_file_dialog.reset_mock()

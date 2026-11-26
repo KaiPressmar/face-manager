@@ -148,6 +148,7 @@ export default function MapGallery({ opening, onClose, onOpenImages, onNavigateT
     </section>}
     {index !== null && detail && <FullscreenImageGallery images={[detail.image]} activeIndex={0}
       onNavigateToCluster={onNavigateToCluster} onChange={() => {}} onClose={closePhoto}
+      closeLabel={openGrid ? "Zurück zur Galerie" : undefined}
       sequence={{
         activeIndex: detail.index, length: total, wrap: false, itemLabel: "Foto",
         onChange: openPhoto, loading: detail.index !== index && !error, error,

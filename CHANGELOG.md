@@ -20,6 +20,7 @@ Requests, nicht in diese Versionshinweise.
 - Der Standortverlauf zeigt Stopps und Ortswechsel in zeitlicher Reihenfolge und nennt passende Orte in der Nähe.
 - Die Fotokarte bietet eine Landschaftsansicht und einblendbare Ländernamen.
 - Kartenauswahlen lassen sich als große Galerie öffnen oder zum Filtern in die Bilderbibliothek übernehmen.
+- Kartenausschnitte und Standortverläufe lassen sich als PNG-Bilder fürs Fotobuch speichern. Format, Farben, Bildausschnitt und Beschriftungen sind einstellbar. Für Reiseetappen können Symbole für Verkehrsmittel ergänzt werden.
 
 ### Verbessert
 
