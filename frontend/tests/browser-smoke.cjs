@@ -272,6 +272,13 @@ async function mapFlow(browser, errors) {
   try {
     await page.goto(`${webBase}/#/weltkarte`);
     await waitForCount(85);
+    const borders = page.locator('.gps-map__border');
+    assert.equal(await borders.count(), 2);
+    for (const border of await borders.all()) {
+      assert.ok(await border.evaluate((path) => path.getTotalLength() > 0 &&
+        getComputedStyle(path).pointerEvents === 'none' &&
+        getComputedStyle(path).vectorEffect === 'non-scaling-stroke'));
+    }
     const markers = page.locator('.gps-map__marker');
     await markers.first().waitFor();
     assert.equal(await page.locator('.gps-page__photo').count(), 36);
@@ -308,6 +315,7 @@ async function mapFlow(browser, errors) {
 
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await waitForCount(29);
+    await borders.first().waitFor();
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await page.getByLabel('Bis', { exact: true }).fill('2025-12-31');
     await waitForCount(14);
