@@ -140,6 +140,18 @@ class ImportQueueTest(unittest.TestCase):
             update({"processed_images": 3})
             self.assertEqual(persist.call_count, 1)
 
+    def test_import_summary_counts_survive_reloading_completed_job(self):
+        def report_skips(_folder, update, _cancel):
+            update({"unavailable_images": 1, "unreadable_images": 2, "last_error": "one skipped file"})
+
+        with patch.object(self.processor, "process", side_effect=report_skips):
+            self.queue.enqueue("/photos")
+            self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "completed")
+
+        stored, _ = self.repository.load()
+        self.assertEqual(stored[0].to_dict()["unavailable_images"], 1)
+        self.assertEqual(stored[0].to_dict()["unreadable_images"], 2)
+
     def test_jobs_can_run_in_parallel_when_configured(self):
         self.processor.release.clear()
         self.queue.stop()
@@ -503,6 +515,8 @@ class ImportQueueTest(unittest.TestCase):
             started_at="2026-01-01T00:01:00+00:00",
             total_images=100,
             processed_images=40,
+            unavailable_images=2,
+            unreadable_images=3,
             total_faces=20,
             processed_faces=20,
         )
@@ -529,6 +543,8 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(recovered["status"], "queued")
         self.assertIsNone(recovered["started_at"])
         self.assertEqual(recovered["processed_images"], 0)
+        self.assertEqual(recovered["unavailable_images"], 0)
+        self.assertEqual(recovered["unreadable_images"], 0)
         self.assertEqual(snapshot["queued_count"], 2)
 
         self.queue.start()

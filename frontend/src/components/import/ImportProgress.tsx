@@ -10,6 +10,7 @@ import {
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
 import TaskActionIcon from "./TaskActionIcon";
+import { importSkippedImages } from "./importSkippedImages";
 
 const statusLabels: Record<ImportJob["status"], string> = {
   queued: "Wartet",
@@ -151,6 +152,7 @@ const ImportJobCard: React.FC<{
 }> = ({ job, onAction, collapsed, onToggleCollapse }) => {
   const isActive = job.status === "running" || job.status === "paused" || job.status === "cancelling";
   const isTerminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
+  const skipped = importSkippedImages(job);
   const stageLabel = job.stage ? stageLabels[job.stage] : null;
   const eta = formatEtaDuration(job.eta_seconds);
   const elapsed = formatDuration(job.elapsed_seconds);
@@ -273,6 +275,10 @@ const ImportJobCard: React.FC<{
             </div>
           )}
         </>
+      )}
+
+      {skipped && (
+        <div className="import-job__meta">{skipped}</div>
       )}
 
       {job.last_error && (

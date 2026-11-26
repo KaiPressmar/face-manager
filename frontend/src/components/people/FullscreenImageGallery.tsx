@@ -8,6 +8,7 @@ import { useModalFocus } from "../../hooks/useModalFocus";
 import { imageFileUrl, imageThumbnailUrl, openImageLocation } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
+import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import { copyTextToClipboard } from "../../utils/clipboard";
 import "./FullscreenImageGallery.css";
@@ -40,6 +41,7 @@ interface GalleryMediaState {
 
 export interface GalleryImage {
   id: number;
+  content_hash?: string | null;
   image_path: string;
   filename?: string;
   directory?: string;
@@ -371,6 +373,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
           )}
           {showFaces && !isDeleting && naturalSize.width > 0 &&
             imageWidth && imageHeight &&
+            (image.content_hash || imageAspectRatiosMatch(imageWidth, imageHeight, naturalSize.width, naturalSize.height)) &&
             (() => {
               const visibleFaces = sequence?.highlightedFaceId
                 ? image.faces.filter(

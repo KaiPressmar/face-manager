@@ -388,6 +388,8 @@ export interface ImportJob {
   finished_at: string | null;
   total_images: number;
   processed_images: number;
+  unavailable_images?: number;
+  unreadable_images?: number;
   total_faces: number;
   processed_faces: number;
   stage: ImportJobStage | null;
@@ -785,8 +787,13 @@ export async function importDatabase(file: File): Promise<void> {
 }
 
 /** Load one image with its faces, to show a face crop in its full context. */
-export async function fetchImageDetail(imageId: number, signal?: AbortSignal): Promise<FaceImage> {
-  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail`, { signal });
+export async function fetchImageDetail(
+  imageId: number,
+  signal?: AbortSignal,
+  { resolveGeometry = false } = {},
+): Promise<FaceImage> {
+  const query = resolveGeometry ? "?resolve_geometry=true" : "";
+  const res = await apiFetch(`${API_BASE}/images/${imageId}/detail${query}`, { signal });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Das Bild konnte nicht geladen werden."));
   }
@@ -810,6 +817,7 @@ export async function fetchImages({
   sortDirection = "desc",
   limit = 40,
   offset = 0,
+  signal,
 }: FetchImagesParams = {}): Promise<ImagePage> {
   const params = new URLSearchParams();
   folders.forEach((folder) => params.append("folders", folder));
@@ -821,7 +829,7 @@ export async function fetchImages({
   params.set("offset", String(offset));
   params.set("all_photos", "true");
   const query = params.toString();
-  const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`);
+  const res = await apiFetch(`${API_BASE}/images${query ? `?${query}` : ""}`, { signal });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Bilder konnten nicht geladen werden."));
   }
@@ -1356,6 +1364,8 @@ export interface ImageRenameCandidate {
   directory: string;
   current_filename: string;
   proposed_filename: string;
+  validation_error?: "filename_too_long" | "invalid_filename" | null;
+  omitted_person_count?: number;
   proposed_path: string;
   detected_person_names: string[];
   current_suffix_person_names: string[];

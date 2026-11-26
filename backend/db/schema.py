@@ -618,6 +618,8 @@ def _create_import_job_table(cur):
             finished_at TEXT,
             total_images INTEGER NOT NULL DEFAULT 0,
             processed_images INTEGER NOT NULL DEFAULT 0,
+            unavailable_images INTEGER NOT NULL DEFAULT 0,
+            unreadable_images INTEGER NOT NULL DEFAULT 0,
             total_faces INTEGER NOT NULL DEFAULT 0,
             processed_faces INTEGER NOT NULL DEFAULT 0,
             stage TEXT,
@@ -640,6 +642,8 @@ def _create_import_job_table(cur):
         "stage_current": "INTEGER NOT NULL DEFAULT 0",
         "stage_total": "INTEGER NOT NULL DEFAULT 0",
         "current_file": "TEXT",
+        "unavailable_images": "INTEGER NOT NULL DEFAULT 0",
+        "unreadable_images": "INTEGER NOT NULL DEFAULT 0",
     }
     for column, definition in additions.items():
         if column not in columns:

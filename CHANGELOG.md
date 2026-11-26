@@ -11,7 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Der Import zeigt getrennt an, wie viele Bilder unlesbar oder nicht erreichbar waren.
+- Bei zu langen Dateinamen kürzt die Vorschau die angehängte Namensliste und behält den ursprünglichen Namensteil bei.
+
 ### Behoben
+
+- Gesichtsrahmen erscheinen auch bei älteren Fotos weiter unten in großen Bibliotheken wieder zuverlässig.
 
 ## [0.15.0] - 2026-11-25
 

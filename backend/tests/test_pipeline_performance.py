@@ -204,7 +204,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 finally:
                     worker.stop()
 
-    def test_file_with_image_extension_but_invalid_content_is_skipped(self):
+    def test_unavailable_and_undecodable_files_are_counted_separately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             photo_dir = root / "photos"
@@ -213,17 +213,31 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 photo_dir / "valid.jpg"
             )
             (photo_dir / "cache.jpg").write_text("not an image", encoding="utf-8")
+            (photo_dir / "disconnected.jpg").touch()
+            Image.new("RGB", (16, 16), color=(200, 3, 4)).save(photo_dir / "inference.png")
+            hash_image = ImagePreparer.hash_image
+
+            def hash_available_image(path):
+                if path.name == "disconnected.jpg":
+                    raise FileNotFoundError(path)
+                return hash_image(path)
+
+            def infer(image):
+                if image[0, 0, 0] == 200:
+                    raise OSError("inference failed")
+                return []
 
             model = Mock(compute_mode="cpu")
-            model.detect_and_embed.return_value = []
+            model.detect_and_embed.side_effect = infer
             resources = Mock()
             resources.get_model.return_value = model
             resources.get_clusterer.return_value = Mock()
-            errors = []
+            progress = {}
             db_path = root / "database.sqlite"
 
             with (
                 patch.object(schema, "DB_PATH", str(db_path)),
+                patch.object(ImagePreparer, "hash_image", side_effect=hash_available_image),
                 patch(
                     "backend.services.pipeline.get_import_worker_count",
                     return_value=1,
@@ -232,9 +246,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 schema.init_db()
                 ImportProcessor(resources).process(
                     str(photo_dir),
-                    lambda changes: errors.append(changes["last_error"])
-                    if "last_error" in changes
-                    else None,
+                    progress.update,
                     threading.Event(),
                 )
                 conn = schema.get_conn()
@@ -244,10 +256,10 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 ]
                 conn.close()
 
-            self.assertEqual(model.detect_and_embed.call_count, 1)
+            self.assertEqual(model.detect_and_embed.call_count, 2)
             self.assertEqual(stored_paths, [str(photo_dir / "valid.jpg")])
-            self.assertEqual(len(errors), 1)
-            self.assertIn("cache.jpg", errors[0])
+            self.assertEqual(progress["unavailable_images"], 1)
+            self.assertEqual(progress["unreadable_images"], 1)
 
     def test_file_replaced_after_hash_is_not_committed(self):
         with tempfile.TemporaryDirectory() as temp_dir:

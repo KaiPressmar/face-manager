@@ -42,12 +42,27 @@ function skipLabel(reason: string) {
     case "target_exists": return "Zielname bereits belegt";
     case "missing_source": return "Datei nicht erreichbar";
     case "invalid_filename": return "Vorgeschlagener Name nicht zulässig";
+    case "filename_too_long": return "Vorgeschlagener Dateiname zu lang";
     default: return "Übersprungen";
   }
 }
 
 function isSelectable(item: ImageRenameCandidate) {
-  return item.current_filename !== item.proposed_filename && !/[/\\\u0000]/.test(item.proposed_filename);
+  return !item.validation_error && item.current_filename !== item.proposed_filename && !/[/\\\u0000]/.test(item.proposed_filename);
+}
+
+function filenameWarning(item: ImageRenameCandidate) {
+  if (item.validation_error === "filename_too_long") {
+    return "Der Dateiname ist zu lang. Kürze den bestehenden Namen, damit die Personennamen ergänzt werden können.";
+  }
+  if (!isSelectable(item)) {
+    return item.current_filename === item.proposed_filename
+      ? "Bereits passend benannt"
+      : "Der vorgeschlagene Name enthält ein unzulässiges Zeichen.";
+  }
+  if (item.omitted_person_count === 1) return "Der Dateiname hätte sonst nicht gepasst. Ein Personenname entfällt.";
+  if (item.omitted_person_count) return `Der Dateiname hätte sonst nicht gepasst. ${item.omitted_person_count} Personennamen entfallen.`;
+  return null;
 }
 
 const ImageRenamePage: React.FC<{
@@ -231,6 +246,7 @@ const ImageRenamePage: React.FC<{
       : selectedPaths.has(path);
   const selectableItems = items.filter(isSelectable);
   const canReview = selectedCount > 0 && !isLoading && !loadError && !isSubmitting;
+  const exampleWarning = renameReview?.example && filenameWarning(renameReview.example);
 
   const toggleItem = (path: string) => {
     setMessage(null);
@@ -825,8 +841,8 @@ const ImageRenamePage: React.FC<{
                       <div><small>Vorgeschlagener Name</small><strong>{item.proposed_filename}</strong></div>
                     </div>
                     <div className="rename-row__path">{item.directory ?? item.path}</div>
-                    {!isSelectable(item) && <span className="rename-row__unavailable">
-                      {item.current_filename === item.proposed_filename ? "Bereits passend benannt" : "Der vorgeschlagene Name enthält ein unzulässiges Zeichen."}
+                    {filenameWarning(item) && <span className="rename-row__unavailable">
+                      {filenameWarning(item)}
                     </span>}
                     <div className="rename-row__people">
                       Personen: {item.detected_person_names.join(", ")}
@@ -877,14 +893,17 @@ const ImageRenamePage: React.FC<{
               <strong>{renameReview.count} ausgewählte {renameReview.count === 1 ? "Datei" : "Dateien"}</strong>
               <p>Face Manager benennt die Dateien am jeweiligen Speicherort um.</p>
               {renameReview.payload.rename_all && (
-                <p>Die Auswahl gilt für alle Treffer des aktuellen Filters, auch auf anderen Seiten. Face Manager prüft die Treffer beim Umbenennen erneut.</p>
+                <p>Die Auswahl gilt für alle Treffer des aktuellen Filters, auch auf anderen Seiten. Bei langen Dateinamen können Personennamen entfallen. Face Manager überspringt unzulässige Dateinamen.</p>
               )}
               {renameReview.example && (
-                <div className="rename-file-names rename-review-example">
-                  <div><small>{renameReview.count > 1 ? "Beispiel" : "Aktueller Name"}</small><code>{renameReview.example.current_filename}</code></div>
-                  <span className="rename-file-names__arrow" aria-hidden="true">→</span>
-                  <div><small>Vorgeschlagener Name</small><strong>{renameReview.example.proposed_filename}</strong></div>
-                </div>
+                <>
+                  <div className="rename-file-names rename-review-example">
+                    <div><small>{renameReview.count > 1 ? "Beispiel" : "Aktueller Name"}</small><code>{renameReview.example.current_filename}</code></div>
+                    <span className="rename-file-names__arrow" aria-hidden="true">→</span>
+                    <div><small>Vorgeschlagener Name</small><strong>{renameReview.example.proposed_filename}</strong></div>
+                  </div>
+                  {exampleWarning && <p>{exampleWarning}</p>}
+                </>
               )}
             </div>
             <footer className="cluster-action-modal__footer">
