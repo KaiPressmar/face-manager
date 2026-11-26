@@ -1,23 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AppPage } from "../../App";
+import { PRIMARY_ITEMS, SECONDARY_ITEMS } from "./workspaceDestinations";
 
-interface NavItem {
-  page: AppPage;
-  icon: string;
-  label: string;
-  hint: string;
-}
-
-const PRIMARY_ITEMS: NavItem[] = [
-  { page: "people", icon: "▦", label: "Bilder", hint: "Fotos durchsuchen" },
-  { page: "review", icon: "◉", label: "Personen", hint: "Gesichter prüfen und Namen zuordnen" },
-  { page: "map", icon: "◎", label: "Karte", hint: "Aufnahmeorte entdecken" },
-];
-
-const SECONDARY_ITEMS: NavItem[] = [
-  { page: "renaming", icon: "Aa", label: "Dateinamen", hint: "Personennamen ergänzen" },
-  { page: "settings", icon: "⚙", label: "Einstellungen", hint: "Face Manager verwalten" },
-];
+type NavItem = (typeof PRIMARY_ITEMS)[number] | (typeof SECONDARY_ITEMS)[number];
 
 const Sidebar: React.FC<{
   page: AppPage;

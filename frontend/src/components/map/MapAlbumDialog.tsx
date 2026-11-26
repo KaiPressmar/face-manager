@@ -180,6 +180,8 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const busy = Boolean(saving || savingDraft);
   const [saveError, setSaveError] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [leaveDesign, setLeaveDesign] = useState<"close" | "reset">();
+  const confirmationDialog = useRef<HTMLElement>(null);
   const active = useRef(true);
   const fileTitle = title.trim();
   const exportName = fileTitle.replace(/[^\p{L}\p{N} ._-]+/gu, "-").replace(/^\.+|[ .-]+$/g, "").trim() || "Fotokarte";
@@ -192,14 +194,23 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const availableColorFields = colorFields.filter(([field]) => style !== "satellite" || field === "paper" || field === "accent");
   const invalidColor = availableColorFields.some(([field]) => Boolean(colors[field]?.trim() && !normalizeAlbumColor(colors[field])));
   const canRender = Boolean(fileTitle && size && !invalidColor);
+  const currentDesign: AlbumDraft = { version: 1, title, subtitle, format, dimensions, dpi, palette, accent, colors, formatting,
+    contextPercent, markerScale, useViewport, transports, style, showNames, showPeriod, showStopsList };
+  const designKey = JSON.stringify(currentDesign);
+  const savedDesign = useRef({ design: currentDesign, key: designKey });
+  const dirty = savedDesign.current.key !== designKey;
+  const markDesignSaved = () => { savedDesign.current = { design: currentDesign, key: designKey }; };
   const defaultColors = albumPaletteColors(palette, accent, Boolean(opening.journey), style);
   const renderKey = JSON.stringify([fileTitle, subtitle, format, dimensions, dpi, palette, accent, colors, formatting, style,
     showNames, showPeriod, showStopsList, contextPercent, markerScale, useViewport, transports, retry]);
   const pages = canRender && rendered?.key === renderKey && rendered.opening === opening && rendered.data === data
     ? rendered.pages : [];
   const page = pages[pageIndex];
-  const previewPage = rendered?.pages[pageIndex] ?? rendered?.pages[0];
+  const previewCount = rendered?.pages.length ?? 0;
+  const previewIndex = Math.min(pageIndex, Math.max(0, previewCount - 1));
+  const previewPage = rendered?.pages[previewIndex];
   const error = dataError || (renderError?.key === renderKey ? renderError.text : "");
+  const updatingPreview = canRender && !page && !error;
   const stops = useMemo(() => {
     if (!opening.journey) return undefined;
     const places = describeJourneyPlaces(opening.journey.stops, data?.places);
@@ -215,7 +226,13 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     const end = stopsById.get(leg.to_stop_id);
     return start && end ? [{ key: legKey(leg), start, end }] : [];
   }), [opening, stopsById]);
-  useModalFocus(dialog, onClose, !busy);
+  const requestClose = () => {
+    if (busy) return;
+    if (dirty) setLeaveDesign("close");
+    else onClose();
+  };
+  useModalFocus(dialog, requestClose, !busy);
+  useModalFocus(confirmationDialog, () => setLeaveDesign(undefined), true, Boolean(leaveDesign));
 
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
@@ -282,9 +299,13 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         if (!active.current) return;
         const result = await desktop.save_album_png(filename, data);
         if (result.status === "error") throw new Error(result.message || "Das PNG konnte nicht gespeichert werden.");
-        if (active.current && result.status === "saved") setConfirmation("PNG gespeichert.");
+        if (active.current && result.status === "saved") {
+          if (!onSaveDraft && pages.length === 1) markDesignSaved();
+          setConfirmation("PNG gespeichert.");
+        }
       } else {
         downloadAlbumFile(png, filename);
+        if (!onSaveDraft && pages.length === 1) markDesignSaved();
         setConfirmation("PNG erstellt.");
       }
     } catch (failure) {
@@ -319,11 +340,15 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
       if (desktop?.save_album_zip) {
         const result = await desktop.save_album_zip(filename, nativePages);
         if (result.status === "error") throw new Error(result.message || "Das ZIP konnte nicht gespeichert werden.");
-        if (active.current && result.status === "saved") setConfirmation("ZIP gespeichert.");
+        if (active.current && result.status === "saved") {
+          if (!onSaveDraft) markDesignSaved();
+          setConfirmation("ZIP gespeichert.");
+        }
       } else {
         const archive = await archiveMapAlbumPages(pngFiles);
         if (!active.current) return;
         downloadAlbumFile(archive, filename);
+        if (!onSaveDraft) markDesignSaved();
         setConfirmation("ZIP erstellt.");
       }
     } catch (failure) {
@@ -348,9 +373,11 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     setSaveError("");
     setConfirmation("");
     try {
-      await onSaveDraft({ version: 1, title: fileTitle, subtitle: subtitle.trim(), format, dimensions, dpi, palette, accent,
-        colors, formatting, contextPercent, markerScale, useViewport, transports, style, showNames, showPeriod, showStopsList });
-      if (active.current) setConfirmation("Entwurf im Album gespeichert.");
+      await onSaveDraft({ ...currentDesign, title: fileTitle, subtitle: subtitle.trim() });
+      if (active.current) {
+        markDesignSaved();
+        setConfirmation("Entwurf im Album gespeichert.");
+      }
     } catch (failure) {
       if (active.current) setSaveError(failure instanceof Error ? failure.message : "Der Entwurf konnte nicht gespeichert werden.");
     } finally {
@@ -368,19 +395,74 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     setConfirmation("");
   };
 
+  const discardChanges = () => {
+    if (leaveDesign === "close") { onClose(); return; }
+    const initial = savedDesign.current.design;
+    setTitle(initial.title);
+    setSubtitle(initial.subtitle);
+    setFormat(initial.format);
+    setSizeUnit("px");
+    setWidth(String(initial.dimensions.width));
+    setHeight(String(initial.dimensions.height));
+    setDpi(initial.dpi);
+    setPalette(initial.palette);
+    setAccent(initial.accent);
+    setColors(initial.colors);
+    setFormatting(initial.formatting);
+    setContextPercent(initial.contextPercent);
+    setMarkerScale(initial.markerScale);
+    setUseViewport(initial.useViewport);
+    setTransports(initial.transports);
+    setStyle(initial.style);
+    setShowNames(initial.showNames);
+    setShowPeriod(initial.showPeriod);
+    setShowStopsList(initial.showStopsList);
+    setLeaveDesign(undefined);
+    setSaveError("");
+    setConfirmation("Gestaltung zurückgesetzt.");
+  };
+
   return <div className="gps-album-overlay">
-    <section ref={dialog} className="gps-album-dialog" role="dialog" aria-modal="true" aria-labelledby="gps-album-title">
+    <section ref={dialog} className="gps-album-dialog" role="dialog" aria-modal="true" aria-labelledby="gps-album-title" aria-hidden={leaveDesign ? true : undefined}>
       <header className="gps-album-dialog__header">
         <h2 id="gps-album-title">Fotobuchbild erstellen</h2>
-        <button type="button" data-initial-focus onClick={onClose} disabled={busy}>Schließen</button>
+        <button type="button" data-initial-focus onClick={requestClose} disabled={busy}>Schließen</button>
       </header>
+      <div className="gps-album-dialog__preview-area">
+        <div className="gps-album-dialog__preview" aria-busy={updatingPreview}>
+          {preview && preview.page === previewPage && <img src={preview.url} alt="Vorschau des Fotobuchbildes" />}
+          {!preview && !updatingPreview && <p>Die Druckvorschau erscheint hier.</p>}
+        </div>
+        <div className="gps-album-dialog__preview-context">
+          {previewCount > 1 && <div role="group" aria-label="Fotobuchseiten" className="gps-album-dialog__pages">
+            <button type="button" aria-label="Vorherige Seite" disabled={busy || previewIndex === 0} onClick={() => {
+              setPageIndex(previewIndex - 1); setConfirmation("");
+            }}>‹</button>
+            <span>Seite {previewIndex + 1} von {previewCount}</span>
+            <button type="button" aria-label="Nächste Seite" disabled={busy || previewIndex >= previewCount - 1} onClick={() => {
+              setPageIndex(previewIndex + 1); setConfirmation("");
+            }}>›</button>
+          </div>}
+          {size && <span className="gps-album-dialog__dimensions">{millimeters.format(size.width / dpi * MM_PER_INCH)} × {millimeters.format(size.height / dpi * MM_PER_INCH)} mm · {dpi} dpi</span>}
+        </div>
+        {updatingPreview && <p className="gps-album-dialog__feedback" role="status">{preview ? "Vorschau wird aktualisiert …" : "Vorschau wird erstellt …"}</p>}
+        {!fileTitle && <p className="gps-album-dialog__feedback" role="status">Gib einen Titel für das Fotobuchbild ein.</p>}
+        {fileTitle && !size && <p className="gps-album-dialog__feedback">Prüfe die Bildgröße.</p>}
+        {fileTitle && invalidColor && <p className="gps-album-dialog__feedback">Prüfe die Hexcodes unter „Eigene Farben“.</p>}
+        {error && <p className="gps-album-dialog__feedback" role="alert">{error}{" "}<button type="button" onClick={() => {
+          setData(null); setRenderError(undefined); setRetry((value) => value + 1);
+        }}>Erneut versuchen</button></p>}
+        {page?.satelliteFallback && <p className="gps-album-dialog__feedback" role="status">Satellitenbild nicht verfügbar. Die Standardkarte wird verwendet.</p>}
+        {style === "satellite" && page?.number === 1 && !page.satelliteFallback &&
+          <a className="gps-map__credit" href={satelliteSource.url} target="_blank" rel="noreferrer">{satelliteSource.name}</a>}
+      </div>
       <div className="gps-album-dialog__editor">
         <fieldset className="gps-album-dialog__options" disabled={busy}>
           <label>Titel<input required aria-invalid={!fileTitle} value={title} maxLength={72} onChange={(event) => {
             setTitle(event.target.value); setConfirmation("");
           }} /></label>
           <label><span id="gps-album-format">Format</span><select aria-labelledby="gps-album-format" value={format} onChange={(event) => {
-            setFormat(event.target.value as AlbumFormat); setConfirmation(""); setPageIndex(0);
+            setFormat(event.target.value as AlbumFormat); setConfirmation("");
           }}>
             {formatOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             <option value="custom">Eigene Größe</option>
@@ -536,42 +618,31 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
           </fieldset>
         </details>}
       </div>
-      <div className="gps-album-dialog__preview" aria-busy={canRender && !page && !error}>
-        {fileTitle && !error && preview && preview.page === previewPage && <img src={preview.url} alt="Vorschau des Fotobuchbildes" />}
-        {page?.satelliteFallback && <p role="status">Satellitenbild nicht verfügbar. Die Standardkarte wird verwendet.</p>}
-        {style === "satellite" && page?.number === 1 && !page.satelliteFallback &&
-          <a className="gps-map__credit" href={satelliteSource.url} target="_blank" rel="noreferrer">{satelliteSource.name}</a>}
-        {!fileTitle && <p role="status">Gib einen Titel für das Fotobuchbild ein.</p>}
-        {fileTitle && !size && <p>Prüfe die Bildgröße.</p>}
-        {fileTitle && invalidColor && <p>Prüfe die Hexcodes unter „Eigene Farben“.</p>}
-        {canRender && !page && !error && !preview && <p role="status">Vorschau wird erstellt …</p>}
-        {error && <p role="alert">{error}{" "}<button type="button" onClick={() => {
-          setData(null); setRenderError(undefined); setRetry((value) => value + 1);
-        }}>Erneut versuchen</button></p>}
-      </div>
       <footer className="gps-album-dialog__footer">
-        {pages.length > 1 && <div role="group" aria-label="Fotobuchseiten" className="gps-album-dialog__pages">
-          <button type="button" aria-label="Vorherige Seite" disabled={busy || pageIndex === 0} onClick={() => {
-            setPageIndex((index) => index - 1); setConfirmation("");
-          }}>‹</button>
-          <span>Seite {pageIndex + 1} von {pages.length}</span>
-          <button type="button" aria-label="Nächste Seite" disabled={busy || pageIndex >= pages.length - 1} onClick={() => {
-            setPageIndex((index) => index + 1); setConfirmation("");
-          }}>›</button>
-        </div>}
         {saveError && <span role="alert">{saveError}</span>}
         {confirmation && <span role="status">{confirmation}</span>}
         {saving === "archive" && <span role="status">Seite {archivePage} von {pages.length} wird für das ZIP vorbereitet.</span>}
-        {pages.length > MAX_ALBUM_ARCHIVE_PAGES && <span>Mehr als {MAX_ALBUM_ARCHIVE_PAGES} Seiten lassen sich einzeln als PNG speichern.</span>}
+        {previewCount > MAX_ALBUM_ARCHIVE_PAGES && <span>Mehr als {MAX_ALBUM_ARCHIVE_PAGES} Seiten lassen sich einzeln als PNG speichern.</span>}
+        <button type="button" disabled={!dirty || busy} onClick={() => setLeaveDesign("reset")}>Gestaltung zurücksetzen</button>
         {onSaveDraft && <button type="button" disabled={!canRender || busy} onClick={() => void saveDraft()}>
           {savingDraft ? "Entwurf wird gespeichert …" : "Entwurf im Album speichern"}
         </button>}
-        <button type="button" className={pages.length < 2 ? "gps-album-dialog__save" : undefined} disabled={!page || busy} onClick={() => void save()}>
-          {saving === "page" ? "PNG wird erstellt …" : pages.length > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
+        <button type="button" className={previewCount < 2 ? "gps-album-dialog__save" : undefined} disabled={!page || busy} onClick={() => void save()}>
+          {saving === "page" ? "PNG wird erstellt …" : previewCount > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
         </button>
-        {pages.length > 1 && pages.length <= MAX_ALBUM_ARCHIVE_PAGES && <button type="button" className="gps-album-dialog__save"
-          disabled={busy} onClick={() => void saveArchive()}>{saving === "archive" ? "ZIP wird erstellt …" : "Alle Seiten als ZIP speichern"}</button>}
+        {previewCount > 1 && previewCount <= MAX_ALBUM_ARCHIVE_PAGES && <button type="button" className="gps-album-dialog__save"
+          disabled={!page || busy} onClick={() => void saveArchive()}>{saving === "archive" ? "ZIP wird erstellt …" : "Alle Seiten als ZIP speichern"}</button>}
       </footer>
     </section>
+    {leaveDesign && <div className="gps-album-overlay gps-album-confirm-overlay">
+      <section className="gps-album-confirm" ref={confirmationDialog} role="dialog" aria-modal="true" aria-labelledby="gps-album-confirm-title">
+        <h2 id="gps-album-confirm-title">Änderungen am Fotobuch verwerfen?</h2>
+        <p>{leaveDesign === "close" ? "Deine Änderungen an der Gestaltung gehen verloren." : "Die Gestaltung kehrt zu ihrem letzten gespeicherten Stand zurück."}</p>
+        <div>
+          <button type="button" className="secondary-button" data-initial-focus onClick={() => setLeaveDesign(undefined)}>Weiter bearbeiten</button>
+          <button type="button" className="secondary-button" onClick={discardChanges}>Entwurf verwerfen</button>
+        </div>
+      </section>
+    </div>}
   </div>;
 }

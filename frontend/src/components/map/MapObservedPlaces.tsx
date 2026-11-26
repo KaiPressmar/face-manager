@@ -107,7 +107,9 @@ export default function MapObservedPlaces({ from, to, albumId, onSelect, onSetHo
       </div>
       {loading && <p role="status">Fotoorte werden geladen …</p>}
       {error && <p role="alert">{error} <button type="button" onClick={() => setRetry((value) => value + 1)}>Erneut versuchen</button></p>}
-      {!loading && !error && visible.length === 0 && <p>Für diese Auswahl wurden keine passenden Orte gefunden.</p>}
+      {!loading && !error && visible.length === 0 && <p>{next !== null && query.trim()
+        ? "Unter den geladenen Fotoorten gibt es keinen Treffer. Lade weitere Orte, um weiterzusuchen."
+        : "Für diese Auswahl wurden keine passenden Orte gefunden."}</p>}
       {next !== null && <button type="button" disabled={loading} onClick={() => setOffset(next)}>Weitere Orte laden</button>}
     </div>}
   </details>;

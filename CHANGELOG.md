@@ -9,9 +9,21 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Mit „Zurück“ und „Vorwärts“ erreichst du deine früheren Ansichten. „Zur Ausgangsansicht“ setzt die aktuelle Seite bewusst zurück.
+- Mit „Schnellwechsel“ findest du Bereiche anhand von Begriffen wie „Karte“ oder „Sicherung“.
+- Lokale Namenszuordnungen und Archivaktionen lassen sich unter „Personen“ rückgängig machen und wiederholen.
+
 ### Verbessert
 
+- Fotos und Karte bekommen mehr Platz. Beschriftungen, Tastaturfokus und Statusmeldungen sind deutlicher sichtbar.
+- Die Fotobuchvorschau erscheint in schmalen Fenstern weiter oben. Beim Aktualisieren bleibt die Seitenauswahl erreichbar.
+- In den Einstellungen stehen Rückmeldungen bei der jeweiligen Aktion. Technische Speicherorte kannst du bei Bedarf aufklappen.
+
 ### Behoben
+
+- Der erste Start führt direkt zur Bibliothek und zur freiwilligen Einführung.
+- Beim Wechsel von Bilderfiltern lassen sich nur Fotos aus der aktuellen Auswahl bearbeiten.
+- Beim Umblättern in „Dateinamen“ bleibt die gewählte Seite auch bei einer Aktualisierung erhalten.
 
 ## [0.17.1] - 2026-11-26
 

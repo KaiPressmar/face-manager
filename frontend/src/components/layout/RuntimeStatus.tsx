@@ -156,7 +156,10 @@ export default function RuntimeStatus({ runtime, unavailable, route }: { runtime
     <button type="button" ref={trigger} className={`compute-mode-badge compute-mode-badge--${mode ?? "unknown"}`}
       aria-label={`Hardwarestatus: ${label}`} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((value) => !value)}>
       <span className="compute-mode-badge__indicator" aria-hidden="true" />
-      <span>{label}</span>
+      <span className="runtime-status__badge-copy">
+        <strong>Hardware</strong>
+        <small>{label}</small>
+      </span>
     </button>
     <section className="runtime-status__panel" id={panelId} ref={panel} tabIndex={-1} hidden={!open} aria-label="Hardwarestatus">
       <strong>Gesichtserkennung</strong>

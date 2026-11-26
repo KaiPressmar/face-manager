@@ -1,7 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const load = require('./load-typescript.cjs');
-const { navigationHash, parseNavigationHash } = load('src/utils/navigation.ts');
+const {
+  navigationHash, parseNavigationHash, workspaceHistoryMarker, workspaceHistoryState, workspaceSelectionLimited, MAX_HISTORY_PHOTO_IDS,
+} = load('src/utils/navigation.ts');
 
 test('all library pages survive reload via hash routes', () => {
   for (const page of ['people', 'map', 'renaming', 'review', 'settings']) {
@@ -14,11 +16,35 @@ test('review and settings deep links preserve their targets', () => {
   for (const target of [
     { page: 'review', clusterId: 42 },
     { page: 'review', reviewView: 'open' },
+    { page: 'review', reviewView: 'suggestions' },
+    { page: 'review', reviewView: 'people' },
+    { page: 'review', reviewView: 'archive' },
+    { page: 'review', reviewView: 'shared' },
     { page: 'review', groupKey: 'unknown_person' },
     { page: 'review', groupKey: 'not_face' },
+    { page: 'review', groupKey: 'not_face', archiveClusterId: 87 },
     { page: 'settings', settingsSection: 'dateinamen' },
     { page: 'settings', settingsSection: 'updates' },
   ]) assert.deepEqual(parseNavigationHash(navigationHash(target)), target);
+});
+
+test('browser metadata identifies each workspace and bounds durable selection size', () => {
+  const ordinary = { from_date: '2025-01-01', album_id: 'a'.repeat(32), bounds: { west: 0, east: 1, south: 2, north: 3 } };
+  const route = { page: 'people', geoSelection: { ...ordinary, image_ids: [2, 100, 301] } };
+  const first = { id: 'a', position: 1, generation: 5 };
+  const second = { id: 'b', position: 2, generation: 5 };
+  const firstState = workspaceHistoryState(route, first);
+  const secondState = workspaceHistoryState(route, second);
+  assert.deepEqual(workspaceHistoryMarker(firstState), first);
+  assert.deepEqual(workspaceHistoryMarker(secondState), second);
+  assert.deepEqual(parseNavigationHash(navigationHash(route), firstState), { ...route, geoSelectionEpoch: first.generation });
+  const oversized = { page: 'people', geoSelection: { ...ordinary, image_ids: Array.from({ length: MAX_HISTORY_PHOTO_IDS + 1 }, (_, index) => index + 1) } };
+  const limitedState = workspaceHistoryState(oversized, second);
+  assert.equal(workspaceSelectionLimited(limitedState), true);
+  assert.deepEqual(parseNavigationHash(navigationHash(oversized), limitedState), { page: 'people', geoSelection: ordinary, geoSelectionEpoch: second.generation });
+  assert.equal('geoSelection' in workspaceHistoryState({ page: 'people' }, first), false);
+  assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, position: -1 } }), undefined);
+  assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, generation: 2.5 } }), undefined);
 });
 
 test('image selection survives browser history without putting photo IDs in the URL', () => {

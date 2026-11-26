@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
 from backend import app
 from backend.services import preview_cache_budget as budget
@@ -231,6 +231,42 @@ class DatabaseRestoreTest(unittest.TestCase):
             self.assertEqual(marker_at(current), "new")
             self.assertNotEqual(app.get_person_suggestion_epoch(), old_epoch)
             worker.start.assert_called_once()
+
+    def test_library_identity_survives_coalescing_of_the_restore_event(self):
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "init_db"))
+            latest = {}
+            patches.enter_context(patch.object(app.event_hub, "_latest", latest))
+
+            response = Response()
+            previous = app.api_library_identity(response)["library_id"]
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            app.notify_clusters_changed("background_progress")
+            self.assertEqual(latest["clusters"]["library_id"], previous)
+
+            replace = app.os.replace
+
+            def replace_while_identity_is_unavailable(source, destination):
+                with self.assertRaises(HTTPException) as switching:
+                    app.api_library_identity(Response())
+                self.assertEqual(switching.exception.status_code, 409)
+                app.notify_clusters_changed("background_progress")
+                self.assertEqual(latest["clusters"]["library_id"], previous)
+                return replace(source, destination)
+
+            patches.enter_context(patch.object(app.os, "replace", side_effect=replace_while_identity_is_unavailable))
+            app.api_import_database(incoming.read_bytes())
+            current_identity = app.api_library_identity(Response())["library_id"]
+            self.assertNotEqual(current_identity, previous)
+            self.assertEqual(latest["clusters"], {"reason": "database_import", "library_id": current_identity})
+
+            app.notify_clusters_changed("background_progress")
+            self.assertEqual(latest["clusters"], {"reason": "background_progress", "library_id": current_identity})
 
     def test_inflight_clustering_prevents_replacing_database(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:

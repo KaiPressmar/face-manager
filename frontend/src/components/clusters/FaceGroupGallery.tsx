@@ -6,6 +6,7 @@ import {
   fetchImageDetail,
 } from "../../utils/api";
 import FullscreenImageGallery from "../people/FullscreenImageGallery";
+import type { NavigateToFaceGroup } from "../people/FaceOverlay";
 
 interface FaceGroupGalleryProps {
   faces: ClusterFace[];
@@ -14,7 +15,7 @@ interface FaceGroupGalleryProps {
   contextLabel: string;
   groupLabel: string;
   onClose: () => void;
-  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  onNavigateToCluster: NavigateToFaceGroup;
 }
 
 const FaceGroupGallery: React.FC<FaceGroupGalleryProps> = ({
@@ -43,7 +44,7 @@ const FaceGroupGallery: React.FC<FaceGroupGalleryProps> = ({
     if (cached) return Promise.resolve(cached);
     const pending = requestCacheRef.current.get(imageId);
     if (pending) return pending;
-    const request = fetchImageDetail(imageId)
+    const request = fetchImageDetail(imageId, undefined, { resolveGeometry: true })
       .then((image) => {
         imageCacheRef.current.set(imageId, image);
         requestCacheRef.current.delete(imageId);

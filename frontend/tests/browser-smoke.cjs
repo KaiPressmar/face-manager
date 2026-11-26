@@ -7,6 +7,9 @@ const albumLibraryFlow = require('./album-library-flow.cjs');
 const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
+const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
+const mapFaceliftFlow = require('./map-facelift-flow.cjs');
+const faceliftWorkspacesFlow = require('./facelift-workspaces-flow.cjs');
 let chromium;
 try {
   ({ chromium } = require('playwright'));
@@ -142,6 +145,8 @@ async function firstAssignmentFlow(browser, errors) {
     await openTab.waitFor();
     await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
     await page.goBack();
+    await openTab.waitFor();
+    await page.goBack();
     await assign.click();
     await page.waitForURL(reviewHash);
     await openTab.waitFor();
@@ -193,6 +198,10 @@ async function localRecoveryFlow(browser, errors) {
     });
     await page.goto(`${webBase}/#/einstellungen/daten`);
     const backupCard = page.locator('.settings-card').filter({ has: page.getByRole('heading', { name: 'Daten sichern und wiederherstellen' }) });
+    const storage = backupCard.locator('details').filter({ hasText: 'Speicherort der Bibliothek' });
+    assert.equal(await storage.getAttribute('open'), null);
+    await storage.getByText('Speicherort der Bibliothek', { exact: true }).press('Enter');
+    assert.notEqual(await storage.getAttribute('open'), null);
     const fileField = backupCard.locator('input[type="file"]');
     const upload = (body) => fileField.setInputFiles({ name: 'demo.sqlite', mimeType: 'application/octet-stream', buffer: Buffer.from(body) });
     await upload('invalid');
@@ -324,7 +333,7 @@ async function mapFlow(browser, errors) {
     assert.equal(await page.getByText('Karte wird aktualisiert …').count(), 0, 'Invalid dates left the map in a loading state');
     assert.equal(await markers.count(), 0);
     await page.unroute('**/api/map/points?**');
-    await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
+    await page.getByRole('button', { name: 'Filter zurücksetzen', exact: true }).click();
     await waitForCount(85);
     await markers.first().waitFor();
     await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
@@ -339,7 +348,9 @@ async function mapFlow(browser, errors) {
     await page.getByLabel('Bis', { exact: true }).fill('2024-12-31');
     await page.getByRole('alert').filter({ hasText: 'Enddatum' }).waitFor();
     assert.equal(await page.locator('.gps-page__photo').count(), 0);
-    await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
+    await page.getByRole('button', { name: 'Filter zurücksetzen', exact: true }).click();
+    await waitForCount(29);
+    await page.getByRole('button', { name: 'Ganze Karte zeigen', exact: true }).click();
     await waitForCount(85);
 
     await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
@@ -412,7 +423,10 @@ async function mapFlow(browser, errors) {
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
     await page.unroute('**/api/images/*/file');
 
-    await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
+    const resetMapFilters = page.getByRole('button', { name: 'Filter zurücksetzen', exact: true });
+    if (await resetMapFilters.count()) await resetMapFilters.click();
+    const showWorld = page.getByRole('button', { name: 'Ganze Karte zeigen', exact: true });
+    if (await showWorld.count()) await showWorld.click();
     await waitForCount(85);
     await page.route('**/api/map/points?**', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{"detail":"Testfehler Karte"}' }));
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
@@ -423,7 +437,7 @@ async function mapFlow(browser, errors) {
     await waitForCount(29);
     await page.getByRole('alert').waitFor({ state: 'hidden' });
 
-    await page.getByRole('button', { name: 'Zurücksetzen', exact: true }).click();
+    await showWorld.click();
     await waitForCount(85);
     await page.route('**/api/map/images?**', (route) => {
       if (!new URL(route.request().url()).searchParams.has('before_id')) return route.continue();
@@ -510,21 +524,20 @@ async function existingFlow(browser, errors) {
     assert.ok(await changelogTrigger.evaluate((element) => element === document.activeElement), 'Changelog did not restore its trigger');
 
     await page.getByRole('button', { name: /Dateinamen/ }).click();
-    await page.getByRole('button', { name: /Seite wählen/ }).waitFor();
-    await page.getByRole('button', { name: /Seite wählen/ }).click();
-    await page.getByRole('button', { name: '8 Dateinamen aktualisieren', exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Diese Seite auswählen (8)', exact: true }).click();
+    assert.ok(await page.getByRole('button', { name: 'Umbenennung prüfen', exact: true }).isEnabled());
     await page.getByRole('button', { name: 'Auswahl aufheben', exact: true }).click();
     await page.getByRole('button', { name: /Benennungsschema ändern/ }).click();
     await page.waitForURL('**/einstellungen/dateinamen');
     await page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Personen' }).click();
     await page.getByRole('button', { name: /Ohne Namen.*Benennen/ }).click();
     await page.getByRole('button', { name: /Personen korrigieren.*Bestätigte/ }).click();
-    const cards = page.locator('.page-pane--active .cluster-person-browser__cluster-card[role="button"]');
+    const cards = page.locator('.page-pane--active button.cluster-person-browser__cluster-card');
     await cards.first().waitFor();
     const card = (await cards.count()) > 1 ? cards.nth(1) : cards.first();
     await card.focus();
     await page.keyboard.press('Enter');
-    assert.ok(await card.evaluate((element) => element.classList.contains('neon-card--active')), 'Enter did not select cluster card');
+    await card.and(page.locator('[aria-pressed="true"]')).waitFor();
     await page.getByRole('button', { name: 'Person bearbeiten' }).click();
     const personDialog = page.getByRole('dialog', { name: /Anna Beispiel|Ben Beispiel/ });
     await personDialog.waitFor();
@@ -580,6 +593,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+    await page.getByText('Kartendarstellung', { exact: true }).click();
     await page.getByLabel('Ländernamen anzeigen').check();
     await page.locator('.gps-map__place-label--country').first().waitFor();
     const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
@@ -717,6 +731,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await book.getByText('Route gestalten', { exact: true }).click();
     await screenshot(page, 'map-album');
     await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Entwurf verwerfen', exact: true }).click();
     await book.waitFor({ state: 'hidden' });
     await screenshot(page, 'map-journey');
     await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
@@ -800,7 +815,7 @@ async function pagedLibraryFacesFlow(browser, errors) {
     await box.waitFor();
     assert.equal(await box.evaluate((element) => element.style.left), '20%');
     assert.equal(await card.locator('.hologram-overlay').count(), 1);
-    assert.equal(await card.locator('.hologram-label').textContent(), 'Name aus Liste');
+    assert.equal(await card.locator('.hologram-label').textContent(), 'Als unbekannt aussortiert');
     await card.locator('.image-gallery-card__open').click();
     const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
     await gallery.locator('.hologram-box').waitFor();
@@ -847,7 +862,7 @@ async function liveWorkflowFlow(browser, errors) {
       };
     });
     await page.goto(`${webBase}/#/bilder`);
-    const firstPhoto = page.locator('.image-gallery-card__open').first();
+    const firstPhoto = page.locator('.image-gallery-card__open:enabled').first();
     await firstPhoto.press('Enter');
     const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
     const galleryTitle = gallery.locator('.gallery-title strong');
@@ -916,7 +931,8 @@ async function liveWorkflowFlow(browser, errors) {
     } }));
     await page.route('**/api/clusters', (route) => route.fulfill({ json: reviewClusters }));
     await page.goto(`${webBase}/#/gesichter-pruefen/gruppe/987654321`);
-    await page.locator('.cluster-detail-topbar__entity--secondary').getByText('Offene Gruppe', { exact: true }).waitFor();
+    await page.getByRole('alert').filter({ hasText: 'Diese Gesichtsgruppe ist nicht mehr verfügbar' }).waitFor();
+    await page.waitForURL('**/#/gesichter-pruefen');
     const groupRequest = page.waitForRequest('**/api/face-review-groups/unknown_person/faces');
     await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
     await groupRequest;
@@ -928,10 +944,16 @@ async function liveWorkflowFlow(browser, errors) {
       detected_person_names: ['Anna'], current_suffix_person_names: [],
     }));
     await page.route('**/api/image-renames/count?**', (route) => route.fulfill({ json: { total } }));
-    await page.route('**/api/image-renames?**', (route) => {
+    const nextPageGate = gate();
+    let holdNextPage = true;
+    await page.route('**/api/image-renames?**', async (route) => {
       const query = new URL(route.request().url()).searchParams;
       const offset = Number(query.get('offset'));
       const limit = Number(query.get('limit'));
+      if (offset === 25 && holdNextPage) {
+        holdNextPage = false;
+        await nextPageGate.ready;
+      }
       return route.fulfill({ json: {
         items: candidates.slice(0, total).slice(offset, offset + limit),
         offset, limit, total: null, has_more: offset + limit < total, available_persons: ['Anna'],
@@ -957,9 +979,22 @@ async function liveWorkflowFlow(browser, errors) {
     await page.goto(`${webBase}/#/dateinamen`);
     const pagination = page.locator('.rename-pagination--top');
     await pagination.getByText('Seite 1 von 2').waitFor();
-    await pagination.getByRole('button', { name: 'Weiter' }).click();
-    await page.getByRole('button', { name: 'Seite wählen (2)' }).click();
-    await page.getByRole('button', { name: '2 Dateinamen aktualisieren', exact: true }).click();
+    try {
+      const openingNextPage = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return url.pathname === '/api/image-renames' && url.searchParams.get('offset') === '25';
+      });
+      await pagination.getByRole('button', { name: 'Weiter' }).click();
+      await openingNextPage;
+      const liveRefresh = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/image-renames');
+      await publishLibraryChange('import_completed');
+      const liveOffset = new URL((await liveRefresh).url()).searchParams.get('offset');
+      assert.equal(liveOffset, '25', 'Live refresh returned to the previous rename page');
+    } finally {
+      nextPageGate.release();
+    }
+    await page.getByRole('button', { name: 'Diese Seite auswählen (2)' }).click();
+    await page.getByRole('button', { name: 'Umbenennung prüfen', exact: true }).click();
     const confirmRename = page.getByRole('dialog', { name: 'Dateinamen prüfen' });
     await confirmRename.getByText('foto-26 Anna.jpg', { exact: true }).waitFor();
     await confirmRename.getByText('Zielname bereits belegt', { exact: true }).waitFor();
@@ -1137,7 +1172,7 @@ async function responsiveFlow(browser, errors) {
     await page.setViewportSize({ width: 320, height: 568 });
     await page.goto(`${webBase}/#/bilder`);
     await page.locator('[data-image-id]').first().waitFor();
-    await page.getByText('85', { exact: true }).first().waitFor();
+    await page.getByText('85 Bilder', { exact: true }).first().waitFor();
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
     await page.locator('.topbar-import-button__label').waitFor();
@@ -1440,6 +1475,7 @@ async function denseJourneyReview(browser, errors) {
     assert.equal(await draftLeg.inputValue(), 'walk');
     await album.locator('.gps-album-dialog__preview[aria-busy="false"] img').waitFor();
     await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Entwurf verwerfen', exact: true }).click();
     await album.waitFor({ state: 'hidden' });
     await page.getByRole('button', { name: 'Bereichsfilter entfernen' }).click();
     await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
@@ -1516,6 +1552,42 @@ async function backgroundActivitiesFlow(browser, errors) {
   }
 }
 
+async function quickSwitchFlow(browser, errors) {
+  const page = await newPage(browser, 320, 680, errors);
+  try {
+    await page.route('**/api/changelog/current', (route) => route.fulfill({
+      json: { seen: false, fresh_install: true, versions: [{ version: '0.17.1', sections: [] }] },
+    }));
+    await page.route('**/api/changelog/current/acknowledge', (route) => route.fulfill({ json: { seen: true } }));
+    const acknowledgement = page.waitForResponse((response) => response.url().endsWith('/api/changelog/current/acknowledge') && response.ok());
+    await page.goto(`${webBase}/#/bilder`);
+    await page.getByRole('heading', { name: 'Bilder', exact: true }).waitFor();
+    await acknowledgement;
+    await page.waitForFunction(() => !document.querySelector('[aria-labelledby="whats-new-title"]'));
+    assert.equal(await page.getByRole('dialog', { name: /Neu in Face Manager/ }).count(), 0);
+    const trigger = page.getByRole('button', { name: 'Schnellwechsel', exact: true });
+    await trigger.click();
+    const dialog = page.getByRole('dialog', { name: 'Schnellwechsel' });
+    const search = dialog.getByRole('searchbox', { name: 'Bereich finden' });
+    assert.ok(await search.evaluate((element) => element === document.activeElement));
+    await search.fill('nichts-passendes');
+    await dialog.getByRole('status').filter({ hasText: 'Kein Bereich gefunden' }).waitFor();
+    await search.press('Escape');
+    assert.ok(await trigger.evaluate((element) => element === document.activeElement));
+
+    await page.keyboard.press('Control+k');
+    await search.fill('reisealbum');
+    await search.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await page.getByRole('heading', { name: 'Fotokarte', exact: true }).waitFor();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+    console.log('PASS first start and quick switch: 320px, keyword search, keyboard, focus, empty results');
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
@@ -1526,6 +1598,10 @@ async function backgroundActivitiesFlow(browser, errors) {
       pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
+      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase),
+      (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+      (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
+      quickSwitchFlow,
       (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
     ];
     for (const flow of flows) await flow(browser, errors);

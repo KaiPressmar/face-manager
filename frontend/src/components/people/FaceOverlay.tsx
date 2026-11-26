@@ -1,6 +1,9 @@
 import React from "react";
 import { identityColor } from "../../utils/colors";
 import { faceLabelText } from "../../utils/faceLabels";
+import type { FaceReviewGroupKey } from "../../utils/api";
+
+export type NavigateToFaceGroup = (clusterId: number, personName?: string | null, groupKey?: FaceReviewGroupKey) => void;
 
 interface Face {
   id: number;
@@ -23,7 +26,8 @@ interface FaceOverlayProps {
   stackIndex?: number;
   /** Emphasize the face whose crop currently owns the gallery position. */
   highlighted?: boolean;
-  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  disabled?: boolean;
+  onNavigateToCluster: NavigateToFaceGroup;
 }
 
 const FaceOverlay: React.FC<FaceOverlayProps> = ({
@@ -32,6 +36,7 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
   naturalHeight,
   stackIndex = 0,
   highlighted = false,
+  disabled = false,
   onNavigateToCluster,
 }) => {
   if (!naturalWidth || !naturalHeight) return null;
@@ -41,7 +46,8 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
   const left = (face.bbox_x / naturalWidth) * 100;
   const width = (face.bbox_w / naturalWidth) * 100;
   const height = (face.bbox_h / naturalHeight) * 100;
-  const canNavigate = face.cluster_id !== null;
+  const archive = face.review_status === "active" ? undefined : face.review_status;
+  const canNavigate = face.cluster_id !== null && !disabled;
   // "Unbekannt" is the archived review status; a face that simply has no person
   // yet must not borrow that word — it reads as a different thing entirely.
   const personLabel = faceLabelText(face);
@@ -49,7 +55,7 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
   // which face. Keyed by person where known, so the colour also matches that
   // person's filter chip; otherwise faces of one cluster still share a colour.
   const colorKey =
-    face.person_name ||
+    (!archive && face.person_name) ||
     (face.cluster_id !== null ? `cluster:${face.cluster_id}` : `face:${face.id}`);
   const faceColor = identityColor(colorKey);
   // The badge answers "who is this". The cluster number would roughly double
@@ -93,14 +99,15 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
 
   const handleNavigate = (event: React.MouseEvent) => {
     event.stopPropagation();
-    if (face.cluster_id === null) return;
+    if (face.cluster_id === null || disabled) return;
     // Pass the person along so the review page can open the right work
     // area immediately instead of briefly showing the suggestions inbox.
-    onNavigateToCluster(face.cluster_id, face.person_name);
+    onNavigateToCluster(face.cluster_id, face.person_name, archive);
   };
 
   return (
     <div
+      data-face-id={face.id}
       className={`hologram-overlay${canNavigate ? " hologram-overlay--interactive" : ""}${highlighted ? " hologram-overlay--highlighted" : ""}`}
       style={{ "--face-color": faceColor } as React.CSSProperties}
     >
@@ -113,7 +120,7 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
           height: `${height}%`,
         }}
         onClick={canNavigate ? handleNavigate : undefined}
-        title={canNavigate ? `Gesichtsgruppe ${face.cluster_id} ansehen` : undefined}
+        title={canNavigate ? archive ? "Im Archiv öffnen" : `Gesichtsgruppe ${face.cluster_id} ansehen` : undefined}
         aria-hidden="true"
       />
 
@@ -125,11 +132,11 @@ const FaceOverlay: React.FC<FaceOverlayProps> = ({
         style={labelPosition}
         onClick={handleNavigate}
         disabled={!canNavigate}
-        aria-label={canNavigate ? `${labelText} unter „Personen“ öffnen` : labelText}
+        aria-label={canNavigate ? `${labelText} ${archive ? "im Archiv" : "unter „Personen“"} öffnen` : labelText}
         title={
           canNavigate
-            ? `${detailText} – unter „Personen“ öffnen`
-            : `${detailText} – noch keiner Gesichtsgruppe zugeordnet`
+            ? `${detailText} – ${archive ? "im Archiv" : "unter „Personen“"} öffnen`
+            : detailText
         }
       >
         <span>{labelText}</span>

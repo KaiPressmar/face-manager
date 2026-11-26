@@ -8,8 +8,9 @@ import ImageRenamePage from "./components/renaming/ImageRenamePage";
 import SettingsPage from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
+import { LIBRARY_GENERATION_KEY, useAppNavigation } from "./hooks/useAppNavigation";
+import { WorkspaceNavigationContext } from "./hooks/useWorkspaceNavigation";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
-import { subscribeToTopic } from "./utils/events";
 import { hasGeoPhotoSelection, type GeoPhotoSelection } from "./utils/geoPhotoSelection";
 import WhatsNewModal from "./components/shared/WhatsNewModal";
 import UpdateAvailableModal from "./components/shared/UpdateAvailableModal";
@@ -22,10 +23,11 @@ import {
   type ReleaseNotes,
 } from "./utils/api";
 import {
-  navigationHash,
   parseNavigationHash,
+  workspaceHistoryMarker,
   type AppPage,
   type NavigationEntry,
+  type ReviewView,
   type SettingsSection,
 } from "./utils/navigation";
 
@@ -34,7 +36,8 @@ export type { AppPage } from "./utils/navigation";
 export interface ClusterNavigationTarget {
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
-  reviewView?: "open" | "shared";
+  archiveClusterId?: number;
+  reviewView?: ReviewView;
   /** Person of the clicked face, if known — lets the review page open the
    *  matching work area without waiting for its cluster list to load. */
   personName?: string | null;
@@ -46,7 +49,6 @@ const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const GEO_SELECTION_EPOCH_KEY = "face-manager:geo-selection-epoch";
 const HELP_INVITATION_KEY = "face-manager:help-introduction-v1";
 
 function helpInvitationSeen() {
@@ -63,7 +65,7 @@ function focusHelpButton() {
 
 function readGeoSelectionEpoch() {
   try {
-    return Number(window.sessionStorage.getItem(GEO_SELECTION_EPOCH_KEY)) || 0;
+    return Number(window.sessionStorage.getItem(LIBRARY_GENERATION_KEY)) || 0;
   } catch {
     return 0;
   }
@@ -71,7 +73,15 @@ function readGeoSelectionEpoch() {
 
 function readNavigationEntry(geoSelectionEpoch: number): NavigationEntry {
   const entry = parseNavigationHash(window.location.hash, window.history.state);
+  const marker = workspaceHistoryMarker(window.history.state);
+  if (marker && marker.generation !== geoSelectionEpoch) return { page: entry.page };
   return entry.geoSelection && entry.geoSelectionEpoch !== geoSelectionEpoch ? { page: "people" } : entry;
+}
+
+function reviewTarget(entry: NavigationEntry, token: number): ClusterNavigationTarget | null {
+  if (entry.page !== "review" || (!entry.groupKey && entry.clusterId === undefined && !entry.reviewView)) return null;
+  return { clusterId: entry.clusterId, groupKey: entry.groupKey, archiveClusterId: entry.archiveClusterId,
+    personName: entry.personName, reviewView: entry.reviewView, token };
 }
 
 type Changelog =
@@ -79,8 +89,9 @@ type Changelog =
   | { status: "error"; message: string }
   | { status: "loaded"; releases: ReleaseNotes[] };
 
-const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
+const PagePane: React.FC<{ active: boolean; page: AppPage; children: React.ReactNode }> = ({
   active,
+  page,
   children,
 }) => {
   const applyPaneState = useCallback((pane: HTMLDivElement | null) => {
@@ -91,6 +102,7 @@ const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
       ref={applyPaneState}
       className={`page-pane${active ? " page-pane--active" : ""}`}
       aria-hidden={!active}
+      data-workspace-page={page}
     >
       <div className="page-content">{children}</div>
     </div>
@@ -100,22 +112,12 @@ const PagePane: React.FC<{ active: boolean; children: React.ReactNode }> = ({
 const App: React.FC = () => {
   const sharedLibrary = useSharedLibrary();
   const [initialGeoSelectionEpoch] = useState(readGeoSelectionEpoch);
-  const geoSelectionEpoch = useRef(initialGeoSelectionEpoch);
   const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
   const [mapAlbumId, setMapAlbumId] = useState(initialEntry.mapAlbumId);
   const [clusterNavigationTarget, setClusterNavigationTarget] =
-    useState<ClusterNavigationTarget | null>(() => {
-      if (initialEntry.clusterId !== undefined) {
-        return { clusterId: initialEntry.clusterId, token: Date.now() };
-      }
-      if (initialEntry.groupKey !== undefined) {
-        return { groupKey: initialEntry.groupKey, token: Date.now() };
-      }
-      if (initialEntry.reviewView) return { reviewView: initialEntry.reviewView, token: Date.now() };
-      return null;
-    });
+    useState<ClusterNavigationTarget | null>(() => reviewTarget(initialEntry, 0));
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(
     () => initialEntry.settingsSection,
   );
@@ -150,51 +152,21 @@ const App: React.FC = () => {
   const visitedRef = useRef<Set<AppPage>>(new Set([page]));
   visitedRef.current.add(page);
 
-  // Hash routes survive refreshes and work with both Vite and the packaged
-  // static frontend because the route fragment is never sent to the server.
-  const lastAppliedHashRef = useRef(navigationHash(initialEntry));
-
+  const reviewToken = useRef(0);
   const applyEntry = useCallback((entry: NavigationEntry) => {
-    if (entry.clusterId !== undefined) {
-      setClusterNavigationTarget({
-        clusterId: entry.clusterId,
-        personName: entry.personName,
-        token: Date.now(),
-      });
-    } else if (entry.groupKey !== undefined) {
-      setClusterNavigationTarget({ groupKey: entry.groupKey, token: Date.now() });
-    } else if (entry.reviewView) {
-      setClusterNavigationTarget({ reviewView: entry.reviewView, token: Date.now() });
-    } else {
-      setClusterNavigationTarget(null);
-    }
-    setSettingsSection(entry.page === "settings" ? entry.settingsSection : undefined);
+    if (entry.page === "review") setClusterNavigationTarget(reviewTarget(entry, ++reviewToken.current));
+    if (entry.page === "settings") setSettingsSection(entry.settingsSection);
     if (entry.page === "people") setGeoSelection(entry.geoSelection);
     if (entry.page === "map") setMapAlbumId(entry.mapAlbumId);
     setPage(entry.page);
   }, []);
-
-  const navigate = useCallback(
-    (entry: NavigationEntry, replace = false) => {
-      const nextEntry = entry.geoSelection ? { ...entry, geoSelectionEpoch: geoSelectionEpoch.current } : entry;
-      applyEntry(nextEntry);
-      const nextHash = navigationHash(nextEntry);
-      lastAppliedHashRef.current = nextHash;
-      if (replace || window.location.hash === nextHash) {
-        window.history.replaceState(nextEntry, "", nextHash);
-      } else {
-        window.history.pushState(nextEntry, "", nextHash);
-      }
-    },
-    [applyEntry],
-  );
-
-  useEffect(() => {
-    const entry = readNavigationEntry(geoSelectionEpoch.current);
-    const canonicalHash = navigationHash(entry);
-    lastAppliedHashRef.current = canonicalHash;
-    window.history.replaceState(entry, "", canonicalHash);
+  const clearLibraryTargets = useCallback(() => {
+    setGeoSelection(undefined);
+    setMapAlbumId(undefined);
+    setClusterNavigationTarget(null);
   }, []);
+  const navigation = useAppNavigation(initialEntry, applyEntry, initialGeoSelectionEpoch, clearLibraryTargets);
+  const { navigate } = navigation;
 
   useEffect(() => {
     const handleSetting = (event: Event) => {
@@ -257,7 +229,9 @@ const App: React.FC = () => {
           release.sections.some((section) => section.items.length > 0),
         );
         setUnseenReleases(versions);
-        if (!result.seen && versions.length > 0) {
+        if (result.fresh_install) {
+          void acknowledgeCurrentReleaseNotes().catch(() => undefined);
+        } else if (!result.seen && versions.length > 0) {
           setShowReleaseNotes(true);
         }
       })
@@ -299,49 +273,6 @@ const App: React.FC = () => {
     if (changelog.status === "idle" || changelog.status === "error") loadFullChangelog();
   }, [changelog.status, loadFullChangelog]);
 
-  useEffect(() => {
-    const restoreFromLocation = () => {
-      if (lastAppliedHashRef.current === window.location.hash) return;
-      const entry = readNavigationEntry(geoSelectionEpoch.current);
-      const canonicalHash = navigationHash(entry);
-      lastAppliedHashRef.current = canonicalHash;
-      if (canonicalHash !== window.location.hash) {
-        window.history.replaceState(entry, "", canonicalHash);
-      }
-      applyEntry(entry);
-    };
-
-    window.addEventListener("popstate", restoreFromLocation);
-    window.addEventListener("hashchange", restoreFromLocation);
-    return () => {
-      window.removeEventListener("popstate", restoreFromLocation);
-      window.removeEventListener("hashchange", restoreFromLocation);
-    };
-  }, [applyEntry]);
-
-  useEffect(() => subscribeToTopic<{ reason?: string }>("clusters", (update) => {
-    if (update?.reason !== "database_import") return;
-    geoSelectionEpoch.current += 1;
-    try {
-      window.sessionStorage.setItem(GEO_SELECTION_EPOCH_KEY, String(geoSelectionEpoch.current));
-    } catch {
-      // History selections are still invalidated in the open application.
-    }
-    const current = parseNavigationHash(window.location.hash, window.history.state);
-    if (current.geoSelection) {
-      navigate({ page: "people" }, true);
-    } else if (current.mapAlbumId) {
-      navigate({ page: "map" }, true);
-    } else {
-      setGeoSelection(undefined);
-    }
-  }), [navigate]);
-
-  const handleChangePage = useCallback(
-    (nextPage: AppPage) => navigate({ page: nextPage }),
-    [navigate],
-  );
-
   const handleOpenPeople = useCallback(() => navigate({ page: "review", reviewView: "open" }), [navigate]);
 
   const handleOpenImages = useCallback((selection: GeoPhotoSelection) => {
@@ -349,12 +280,12 @@ const App: React.FC = () => {
   }, [navigate]);
 
   const handleChangeGeoSelection = useCallback((selection?: GeoPhotoSelection) => {
-    navigate({ page: "people", geoSelection: hasGeoPhotoSelection(selection) ? selection : undefined }, true);
+    navigate({ page: "people", geoSelection: hasGeoPhotoSelection(selection) ? selection : undefined }, { replace: true, preserveWorkspace: true });
   }, [navigate]);
 
   const handleNavigateToCluster = useCallback(
-    (clusterId: number, personName?: string | null) =>
-      navigate({ page: "review", clusterId, personName }),
+    (clusterId: number, personName?: string | null, groupKey?: FaceReviewGroupKey) =>
+      navigate(groupKey ? { page: "review", groupKey, archiveClusterId: clusterId } : { page: "review", clusterId, personName }),
     [navigate],
   );
 
@@ -363,9 +294,17 @@ const App: React.FC = () => {
   }, [navigate]);
 
   const handleNavigateSettingsSection = useCallback(
-    (section: SettingsSection) => navigate({ page: "settings", settingsSection: section }),
+    (section: SettingsSection) => navigate({ page: "settings", settingsSection: section }, { preserveWorkspace: true }),
     [navigate],
   );
+
+  const handleNavigateReview = useCallback((target: Omit<ClusterNavigationTarget, "token">) => {
+    navigate({ page: "review", ...target }, { preserveWorkspace: true });
+  }, [navigate]);
+
+  const handleMapAlbumChange = useCallback((id?: string, options?: { replace?: boolean }) => {
+    navigate({ page: "map", mapAlbumId: id }, { replace: options?.replace, preserveWorkspace: true });
+  }, [navigate]);
 
   const openHelpDestination = (destination: HelpDestination) => {
     setHelpTopic(null);
@@ -402,7 +341,8 @@ const App: React.FC = () => {
         return (
           <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
             <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} openAlbumId={mapAlbumId} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
+              <MapPage active={active} openAlbumId={mapAlbumId} onAlbumChange={handleMapAlbumChange}
+                onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
             </Suspense>
           </ErrorBoundary>
         );
@@ -413,6 +353,7 @@ const App: React.FC = () => {
               navigationTarget={clusterNavigationTarget}
               active={active}
               sharedLibrary={sharedLibrary}
+              onNavigateReview={handleNavigateReview}
               onLeaveSharedReview={() => navigate({ page: "review" })}
             />
           </ErrorBoundary>
@@ -436,12 +377,13 @@ const App: React.FC = () => {
   };
 
   return (
-    <>
+    <WorkspaceNavigationContext.Provider value={navigation.workspace}>
       <Layout
         page={page}
+        navigation={navigation}
         sharedLibrary={sharedLibrary.resource}
         sharedLibraryReadError={sharedLibrary.readError}
-        onChangePage={handleChangePage}
+        onChangePage={navigation.resume}
         onShowReleaseNotes={openFullChangelog}
         onShowHelp={() => showHelp(helpTopicForPage[page])}
         onImportStateChange={setImportDialogOpen}
@@ -462,11 +404,12 @@ const App: React.FC = () => {
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
       >
-        {PAGE_ORDER.filter((target) => visitedRef.current.has(target)).map(
+        {!navigation.ready && <p className="workspace-history__notice" role="status">Bibliothek wird geprüft …</p>}
+        {navigation.ready && PAGE_ORDER.filter((target) => visitedRef.current.has(target)).map(
           (target) => {
             const active = target === page;
             return (
-              <PagePane key={target} active={active}>
+              <PagePane key={target} page={target} active={active}>
                 {renderPage(target, active)}
               </PagePane>
             );
@@ -507,7 +450,7 @@ const App: React.FC = () => {
           }}
         />
       )}
-    </>
+    </WorkspaceNavigationContext.Provider>
   );
 };
 

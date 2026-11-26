@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { identityColor } from "../../utils/colors";
+import { countWithLabel } from "../../utils/germanFormatting";
 
 export type LibrarySortBy = "date" | "folder";
 export type LibrarySortDirection = "desc" | "asc";
@@ -16,13 +17,13 @@ const UNASSIGNED_FILTER_LABEL = "Nicht zugewiesen";
 const STATUS_FILTERS: { value: string; label: string; hint: string }[] = [
   {
     value: "unknown_person",
-    label: "Unbekannt",
+    label: "Als unbekannt aussortiert",
     hint: "Gesichter, die du bewusst als unbekannte Person aussortiert hast",
   },
   {
     value: "not_face",
     label: "Kein Gesicht",
-    hint: "Fehl-Erkennungen, die du aussortiert hast",
+    hint: "Fehlerkennungen, die du aussortiert hast",
   },
 ];
 
@@ -65,6 +66,8 @@ interface LibraryFilterBarProps {
   /** Unfiltered size of the library, to show "162 von 3.000". */
   totalCount?: number | null;
   resultNoun: string;
+  resultSingular: string;
+  resultsUnavailable?: boolean;
 
   /** Archived statuses to include. Omit to hide those filters entirely. */
   faceStatuses?: string[];
@@ -88,6 +91,8 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
   resultCount,
   totalCount = null,
   resultNoun,
+  resultSingular,
+  resultsUnavailable = false,
   faceStatuses,
   onFaceStatusesChange,
   onResetFilters,
@@ -118,10 +123,10 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
     () =>
       query
         ? orderedPersons.filter((person) =>
-            person.toLocaleLowerCase("de").includes(query),
+            selectedSet.has(person) || person.toLocaleLowerCase("de").includes(query),
           )
         : orderedPersons,
-    [orderedPersons, query],
+    [orderedPersons, query, selectedSet],
   );
 
   // Never hide an active selection behind the collapse.
@@ -146,13 +151,10 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
     <section className="filter-bar" aria-label="Filter und Sortierung">
       <div className="filter-bar__controls">
         <div className="filter-bar__result" aria-live="polite">
-          <strong>{resultCount === null ? "…" : resultCount.toLocaleString()}</strong>
-          <span>
-            {/* Only mention the whole library while a filter actually narrows it. */}
-            {totalCount !== null && resultCount !== null && totalCount !== resultCount
-              ? `von ${totalCount.toLocaleString()} ${resultNoun}`
-              : resultNoun}
-          </span>
+          {resultsUnavailable ? <span>Treffer nicht geladen</span> : resultCount === null ? <span>Treffer werden ermittelt …</span> :
+            totalCount !== null && totalCount !== resultCount
+              ? <><strong>{resultCount.toLocaleString("de-DE")}</strong><span>von {countWithLabel(totalCount, resultSingular, resultNoun)}</span></>
+              : <strong>{countWithLabel(resultCount, resultSingular, resultNoun)}</strong>}
         </div>
 
         <div className="filter-bar__tools">

@@ -1,5 +1,5 @@
 .workflow-sidebar {
-  width: clamp(220px, 22vw, 280px);
+  width: clamp(204px, 18.5vw, 248px);
   flex-shrink: 0;
 }
 
@@ -226,6 +226,26 @@
     justify-content: flex-start;
     padding-inline: 12px;
     text-align: left;
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar {
+    height: auto;
+    min-height: 3.25rem;
+    padding-block: .35rem;
+  }
+
+  .topbar__actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 100%;
+    gap: .35rem;
+  }
+
+  .topbar__workflow,
+  .topbar__utilities {
+    flex: 0 0 auto;
   }
 }
 

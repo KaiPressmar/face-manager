@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Masonry from "react-masonry-css";
-import FaceOverlay from "./FaceOverlay";
+import FaceOverlay, { type NavigateToFaceGroup } from "./FaceOverlay";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import FullscreenImageGallery from "./FullscreenImageGallery";
 import {
@@ -27,11 +27,13 @@ function needsImageGeometry(image: FaceImage) {
 interface ImageGridProps {
   images: FaceImage[];
   isLoading: boolean;
+  interactionsDisabled: boolean;
+  isUpdating: boolean;
   hasMore: boolean;
   isLoadingMore: boolean;
   faceOverlayMode: FaceOverlayMode;
   gridSize: ImageGridSize;
-  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  onNavigateToCluster: NavigateToFaceGroup;
   onLoadMore: () => void;
   onImageGeometryNeeded: (image: FaceImage) => void;
   hasActiveFilters: boolean;
@@ -79,6 +81,8 @@ const GRID_PRELOAD_VIEWPORTS = 2.5;
 const ImageGrid: React.FC<ImageGridProps> = ({
   images,
   isLoading,
+  interactionsDisabled,
+  isUpdating,
   hasMore,
   isLoadingMore,
   faceOverlayMode,
@@ -182,8 +186,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
   useLayoutEffect(() => {
     currentImagesRef.current = images;
-    if (galleryImageId !== null && galleryIndex < 0) setGalleryImageId(null);
-  }, [images, galleryIndex, galleryImageId]);
+    if (galleryImageId !== null && (galleryIndex < 0 || interactionsDisabled)) setGalleryImageId(null);
+  }, [images, galleryIndex, galleryImageId, interactionsDisabled]);
 
   useEffect(() => {
     images.forEach((image) => {
@@ -290,7 +294,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       <div className="empty-image-state">
         <span className="folder-icon" aria-hidden="true" />
         <h3>Keine Bilder in dieser Auswahl</h3>
-        <p>Für die gewählten Personen, Status oder Ordner gibt es keine Bilder.</p>
+        <p>Ändere die aktiven Filter, um andere Bilder zu sehen.</p>
         {hasActiveFilters && (
           <button className="neon-card" type="button" onClick={onResetFilters}>
             Alle Filter zurücksetzen
@@ -302,7 +306,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
 
   return (
     <>
-      <div ref={gridRef}>
+      <div ref={gridRef} aria-busy={isUpdating || isLoadingMore}>
         <Masonry
           breakpointCols={breakpointCols}
           className="masonry-grid"
@@ -367,7 +371,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                       objectFit: "cover",
                       display: "block",
                     }}
-                    alt=""
+                    alt={interactionsDisabled ? img.filename || "Foto" : ""}
                   />
                 )}
 
@@ -376,6 +380,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   className="image-gallery-card__open"
                   aria-label={photoSelection ? `${img.filename || "Bild"} auswählen` : `${img.filename || "Bild"} in Galerie öffnen`}
                   aria-pressed={photoSelection?.ids.has(img.id)}
+                  disabled={interactionsDisabled}
                   onClick={() => photoSelection ? photoSelection.onToggle(img.id) : setGalleryImageId(img.id)}
                 >{photoSelection && <span className="image-gallery-card__selection" aria-hidden="true">
                   {photoSelection.ids.has(img.id) ? "✓" : "+"}
@@ -384,6 +389,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   <button
                     type="button"
                     className="secondary-button image-gallery-card__retry"
+                    disabled={interactionsDisabled}
                     aria-label={`Vorschau von ${img.filename || "Bild"} erneut laden`}
                     onClick={(event) => {
                       event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".image-gallery-card__open")?.focus();
@@ -405,6 +411,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                 {!photoSelection && <div className="image-file-actions">
                   <button
                     type="button"
+                    disabled={interactionsDisabled}
                     title="Vollständigen Dateipfad kopieren"
                     aria-label={`Dateipfad von ${img.filename || "Bild"} kopieren`}
                     onClick={(event) => void copyImagePath(event, img)}
@@ -414,6 +421,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                   </button>
                   <button
                     type="button"
+                    disabled={interactionsDisabled}
                     title="Datei im Explorer oder Dateimanager anzeigen"
                     aria-label={`Speicherort von ${img.filename || "Bild"} öffnen`}
                     onClick={(event) => void revealImage(event, img)}
@@ -452,6 +460,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
                         naturalWidth={sourceSize.w}
                         naturalHeight={sourceSize.h}
                         stackIndex={lanes.get(face.id) ?? 0}
+                        disabled={interactionsDisabled}
                         onNavigateToCluster={onNavigateToCluster}
                       />
                     ));
@@ -468,9 +477,9 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         </div>
       )}
 
-      {isLoadingMore && <div className="image-grid-status">Weitere Bilder werden geladen…</div>}
+      {isLoadingMore && <div className="image-grid-status" role="status">Weitere Bilder werden geladen …</div>}
 
-      {galleryIndex >= 0 && (
+      {galleryIndex >= 0 && !interactionsDisabled && (
         <FullscreenImageGallery
           images={images}
           activeIndex={galleryIndex}
