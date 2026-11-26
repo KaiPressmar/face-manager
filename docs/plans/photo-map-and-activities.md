@@ -1,5 +1,17 @@
 # Fotokarte, Reiseauswahl und Aktivitäten
 
+## Fester Umfang für 0.17.0
+
+Der Release bündelt kombinierte Zeit-, Gebiet- und Albumfilter, Fotoorte aus der Bibliothek, Stadtzoom und eine Offline-Satellitenansicht. Bearbeitbare Reisevorschläge unterstützen die Auswahl einzelner Tage sowie An- und Rückreise. Fotoalben und Reisealben lassen sich aus Bildern, Galerie und Karte befüllen. Der Fotobuchexport bietet eigene Farben, Maße, Rahmen, Layouts und speicherbare Entwürfe. Verkehrsmittel bleiben bestätigbare Hinweise.
+
+Die Aufgabenübersicht zeigt Metadatenprüfung, Pfadprüfung und Update-Downloads neben Import, Gruppierung, Vorschauen und gemeinsamen Ordnern. Der Hardwarestatus erklärt die GPU-Prüfung und Rückfälle und bietet einen freiwilligen Test. Die Einführung verbindet diese Funktionen in deutscher Alltagssprache. Die Abnahme umfasst unabhängige Reviews, bestehende App-Abläufe, eine SQLite-Bibliothek mit 400 Fotos und neun Reisen, Tastatur und schmale Ansichten sowie die Windows- und Ubuntu-Paketprüfungen.
+
+## Verständliche Hilfe
+
+In der Kopfzeile bleibt „Hilfe“ auf allen Seiten an derselben Stelle. Eine einmalige Einladung fragt, ob die ersten Schritte gezeigt werden sollen. „Später“ schließt die Einladung. Der Dialog öffnet sich erst auf Wunsch und lässt sich jederzeit wieder aufrufen. Beim Einstieg über „Hilfe“ erscheint das passende Thema der aktuellen Seite. Die anderen Themen bleiben erreichbar.
+
+Jede Anleitung nennt einen Schritt pro Satz und verwendet die Beschriftung der Schaltflächen. Die Schritte lassen sich vor- und zurückblättern. Die App wechselt nur auf ausdrücklichen Wunsch in einen anderen Bereich. Text, Kontrast, Tastaturfokus und große Schaltflächen helfen bei eingeschränktem Sehvermögen, langsamem Lesen und unsicherer Bedienung. Wir prüfen die Einführung auf schmalen Geräten, mit vergrößerter Schrift und per Tastatur. Versionshinweise bleiben eine eigene Ansicht. [W3C zu älteren Nutzern](https://www.w3.org/WAI/older-users/developing/) · [W3C zu klaren Anleitungen](https://www.w3.org/WAI/WCAG2/supplemental/patterns/o4p07-step-instructions/) · [W3C zu konsistenter Hilfe](https://www.w3.org/WAI/WCAG22/Understanding/consistent-help.html)
+
 ## Einheitliche Bedienung in der gesamten Anwendung
 
 Die Anwendung verwendet drei vertraute Werkzeuge. **Filter** bestimmen, was sichtbar ist. **Auswahl** bezeichnet die Fotos, die bei einer Aktion berücksichtigt werden. **Alben** merken eine Auswahl dauerhaft. In „Bilder“ und „Karte“ zeigen dieselben abwählbaren Chips die aktiven Filter. Ein Wechsel zwischen beiden Ansichten erhält die Auswahl. Zurück, Tastaturfokus, leere Trefferlisten und der Umgang mit inzwischen gelöschten Fotos folgen demselben Verhalten.

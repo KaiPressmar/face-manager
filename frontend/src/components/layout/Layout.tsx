@@ -2,7 +2,8 @@ import React from "react";
 import type { AppPage } from "../../App";
 import type { SharedLibraryState } from "../../utils/api";
 import Sidebar from "./Sidebar";
-import Topbar from "./Topbar";
+import Topbar, { type TopbarAction } from "./Topbar";
+import "./help-entry.css";
 
 const Layout: React.FC<{
   page: AppPage;
@@ -11,8 +12,13 @@ const Layout: React.FC<{
   onChangePage: (p: AppPage) => void;
   onShowReleaseNotes?: () => void;
   onShowUpdate?: () => void;
+  onShowHelp: () => void;
+  onImportStateChange: (open: boolean) => void;
+  topbarAction?: TopbarAction;
+  invitation?: React.ReactNode;
   children: React.ReactNode;
-}> = ({ page, sharedLibrary, sharedLibraryReadError, onChangePage, onShowReleaseNotes, onShowUpdate, children }) => {
+}> = ({ page, sharedLibrary, sharedLibraryReadError, onChangePage, onShowReleaseNotes, onShowUpdate,
+  onShowHelp, onImportStateChange, topbarAction, invitation, children }) => {
   return (
     <div className="app-shell">
       <Sidebar
@@ -23,7 +29,9 @@ const Layout: React.FC<{
       />
 
       <div className="app-main">
-        <Topbar sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
+        <Topbar sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
+          onImportStateChange={onImportStateChange} action={topbarAction} />
+        {invitation}
         <div className="app-viewport">{children}</div>
       </div>
     </div>

@@ -452,9 +452,10 @@ const SHARED_ACTIVITY_STATUS = {
 };
 
 const BackgroundTasksStatus: React.FC<{
+  openRequest?: number;
   sharedLibrary?: SharedLibraryState | null;
   sharedLibraryReadError?: string | null;
-}> = ({ sharedLibrary, sharedLibraryReadError }) => {
+}> = ({ sharedLibrary, sharedLibraryReadError, openRequest }) => {
   const [queue, setQueue] = useState<ImportQueueState | null>(null);
   const [clustering, setClustering] = useState<AutoClusterTask | null>(null);
   const [thumbnails, setThumbnails] = useState<ThumbnailWarmupTask | null>(null);
@@ -631,6 +632,12 @@ const BackgroundTasksStatus: React.FC<{
   const waitingCount = activeTasks.length - runningCount;
   const parallelImports = queue?.running_count ?? queue?.active_job_ids?.length ?? 0;
   const open = isPinned;
+  useEffect(() => {
+    if (openRequest) {
+      setIsPinned(true);
+      triggerRef.current?.focus();
+    }
+  }, [openRequest]);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const retryInFlight = useRef(false);
   const [actionError, setActionError] = useState<string | null>(null);

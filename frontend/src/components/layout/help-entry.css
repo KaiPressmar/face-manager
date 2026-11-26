@@ -1,0 +1,27 @@
+.help-invitation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  padding: 12px clamp(12px, 3vw, 32px);
+  background: var(--surface-1);
+  color: var(--text-strong);
+  border-bottom: 1px solid var(--border);
+}
+.help-invitation p { margin: 4px 0 0; line-height: 1.5; color: var(--text-muted); }
+.help-invitation__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.help-invitation button {
+  min-height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  padding: 8px 12px;
+  background: var(--surface-2);
+  color: var(--text-strong);
+  font: inherit;
+}
+.help-invitation button:first-child { background: var(--accent-soft); border-color: var(--accent-border); font-weight: 650; }
+#app-help-trigger { min-width: 44px; min-height: 44px; width: auto; }
+@media (max-width: 420px) {
+  .runtime-status > .compute-mode-badge { max-width: 76px; white-space: normal; overflow-wrap: anywhere; }
+}
+.help-invitation button:focus-visible, #app-help-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
