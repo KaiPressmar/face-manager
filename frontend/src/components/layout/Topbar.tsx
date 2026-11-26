@@ -22,12 +22,13 @@ const THEME_META: Record<ThemeMode, { icon: string; label: string }> = {
 export type TopbarAction = { destination: "import" | "activities"; sequence: number };
 
 const Topbar: React.FC<{
+  route: string;
   sharedLibrary?: SharedLibraryState | null;
   sharedLibraryReadError?: string | null;
   onShowHelp: () => void;
   onImportStateChange: (open: boolean) => void;
   action?: TopbarAction;
-}> = ({ sharedLibrary, sharedLibraryReadError, onShowHelp, onImportStateChange, action }) => {
+}> = ({ route, sharedLibrary, sharedLibraryReadError, onShowHelp, onImportStateChange, action }) => {
   const [runtime, setRuntime] = useState<RuntimeStatusInfo | null>(null);
   const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   // Adding pictures is the one setup action that stays relevant forever, so it
@@ -131,7 +132,7 @@ const Topbar: React.FC<{
         </div>
 
         <div className="topbar__utilities">
-          <RuntimeStatus runtime={runtime} unavailable={runtimeUnavailable} />
+          <RuntimeStatus runtime={runtime} unavailable={runtimeUnavailable} route={route} />
           <button id="app-help-trigger" className="theme-toggle" type="button" onClick={onShowHelp}>Hilfe</button>
           <button
             type="button"

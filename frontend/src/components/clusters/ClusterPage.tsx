@@ -32,6 +32,7 @@ import {
   renamePerson,
 } from "../../utils/api";
 import { subscribeToTopic } from "../../utils/events";
+import { countWithLabel } from "../../utils/germanFormatting";
 import ClusterFacesGrid from "./ClusterFacesGrid";
 import FaceGroupGallery from "./FaceGroupGallery";
 import ClusterList from "./ClusterList";
@@ -174,7 +175,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     return navigationTarget?.reviewView === "open" ? "open" : "suggestions";
   });
   const [assignmentRevision, setAssignmentRevision] = useState(0);
-  const [activeArchiveSectionKey, setActiveArchiveSectionKey] = useState<string | null>(null);
+  const [archiveSelection, setArchiveSelection] = useState<{
+    groupKey: FaceReviewGroupKey;
+    sectionKey: string;
+  } | null>(null);
   const [visibleSectionCount, setVisibleSectionCount] = useState(SECTION_BATCH_SIZE);
   // Groups to continue with when the current one disappears after a mutation.
   const workflowFallbackRef = useRef<number[]>([]);
@@ -271,28 +275,16 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     [currentScope],
   );
 
-  const currentFaces = useMemo(() => {
-    if (selectedTarget?.type === "cluster") {
-      return clusterDetailsMap[selectedTarget.clusterId]?.faces ?? [];
-    }
-    if (selectedTarget?.type === "group") {
-      return reviewGroupDetails?.group_key === selectedTarget.groupKey
-        ? reviewGroupDetails.faces
-        : [];
-    }
-    return [];
-  }, [clusterDetailsMap, reviewGroupDetails, selectedTarget]);
-
   // Archived faces arrive as one flat list spanning many clusters. Group them by
   // their original cluster so related crops stay together instead of forming one
   // undifferentiated wall of faces.
   const reviewGroupSections = useMemo(() => {
-    if (selectedTarget?.type !== "group") {
+    if (selectedReviewGroupKey === null || reviewGroupDetails?.group_key !== selectedReviewGroupKey) {
       return [] as Array<{ key: string; label: string; faces: ClusterFace[] }>;
     }
     const byCluster = new Map<number, ClusterFace[]>();
     const ungrouped: ClusterFace[] = [];
-    currentFaces.forEach((face) => {
+    reviewGroupDetails.faces.forEach((face) => {
       if (face.cluster_id == null) {
         ungrouped.push(face);
         return;
@@ -320,9 +312,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       sections.push({ key: "ungrouped", label: "Einzelne Gesichter", faces: ungrouped });
     }
     return sections;
-  }, [selectedTarget, currentFaces, clusters]);
-
-  const selectedFaceIdSet = useMemo(() => new Set(selectedFaceIds), [selectedFaceIds]);
+  }, [selectedReviewGroupKey, reviewGroupDetails, clusters]);
 
   /**
    * One uniform list of stacked groups for the detail pane, used by all three
@@ -355,6 +345,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   }, [selectedTarget, reviewGroupSections, currentScope, clusterDetailsMap]);
 
   /** Section the sidebar highlights / the header acts on. */
+  const activeArchiveSectionKey = archiveSelection?.groupKey === selectedReviewGroupKey
+    ? archiveSelection.sectionKey
+    : null;
   const activeSectionKey =
     selectedTarget?.type === "cluster"
       ? `cluster-${selectedTarget.clusterId}`
@@ -365,6 +358,16 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const activeSectionIndex = detailSections.findIndex(
     (section) => section.key === activeSectionKey,
   );
+  const actionSection = detailSections[activeSectionIndex];
+  const actionSectionFaceIds = actionSection?.faces.map((face) => face.id) ?? [];
+  const scopeFacesById = useMemo(
+    () => new Map(detailSections.flatMap((section) => section.faces.map((face) => [face.id, face] as const))),
+    [detailSections],
+  );
+  const checkedFaceIds = selectedFaceIds.filter((faceId) => scopeFacesById.has(faceId));
+  const selectedFaceIdSet = new Set(checkedFaceIds);
+  const allActionSectionSelected = actionSectionFaceIds.length > 0 &&
+    actionSectionFaceIds.every((id) => selectedFaceIdSet.has(id));
   const effectiveSectionCount = Math.max(
     visibleSectionCount,
     activeSectionIndex >= 0 ? activeSectionIndex + 1 : 0,
@@ -454,25 +457,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     [reviewGroupSections],
   );
 
-  const currentFaceCount =
-    selectedTarget?.type === "cluster"
-      ? clusterDetailsMap[selectedTarget.clusterId]?.face_count ?? selectedSummary?.face_count ?? 0
-      : (reviewGroupDetails?.group_key === selectedReviewGroupKey
-          ? reviewGroupDetails.face_count
-          : selectedReviewGroupSummary?.face_count) ?? 0;
-
   const selectedClusterLabel =
     selectedTarget?.type === "cluster"
       ? selectedSummary?.cluster_label?.trim() || `Gruppe ${selectedTarget.clusterId}`
-      : selectedReviewGroupSummary?.label || "Arbeitsliste";
+      : actionSection?.label || selectedReviewGroupSummary?.label || "Arbeitsliste";
 
   const selectedPersonLabel =
     selectedSummary?.person_name?.trim() || UNKNOWN_PERSON_LABEL;
-
-  const allVisibleFaceIds = useMemo(
-    () => currentFaces.map((face) => face.id),
-    [currentFaces],
-  );
 
   const openClusters = useMemo(
     () => clusters.filter((cluster) => !(cluster.person_name || "").trim()),
@@ -910,6 +901,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         if (update?.reason === "database_import") {
           suggestionPhotoRequest.current?.abort();
           setFaceGallery(null);
+          setSelectedFaceIds([]);
+          setArchiveSelection(null);
+          setAssignmentRevision((value) => value + 1);
         }
         needsCatchUpRefreshRef.current = true;
         const isBackgroundCheckpoint = update?.reason === "background_progress";
@@ -1109,6 +1103,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     }
     if (navigationTarget.groupKey) {
       cancelPendingNavigation();
+      setArchiveSelection(null);
       setWorkspaceView("archive");
       selectionSourceRef.current = "navigation";
       setSelectedTarget({ type: "group", groupKey: navigationTarget.groupKey });
@@ -1345,12 +1340,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     );
   };
 
-  const handleSelectAllFaces = () => {
-    setSelectedFaceIds((current) =>
-      current.length === allVisibleFaceIds.length ? [] : allVisibleFaceIds,
-    );
-  };
-
   /** Groups to fall back to, nearest first, if the current one disappears. */
   const remainingScopeAfterSelection = () => {
     const scopeIds = (currentScope?.clusters ?? []).map((cluster) => cluster.cluster_id);
@@ -1423,25 +1412,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
   const handleBatchAction = async (
     action: BatchActionType,
-    faceIds: number[] = selectedFaceIds,
+    faceIds: number[],
     personName?: string,
   ) => {
     if (faceIds.length === 0 || isMutating) {
       return;
     }
 
-    const payload: {
-      action:
-        | "remove_from_cluster"
-        | "create_cluster"
-        | "assign_person"
-        | "mark_unknown_person"
-        | "mark_not_face"
-        | "restore_to_manual_review";
-      face_ids: number[];
-      cluster_id?: number;
-      person_name?: string;
-    } = {
+    const payload: Parameters<typeof batchUpdateFaces>[0] = {
       action,
       face_ids: faceIds,
     };
@@ -1459,6 +1437,24 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         return;
       }
       payload.person_name = name;
+      payload.expected_faces = [];
+      const libraryIds = new Set<string | undefined>();
+      for (const id of faceIds) {
+        const face = scopeFacesById.get(id);
+        if (!face) return;
+        libraryIds.add(face.assignment_library_id);
+        payload.expected_faces.push({
+          id, cluster_id: face.cluster_id, review_status: face.review_status, person_name: face.person_name,
+        });
+      }
+      if (libraryIds.size > 1) {
+        setWorkflowFeedback({
+          kind: "error",
+          message: "Die Auswahl enthält Gesichter aus unterschiedlichen Bibliotheksständen. Lade die Ansicht neu.",
+        });
+        return;
+      }
+      [payload.expected_library_id] = libraryIds;
     }
 
     setIsMutating(true);
@@ -1476,7 +1472,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       if (action === "assign_person") {
         setWorkflowFeedback({ kind: "success", message: faceIds.length === 1
           ? "Ein Gesicht wurde „" + payload.person_name + "“ zugewiesen."
-          : faceIds.length + " Gesichter wurden „" + payload.person_name + "“ zugewiesen." });
+          : `${countWithLabel(faceIds.length, "Gesicht", "Gesichter")} wurden „${payload.person_name}“ zugewiesen.` });
         ensurePersonsLoaded(true);
       }
       await loadSidebarData(true);
@@ -1492,12 +1488,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     }
   };
 
-  // Actions apply to the marked faces, or to the whole group when nothing is
-  // marked — so assigning a full cluster to a person is just pick + confirm.
-  const hasFaceSelection = selectedFaceIds.length > 0;
-  const targetFaceIds = hasFaceSelection ? selectedFaceIds : allVisibleFaceIds;
+  // A whole-group action always targets one chosen cluster. An archive status
+  // and the catch-all section for ungrouped faces are not clusters.
+  const hasFaceSelection = checkedFaceIds.length > 0;
+  const canActOnWholeGroup = !!actionSection && actionSection.key !== "ungrouped";
+  const targetFaceIds = hasFaceSelection ? checkedFaceIds : canActOnWholeGroup ? actionSectionFaceIds : [];
+  const removableFaceIds = actionSectionFaceIds.filter((id) => selectedFaceIdSet.has(id));
   const runQuickAction = (action: BatchActionType) => {
-    void handleBatchAction(action, targetFaceIds);
+    void handleBatchAction(action, action === "remove_from_cluster" ? removableFaceIds : targetFaceIds);
   };
 
   const handleRenameCluster = async () => {
@@ -1652,7 +1650,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const selectReviewGroup = (groupKey: FaceReviewGroupKey) => {
     cancelPendingNavigation();
     selectionSourceRef.current = "explicit";
-    setActiveArchiveSectionKey(null);
+    setArchiveSelection(null);
     setSelectedTarget({ type: "group", groupKey });
   };
 
@@ -1666,11 +1664,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   /** Jump to one group from the sidebar (table-of-contents style). */
   const selectArchiveSection = React.useCallback(
     (sectionKey: string) => {
+      if (selectedReviewGroupKey === null) return;
       cancelPendingNavigation();
-      setActiveArchiveSectionKey(sectionKey);
+      setSelectedFaceIds([]);
+      setArchiveSelection({ groupKey: selectedReviewGroupKey, sectionKey });
       scrollToSection(sectionKey);
     },
-    [cancelPendingNavigation, scrollToSection],
+    [cancelPendingNavigation, scrollToSection, selectedReviewGroupKey],
   );
 
   const selectWorkspaceView = (view: ReviewWorkspaceView) => {
@@ -1840,8 +1840,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
               </div>
 
-              <PersonAssignment
-                key={(selectedClusterId ?? selectedReviewGroupKey) + "-" + assignmentRevision}
+              {(selectedTarget.type !== "group" || targetFaceIds.length > 0) && <PersonAssignment
+                key={`${selectedClusterId ?? selectedReviewGroupKey}-${actionSection?.key ?? "selection"}-${assignmentRevision}`}
                 people={persons}
                 peopleStatus={peopleStatus}
                 busy={isMutating}
@@ -1849,24 +1849,22 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                 wholeGroup={!hasFaceSelection}
                 onRetry={() => ensurePersonsLoaded(true)}
                 onAssign={(name) => void handleBatchAction("assign_person", targetFaceIds, name)}
-              />
+              />}
 
               <div className="cluster-detail-toolbar">
                 <div className="cluster-detail-toolbar__selection">
                   <button
                     className="cluster-selection-status__link"
                     type="button"
-                    onClick={handleSelectAllFaces}
-                    disabled={currentFaces.length === 0}
+                    onClick={() => setFaceGroupSelection(actionSectionFaceIds, !allActionSectionSelected)}
+                    disabled={actionSectionFaceIds.length === 0}
                   >
-                    {hasFaceSelection && selectedFaceIds.length === currentFaces.length
-                      ? "Auswahl aufheben"
-                      : "Alle auswählen"}
+                    {allActionSectionSelected ? "Gruppenauswahl aufheben" : "Alle Gesichter dieser Gruppe auswählen"}
                   </button>
                   {hasFaceSelection ? (
                     <>
                       <span className="cluster-selection-status__count">
-                        {selectedFaceIds.length} von {currentFaces.length} markiert
+                        {countWithLabel(checkedFaceIds.length, "Gesicht", "Gesichter")} markiert
                       </span>
                       <button
                         className="cluster-selection-status__link"
@@ -1878,7 +1876,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                     </>
                   ) : (
                     <span className="cluster-selection-status__hint">
-                      Ohne Auswahl gilt die Aktion für die ganze Gesichtsgruppe
+                      {canActOnWholeGroup
+                        ? "Ohne Markierung gilt die Aktion für die gewählte Gesichtsgruppe."
+                        : "Wähle eine Gesichtsgruppe oder markiere einzelne Gesichter."}
                     </span>
                   )}
                 </div>
@@ -1897,14 +1897,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                           type="button"
                           className="cluster-action-button"
                           title={
-                            requiresSelection && !hasFaceSelection
-                              ? "Zuerst einzelne Gesichter markieren"
+                            requiresSelection && removableFaceIds.length === 0
+                              ? "Zuerst Gesichter dieser Gruppe markieren"
                               : item.description
                           }
                           disabled={
                             isMutating ||
                             targetFaceIds.length === 0 ||
-                            (requiresSelection && !hasFaceSelection)
+                            (requiresSelection && removableFaceIds.length === 0)
                           }
                           onClick={() => runQuickAction(item.action)}
                         >
@@ -1956,7 +1956,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                         <header className="cluster-group-card__header">
                           <div>
                             <strong>{section.label}</strong>
-                            <span>{section.faceCount} Gesichter</span>
+                            <span>{countWithLabel(section.faceCount, "Gesicht", "Gesichter")}</span>
                           </div>
                           <button
                             className="cluster-selection-status__link"
@@ -1974,7 +1974,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                           faces={section.faces}
                           reservedCount={section.faceCount}
                           loaded={section.loaded}
-                          selectedFaceIds={selectedFaceIds}
+                          selectedFaceIds={checkedFaceIds}
                           onToggleFace={toggleFaceSelection}
                           onOpenImage={(face, groupFaces) =>
                             void openFaceContext(

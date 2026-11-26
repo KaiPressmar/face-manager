@@ -1,11 +1,13 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
+from backend.db import schema
 from backend.services import storage
 
 
@@ -1053,6 +1055,97 @@ class ClusterAssignmentTest(unittest.TestCase):
             self.assertEqual(face_row["cluster_id"], cluster_id)
             self.assertEqual(face_row["review_status"], "active")
             self.assertEqual(person_row["name"], "Kai")
+
+
+class ExactFaceAssignmentTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        database = patch.object(schema, "DB_PATH", str(Path(temporary.name) / "assignment.sqlite"))
+        database.start()
+        self.addCleanup(database.stop)
+        schema.init_db(scan_sources=False)
+        with closing(schema.get_conn()) as conn, conn:
+            conn.execute("INSERT INTO image(id, path, directory, filename) VALUES (1, '/photo.jpg', '/', 'photo.jpg')")
+            conn.execute("INSERT INTO person(id, name) VALUES (1, 'Andrea')")
+            conn.execute("INSERT INTO cluster(id, label) VALUES (7, 'Existing group')")
+
+    def add_faces(self, rows):
+        with closing(schema.get_conn()) as conn, conn:
+            conn.executemany("INSERT INTO face(id, image_id, cluster_id, review_status) VALUES (?, 1, ?, ?)", rows)
+
+    def assignments(self):
+        with closing(schema.get_conn()) as conn:
+            return [tuple(row) for row in conn.execute(
+                """SELECT f.id, f.cluster_id, f.review_status, p.name
+                   FROM face f LEFT JOIN cluster c ON c.id = f.cluster_id
+                   LEFT JOIN person p ON p.id = c.person_id ORDER BY f.id""",
+            )]
+
+    def test_equal_count_mixed_selection_leaves_other_faces_untouched(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "active"), (13, None, "active"), (14, 7, "unknown_person")])
+
+        cluster_id = storage.assign_faces_to_person([11, 13], "Andrea")
+
+        self.assertNotEqual(cluster_id, 7)
+        self.assertEqual(self.assignments(), [
+            (11, cluster_id, "active", "Andrea"), (12, 7, "active", None),
+            (13, cluster_id, "active", "Andrea"), (14, 7, "unknown_person", None),
+        ])
+
+    def test_entire_active_cluster_reuses_cluster_id(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "active")])
+        self.assertEqual(storage.assign_faces_to_person([12, 11, 12], "Andrea"), 7)
+        self.assertEqual(self.assignments(), [(11, 7, "active", "Andrea"), (12, 7, "active", "Andrea")])
+
+    def test_selected_archived_face_activates_without_touching_its_group(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "unknown_person")])
+        cluster_id = storage.assign_faces_to_person([12], "Andrea")
+        self.assertNotEqual(cluster_id, 7)
+        self.assertEqual(self.assignments(), [(11, 7, "active", None), (12, cluster_id, "active", "Andrea")])
+
+    def test_legacy_whole_cluster_assignment_skips_archived_faces(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "unknown_person")])
+        storage.assign_cluster_to_person(7, "Andrea")
+        active, archived = self.assignments()
+        self.assertNotEqual(active[1], 7)
+        self.assertEqual(active[2:], ("active", "Andrea"))
+        self.assertEqual(archived, (12, 7, "unknown_person", None))
+
+    def test_missing_selection_rolls_back_without_adding_a_person(self):
+        self.add_faces([(11, 7, "active")])
+        with self.assertRaises(LookupError):
+            storage.assign_faces_to_person([11, 999], "Zoe")
+        with closing(schema.get_conn()) as conn:
+            self.assertEqual(conn.execute("SELECT name FROM person").fetchone()[0], "Andrea")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM person").fetchone()[0], 1)
+        self.assertEqual(self.assignments(), [(11, 7, "active", None)])
+
+    def test_stale_group_or_status_expectation_blocks_assignment(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "unknown_person")])
+        for stale_selection in (
+            {11: (8, "active", None)},
+            {11: (7, "unknown_person", None)},
+            {11: (7, "active", None), 999: (7, "active", None)},
+        ):
+            with self.subTest(stale_selection=stale_selection), self.assertRaises(storage.StaleFaceAssignmentError):
+                storage.assign_faces_to_person([11], "Zoe", expected_faces=stale_selection)
+        self.assertEqual(self.assignments(), [(11, 7, "active", None), (12, 7, "unknown_person", None)])
+        cluster_id = storage.assign_faces_to_person([12], "Andrea", expected_faces={12: (7, "unknown_person", None)})
+        self.assertEqual(self.assignments()[1], (12, cluster_id, "active", "Andrea"))
+
+    def test_stale_tab_cannot_overwrite_an_in_place_owner_change(self):
+        self.add_faces([(11, 7, "active"), (12, 7, "active")])
+        unassigned = {11: (7, "active", None), 12: (7, "active", None)}
+        self.assertEqual(storage.assign_faces_to_person([11, 12], "Andrea", expected_faces=unassigned), 7)
+
+        with self.assertRaises(storage.StaleFaceAssignmentError):
+            storage.assign_faces_to_person([11, 12], "Zoe", expected_faces=unassigned)
+        self.assertEqual(self.assignments(), [(11, 7, "active", "Andrea"), (12, 7, "active", "Andrea")])
+
+        assigned = {11: (7, "active", "Andrea"), 12: (7, "active", "Andrea")}
+        self.assertEqual(storage.assign_faces_to_person([11, 12], "Zoe", expected_faces=assigned), 7)
+        self.assertEqual(self.assignments(), [(11, 7, "active", "Zoe"), (12, 7, "active", "Zoe")])
 
 
 if __name__ == "__main__":

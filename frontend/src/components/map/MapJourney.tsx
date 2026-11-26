@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Journey, JourneyStop } from "./mapData";
-import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
+import { describeJourneyPlaces, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
+import { countWithLabel } from "../../utils/germanFormatting";
 
 const numbers = new Intl.NumberFormat("de-DE");
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
-const place = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 3 });
 
 export function journeyTime(value: string) {
   const date = new Date(value.slice(0, 19) + "Z");
@@ -49,14 +49,11 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
     });
     return () => { active = false; };
   }, [hasStops]);
-  const nearby = useMemo(() => new Map(journey.stops.map((stop) => [
-    stop.id, places ? findNearbyPlace(places, stop.latitude, stop.longitude) : undefined,
-  ])), [journey.stops, places]);
+  const locations = useMemo(() => describeJourneyPlaces(journey.stops, places ?? undefined), [journey.stops, places]);
   const query = searchable(search.trim());
   const visibleStops = query ? journey.stops.filter((stop) => {
-    const match = nearby.get(stop.id);
-    const label = match?.name ?? `${place.format(stop.latitude)}°, ${place.format(stop.longitude)}°`;
-    return searchable(`Stopp ${stop.number} ${label} ${journeyStopLabel(stop)}`).includes(query);
+    const location = locations.get(stop.id);
+    return searchable(`Stopp ${stop.number} ${location?.nearby?.name ?? ""} ${location?.coordinates ?? ""} ${journeyStopLabel(stop)}`).includes(query);
   }) : journey.stops;
   const showLocationNote = !areaFiltered && journey.missing_location_count > 0;
 
@@ -77,20 +74,22 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
     {query && <p role="status" className="gps-page__results-hint">{numbers.format(visibleStops.length)} von {numbers.format(journey.stops.length)} Stopps in der Liste</p>}
     <ol aria-label="Chronologische Stopps" className="gps-journey__stops">
       {visibleStops.map((stop, index) => {
-        const match = nearby.get(stop.id);
+        const location = locations.get(stop.id);
+        const match = location?.nearby;
         const inferredCount = stop.inferred_image_ids?.length ?? 0;
         return <li key={stop.id}>
         {index > 0 && stop.section !== visibleStops[index - 1].section && <p className="gps-journey__gap">{areaFiltered
           ? "Neuer Abschnitt im gewählten Bereich" : "Neuer Abschnitt nach mehr als einem Tag ohne Beobachtung"}</p>}
         <button type="button" aria-pressed={selected === stop.id} onClick={() => onSelect(stop.id)}>
-          <span className="gps-journey__stop-number">{stop.number}</span>
+          <span className="gps-journey__stop-number"><span className="gps-journey__number-label">Stopp </span>{stop.number}</span>
           <span>
             {match && <strong>Bei {match.name}</strong>}
             {match ? <small>{journeyStopLabel(stop)}</small> : <strong>{journeyStopLabel(stop)}</strong>}
             <small>{match
               ? match.distanceKm < 1 ? "Unter 1 km Entfernung" : `Ca. ${numbers.format(Math.round(match.distanceKm))} km Entfernung`
-              : `${place.format(stop.latitude)}°, ${place.format(stop.longitude)}°`}
-              {" · "}{numbers.format(stop.image_ids.length)} {stop.image_ids.length === 1 ? "Foto" : "Fotos"}</small>
+              : location?.coordinates}
+              {location?.sharedName && ` · ${location.coordinates}`}
+              {" · "}{countWithLabel(stop.image_ids.length, "Foto", "Fotos")}</small>
             {stop.uncertain && <small>Reihenfolge unsicher</small>}
             {inferredCount > 0 && <small>{numbers.format(inferredCount)} nach Aufnahmezeit zugeordnet</small>}
           </span>
@@ -100,9 +99,9 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
     </ol>
     {(showLocationNote || journey.missing_time_count > 0 || journey.uncertain_count > 0) &&
       <ul className="gps-journey__notes">
-        {showLocationNote && <li>{numbers.format(journey.missing_location_count)} Fotos im Zeitraum ohne Standort</li>}
-        {journey.missing_time_count > 0 && <li>{numbers.format(journey.missing_time_count)} Fotos mit Standort ohne zuordenbare Aufnahmezeit {areaFiltered ? "im Bereich" : "in der Bibliothek"}</li>}
-        {journey.uncertain_count > 0 && <li>{numbers.format(journey.uncertain_count)} Fotos mit unsicherer zeitlicher Einordnung</li>}
+        {showLocationNote && <li>{countWithLabel(journey.missing_location_count, "Foto", "Fotos")} im Zeitraum ohne Standort</li>}
+        {journey.missing_time_count > 0 && <li>{countWithLabel(journey.missing_time_count, "Foto", "Fotos")} mit Standort ohne zuordenbare Aufnahmezeit {areaFiltered ? "im Bereich" : "in der Bibliothek"}</li>}
+        {journey.uncertain_count > 0 && <li>{countWithLabel(journey.uncertain_count, "Foto", "Fotos")} mit unsicherer zeitlicher Einordnung</li>}
       </ul>}
   </div>;
 }

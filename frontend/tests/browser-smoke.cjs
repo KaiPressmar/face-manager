@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const albumLibraryFlow = require('./album-library-flow.cjs');
+const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 let chromium;
@@ -167,12 +168,18 @@ async function localRecoveryFlow(browser, errors) {
         close() {}
       };
     });
-    await page.route('**/api/database/import', async (route) => {
-      restores += 1;
-      if (restores === 1) {
+    let previews = 0;
+    await page.route('**/api/database/restore-preview', async (route) => {
+      previews += 1;
+      if (previews === 1) {
         await firstBackup.ready;
         return route.fulfill({ status: 400, json: { detail: 'Die Testdatei ist keine gültige Sicherung.' } });
       }
+      return route.fulfill({ json: { photos: 2, people: 1, albums: 1, checksum: 'preview-checksum' } });
+    });
+    await page.route('**/api/database/import', async (route) => {
+      restores += 1;
+      assert.equal(route.request().headers()['x-restore-sha256'], 'preview-checksum');
       return route.fulfill({ status: 204 });
     });
     await page.route('**/api/imports', async (route) => {
@@ -189,14 +196,21 @@ async function localRecoveryFlow(browser, errors) {
     const fileField = backupCard.locator('input[type="file"]');
     const upload = (body) => fileField.setInputFiles({ name: 'demo.sqlite', mimeType: 'application/octet-stream', buffer: Buffer.from(body) });
     await upload('invalid');
-    await backupCard.getByRole('status').filter({ hasText: 'Die Sicherung wird geprüft und wiederhergestellt' }).waitFor();
+    await backupCard.getByRole('status').filter({ hasText: 'Die ausgewählte Sicherung wird geprüft' }).waitFor();
     assert.ok(await backupCard.getByRole('button', { name: 'Sicherung erstellen' }).isDisabled());
     firstBackup.release();
     await backupCard.getByRole('alert').filter({ hasText: 'Die Testdatei ist keine gültige Sicherung.' }).waitFor();
     assert.ok(await backupCard.getByRole('button', { name: 'Sicherung wiederherstellen' }).isEnabled());
     await upload('valid fixture');
+    const restoreDialog = page.getByRole('dialog', { name: 'Bibliothek aus Sicherung wiederherstellen?' });
+    await restoreDialog.getByText('2 Fotos · 1 Person · 1 Album').waitFor();
+    await restoreDialog.getByRole('button', { name: 'Abbrechen' }).click();
+    assert.equal(restores, 0);
+    await upload('valid fixture');
+    await restoreDialog.getByRole('button', { name: 'Bibliothek wiederherstellen' }).click();
     await backupCard.getByRole('status').filter({ hasText: 'Die Sicherung wurde wiederhergestellt.' }).waitFor();
-    assert.equal(restores, 2);
+    await backupCard.getByRole('button', { name: 'Vorherige Bibliothek herunterladen' }).waitFor();
+    assert.equal(restores, 1);
 
     await page.evaluate(() => {
       window.recoveryTestEvents.dispatchEvent(new MessageEvent('imports', { data: JSON.stringify({
@@ -907,8 +921,8 @@ async function liveWorkflowFlow(browser, errors) {
     await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
     await groupRequest;
 
-    let total = 26;
-    const candidates = Array.from({ length: 26 }, (_, index) => ({
+    let total = 27;
+    const candidates = Array.from({ length: 27 }, (_, index) => ({
       image_id: index + 1, location_id: index + 1, path: `/fixture/foto-${index + 1}.jpg`,
       current_filename: `foto-${index + 1}.jpg`, proposed_filename: `foto-${index + 1} Anna.jpg`,
       detected_person_names: ['Anna'], current_suffix_person_names: [],
@@ -923,17 +937,32 @@ async function liveWorkflowFlow(browser, errors) {
         offset, limit, total: null, has_more: offset + limit < total, available_persons: ['Anna'],
       } });
     });
+    await page.route('**/api/image-renames/preview', (route) => {
+      assert.deepEqual(route.request().postDataJSON().selected_paths, ['/fixture/foto-26.jpg', '/fixture/foto-27.jpg']);
+      return route.fulfill({ json: {
+        ready_count: 1, skipped_count: 1,
+        items: [
+          { path: '/fixture/foto-26.jpg', target_path: '/fixture/foto-26 Anna.jpg', reason: null, source_token: 'e'.repeat(64) },
+          { path: '/fixture/foto-27.jpg', target_path: '/fixture/foto-27 Anna.jpg', reason: 'target_exists', source_token: null },
+        ],
+      } });
+    });
     await page.route('**/api/image-renames/apply', (route) => {
+      assert.deepEqual(route.request().postDataJSON().confirmed_targets, {
+        '/fixture/foto-26.jpg': { target_path: '/fixture/foto-26 Anna.jpg', source_token: 'e'.repeat(64) },
+      });
       total = 25;
-      return route.fulfill({ json: { renamed_count: 1, skipped_count: 0, error_count: 0 } });
+      return route.fulfill({ json: { renamed: [], skipped: [], errors: [], renamed_count: 1, skipped_count: 0, error_count: 0 } });
     });
     await page.goto(`${webBase}/#/dateinamen`);
     const pagination = page.locator('.rename-pagination--top');
     await pagination.getByText('Seite 1 von 2').waitFor();
     await pagination.getByRole('button', { name: 'Weiter' }).click();
-    await page.getByRole('button', { name: 'Seite wählen (1)' }).click();
-    await page.getByRole('button', { name: '1 Dateinamen aktualisieren', exact: true }).click();
+    await page.getByRole('button', { name: 'Seite wählen (2)' }).click();
+    await page.getByRole('button', { name: '2 Dateinamen aktualisieren', exact: true }).click();
     const confirmRename = page.getByRole('dialog', { name: 'Dateinamen prüfen' });
+    await confirmRename.getByText('foto-26 Anna.jpg', { exact: true }).waitFor();
+    await confirmRename.getByText('Zielname bereits belegt', { exact: true }).waitFor();
     await confirmRename.getByRole('button', { name: 'Dateien jetzt umbenennen' }).click();
     await pagination.getByText('Seite 1 von 1').waitFor();
     assert.equal(await page.locator('.rename-row').count(), 25);
@@ -1493,6 +1522,7 @@ async function backgroundActivitiesFlow(browser, errors) {
   try {
     const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
       previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
+      (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
       pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),

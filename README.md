@@ -91,9 +91,11 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 <details>
 <summary>Fotobuchbild gestalten</summary>
 
-Öffne in **Karte** die gewünschte Auswahl und wähle **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. **PNG speichern** erzeugt eine Bilddatei fürs Fotobuch. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
+Öffne in **Karte** die gewünschte Auswahl und wähle **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
 
 ![Fotobuchvorschau mit Kartenroute, Gestaltungsmöglichkeiten und Speicherschaltflächen](docs/screenshots/photobook-017.webp)
+
+![Mehrseitiges Fotobuch mit Vorschau und gemeinsamem ZIP-Export](docs/screenshots/photobook-zip-0171.webp)
 
 </details>
 
@@ -119,6 +121,8 @@ In **Einstellungen** findest du Erkennung, Dateinamen, Darstellung sowie **Daten
 
 ![Einstellungen für den lokalen Vorschau-Speicher](docs/screenshots/settings.webp)
 
+![Wiederherstellungsvorschau mit Dateidatum, Anzahl der Fotos, Personen und Alben und einer Schaltfläche zum Abbrechen](docs/screenshots/restore-0171.webp)
+
 ![Gemeinsame Ordner in der Vorschau mit verbundenem Beispielordner und Archiv im Lesemodus](docs/screenshots/shared-library-017.webp)
 
 </details>
@@ -129,7 +133,9 @@ In **Einstellungen** findest du Erkennung, Dateinamen, Darstellung sowie **Daten
 
 Die Fotoanalyse läuft auf deinem Gerät. Namen, Zuordnungen und Merkmale erkannter Gesichter speichert Face Manager in einer lokalen Bibliothek. Die Bibliothek verweist auf deine Fotoordner. Wenn du einen Ordner verschiebst, füge ihn am neuen Speicherort erneut hinzu.
 
-Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek mit **Sicherung erstellen** sichern und mit **Sicherung wiederherstellen** zurückholen. Sichere deine Originalfotos separat.
+Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek sichern oder eine frühere Sicherung wiederherstellen. Die Vorschau zeigt, wie viele Fotos, Personen und Alben in der gewählten Datei stehen. Nach der Bestätigung kannst du den vorherigen Stand herunterladen. Sichere deine Originalfotos separat.
+
+Unter **Aussortierte Gesichter prüfen** findest du Hinweise aus früheren Sicherungen, falls ein eigentlich aussortiertes Gesicht wieder bei einer benannten Person erschienen ist. Du kannst auch eine eigene Sicherung derselben Bibliothek zum Vergleich hinzufügen. Übernimm nur Vorschläge, bei denen du das Gesicht wiedererkennst.
 
 Karte und Reiseverlauf verwenden lokal mitgelieferte Karten- und Satellitendaten. Die optionale Update-Suche fragt GitHub nach neuen Versionen. [Kartendaten und Quellen](frontend/src/components/map/world-land.LICENSE.md) · [Datenaustausch in der Vorschau für gemeinsame Ordner](docs/shared-library-design.md)
 

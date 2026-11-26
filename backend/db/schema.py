@@ -1028,6 +1028,11 @@ def _initialize_schema(conn, *, scan_sources: bool):
     _ensure_person_name_indexes(cur)
 
     conn.commit()
+    # This repair snapshots the last committed library from a separate
+    # connection before writing. It must run outside the schema transaction.
+    from ..services.archive_repair import initialize_archive_repair
+
+    initialize_archive_repair(conn)
 
 
 def init_db(*, recover: bool = True, scan_sources: bool = True):

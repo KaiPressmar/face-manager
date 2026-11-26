@@ -29,7 +29,7 @@ const Layout: React.FC<{
       />
 
       <div className="app-main">
-        <Topbar sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
+        <Topbar route={`${page}:${window.location.hash}`} sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
           onImportStateChange={onImportStateChange} action={topbarAction} />
         {invitation}
         <div className="app-viewport">{children}</div>

@@ -1,13 +1,20 @@
+import ctypes
 import errno
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
+import stat
 import struct
+import sys
+import tempfile
+import unicodedata
 from collections import defaultdict
 from contextlib import closing
+from functools import lru_cache
 from itertools import groupby
 from threading import Lock
 from time import monotonic
@@ -974,6 +981,13 @@ def _rename_filename_error(filename: str, maximum: int) -> str | None:
     if not filename or filename in {".", ".."} or any(char in forbidden for char in filename):
         return "invalid_filename"
     if os.name == "nt":
+        stem = filename.split(".", 1)[0].rstrip().upper()
+        if (
+            filename.endswith((".", " "))
+            or any(ord(char) < 32 for char in filename)
+            or re.fullmatch(r"CON|PRN|AUX|NUL|(?:COM|LPT)[1-9¹²³]", stem)
+        ):
+            return "invalid_filename"
         units = len(filename.encode("utf-16-le", errors="surrogatepass")) // 2
     else:
         units = len(os.fsencode(filename))
@@ -3325,9 +3339,17 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
         cluster_id: Cluster identifier to update.
         person_name: Unique person display name.
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        active_face_ids = [
+            row["id"] for row in cur.execute(
+                "SELECT id FROM face WHERE cluster_id = ? AND review_status = ? ORDER BY id",
+                (cluster_id, FACE_REVIEW_STATUS_ACTIVE),
+            )
+        ]
+        if not active_face_ids:
+            raise LookupError(f"Cluster {cluster_id} has no active faces")
         cluster_row = cur.execute(
             """
             SELECT
@@ -3341,12 +3363,6 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
             (cluster_id,),
         ).fetchone()
         if cluster_row is None:
-            referenced_face = cur.execute(
-                "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
-                (cluster_id,),
-            ).fetchone()
-            if referenced_face is None:
-                raise LookupError(f"Cluster {cluster_id} not found")
             cur.execute(
                 "INSERT INTO cluster(id, label, person_id) VALUES (?, NULL, NULL)",
                 (cluster_id,),
@@ -3355,27 +3371,7 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
                 "Recreated missing cluster row %s during person assignment",
                 cluster_id,
             )
-            cluster_row = cur.execute(
-                """
-                SELECT
-                    c.id,
-                    c.person_id,
-                    p.id AS resolved_person_id
-                FROM cluster c
-                LEFT JOIN person p ON p.id = c.person_id
-                WHERE c.id = ?
-                """,
-                (cluster_id,),
-            ).fetchone()
-
-        referenced_face = cur.execute(
-            "SELECT 1 FROM face WHERE cluster_id = ? LIMIT 1",
-            (cluster_id,),
-        ).fetchone()
-        if referenced_face is None:
-            raise LookupError(f"Cluster {cluster_id} has no faces")
-
-        if (
+        elif (
             cluster_row["person_id"] is not None
             and cluster_row["resolved_person_id"] is None
         ):
@@ -3388,20 +3384,7 @@ def assign_cluster_to_person(cluster_id: int, person_name: str):
                 cluster_row["person_id"],
                 cluster_id,
             )
-
-        person_id = _resolve_person_id(cur, person_name)
-        previous_person_id = cluster_row["person_id"]
-
-        cur.execute(
-            "UPDATE cluster SET person_id = ? WHERE id = ?",
-            (person_id, cluster_id),
-        )
-        if cur.rowcount == 0:
-            raise LookupError(f"Cluster {cluster_id} not found")
-        mark_persons_dirty_for_recluster(cur, [previous_person_id, person_id])
-        conn.commit()
-    finally:
-        conn.close()
+        _assign_face_selection_to_person(cur, active_face_ids, person_name)
     invalidate_image_query_cache()
 
 
@@ -3744,67 +3727,64 @@ def create_cluster_from_faces(face_ids):
     return cluster_id
 
 
-def assign_faces_to_person(face_ids, person_name: str):
-    """Assign selected faces directly to a person via a dedicated cluster."""
-    normalized_face_ids = _normalize_face_ids(face_ids)
-    conn = get_conn()
-    cur = conn.cursor()
-    placeholders = ",".join("?" for _ in normalized_face_ids)
-    face_rows = cur.execute(
-        f"""
-        SELECT id, cluster_id
-        FROM face
-        WHERE id IN ({placeholders})
-        """,
-        normalized_face_ids,
-    ).fetchall()
-    if len(face_rows) != len(normalized_face_ids):
-        conn.close()
+class StaleFaceAssignmentError(ValueError):
+    """The selected faces have changed since the user inspected them."""
+
+
+def _assign_face_selection_to_person(
+    cur, face_ids: list[int], person_name: str,
+    expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None,
+) -> int:
+    """Assign exactly the supplied IDs while holding the SQLite write slot."""
+    face_rows = []
+    for batch in _id_batches(face_ids):
+        placeholders = ",".join("?" for _ in batch)
+        face_rows.extend(cur.execute(
+            f"""SELECT f.id, f.cluster_id, f.review_status, c.id AS existing_cluster_id,
+                       c.person_id, p.name AS person_name
+                FROM face f LEFT JOIN cluster c ON c.id = f.cluster_id
+                LEFT JOIN person p ON p.id = c.person_id
+                WHERE f.id IN ({placeholders})""",
+            batch,
+        ).fetchall())
+    if expected_faces is not None and expected_faces != {
+        row["id"]: (row["cluster_id"], row["review_status"], row["person_name"]) for row in face_rows
+    }:
+        raise StaleFaceAssignmentError("Die ausgewählten Gesichter wurden geändert. Bitte lade die Auswahl neu.")
+    if len(face_rows) != len(face_ids):
         raise LookupError("One or more faces were not found")
 
-    source_cluster_ids = {row["cluster_id"] for row in face_rows if row["cluster_id"] is not None}
-    previous_person_ids = _persons_of_faces(cur, normalized_face_ids)
+    source_cluster_id = face_rows[0]["existing_cluster_id"]
+    previous_person_ids = {row["person_id"] for row in face_rows}
     person_id = _resolve_person_id(cur, person_name)
-    reused_cluster_id = None
-    if len(source_cluster_ids) == 1:
-        source_cluster_id = next(iter(source_cluster_ids))
-        selected_count = len(normalized_face_ids)
-        cluster_face_count = cur.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM face
-            WHERE cluster_id = ? AND review_status = ?
-            """,
-            (source_cluster_id, FACE_REVIEW_STATUS_ACTIVE),
-        ).fetchone()["count"]
-        if int(cluster_face_count) == selected_count:
-            cur.execute(
-                "UPDATE cluster SET person_id = ? WHERE id = ?",
-                (person_id, source_cluster_id),
-            )
-            cur.execute(
-                f"""
-                UPDATE face
-                SET review_status = ?
-                WHERE id IN ({placeholders})
-                """,
-                (FACE_REVIEW_STATUS_ACTIVE, *normalized_face_ids),
-            )
-            reused_cluster_id = int(source_cluster_id)
+    same_active_cluster = source_cluster_id is not None and all(
+        row["cluster_id"] == source_cluster_id and row["review_status"] == FACE_REVIEW_STATUS_ACTIVE
+        for row in face_rows
+    )
+    if same_active_cluster and cur.execute(
+        "SELECT COUNT(*) FROM face WHERE cluster_id = ?", (source_cluster_id,),
+    ).fetchone()[0] == len(face_ids):
+        cur.execute("UPDATE cluster SET person_id = ? WHERE id = ?", (person_id, source_cluster_id))
+        assigned_cluster_id = int(source_cluster_id)
+    else:
+        assigned_cluster_id = _create_cluster_for_faces(cur, face_ids, person_id=person_id)
 
-    if reused_cluster_id is None:
-        reused_cluster_id = _create_cluster_for_faces(
-            cur,
-            normalized_face_ids,
-            person_id=person_id,
-        )
-
-    _delete_empty_clusters(cur)
     mark_persons_dirty_for_recluster(cur, [*previous_person_ids, person_id])
-    conn.commit()
-    conn.close()
+    return assigned_cluster_id
+
+
+def assign_faces_to_person(
+    face_ids, person_name: str, *, expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None,
+):
+    """Assign selected faces directly to a person via a dedicated cluster."""
+    normalized_face_ids = _normalize_face_ids(face_ids)
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        assigned_cluster_id = _assign_face_selection_to_person(cur, normalized_face_ids, person_name, expected_faces)
+        _delete_empty_clusters(cur)
     invalidate_image_query_cache()
-    return reused_cluster_id
+    return assigned_cluster_id
 
 
 def mark_faces_with_review_status(face_ids, review_status: str):
@@ -4586,7 +4566,7 @@ def _refresh_canonical_image_location(cur, image_id: int):
         )
 
 
-def rename_image_locations_to_match_people(
+def _selected_rename_candidates(
     selected_paths: list[str] | None = None,
     rename_all: bool = False,
     excluded_paths: list[str] | None = None,
@@ -4595,7 +4575,6 @@ def rename_image_locations_to_match_people(
     sort_by: str = "date",
     sort_direction: str = "desc",
 ):
-    """Rename selected candidate image locations and sync database metadata."""
     selected_paths = list(dict.fromkeys(selected_paths or []))
     excluded = {path for path in (excluded_paths or []) if path}
 
@@ -4607,45 +4586,297 @@ def rename_image_locations_to_match_people(
             sort_by=sort_by,
             sort_direction=sort_direction,
         )
-        target_candidates = [
+        return [
             candidate
             for candidate in candidates
             if candidate["path"] not in excluded
         ]
-    else:
-        target_candidates = list_filename_rename_candidates_for_paths(
-            selected_paths,
-            suffix_format=None,
-            folders=folders,
-            persons=persons,
-        )
+    return list_filename_rename_candidates_for_paths(
+        selected_paths,
+        suffix_format=None,
+        folders=folders,
+        persons=persons,
+    )
+
+
+def _rename_name_key(name: str) -> str:
+    if os.name == "nt":
+        return name.upper()
+    if sys.platform == "darwin":
+        return unicodedata.normalize("NFD", name).casefold()
+    return name
+
+
+def _case_only_existing_target(source: str, target: str) -> bool:
+    source_name, target_name = os.path.basename(source), os.path.basename(target)
+    source_key = unicodedata.normalize("NFD", source_name).casefold()
+    target_key = unicodedata.normalize("NFD", target_name).casefold()
+    if source_name == target_name or source_key != target_key:
+        return False
+    try:
+        if not os.path.samefile(source, target):
+            return False
+        # A distinct entry can be a hard link to the same file. It is occupied.
+        with os.scandir(os.path.dirname(source)) as entries:
+            return not any(entry.name == target_name for entry in entries)
+    except OSError:
+        return False
+
+
+def _rename_file_identity(source_stat):
+    return (
+        source_stat.st_dev, source_stat.st_ino, stat.S_IFMT(source_stat.st_mode),
+        source_stat.st_size, source_stat.st_mtime_ns,
+    )
+
+
+def _rename_source_token(source_stat) -> str:
+    identity = (*_rename_file_identity(source_stat), source_stat.st_ctime_ns)
+    return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
+
+
+def _rename_destination(candidate):
+    source = candidate["path"]
+    filename = candidate["proposed_filename"]
+    directory = os.path.dirname(source)
+    target = os.path.join(directory, filename)
+    error = _rename_filename_error(filename, _rename_filename_limit(directory))
+    if not error and os.name == "nt":
+        extended_units = len(filesystem_path(target).encode("utf-16-le", errors="surrogatepass")) // 2
+        if extended_units >= 32767:
+            error = "filename_too_long"
+    if error:
+        return target, error, None
+    if source == target:
+        return target, "already_matches", None
+    source_fs, target_fs = filesystem_path(source), filesystem_path(target)
+    try:
+        source_stat = os.lstat(source_fs)
+    except OSError:
+        return target, "missing_source", None
+    if stat.S_ISLNK(source_stat.st_mode):
+        return target, "source_alias", None
+    if not stat.S_ISREG(source_stat.st_mode):
+        return target, "missing_source", None
+    if os.path.lexists(target_fs) and not _case_only_existing_target(source_fs, target_fs):
+        return target, "target_exists", None
+    return target, None, source_stat
+
+
+def _build_location_rename_plan(candidates):
+    plan = []
+    source_entries = defaultdict(list)
+    target_entries = defaultdict(list)
+    real_directories = {}
+    ready_paths = set()
+
+    def entry_key(path):
+        directory = os.path.dirname(path)
+        if directory not in real_directories:
+            real_directories[directory] = os.path.normcase(os.path.realpath(filesystem_path(directory)))
+        return real_directories[directory], _rename_name_key(os.path.basename(path))
+
+    for candidate in candidates:
+        source = candidate["path"]
+        target, reason, source_stat = _rename_destination(candidate)
+        item = {
+            "path": source,
+            "target_path": target,
+            "reason": reason,
+            "source_token": _rename_source_token(source_stat) if source_stat is not None else None,
+        }
+        plan.append(item)
+        if reason not in (None, "target_exists"):
+            continue
+        source_entries[entry_key(source)].append(item)
+        target_entries[entry_key(target)].append(item)
+        if reason is None:
+            ready_paths.add(target)
+
+    for entries in source_entries.values():
+        if len(entries) > 1:
+            for item in entries:
+                item["reason"] = "source_alias"
+    for entries in target_entries.values():
+        if len(entries) > 1:
+            for item in entries:
+                if item["reason"] is None:
+                    item["reason"] = "batch_target_conflict"
+
+    # A registered but disconnected copy must keep its database path too.
+    registered_paths = set()
+    if ready_paths:
+        image_ids = sorted({candidate["image_id"] for candidate in candidates})
+        with closing(get_conn()) as conn:
+            for paths in _id_batches(sorted(ready_paths)):
+                marks = ",".join("?" for _ in paths)
+                rows = conn.execute(f"SELECT path FROM image_location WHERE path IN ({marks})", paths)
+                registered_paths.update(row["path"] for row in rows)
+            # Renaming a source through one directory alias would otherwise
+            # orphan other paths registered for the same photo.
+            for batch in _id_batches(image_ids):
+                marks = ",".join("?" for _ in batch)
+                rows = conn.execute(f"SELECT path FROM image_location WHERE image_id IN ({marks})", batch)
+                for row in rows:
+                    for item in source_entries.get(entry_key(row["path"]), ()):
+                        if item["reason"] is None and item["path"] != row["path"]:
+                            item["reason"] = "source_alias"
+    for item in plan:
+        if item["reason"] is None and item["target_path"] in registered_paths:
+            item["reason"] = "target_exists"
+        if item["reason"] is not None:
+            item["source_token"] = None
+    return plan
+
+
+def preview_image_location_renames(**selection):
+    """Inspect the real destinations for the selected batch without renaming files."""
+    items = _build_location_rename_plan(_selected_rename_candidates(**selection))
+    planned_paths = {item["path"] for item in items}
+    if not selection.get("rename_all"):
+        for path in dict.fromkeys(selection.get("selected_paths") or []):
+            if path not in planned_paths:
+                items.append({"path": path, "target_path": None, "reason": "preview_changed", "source_token": None})
+    ready = sum(item["reason"] is None for item in items)
+    return {"items": items, "ready_count": ready, "skipped_count": len(items) - ready}
+
+
+@lru_cache(maxsize=1)
+def _exclusive_rename_function():
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return None
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is not None:
+            rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+            return lambda source, target: rename(source, target, 0x00000004)  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is not None:
+            rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+            return lambda source, target: rename(-100, source, -100, target, 1)  # AT_FDCWD, RENAME_NOREPLACE
+    return None
+
+
+def _rename_noreplace(source: str, target: str):
+    """Move on one filesystem using an exclusive destination operation."""
+    if os.name == "nt":
+        os.rename(source, target)
+        return
+    exclusive_rename = _exclusive_rename_function()
+    if exclusive_rename is not None:
+        if exclusive_rename(os.fsencode(source), os.fsencode(target)) == 0:
+            return
+        error_number = ctypes.get_errno()
+        if error_number not in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+            raise OSError(error_number, os.strerror(error_number), target)
+    # A link/unlink fallback cannot atomically protect the source from being
+    # replaced between those operations. Leave both paths alone in that case.
+    raise OSError(errno.EOPNOTSUPP, "Das Dateisystem unterstützt kein sicheres Umbenennen.", target)
+
+
+class _RenameSourceChanged(OSError):
+    """The file moved into staging differs from the approved file."""
+
+
+class _RenameRecoveryRequired(OSError):
+    """The staged file was kept because its original path could not be restored."""
+
+    def __init__(self, path: str):
+        self.recovery_path = path
+        super().__init__(f"Die Datei liegt zur Wiederherstellung hier: {path}")
+
+
+def _move_rename_location(source: str, target: str, source_stat):
+    # Verify the actual moved file in a private directory before occupying the
+    # public target. The two moves also handle case changes on insensitive filesystems.
+    parent = os.path.realpath(os.path.dirname(source))
+    staging_dir = tempfile.mkdtemp(prefix=".face-manager-rename-", dir=parent)
+    staging = os.path.join(staging_dir, os.path.basename(source))
+    try:
+        _rename_noreplace(source, staging)
+        try:
+            if _rename_file_identity(os.lstat(staging)) != _rename_file_identity(source_stat):
+                raise _RenameSourceChanged()
+            _rename_noreplace(staging, target)
+        except OSError:
+            try:
+                _rename_noreplace(staging, source)
+            except OSError as exc:
+                logger.exception("Could not restore source path; file retained at %s", staging)
+                raise _RenameRecoveryRequired(staging) from exc
+            raise
+    finally:
+        try:
+            os.rmdir(staging_dir)
+        except OSError:
+            logger.debug("Rename staging directory retained at %s", staging_dir)
+
+
+def rename_image_locations_to_match_people(
+    selected_paths: list[str] | None = None,
+    rename_all: bool = False,
+    excluded_paths: list[str] | None = None,
+    folders=None,
+    persons=None,
+    sort_by: str = "date",
+    sort_direction: str = "desc",
+    *,
+    confirmed_targets: dict[str, str] | None = None,
+    confirmed_source_tokens: dict[str, str] | None = None,
+):
+    """Apply still-valid, confirmed file renames without replacing any path."""
+    candidates = _selected_rename_candidates(
+        selected_paths, rename_all, excluded_paths, folders, persons, sort_by, sort_direction,
+    )
+    plan = _build_location_rename_plan(candidates)
 
     renamed = []
     skipped = []
     errors = []
-    for candidate in target_candidates:
-        source_path = candidate["path"]
-        filename = candidate["proposed_filename"]
-        error = _rename_filename_error(filename, _rename_filename_limit(os.path.dirname(source_path)))
-        if error:
-            skipped.append({"path": source_path, "reason": error})
-            continue
-        target_path = os.path.join(os.path.dirname(source_path), filename)
-        if source_path == target_path:
-            skipped.append({"path": source_path, "reason": "already_matches"})
+    current_paths = {item["path"] for item in plan}
+    for path in (confirmed_targets or {}):
+        if path not in current_paths:
+            skipped.append({"path": path, "reason": "preview_changed"})
+    for candidate, item in zip(candidates, plan):
+        source_path, target_path = item["path"], item["target_path"]
+        reason = item["reason"]
+        if confirmed_targets is not None:
+            if source_path not in confirmed_targets:
+                continue
+            if confirmed_targets[source_path] != target_path:
+                reason = "preview_changed"
+        if reason is None:
+            _, reason, source_stat = _rename_destination(candidate)
+            if reason is None:
+                expected_token = item["source_token"]
+                if confirmed_source_tokens is not None:
+                    expected_token = confirmed_source_tokens.get(source_path)
+                if _rename_source_token(source_stat) != expected_token:
+                    reason = "source_changed"
+        if reason:
+            skipped.append({"path": source_path, "reason": reason})
             continue
         source_filesystem_path = filesystem_path(source_path)
         target_filesystem_path = filesystem_path(target_path)
-        if not os.path.isfile(source_filesystem_path):
-            skipped.append({"path": source_path, "reason": "missing_source"})
-            continue
-        if os.path.lexists(target_filesystem_path):
-            skipped.append({"path": source_path, "reason": "target_exists"})
-            continue
 
         try:
-            os.rename(source_filesystem_path, target_filesystem_path)
+            _move_rename_location(source_filesystem_path, target_filesystem_path, source_stat)
         except OSError as exc:
+            if isinstance(exc, _RenameSourceChanged):
+                skipped.append({"path": source_path, "reason": "source_changed"})
+                continue
+            if isinstance(exc, FileExistsError):
+                skipped.append({"path": source_path, "reason": "target_exists"})
+                continue
+            if isinstance(exc, FileNotFoundError):
+                skipped.append({"path": source_path, "reason": "missing_source"})
+                continue
+            if exc.errno == errno.EOPNOTSUPP:
+                skipped.append({"path": source_path, "reason": "exclusive_rename_unavailable"})
+                continue
             if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
                 skipped.append({"path": source_path, "reason": "filename_too_long"})
                 continue
@@ -4654,31 +4885,45 @@ def rename_image_locations_to_match_people(
                 source_path,
                 target_path,
             )
-            errors.append({"path": source_path, "reason": str(exc)})
+            failure = {"path": source_path, "reason": str(exc)}
+            if isinstance(exc, _RenameRecoveryRequired):
+                failure["recovery_path"] = exc.recovery_path
+            errors.append(failure)
             continue
 
-        conn = get_conn()
+        conn = None
         try:
+            conn = get_conn()
             cur = conn.cursor()
             cur.execute(
                 """
                 UPDATE image_location
                 SET path = ?, filename = ?
-                WHERE id = ?
+                WHERE id = ? AND path = ?
                 """,
-                (target_path, candidate["proposed_filename"], candidate["location_id"]),
+                (target_path, candidate["proposed_filename"], candidate["location_id"], source_path),
             )
+            if cur.rowcount == 0:
+                raise sqlite3.IntegrityError("Der registrierte Dateipfad wurde geändert.")
             _refresh_canonical_image_location(cur, candidate["image_id"])
+            if _rename_file_identity(os.lstat(target_filesystem_path)) != _rename_file_identity(source_stat):
+                raise OSError("Die Datei wurde beim Umbenennen ausgetauscht.")
             conn.commit()
-        except sqlite3.DatabaseError as exc:
-            conn.rollback()
+        except (sqlite3.DatabaseError, OSError) as exc:
+            if conn is not None:
+                conn.rollback()
+            failure = {"path": source_path, "reason": str(exc)}
             logger.exception(
                 "Database update failed after renaming %s to %s",
                 source_path,
                 target_path,
             )
             try:
-                os.rename(target_filesystem_path, source_filesystem_path)
+                if _rename_file_identity(os.lstat(target_filesystem_path)) == _rename_file_identity(source_stat):
+                    _move_rename_location(target_filesystem_path, source_filesystem_path, source_stat)
+            except _RenameRecoveryRequired as recovery:
+                failure["reason"] = f"{exc} {recovery}"
+                failure["recovery_path"] = recovery.recovery_path
             except OSError:
                 logger.exception(
                     "Could not roll back file rename from %s to %s",
@@ -4686,10 +4931,11 @@ def rename_image_locations_to_match_people(
                     source_path,
                 )
                 pass
-            errors.append({"path": source_path, "reason": str(exc)})
-            conn.close()
+            errors.append(failure)
             continue
-        conn.close()
+        finally:
+            if conn is not None:
+                conn.close()
         renamed.append(
             {
                 "from_path": source_path,
