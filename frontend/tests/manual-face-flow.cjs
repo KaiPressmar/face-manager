@@ -37,7 +37,7 @@ module.exports = async function manualFaceFlow(browser, errors, newPage, webBase
     await page.mouse.move(area.x + area.width * 0.67, area.y + area.height * 0.25, { steps: 7 });
     await page.mouse.up();
     const name = editor.getByRole('combobox', { name: 'Person suchen oder neuen Namen eingeben' });
-    await name.fill('Anna');
+    await name.focus();
     await editor.getByRole('listbox').waitFor();
     await name.press('Escape');
     await editor.getByRole('listbox').waitFor({ state: 'hidden' });
