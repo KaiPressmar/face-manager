@@ -1,119 +1,139 @@
 # Face Manager
 
-Face Manager organizes your photo library on your own device. It groups similar faces so you can name people, find them across folders, and browse geotagged photos on an offline map. The library tracks your originals at their existing locations.
+Face Manager ordnet deine Fotos auf deinem Gerät. Du kannst Gesichtern Namen geben, Aufnahmeorte auf der Offline-Karte finden und Reisen als Album oder Fotobuchbild festhalten.
 
-[Download](#download-and-install) · [First import](#first-import) · [App tour](#app-tour) · [Data and privacy](#data-and-privacy) · [Development](#run-from-source)
+[Download](#download-und-installation) · [Erste Schritte](#erste-schritte) · [Bebilderte Tour](#bebilderte-tour) · [Datenschutz](#daten-und-datenschutz) · [Quellcode](#aus-dem-quellcode-starten)
 
-## Download and install
+![Bilderbibliothek mit Personenfiltern und KI-generierten Demofotos](docs/screenshots/photo-library.webp)
 
-Download the package for your system under **Assets**. [Latest GitHub release](https://github.com/KaiPressmar/face-manager/releases/latest)
+<a id="download-and-install"></a>
 
-| System | Package | Installation |
+## Download und Installation
+
+Wähle unter **Assets** das Paket für dein System. Zu den Installationspaketen gibt es SHA-256-Prüfsummen. [Aktuelle Version herunterladen](https://github.com/KaiPressmar/face-manager/releases/latest)
+
+| System | Paket | Installation |
 | --- | --- | --- |
-| Windows 11 x64 | `FaceManager-Setup-X.Y.Z.exe` | Open the installer. |
-| Ubuntu 26.04 amd64 | `face-manager_X.Y.Z_amd64.deb` | Install the downloaded package with APT. |
+| Windows 11 x64 | `FaceManager-Setup-X.Y.Z.exe` | Öffne den Installer. |
+| Ubuntu 26.04 amd64 | `face-manager_X.Y.Z_amd64.deb` | Installiere die heruntergeladene Datei mit APT. |
 
-From the Ubuntu download folder, replace `X.Y.Z` with the version in the filename. Use the same command with the new file to update.
+Ersetze unter Ubuntu im Download-Ordner `X.Y.Z` durch die Version im Dateinamen. Für ein Update verwendest du denselben Befehl mit der neuen Datei.
 
 ```bash
 sudo apt install ./face-manager_X.Y.Z_amd64.deb
 ```
 
-Open **Face Manager** from your applications menu. On Ubuntu, the `face-manager` command also opens the app. The first desktop face-processing run downloads the InsightFace model if it is absent.
+Öffne Face Manager im Anwendungsmenü. Bei der ersten Gesichtserkennung lädt die Desktop-App das Gesichtsmodell bei Bedarf herunter.
 
-The Windows installer serves CPU and GPU systems. If you installed an older `-GPU` edition, download the current installer from GitHub once and select **Keep current data and update the application (recommended)**. Windows SmartScreen may warn about the unsigned installer. Each desktop package has a published SHA-256 checksum. [Release assets](https://github.com/KaiPressmar/face-manager/releases/latest)
+Unter **Einstellungen → Updates → Jetzt nach Updates suchen** kannst du von Hand prüfen, ob eine neue Version verfügbar ist. Beim manuellen Update unter Windows wähle **Keep current data and update the application (recommended)**, falls der Installer nachfragt. Windows SmartScreen kann beim unsignierten Installer einen Hinweis anzeigen. [Versionshinweise](CHANGELOG.md)
 
-### Desktop acceleration
+Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub-Releases enthalten Installationspakete für Windows und Ubuntu. [Android-Bauanleitung](android/README.md)
 
-With a supported graphics driver, Face Manager tries NVIDIA CUDA, then an available Intel GPU through OpenVINO, then the CPU. Ubuntu also needs the Intel OpenCL compute driver for Intel GPU acceleration. The app shows which processing mode it has selected after it loads the face model. To run the Ubuntu package on the CPU, use `FACE_MANAGER_CPU_ONLY=1 face-manager`.
+<a id="first-import"></a>
 
-## First import
+## Erste Schritte
 
-1. Open **Bilder** (Photos) and select **Bilder hinzufügen** (Add photos). The empty library also offers **Bilderordner auswählen** (Choose photo folders).
-2. Add one or more folders. The dialog offers native folder selection on the desktop. Ubuntu also accepts an absolute path to a local folder or mounted network share.
-3. Start the import and follow it in **Aktivitäten** (Activity). Face Manager scans subfolders for JPEG and PNG files. Identical files share one library entry, with each source location recorded.
-4. Open **Personen** (People) to name groups under **Ohne Namen** (Unnamed) and review suggestions under **Vorschläge** (Suggestions). The **Personen zuordnen** prompt in **Bilder** opens the unnamed groups directly.
-5. Return to **Bilder** to browse by person or folder. Open **Karte** (Map) to see photos with GPS coordinates.
+1. Öffne **Bilder hinzufügen** und wähle einen oder mehrere Bilderordner. Unter **Aktivitäten** siehst du den Fortschritt.
+2. Öffne **Personen → Ohne Namen** und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
+3. In **Bilder** kannst du nach Personen, Ordnern oder Alben filtern. Unter **Karte** findest du Fotos mit gespeicherten Aufnahmeorten.
 
-## App tour
+Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst.
 
-These screenshots and the video were captured in the running Face Manager app. The portraits and travel scenes are AI-generated with OpenAI. Names, dates, and photo locations are demonstration data. [OpenAI image generation](https://developers.openai.com/api/docs/guides/image-generation)
+<a id="app-tour"></a>
 
-The offline map uses public-domain map data from Natural Earth. [Natural Earth terms of use](https://www.naturalearthdata.com/about/terms-of-use/)
+## Bebilderte Tour
 
-### Video walkthrough
+Screenshots und Video zeigen Beispieldaten aus der App. Die Porträts und Reisefotos der ersten Demo wurden mit OpenAI erzeugt. [Älteres Bedienvideo mit englischen Texteinblendungen (ohne Ton)](docs/screenshots/face-manager-demo.mp4?raw=true)
 
-Watch the main workflows in a short, captioned MP4. [Open or download the demo](docs/screenshots/face-manager-demo.mp4?raw=true)
+<details>
+<summary>Bilder, Galerie und Import</summary>
 
-[![Open the Face Manager demo video, pictured here with the photo library](docs/screenshots/photo-library.webp)](docs/screenshots/face-manager-demo.mp4?raw=true)
+Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. Öffne in **Bilder** ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
 
-### Photo library
+![Importdialog mit ausgewählten Bilderordnern](docs/screenshots/import-sources.webp)
 
-**Bilder** lets you browse the full collection, filter by person or folder, and open a face label to review its group. Folder filters include photos in subfolders.
+![Vollbildgalerie mit Navigation und Speicherort des Originalfotos](docs/screenshots/photo-gallery.webp)
 
-[Open the photo library screenshot at full size](docs/screenshots/photo-library.webp)
+</details>
 
-### Full-screen gallery
+<details>
+<summary>Personen und Dateinamen</summary>
 
-Open a photo to browse its neighbors, toggle face labels, and find its original file locations. When a source is temporarily unavailable, the gallery can show a locally cached preview and lets you retry loading the original.
+Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. **Dateinamen** zeigt dir vor dem Umbenennen den aktuellen und den vorgeschlagenen Namen.
 
-![Full-screen gallery showing a travel photo, navigation controls, and the original file location](docs/screenshots/photo-gallery.webp)
+![Gesichter prüfen mit einer vorgeschlagenen Zuordnung und Vergleichsfotos](docs/screenshots/people-review.webp)
 
-### People review
+![Vorschau der aktuellen und vorgeschlagenen Dateinamen](docs/screenshots/filenames.webp)
 
-**Personen** shows suggested matches alongside confirmed reference photos. Select the faces you want to assign, give an unnamed group a name, or correct an existing assignment. Suggestions are based on confirmed people in your library.
+</details>
 
-![People review showing suggested assignments, selectable faces, and confirmed reference photos](docs/screenshots/people-review.webp)
+<details>
+<summary>Fotokarte, Reiseverlauf und Alben</summary>
 
-### Photo map
+Kombiniere in **Karte** einen **Zeitraum** mit **Bereich wählen** oder wähle einen Aufnahmeort unter **Orte aus meinen Fotos**. Die Stile **Standard**, **Landschaft** und **Satellit** funktionieren offline. **Verlauf** zeigt die Stopps in zeitlicher Reihenfolge. Für kurze Wege wähle unter **Stoppabstand** den Modus **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte.
 
-**Karte** shows photos with GPS coordinates. Zoom, pan, search for a country, select a region, and filter by capture date. Choose the landscape style or show country names in either style. Open a map selection in the full-screen gallery or use it to filter the Pictures page.
+Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
 
-**Verlauf** groups dated photos into chronological stops. Combine dates with a fixed map area, find repeated places in the stop list, or open a stop to see its photos and jump to its date. Stops show nearby places when a clear local match is available. Dashed lines connect observed photo locations. Known visits outside the selected area interrupt the route. The map and journey work offline. Check **Aktivitäten** for progress while Face Manager reads locations and capture times from existing photos.
+![Offline-Fotokarte mit Standortmarkierungen, Filtern und Fotos aus dem Ausschnitt](docs/screenshots/photo-map.webp)
 
-**Bild exportieren** makes a photo-book PNG from the current map area or the filtered journey. Preview preset or custom dimensions and adjust the print resolution, page colors, text and layout, surrounding area, and marker size. Under **Route gestalten**, assign transport symbols to individual journey legs. Longer stop lists continue on additional pages that can be saved individually.
+![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite-017.webp)
 
-Use **Alben** in **Bilder** to collect photos and filter the library. You can add photos from the full-screen gallery or a map selection. **Reisen entdecken** suggests itineraries from dated photo locations. Choose a day and review any included transfers before saving a journey as an album. The export dialog can save its editable design to that album. The **Satellit** map uses a bundled NASA overview offline.
+![Reiseverlauf in der Landschaftsansicht mit nummerierten Stopps und Datumsfiltern](docs/screenshots/journey-017.webp)
 
-![Offline world map with clustered photo locations, date filters, and photos from the chosen area](docs/screenshots/photo-map.webp)
+![Reisealbum „Sommer in Frankreich“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
 
-### Filename suggestions
+</details>
 
-**Dateinamen** previews filenames that include confirmed person names. Review the proposed changes and choose which files to rename. The filename format is configurable in **Einstellungen** (Settings).
+<details>
+<summary>Fotobuchbild gestalten</summary>
 
-![Filename review with current and proposed names beside selected photos](docs/screenshots/filenames.webp)
+Öffne in **Karte** die gewünschte Auswahl und wähle **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. **PNG speichern** erzeugt eine Bilddatei fürs Fotobuch. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
 
-### Settings and maintenance
+![Fotobuchvorschau mit Kartenroute, Gestaltungsmöglichkeiten und Speicherschaltflächen](docs/screenshots/photobook-017.webp)
 
-**Einstellungen** includes recognition settings, filename rules, appearance, updates, backups, and maintenance. In **Daten und Wartung**, you can set the limit for locally cached photo and face previews. **Ohne Grenze** disables automatic size and age cleanup, so the cache can keep growing on the device.
+</details>
 
-![Settings and maintenance, including controls for the local photo and face preview cache](docs/screenshots/settings.webp)
+<details>
+<summary>Hilfe, Aktivitäten und Hardware</summary>
 
-### Import photos
+Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
 
-**Bilder hinzufügen** lets you collect folders before starting the import. **Aktivitäten** shows progress and lets you pause, resume, or cancel jobs. **Ordner erneut prüfen** queues the folder again from an eligible history entry. Previously processed photos are recognized by content.
+![Hilfe mit dem Thema „Fotos auf der Karte finden“, Themenauswahl und direktem Einstieg](docs/screenshots/help-017.webp)
 
-![Import dialog showing a selection of photo folders before starting the import](docs/screenshots/import-sources.webp)
+![Aktivitäten mit laufendem Import, Standortprüfung und einem abgeschlossenen Import](docs/screenshots/activities-017.webp)
 
-## Data and privacy
+![Hardwarestatus mit CPU-Ersatzbetrieb und Ergebnissen der Hardwareprüfung](docs/screenshots/hardware-017.webp)
 
-Face Manager processes photos on your device and keeps library metadata, clusters, and face embeddings in local SQLite. Importing, browsing, and face review leave source files in place. The **Dateinamen** tool renames source files you explicitly select. Keep at least one source copy accessible to open an original, and re-import a folder after moving it to register the new paths.
+</details>
 
-Use **Einstellungen → Daten und Wartung → Sicherung erstellen** to back up the library and **Sicherung wiederherstellen** to restore it. Keep a separate backup of your source photos. The preview cache is stored locally and can be rebuilt from available originals.
+<details>
+<summary>Einstellungen und gemeinsame Ordner</summary>
 
-| Environment | Default library data |
-| --- | --- |
-| Windows desktop | `%LOCALAPPDATA%\FaceManager\database.sqlite` |
-| Ubuntu desktop | `$XDG_DATA_HOME/face-manager/database.sqlite`, or `~/.local/share/face-manager/database.sqlite` |
-| Source checkout | `backend/db/database.sqlite` |
+In **Einstellungen** findest du Erkennung, Dateinamen, Darstellung sowie **Daten und Wartung**. Dort erstellst du eine Sicherung und stellst die Größe des lokalen Vorschau-Speichers ein.
 
-If the default Ubuntu data directory has no database, the package can reuse an existing `~/.face-manager` library.
+**Gemeinsame Ordner** lassen sich in einer Entwicklervorschau für den Abgleich von Zuordnungen über eine eingerichtete Freigabe nutzen. [Stand und Einrichtung der Vorschau](docs/shared-library-design.md)
 
-The desktop app binds to localhost. The development API listens on `0.0.0.0:8000` for WSL and remote development. Both APIs expose unauthenticated endpoints, so keep these ports on a trusted network. Use an authenticated proxy if you deliberately provide access outside that boundary.
+![Einstellungen für den lokalen Vorschau-Speicher](docs/screenshots/settings.webp)
 
-## Run from source
+![Gemeinsame Ordner in der Vorschau mit verbundenem Beispielordner und Archiv im Lesemodus](docs/screenshots/shared-library-017.webp)
 
-On Ubuntu 22.04+ or WSL2, the setup script installs and validates the Python and Node.js environments and dependencies. The script is safe to rerun.
+</details>
+
+<a id="data-and-privacy"></a>
+
+## Daten und Datenschutz
+
+Die Fotoanalyse läuft auf deinem Gerät. Namen, Zuordnungen und Merkmale erkannter Gesichter speichert Face Manager in einer lokalen Bibliothek. Die Bibliothek verweist auf deine Fotoordner. Wenn du einen Ordner verschiebst, füge ihn am neuen Speicherort erneut hinzu.
+
+Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek mit **Sicherung erstellen** sichern und mit **Sicherung wiederherstellen** zurückholen. Sichere deine Originalfotos separat.
+
+Karte und Reiseverlauf verwenden lokal mitgelieferte Karten- und Satellitendaten. Die optionale Update-Suche fragt GitHub nach neuen Versionen. [Kartendaten und Quellen](frontend/src/components/map/world-land.LICENSE.md) · [Datenaustausch in der Vorschau für gemeinsame Ordner](docs/shared-library-design.md)
+
+<a id="run-from-source"></a>
+
+## Aus dem Quellcode starten
+
+Für Ubuntu ab 22.04 und WSL2 richtet das Setup die Entwicklungsumgebung ein.
 
 ```bash
 git clone https://github.com/KaiPressmar/face-manager.git
@@ -121,82 +141,13 @@ cd face-manager
 ./scripts/setup-dev.sh
 ```
 
-Start the FastAPI backend and the Vite frontend in separate terminals.
+Starte im Projektordner `./scripts/dev-backend.sh` und in einem zweiten Terminal `npm --prefix frontend run dev`. Die Entwicklungs-API auf Port 8000 ist für vertrauenswürdige Netze vorgesehen. [Anwendung öffnen](http://localhost:5173) · [API-Dokumentation](http://localhost:8000/docs) · [Entwicklung und Beiträge](CONTRIBUTING.md)
 
-```bash
-# Terminal 1, from the repository root
-./scripts/dev-backend.sh
-```
-
-```bash
-# Terminal 2, from the repository root
-cd frontend
-npm run dev
-```
-
-- [App at localhost:5173](http://localhost:5173)
-- [Interactive API documentation at localhost:8000/docs](http://localhost:8000/docs)
-- [OpenAPI schema](http://localhost:8000/openapi.json)
-
-Use `./scripts/setup-dev.sh --help` for setup options, including `--cpu`, `--gpu`, `--dry-run`, and `--skip-system-packages`. To diagnose source CUDA setup, run `nvidia-smi` and check for `CUDAExecutionProvider` after activating `backend/.venv`. CUDA use also depends on successful model initialization.
-
-```bash
-source backend/.venv/bin/activate
-python -c 'import onnxruntime as ort; print(ort.get_available_providers())'
-```
-
-The development frontend proxies `/api` to port `8000`. Set `FACE_MANAGER_VITE_API_TARGET` to use another backend. For a deliberately separate frontend using `VITE_API_BASE`, configure `FACE_MANAGER_ALLOWED_ORIGINS` with the exact frontend origins, including schemes and ports. To change the number of import preparation workers, set `FACE_MANAGER_IMPORT_WORKERS` before starting the backend.
+<a id="build-desktop-installers"></a>
 
 <details>
-<summary>Manual setup, VS Code, and build dependencies</summary>
+<summary>Tests und Desktop-Installer</summary>
 
-Use Python 3.10+, Node.js 20+, npm 10+, and a C/C++ toolchain for `hnswlib` when setting up manually.
-
-```bash
-python3 -m venv backend/.venv
-source backend/.venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r backend/requirements.txt 'onnxruntime>=1.18,<2'
-npm --prefix frontend ci
-```
-
-If `hnswlib` needs build headers, install `build-essential` and `python3-dev` on Ubuntu. For missing OpenCV shared libraries, install `libgl1` and the distribution’s GLib runtime package. In VS Code, press `F5` and choose **Full Stack: Debug**.
+Führe `./scripts/check-all.sh` aus, um Änderungen zu prüfen. Baue Installationspakete mit `./packaging/windows/build-release.ps1` unter Windows oder `./scripts/package-linux.sh` unter Ubuntu 26.04. [Voraussetzungen und Release-Prozess](CONTRIBUTING.md) · [Build-Konfiguration](.github/workflows/release.yml) · [Plan für Karte, Alben und Aktivitäten](docs/plans/photo-map-and-activities.md)
 
 </details>
-
-### Development and release checks
-
-```bash
-./scripts/check-all.sh
-```
-
-The optional Chromium smoke suite runs against an isolated temporary library. Install Playwright outside the repository to run it locally.
-
-```bash
-npm install --prefix /tmp/face-manager-ui-tools playwright
-PLAYWRIGHT_BROWSERS_PATH=/tmp/face-manager-ui-browsers /tmp/face-manager-ui-tools/node_modules/.bin/playwright install chromium
-NODE_PATH=/tmp/face-manager-ui-tools/node_modules PLAYWRIGHT_BROWSERS_PATH=/tmp/face-manager-ui-browsers ./scripts/check-ui.sh
-```
-
-Use `UI_SMOKE_SCREENSHOT_DIR` to retain screenshots and `UI_SMOKE_API_PORT` / `UI_SMOKE_WEB_PORT` to override the default ports `8194` / `5194`.
-
-Build Windows installers on Windows with CPython 3.12 x64, Node.js 20+, and Inno Setup 6.
-
-```powershell
-./packaging/windows/build-release.ps1
-```
-
-Build and verify the `.deb` on Ubuntu 26.04 amd64 with Python 3.14 headers and venv, a C/C++ toolchain, and Node.js 20+. The release workflow lists the GTK, WebKitGTK, OpenCL, and other system packages used for the build and runtime check. [Ubuntu build dependencies](.github/workflows/release.yml)
-
-```bash
-./scripts/package-linux.sh
-./scripts/package-linux.sh --check "dist/face-manager_$(cat VERSION)_amd64.deb"
-```
-
-Feature work goes through `develop`. Releases move from `develop` to `main` through a pull request. See the complete contribution and release workflows and the user-facing version history. [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
-
-### How face matching works
-
-InsightFace detects faces and creates 512-dimensional embeddings. Face Manager normalizes those vectors and uses cosine distance with an `hnswlib` index to find candidate matches. It checks nearby faces, group cohesion, and competing matches before grouping, and uses confirmed assignments to propose names for eligible faces. Pose, lighting, blur, and similar-looking people can affect results. Review uncertain or mixed groups in **Personen**. [Face model](backend/models/face_model.py) · [Clustering code](backend/models/clustering.py)
-
-The desktop code uses FastAPI, SQLite, and ONNX Runtime, with a React and TypeScript frontend. Windows packages use PyInstaller and Inno Setup. Ubuntu packages use Debian tooling. GitHub Actions runs validation and publishes release assets. [Backend](backend/) · [Frontend](frontend/) · [Release workflow](.github/workflows/release.yml)

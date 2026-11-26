@@ -6,6 +6,8 @@ Der Release bündelt kombinierte Zeit-, Gebiet- und Albumfilter, Fotoorte aus de
 
 Die Aufgabenübersicht zeigt Metadatenprüfung, Pfadprüfung und Update-Downloads neben Import, Gruppierung, Vorschauen und gemeinsamen Ordnern. Der Hardwarestatus erklärt die GPU-Prüfung und Rückfälle und bietet einen freiwilligen Test. Die Einführung verbindet diese Funktionen in deutscher Alltagssprache. Die Abnahme umfasst unabhängige Reviews, bestehende App-Abläufe, eine SQLite-Bibliothek mit 400 Fotos und neun Reisen, Tastatur und schmale Ansichten sowie die Windows- und Ubuntu-Paketprüfungen.
 
+Die README erklärt Installation, erste Schritte und alle Funktionsbereiche kurz auf Deutsch. Ein bebilderter Rundgang zeigt tatsächliche Ansichten der App mit Beispieldaten. Zur Freigabe prüfen wir die Bildbeschreibungen und Links sowie die sichtbaren Beschriftungen in App und README. [README](../../README.md)
+
 ## Verständliche Hilfe
 
 In der Kopfzeile bleibt „Hilfe“ auf allen Seiten an derselben Stelle. Eine einmalige Einladung fragt, ob die ersten Schritte gezeigt werden sollen. „Später“ schließt die Einladung. Der Dialog öffnet sich erst auf Wunsch und lässt sich jederzeit wieder aufrufen. Beim Einstieg über „Hilfe“ erscheint das passende Thema der aktuellen Seite. Die anderen Themen bleiben erreichbar.
