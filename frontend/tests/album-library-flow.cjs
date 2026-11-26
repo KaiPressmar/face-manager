@@ -62,7 +62,7 @@ async function albumLibraryFlow(browser, errors, newPage, webBase) {
     await library.getByRole('button', { name: 'Album löschen …', exact: true }).click();
     await library.getByRole('button', { name: 'Album endgültig löschen' }).click();
     await library.waitFor({ state: 'hidden' });
-    await filters.getByText(String(total), { exact: true }).waitFor();
+    await filters.getByText(`${total.toLocaleString('de-DE')} Bilder`, { exact: true }).waitFor();
 
     await page.setViewportSize({ width: 320, height: 720 });
     await albumButton.click();

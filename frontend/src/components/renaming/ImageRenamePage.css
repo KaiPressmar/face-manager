@@ -140,3 +140,15 @@
     display: none;
   }
 }
+.rename-outcome__recovery {
+  display: grid;
+  justify-items: start;
+  gap: .45rem;
+  margin-block: .75rem;
+  padding: .75rem;
+  border: 1px solid var(--border-strong);
+  border-inline-start: 3px solid var(--warn, var(--accent));
+  border-radius: .5rem;
+}
+
+.rename-outcome__recovery code { overflow-wrap: anywhere; }

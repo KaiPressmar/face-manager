@@ -361,3 +361,9 @@
     min-height: 44px;
   }
 }
+.face-action-history { margin-block: .25rem .75rem; }
+.face-action-history__tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.face-action-history summary { cursor: pointer; min-height: 36px; padding: .5rem; }
+.face-action-history ol { margin: .25rem .5rem .5rem; padding-inline-start: 1.35rem; }
+.face-action-history li { margin-block: .3rem; }
+.face-action-history li small { display: inline-block; margin-inline-start: .6rem; color: var(--muted); }

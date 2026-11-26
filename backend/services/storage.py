@@ -45,6 +45,7 @@ from ..models.clustering import (
 )
 from .cache import app_cache
 from .filesystem_paths import filesystem_path
+from .face_action_history import face_action_watch_available, pause_face_action_watch, record_face_action
 from .face_geometry import face_boxes_overlap
 from .geo_query import GeoPhotoSelection, photo_selection_sql
 
@@ -1260,15 +1261,14 @@ def _persons_of_faces(cur, face_ids) -> list[int]:
     normalized = [int(face_id) for face_id in face_ids or []]
     if not normalized:
         return []
-    placeholders = ",".join("?" for _ in normalized)
     rows = cur.execute(
-        f"""
+        """
         SELECT DISTINCT c.person_id AS person_id
         FROM face f
         JOIN cluster c ON c.id = f.cluster_id
-        WHERE f.id IN ({placeholders}) AND c.person_id IS NOT NULL
+        WHERE f.id IN (SELECT value FROM json_each(?)) AND c.person_id IS NOT NULL
         """,
-        normalized,
+        (json.dumps(normalized),),
     ).fetchall()
     return [int(row["person_id"]) for row in rows]
 
@@ -1373,15 +1373,15 @@ def _move_faces_to_hidden_review_status(
     if normalized_status == FACE_REVIEW_STATUS_ACTIVE:
         raise ValueError("Hidden review status required")
 
-    placeholders = ",".join("?" for _ in face_ids)
+    selected = json.dumps(face_ids)
     rows = cur.execute(
-        f"""
+        """
         SELECT id, cluster_id
         FROM face
-        WHERE id IN ({placeholders})
+        WHERE id IN (SELECT value FROM json_each(?))
         ORDER BY id ASC
         """,
-        face_ids,
+        (selected,),
     ).fetchall()
 
     selected_by_cluster: dict[int, list[int]] = {}
@@ -1412,12 +1412,12 @@ def _move_faces_to_hidden_review_status(
         _create_cluster_for_faces(cur, unclustered_face_ids)
 
     cur.execute(
-        f"""
+        """
         UPDATE face
         SET review_status = ?
-        WHERE id IN ({placeholders})
+        WHERE id IN (SELECT value FROM json_each(?))
         """,
-        (normalized_status, *face_ids),
+        (normalized_status, selected),
     )
 
 
@@ -3731,11 +3731,7 @@ class StaleFaceAssignmentError(ValueError):
     """The selected faces have changed since the user inspected them."""
 
 
-def _assign_face_selection_to_person(
-    cur, face_ids: list[int], person_name: str,
-    expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None,
-) -> int:
-    """Assign exactly the supplied IDs while holding the SQLite write slot."""
+def _face_assignment_rows(cur, face_ids, expected_faces):
     face_rows = []
     for batch in _id_batches(face_ids):
         placeholders = ",".join("?" for _ in batch)
@@ -3753,6 +3749,15 @@ def _assign_face_selection_to_person(
         raise StaleFaceAssignmentError("Die ausgewählten Gesichter wurden geändert. Bitte lade die Auswahl neu.")
     if len(face_rows) != len(face_ids):
         raise LookupError("One or more faces were not found")
+    return face_rows
+
+
+def _assign_face_selection_to_person(
+    cur, face_ids: list[int], person_name: str,
+    expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None,
+) -> int:
+    """Assign exactly the supplied IDs while holding the SQLite write slot."""
+    face_rows = _face_assignment_rows(cur, face_ids, expected_faces)
 
     source_cluster_id = face_rows[0]["existing_cluster_id"]
     previous_person_ids = {row["person_id"] for row in face_rows}
@@ -3775,49 +3780,55 @@ def _assign_face_selection_to_person(
 
 def assign_faces_to_person(
     face_ids, person_name: str, *, expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None,
+    record_history: bool = False,
 ):
     """Assign selected faces directly to a person via a dedicated cluster."""
     normalized_face_ids = _normalize_face_ids(face_ids)
     with closing(get_conn()) as conn, conn:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
-        assigned_cluster_id = _assign_face_selection_to_person(cur, normalized_face_ids, person_name, expected_faces)
-        _delete_empty_clusters(cur)
+        def mutate():
+            cluster_id = _assign_face_selection_to_person(cur, normalized_face_ids, person_name, expected_faces)
+            _delete_empty_clusters(cur)
+            return cluster_id
+
+        result = record_face_action(cur, normalized_face_ids, "assign_person", mutate) if record_history else mutate()
     invalidate_image_query_cache()
-    return assigned_cluster_id
+    return result
 
 
-def mark_faces_with_review_status(face_ids, review_status: str):
+def mark_faces_with_review_status(
+    face_ids, review_status: str, *,
+    expected_faces: dict[int, tuple[int | None, str, str | None]] | None = None, record_history: bool = False,
+):
     """Move selected faces into one explicit hidden review status."""
     normalized_face_ids = _normalize_face_ids(face_ids)
     normalized_status = normalize_face_review_status(review_status)
     if normalized_status == FACE_REVIEW_STATUS_ACTIVE:
         raise ValueError("Active faces should be restored with restore_faces_to_manual_review")
-    placeholders = ",".join("?" for _ in normalized_face_ids)
-    conn = get_conn()
-    cur = conn.cursor()
-    affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
-    _move_faces_to_hidden_review_status(cur, normalized_face_ids, normalized_status)
-    updated_count = int(
-        cur.execute(
-            f"""
-            SELECT COUNT(*) AS count
-            FROM face
-            WHERE id IN ({placeholders})
-              AND review_status = ?
-            """,
-            (*normalized_face_ids, normalized_status),
-        ).fetchone()["count"]
-    )
-    if updated_count == 0:
-        conn.close()
-        raise LookupError("No faces were updated")
-    _delete_empty_clusters(cur)
-    mark_persons_dirty_for_recluster(cur, affected_person_ids)
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+
+        def mutate():
+            if expected_faces is not None:
+                _face_assignment_rows(cur, normalized_face_ids, expected_faces)
+            affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
+            _move_faces_to_hidden_review_status(cur, normalized_face_ids, normalized_status)
+            count = cur.execute("""
+                SELECT COUNT(*) FROM face
+                WHERE id IN (SELECT value FROM json_each(?)) AND review_status = ?
+            """, (json.dumps(normalized_face_ids), normalized_status)).fetchone()[0]
+            if not count:
+                raise LookupError("No faces were updated")
+            _delete_empty_clusters(cur)
+            mark_persons_dirty_for_recluster(cur, affected_person_ids)
+            return count
+
+        action = "mark_unknown_person" if normalized_status == FACE_REVIEW_STATUS_UNKNOWN_PERSON else "mark_not_face"
+        result = record_face_action(cur, normalized_face_ids, action, mutate) if record_history else mutate()
     invalidate_image_query_cache()
-    return updated_count
+    return result
 
 
 def restore_faces_to_manual_review(face_ids):
@@ -4029,6 +4040,7 @@ def recluster_all_active_faces(
     conn.isolation_level = None  # explicit, short transactions per group
     cur = conn.cursor()
     try:
+        history_watch_enabled = face_action_watch_available(cur)
         groups = _resolve_recluster_groups(cur, scoped)
         if not groups:
             return 0
@@ -4057,54 +4069,55 @@ def recluster_all_active_faces(
                     cur.execute("COMMIT")
                     continue
 
-                _replace_recluster_temp_ids(
-                    cur,
-                    _RECLUSTER_FACE_IDS_TABLE,
-                    face_ids,
-                )
-                cur.execute(
-                    f"""
-                    UPDATE face
-                    SET cluster_id = NULL
-                    WHERE id IN (SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE})
-                    """
-                )
-                # Exclude every surviving cluster so the group is rebuilt from
-                # scratch instead of merging back into stale groupings.
-                protected_cluster_ids = {
-                    int(row["id"])
-                    for row in cur.execute("SELECT id FROM cluster").fetchall()
-                }
-
-                group_offset = completed_faces
-
-                def group_progress(processed: int, _group_total: int) -> None:
-                    if progress_callback is not None:
-                        progress_callback(group_offset + processed, total_faces)
-
-                _recluster_active_faces_into_inbox(
-                    cur,
-                    face_ids,
-                    excluded_cluster_ids=protected_cluster_ids,
-                    progress_callback=group_progress,
-                )
-
-                if person_id is not None:
+                with pause_face_action_watch(cur, enabled=history_watch_enabled):
+                    _replace_recluster_temp_ids(
+                        cur,
+                        _RECLUSTER_FACE_IDS_TABLE,
+                        face_ids,
+                    )
                     cur.execute(
                         f"""
-                        UPDATE cluster
-                        SET person_id = ?
-                        WHERE id IN (
-                            SELECT DISTINCT cluster_id
-                            FROM face
-                            WHERE id IN (
-                                SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE}
-                            )
-                              AND cluster_id IS NOT NULL
-                        )
-                        """,
-                        (person_id,),
+                        UPDATE face
+                        SET cluster_id = NULL
+                        WHERE id IN (SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE})
+                        """
                     )
+                    # Exclude every surviving cluster so the group is rebuilt from
+                    # scratch instead of merging back into stale groupings.
+                    protected_cluster_ids = {
+                        int(row["id"])
+                        for row in cur.execute("SELECT id FROM cluster").fetchall()
+                    }
+
+                    group_offset = completed_faces
+
+                    def group_progress(processed: int, _group_total: int) -> None:
+                        if progress_callback is not None:
+                            progress_callback(group_offset + processed, total_faces)
+
+                    _recluster_active_faces_into_inbox(
+                        cur,
+                        face_ids,
+                        excluded_cluster_ids=protected_cluster_ids,
+                        progress_callback=group_progress,
+                    )
+
+                    if person_id is not None:
+                        cur.execute(
+                            f"""
+                            UPDATE cluster
+                            SET person_id = ?
+                            WHERE id IN (
+                                SELECT DISTINCT cluster_id
+                                FROM face
+                                WHERE id IN (
+                                    SELECT id FROM {_RECLUSTER_FACE_IDS_TABLE}
+                                )
+                                  AND cluster_id IS NOT NULL
+                            )
+                            """,
+                            (person_id,),
+                        )
 
                 _clear_dirty_recluster_person(cur, person_id)
                 cur.execute("COMMIT")

@@ -39,8 +39,8 @@
   /* Text ramp */
   --text-strong: #f5f7fb;
   --text: #ececf0;
-  --text-muted: #9a9aa5;
-  --text-faint: #6f6f79;
+  --text-muted: #b0b4c0;
+  --text-faint: #9a9fac;
 
   /* Status */
   --positive: #65e5aa;
@@ -130,8 +130,8 @@
 
   --text-strong: #0c1220;
   --text: #1b2130;
-  --text-muted: #55607a;
-  --text-faint: #6f7a90;
+  --text-muted: #4b576c;
+  --text-faint: #59667a;
 
   --positive: #0f9d6b;
   --warning: #b26a12;
@@ -199,8 +199,8 @@
 
     --text-strong: #0c1220;
     --text: #1b2130;
-    --text-muted: #55607a;
-    --text-faint: #6f7a90;
+    --text-muted: #4b576c;
+    --text-faint: #59667a;
 
     --positive: #0f9d6b;
     --warning: #b26a12;
@@ -886,8 +886,15 @@ button.sidebar__version:hover {
   padding-top: 2px;
 }
 
-.activity-task__actions button:last-child {
-  color: var(--danger);
+.activity-task__actions .activity-task__action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.activity-task__actions .activity-task__action--stop {
+  color: var(--danger-soft-text);
 }
 
 .activity-center__section-title .task-icon-button,
@@ -1853,7 +1860,7 @@ img {
   --text-strong: #ffffff;
   --text: #f0f3f6;
   --text-muted: #aab3bd;
-  --text-faint: #7f8a93;
+  --text-faint: #a0acb7;
   --accent-text: #d9fbff;
   --surface-1: #101418;
   --surface-raise: #1b2129;

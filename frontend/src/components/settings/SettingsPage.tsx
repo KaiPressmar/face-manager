@@ -120,6 +120,8 @@ const SETTINGS_NAV_ITEMS: { section: SettingsSection; label: string }[] = [
   { section: "daten", label: "Daten und Wartung" },
 ];
 
+type FeedbackArea = "erkennung" | "updates" | "protokoll" | "speicherorte";
+
 const SettingsPage: React.FC<{
   activeSection?: SettingsSection;
   sharedLibrary: SharedLibraryController;
@@ -149,10 +151,10 @@ const SettingsPage: React.FC<{
   const backupInFlight = useRef(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Partial<Record<FeedbackArea, { text: string; error: boolean }>>>({});
   const [filenameFeedback, setFilenameFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const focusSection = useRef<SettingsSection>();
   const strictnessSaveTimerRef = useRef<number | null>(null);
   const strictnessRevisionRef = useRef(0);
   const pendingStrictnessRef = useRef<{ value: number; revision: number } | null>(null);
@@ -172,6 +174,16 @@ const SettingsPage: React.FC<{
   const canSaveFilenameFormat = filenameFormatChanged && !invalidBlockSeparator && !invalidPersonJoiner && !isSaving;
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
+
+  const report = (area: FeedbackArea, text?: string, error = false) => {
+    setFeedback((current) => ({ ...current, [area]: text ? { text, error } : undefined }));
+  };
+
+  const sectionFeedback = (area: FeedbackArea) => {
+    const result = feedback[area];
+    return result && <p className={result.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
+      role={result.error ? "alert" : "status"}>{result.text}</p>;
+  };
 
   useEffect(() => {
     let active = true;
@@ -252,10 +264,13 @@ const SettingsPage: React.FC<{
     if (isLoading) return;
     const animationFrame = window.requestAnimationFrame(() => {
       const targetId = activeSection ? `settings-${activeSection}` : "settings-start";
-      document.getElementById(targetId)?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
+      const target = document.getElementById(targetId);
+      if (!target || target.closest("[inert]")) return;
+      target.scrollIntoView({ block: "start" });
+      if (activeSection && focusSection.current === activeSection) {
+        focusSection.current = undefined;
+        target.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
+      }
     });
     return () => window.cancelAnimationFrame(animationFrame);
   }, [activeSection, isLoading]);
@@ -279,10 +294,11 @@ const SettingsPage: React.FC<{
     } catch (saveError) {
       if (strictnessRevisionRef.current === revision) {
         setClusteringSaveState("error");
-        setError(
+        report("erkennung",
           saveError instanceof Error
             ? saveError.message
             : "Die Einstellung für die Gruppierung konnte nicht gespeichert werden.",
+          true,
         );
       }
     } finally {
@@ -299,8 +315,7 @@ const SettingsPage: React.FC<{
 
   const scheduleStrictnessSave = (value: string) => {
     setStrictnessInput(value);
-    setError(null);
-    setMessage(null);
+    report("erkennung");
     setClusteringSaveState("pending");
     strictnessRevisionRef.current += 1;
     const revision = strictnessRevisionRef.current;
@@ -337,8 +352,7 @@ const SettingsPage: React.FC<{
     strictnessRevisionRef.current += 1;
     const revision = strictnessRevisionRef.current;
     setStrictnessInput(value.toFixed(2));
-    setError(null);
-    setMessage(null);
+    report("erkennung");
     void persistStrictness(value, revision);
   };
 
@@ -350,8 +364,7 @@ const SettingsPage: React.FC<{
     pendingStrictnessRef.current = null;
     strictnessRevisionRef.current += 1;
     setIsAutoTuning(true);
-    setError(null);
-    setMessage(null);
+    report("erkennung");
     try {
       const result = await autoTuneClusterThreshold();
       setStrictnessInput(result.strictness.toFixed(2));
@@ -366,15 +379,16 @@ const SettingsPage: React.FC<{
           : current,
       );
       setClusteringSaveState("saved");
-      setMessage(
+      report("erkennung",
         `Die passende Einstellung wurde aus ${result.person_count} bestätigten Personen ermittelt und gespeichert. ` +
           "Mit „Gesichtsgruppen jetzt neu ordnen“ wendest du sie auch auf vorhandene Gesichter an.",
       );
     } catch (tuneError) {
-      setError(
+      report("erkennung",
         tuneError instanceof Error
           ? tuneError.message
           : "Die Einstellung für die Gruppierung konnte nicht automatisch optimiert werden.",
+        true,
       );
     } finally {
       setIsAutoTuning(false);
@@ -383,11 +397,10 @@ const SettingsPage: React.FC<{
 
   const handleRecluster = async () => {
     setIsReclustering(true);
-    setError(null);
-    setMessage(null);
+    report("erkennung");
     try {
       const { scheduled, status } = await reclusterAllFaces();
-      setMessage(
+      report("erkennung",
         !scheduled
           ? "Es sind keine Gesichter vorhanden, die neu geordnet werden könnten."
           : status === "queued"
@@ -395,10 +408,11 @@ const SettingsPage: React.FC<{
             : "Die Gesichtsgruppen werden jetzt neu geordnet.",
       );
     } catch (reclusterError) {
-      setError(
+      report("erkennung",
         reclusterError instanceof Error
           ? reclusterError.message
           : "Die Gesichtsgruppen konnten nicht neu geordnet werden.",
+        true,
       );
     } finally {
       setIsReclustering(false);
@@ -408,8 +422,6 @@ const SettingsPage: React.FC<{
   const handleSaveSuffixFormat = async () => {
     if (!canSaveFilenameFormat) return;
     setIsSaving(true);
-    setError(null);
-    setMessage(null);
     setFilenameFeedback(null);
     try {
       const next = await updateSettings({
@@ -434,20 +446,20 @@ const SettingsPage: React.FC<{
 
   const handleSaveLogLevel = async () => {
     setIsSaving(true);
-    setError(null);
-    setMessage(null);
+    report("protokoll");
     try {
       const next = await updateSettings({
         file_log_level: fileLogLevelInput,
       });
       setSettings(next);
       setFileLogLevelInput(next.file_log_level);
-      setMessage("Detailgrad des Fehlerprotokolls gespeichert.");
+      report("protokoll", "Detailgrad des Fehlerprotokolls gespeichert.");
     } catch (saveError) {
-      setError(
+      report("protokoll",
         saveError instanceof Error
           ? saveError.message
           : "Der Detailgrad des Fehlerprotokolls konnte nicht gespeichert werden.",
+        true,
       );
     } finally {
       setIsSaving(false);
@@ -456,21 +468,20 @@ const SettingsPage: React.FC<{
 
   const handleAutomaticUpdateChecks = async (enabled: boolean) => {
     setIsSaving(true);
-    setError(null);
-    setMessage(null);
+    report("updates");
     try {
       const next = await updateSettings({ automatic_update_checks: enabled });
       setSettings(next);
       window.dispatchEvent(
         new CustomEvent("face-manager:update-check-setting", { detail: enabled }),
       );
-      setMessage(
+      report("updates",
         enabled
           ? "Die stündliche Update-Prüfung ist aktiviert."
           : "Die automatische Update-Prüfung ist deaktiviert.",
       );
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Update-Einstellung konnte nicht gespeichert werden.");
+      report("updates", saveError instanceof Error ? saveError.message : "Update-Einstellung konnte nicht gespeichert werden.", true);
     } finally {
       setIsSaving(false);
     }
@@ -478,8 +489,7 @@ const SettingsPage: React.FC<{
 
   const handleManualUpdateCheck = async () => {
     setIsCheckingUpdates(true);
-    setError(null);
-    setMessage(null);
+    report("updates");
     try {
       const update = await checkForUpdates(true);
       if (update.update_available) {
@@ -487,13 +497,13 @@ const SettingsPage: React.FC<{
           new CustomEvent("face-manager:update-available", { detail: update }),
         );
       }
-      setMessage(
+      report("updates",
         update.update_available
           ? `Face Manager ${update.latest_version} ist verfügbar. Der Hinweis erscheint oben in der Anwendung.`
           : `Face Manager ${update.current_version} ist aktuell.`,
       );
     } catch (checkError) {
-      setError(checkError instanceof Error ? checkError.message : "Update-Prüfung fehlgeschlagen.");
+      report("updates", checkError instanceof Error ? checkError.message : "Update-Prüfung fehlgeschlagen.", true);
     } finally {
       setIsCheckingUpdates(false);
     }
@@ -611,16 +621,16 @@ const SettingsPage: React.FC<{
     if (!window.confirm(
       "Fehlende Dateien aus der Bibliothek entfernen? Wenn ein Bild keinen weiteren Speicherort hat, gehen auch seine Gesichtszuordnungen verloren. Schließe vorher alle Fotolaufwerke an.",
     )) return;
-    setError(null);
-    setMessage(null);
+    report("speicherorte");
     try {
       const next = await startImagePathCleanup();
       setPathCleanup(next);
     } catch (cleanupError) {
-      setError(
+      report("speicherorte",
         cleanupError instanceof Error
           ? cleanupError.message
           : "Die Pfadprüfung konnte nicht gestartet werden.",
+        true,
       );
     }
   };
@@ -641,7 +651,6 @@ const SettingsPage: React.FC<{
     <div className="settings-page">
       <div className="settings-page__header" id="settings-start">
         <div>
-          <div className="settings-page__eyebrow">Face Manager</div>
           <h1 className="settings-page__title">Einstellungen</h1>
           <p className="settings-page__copy">
             Passe Erkennung, Dateinamen und Darstellung an oder sichere deine Daten.
@@ -668,11 +677,14 @@ const SettingsPage: React.FC<{
                 className="settings-nav__link"
                 aria-current={activeSection === item.section ? "location" : undefined}
                 onClick={() => {
+                  if (activeSection === item.section) {
+                    const group = document.getElementById(`settings-${item.section}`);
+                    group?.scrollIntoView({ block: "start" });
+                    group?.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
+                    return;
+                  }
+                  focusSection.current = item.section;
                   onNavigateSection(item.section);
-                  document.getElementById(`settings-${item.section}`)?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "start",
-                  });
                 }}
               >
                 {item.label}
@@ -683,7 +695,7 @@ const SettingsPage: React.FC<{
           <div className="settings-sections">
             <section className="settings-group" id="settings-erkennung">
               <header className="settings-group__header">
-                <h2>Erkennung und Gruppierung</h2>
+                <h2 tabIndex={-1}>Erkennung und Gruppierung</h2>
                 <p>Wie vorsichtig Gesichter automatisch zu Gruppen zusammengefasst werden.</p>
               </header>
               <div className="settings-group__cards">
@@ -794,13 +806,14 @@ const SettingsPage: React.FC<{
                 Nach manuellen Zuordnungen läuft diese Prüfung ansonsten automatisch,
                 sobald Face Manager gerade nichts anderes verarbeitet.
               </p>
+              {sectionFeedback("erkennung")}
             </section>
               </div>
             </section>
 
             <section className="settings-group" id="settings-dateinamen">
               <header className="settings-group__header">
-                <h2>Dateinamen</h2>
+                <h2 tabIndex={-1}>Dateinamen</h2>
                 <p>Lege fest, wie zugeordnete Personennamen in den Dateinamenvorschlägen erscheinen.</p>
               </header>
               <div className="settings-group__cards">
@@ -992,7 +1005,7 @@ const SettingsPage: React.FC<{
 
             <section className="settings-group" id="settings-darstellung">
               <header className="settings-group__header">
-                <h2>Darstellung</h2>
+                <h2 tabIndex={-1}>Darstellung</h2>
                 <p>Erscheinungsbild der Anwendung.</p>
               </header>
               <div className="settings-group__cards">
@@ -1044,7 +1057,7 @@ const SettingsPage: React.FC<{
 
             <section className="settings-group" id="settings-updates">
               <header className="settings-group__header">
-                <h2>Updates</h2>
+                <h2 tabIndex={-1}>Updates</h2>
                 <p>Neue veröffentlichte Versionen von Face Manager.</p>
               </header>
               <div className="settings-group__cards">
@@ -1072,13 +1085,14 @@ const SettingsPage: React.FC<{
                       {isCheckingUpdates ? "Prüfe…" : "Jetzt nach Updates suchen"}
                     </button>
                   </div>
+                  {sectionFeedback("updates")}
                 </section>
               </div>
             </section>
 
             <section className="settings-group" id="settings-daten">
               <header className="settings-group__header">
-                <h2>Daten und Wartung</h2>
+                <h2 tabIndex={-1}>Daten und Wartung</h2>
                 <p>Datensicherung und hilfreiche Informationen für die Fehlersuche.</p>
               </header>
               <div className="settings-group__cards">
@@ -1089,10 +1103,10 @@ const SettingsPage: React.FC<{
                 zuvor gespeicherte Sicherung wieder her.
               </p>
 
-              <div className="settings-meta">
-                <span>Speicherort der Face-Manager-Daten</span>
+              <details className="settings-meta settings-meta--details">
+                <summary>Speicherort der Bibliothek</summary>
                 <code>{settings?.database_path}</code>
-              </div>
+              </details>
 
               <div className="settings-actions">
                 <button
@@ -1174,10 +1188,10 @@ const SettingsPage: React.FC<{
                 </span>
               </div>
 
-              <div className="settings-meta">
-                <span>Speicherort des Fehlerprotokolls</span>
+              <details className="settings-meta settings-meta--details">
+                <summary>Speicherort des Fehlerprotokolls</summary>
                 <code>{settings?.error_log_path}</code>
-              </div>
+              </details>
 
               <div className="settings-actions">
                 <button
@@ -1197,6 +1211,7 @@ const SettingsPage: React.FC<{
                   Auf Standard zurücksetzen
                 </button>
               </div>
+              {sectionFeedback("protokoll")}
             </section>
             {settings && <PreviewCacheSettings settings={settings} />}
             <SharedLibrarySettings controller={sharedLibrary} />
@@ -1220,25 +1235,13 @@ const SettingsPage: React.FC<{
                   {pathCleanupIsActive ? "Pfadprüfung läuft…" : "Fehlende Bildpfade bereinigen"}
                 </button>
               </div>
+              {sectionFeedback("speicherorte")}
             </section>
               </div>
             </section>
           </div>
         </div>
       )}
-
-      {(message || error) && (
-        <div
-          className={
-            error
-              ? "settings-feedback settings-feedback--error"
-              : "settings-feedback"
-          }
-        >
-          {error || message}
-        </div>
-      )}
-
     </div>
   );
 };

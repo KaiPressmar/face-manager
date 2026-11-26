@@ -33,6 +33,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.ContextCompat;
@@ -84,9 +85,14 @@ public final class MainActivity extends ComponentActivity {
     private android.webkit.ValueCallback<Uri[]> fileCallback;
     private ActivityResultLauncher<Intent> filePicker;
     private ActivityResultLauncher<Intent> exportPicker;
+    private boolean workspaceBackInFlight;
+    private final OnBackPressedCallback workspaceBack = new OnBackPressedCallback(true) {
+        @Override public void handleOnBackPressed() { navigateBack(); }
+    };
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        getOnBackPressedDispatcher().addCallback(this, workspaceBack);
         bridge = new AndroidBridge(this);
         if (state != null) {
             pendingExport = state.getString(KEY_EXPORT);
@@ -158,9 +164,30 @@ public final class MainActivity extends ComponentActivity {
         super.onDestroy();
     }
 
-    @Override public void onBackPressed() {
-        if (web != null && web.canGoBack()) web.goBack();
-        else super.onBackPressed();
+    private void navigateBack() {
+        if (workspaceBackInFlight) return;
+        WebView current = web;
+        if (current == null) {
+            delegateBack();
+            return;
+        }
+        workspaceBackInFlight = true;
+        current.evaluateJavascript(
+            "typeof window.faceManagerBack === 'function' && window.faceManagerBack()",
+            handled -> {
+                if (web != current || isFinishing()) return;
+                workspaceBackInFlight = false;
+                if ("true".equals(handled)) return;
+                if (current.canGoBack()) current.goBack();
+                else delegateBack();
+            }
+        );
+    }
+
+    private void delegateBack() {
+        workspaceBack.setEnabled(false);
+        try { getOnBackPressedDispatcher().onBackPressed(); }
+        finally { workspaceBack.setEnabled(true); }
     }
 
     private boolean hasFileAccess() {
@@ -393,6 +420,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void closeWeb() {
+        workspaceBackInFlight = false;
         if (web == null) return;
         root.removeView(web);
         web.removeJavascriptInterface("AndroidExport");

@@ -73,3 +73,14 @@
 @media (hover: none) and (pointer: coarse) {
   .image-gallery-card .image-file-actions { display: none; }
 }
+.collection-start__albums {
+  min-height: 36px;
+  padding-inline: .65rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted, var(--text));
+  text-decoration: underline;
+  text-underline-offset: .2em;
+}
+
+.collection-start__albums:hover { color: var(--text-strong); }

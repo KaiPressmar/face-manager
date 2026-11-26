@@ -1,6 +1,6 @@
 """Coordinate independently authorized local mappings of shared folders."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 import logging
 import re
@@ -114,6 +114,16 @@ class SharedLibraries:
     def snapshot(self) -> dict:
         with self._lock:
             return self._snapshot()
+
+    @contextmanager
+    def local_face_history_allowed(self):
+        """Keep enabling shared writes and local history replay mutually exclusive."""
+        if not self.write_available():
+            yield True
+            return
+        with self._lock:
+            states = (profile.snapshot() for profile in self._profiles.values())
+            yield not any(state["source_path"] and state["write_enabled"] for state in states)
 
     def _rebuild_exclusions(self) -> None:
         states = {key: profile.snapshot() for key, profile in self._profiles.items()}

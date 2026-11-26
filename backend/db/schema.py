@@ -1027,6 +1027,9 @@ def _initialize_schema(conn, *, scan_sources: bool):
     _repair_cluster_integrity(cur)
     _ensure_person_name_indexes(cur)
 
+    from ..services.face_action_history import initialize_face_action_history
+
+    initialize_face_action_history(cur)
     conn.commit()
     # This repair snapshots the last committed library from a separate
     # connection before writing. It must run outside the schema transaction.

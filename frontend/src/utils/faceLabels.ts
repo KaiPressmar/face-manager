@@ -3,10 +3,13 @@ interface LabelledFace {
   bbox_x: number;
   bbox_w: number;
   person_name: string | null;
+  review_status?: "active" | "unknown_person" | "not_face";
 }
 
 /** Text shown on a face badge. Kept here so width estimation matches it. */
-export function faceLabelText(face: { person_name: string | null }): string {
+export function faceLabelText(face: Pick<LabelledFace, "person_name" | "review_status">): string {
+  if (face.review_status === "unknown_person") return "Als unbekannt aussortiert";
+  if (face.review_status === "not_face") return "Kein Gesicht";
   return face.person_name || "Nicht zugewiesen";
 }
 

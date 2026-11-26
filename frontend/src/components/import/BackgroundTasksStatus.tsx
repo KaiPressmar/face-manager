@@ -995,37 +995,34 @@ const TaskRow: React.FC<{
         {!history && task.controlState === "paused" && onResume && (
           <button
             type="button"
-            className="task-icon-button"
+            className="activity-task__action"
             disabled={busy}
             onClick={onResume}
             aria-label={`${task.title} fortsetzen`}
-            title="Fortsetzen"
           >
-            <TaskActionIcon name="resume" />
+            Fortsetzen
           </button>
         )}
         {!history && ["queued", "running"].includes(task.controlState) && onPause && (
           <button
             type="button"
-            className="task-icon-button"
+            className="activity-task__action"
             disabled={busy}
             onClick={onPause}
             aria-label={`${task.title} pausieren`}
-            title="Pausieren"
           >
-            <TaskActionIcon name="pause" />
+            Pausieren
           </button>
         )}
         {!history && task.controlState !== "cancelling" && onCancel && (
           <button
             type="button"
-            className="task-icon-button task-icon-button--danger"
+            className="activity-task__action activity-task__action--stop"
             disabled={busy}
             onClick={onCancel}
             aria-label={`${task.title} abbrechen`}
-            title="Abbrechen"
           >
-            <TaskActionIcon name="cancel" />
+            Abbrechen
           </button>
         )}
         {history && onDelete && (

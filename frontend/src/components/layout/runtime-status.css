@@ -8,6 +8,18 @@
   list-style: none;
 }
 
+.runtime-status__badge-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.1;
+  text-align: start;
+  font-family: inherit;
+}
+
+.runtime-status__badge-copy strong { color: var(--text); font-size: .6875rem; }
+.runtime-status__badge-copy small { color: var(--text-faint); font-size: .625rem; }
+
 .runtime-status__panel {
   position: absolute;
   z-index: 12;
@@ -51,6 +63,13 @@
 }
 
 @media (max-width: 540px) {
+  .runtime-status__badge-copy small {
+    overflow: hidden;
+    max-width: 4.25rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .runtime-status__panel {
     position: fixed;
     inset-inline: 12px;

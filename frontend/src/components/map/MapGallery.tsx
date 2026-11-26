@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
 import {
-  fetchImageDetail, imageThumbnailUrl, type FaceImage, type MapImage, type MapImageCursor,
+  fetchImageDetail, type FaceImage, type MapImage, type MapImageCursor,
 } from "../../utils/api";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import { countWithLabel } from "../../utils/germanFormatting";
 import FullscreenImageGallery from "../people/FullscreenImageGallery";
 import { fetchMapSelection } from "./mapData";
+import MapPhotoTile from "./MapPhotoTile";
 
 export interface MapGalleryOpening {
   selection: GeoPhotoSelection;
@@ -141,11 +142,9 @@ export default function MapGallery({ opening, onClose, onOpenImages, onAddToAlbu
       </header>
       <div className="gps-selection-gallery__content">
         <div className="gps-selection-gallery__grid">
-          {page.items.map((image, position) => <button key={image.id} type="button" className="gps-page__photo"
-            data-gallery-index={position} onClick={() => openPhoto(position)} aria-label={`${image.filename || "Foto"} öffnen`}>
-            <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
-            {!!opening.inferredImageIds?.length && <small>{opening.inferredImageIds.includes(image.id) ? "Nach Aufnahmezeit zugeordnet" : "Mit gespeichertem Standort"}</small>}
-          </button>)}
+          {page.items.map((image, position) => <MapPhotoTile key={image.id} image={image} position={position}
+            inferred={opening.inferredImageIds?.length ? opening.inferredImageIds.includes(image.id) : undefined}
+            onOpen={() => openPhoto(position)} />)}
         </div>
         {pageError && <p className="gps-page__error" role="alert">{pageError}</p>}
         {page.cursor && <button type="button" className="gps-page__more" disabled={pending} onClick={() => void loadMore()}>

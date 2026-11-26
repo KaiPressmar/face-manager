@@ -2,6 +2,7 @@ import type { FaceReviewGroupKey } from "./api";
 import type { GeoPhotoSelection } from "./geoPhotoSelection";
 
 export type AppPage = "people" | "map" | "renaming" | "review" | "settings";
+export type ReviewView = "suggestions" | "open" | "people" | "archive" | "shared";
 export type SettingsSection =
   | "erkennung"
   | "dateinamen"
@@ -13,8 +14,9 @@ export interface NavigationEntry {
   page: AppPage;
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
+  archiveClusterId?: number;
   personName?: string | null;
-  reviewView?: "open" | "shared";
+  reviewView?: ReviewView;
   settingsSection?: SettingsSection;
   geoSelection?: GeoPhotoSelection;
   geoSelectionEpoch?: number;
@@ -28,6 +30,43 @@ const PAGE_SEGMENTS: Record<AppPage, string> = {
   review: "gesichter-pruefen",
   settings: "einstellungen",
 };
+
+const REVIEW_SEGMENTS: Record<ReviewView, string> = {
+  suggestions: "vorschlaege", open: "ohne-namen", people: "personen", archive: "archiv", shared: "abgleich",
+};
+
+export interface WorkspaceHistoryMarker {
+  id: string;
+  position: number;
+  generation: number;
+  libraryId?: string;
+}
+
+export const MAX_HISTORY_PHOTO_IDS = 200;
+
+export function workspaceHistoryMarker(state: unknown): WorkspaceHistoryMarker | undefined {
+  const marker = (state as { faceManagerWorkspace?: WorkspaceHistoryMarker } | null)?.faceManagerWorkspace;
+  if (marker && typeof marker.id === "string" && marker.id && Number.isSafeInteger(marker.position)
+    && marker.position >= 0 && Number.isSafeInteger(marker.generation) && marker.generation >= 0) return marker;
+  return undefined;
+}
+
+export function workspaceHistoryState(entry: NavigationEntry, marker: WorkspaceHistoryMarker) {
+  const { geoSelection, geoSelectionEpoch: _oldEpoch, ...durable } = entry;
+  if (!geoSelection) return { ...durable, faceManagerWorkspace: marker };
+  const { image_ids, ...filters } = geoSelection;
+  const limited = Boolean(image_ids && image_ids.length > MAX_HISTORY_PHOTO_IDS);
+  const savedSelection = limited ? filters : geoSelection;
+  const selection = Object.values(savedSelection).some((value) => value !== undefined)
+    ? { geoSelection: savedSelection, geoSelectionEpoch: marker.generation } : {};
+  // Keep large explicit ID sets in the live entry. Ordinary filters and
+  // bounded lists are durable for browser Back, Forward and reload.
+  return { ...durable, ...selection, faceManagerWorkspace: marker, ...(limited ? { faceManagerSelectionLimited: true } : {}) };
+}
+
+export function workspaceSelectionLimited(state: unknown) {
+  return (state as { faceManagerSelectionLimited?: boolean } | null)?.faceManagerSelectionLimited === true;
+}
 
 const PAGES_BY_SEGMENT = Object.fromEntries(
   Object.entries(PAGE_SEGMENTS).map(([page, segment]) => [segment, page]),
@@ -50,20 +89,23 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
 /** Build a static-host-safe URL. Hash routes are never sent to the web server. */
 export function navigationHash(entry: NavigationEntry): string {
   const base = `#/${PAGE_SEGMENTS[entry.page]}`;
-  if (entry.page === "review" && entry.clusterId !== undefined) {
-    return `${base}/gruppe/${entry.clusterId}`;
-  }
   if (entry.page === "review" && entry.groupKey !== undefined) {
-    return `${base}/kategorie/${entry.groupKey}`;
+    const group = `${base}/kategorie/${entry.groupKey}`;
+    return entry.archiveClusterId === undefined ? group : `${group}/gruppe/${entry.archiveClusterId}`;
   }
-  if (entry.page === "review" && entry.reviewView === "open") return `${base}/ohne-namen`;
-  if (entry.page === "review" && entry.reviewView === "shared") return `${base}/abgleich`;
+  if (entry.page === "review" && entry.clusterId !== undefined) return `${base}/gruppe/${entry.clusterId}`;
+  if (entry.page === "review" && entry.reviewView) return `${base}/${REVIEW_SEGMENTS[entry.reviewView]}`;
   if (entry.page === "settings" && entry.settingsSection !== undefined) {
     return `${base}/${entry.settingsSection}`;
   }
   if (entry.page === "people" && entry.geoSelection) return `${base}/auswahl`;
   if (entry.page === "map" && entry.mapAlbumId) return `${base}/album/${entry.mapAlbumId}`;
   return base;
+}
+
+function positiveId(raw?: string) {
+  const id = raw && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  return Number.isSafeInteger(id) && id > 0 ? id : undefined;
 }
 
 /** Restore a useful view after refresh or a directly opened hash URL. */
@@ -82,18 +124,22 @@ export function parseNavigationHash(hash: string, state?: NavigationEntry | null
   }
 
   if (page === "review" && segments[1] === "gruppe") {
-    const rawId = segments[2] ?? "";
-    const clusterId = /^\d+$/.test(rawId) ? Number(rawId) : NaN;
-    if (Number.isSafeInteger(clusterId) && clusterId > 0) {
+    const clusterId = positiveId(segments[2]);
+    if (clusterId !== undefined) {
       return { page, clusterId };
     }
   }
   if (page === "review" && segments[1] === "kategorie") {
     const groupKey = segments[2] as FaceReviewGroupKey;
-    if (REVIEW_GROUPS.has(groupKey)) return { page, groupKey };
+    if (REVIEW_GROUPS.has(groupKey)) {
+      const archiveClusterId = segments[3] === "gruppe" ? positiveId(segments[4]) : undefined;
+      return archiveClusterId === undefined ? { page, groupKey } : { page, groupKey, archiveClusterId };
+    }
   }
-  if (page === "review" && segments[1] === "ohne-namen") return { page, reviewView: "open" };
-  if (page === "review" && segments[1] === "abgleich") return { page, reviewView: "shared" };
+  if (page === "review") {
+    const match = (Object.keys(REVIEW_SEGMENTS) as ReviewView[]).find((view) => REVIEW_SEGMENTS[view] === segments[1]);
+    if (match) return { page, reviewView: match };
+  }
   if (page === "settings") {
     const settingsSection = segments[1] as SettingsSection;
     if (SETTINGS_SECTIONS.has(settingsSection)) return { page, settingsSection };

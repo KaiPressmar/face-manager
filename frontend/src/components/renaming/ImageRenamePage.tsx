@@ -16,6 +16,8 @@ import LibraryFilterBar from "../shared/LibraryFilterBar";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import { subscribeToTopic } from "../../utils/events";
 import { useModalFocus } from "../../hooks/useModalFocus";
+import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
+import { countWithLabel } from "../../utils/germanFormatting";
 import "./ImageRenamePage.css";
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -25,6 +27,7 @@ const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
 const REVIEW_PAGE_SIZE = 20;
+const number = new Intl.NumberFormat("de-DE");
 type ImageGroupingMode = "date" | "folder";
 type SortDirection = "desc" | "asc";
 
@@ -36,6 +39,16 @@ interface RenameReview {
 interface RenameReport {
   result: ApplyImageRenameResult;
   unreported: number;
+}
+
+interface RenameWorkspace {
+  folders: string[];
+  persons: string[];
+  sortBy: ImageGroupingMode;
+  sortDirection: SortDirection;
+  pageSize: number;
+  offset: number;
+  scrollTop: number;
 }
 
 function skipLabel(reason: string) {
@@ -106,6 +119,9 @@ const ImageRenamePage: React.FC<{
   const [mutationRefresh, setMutationRefresh] = useState(0);
   const [pageJumpInput, setPageJumpInput] = useState("1");
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
+  const [navigationRevision, setNavigationRevision] = useState(0);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const pendingResume = useRef<{ offset: number; scrollTop: number }>();
   const activeRequestRef = useRef(0);
   const pendingOffsetRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
@@ -115,6 +131,26 @@ const ImageRenamePage: React.FC<{
   const reportRef = useRef<HTMLElement>(null);
   const submittingRef = useRef(false);
   const reviewOpenRef = useRef(false);
+
+  useWorkspaceNavigation<RenameWorkspace>("renaming", {
+    capture: () => ({
+      folders: selectedFolders, persons: selectedPersons, sortBy: groupingMode, sortDirection,
+      pageSize, offset, scrollTop: pageRef.current?.closest(".page-content")?.scrollTop ?? 0,
+    }),
+    restore: (snapshot) => {
+      pendingResume.current = { offset: snapshot?.offset ?? 0, scrollTop: snapshot?.scrollTop ?? 0 };
+      setSelectedFolders(snapshot?.folders ?? []);
+      setSelectedPersons(snapshot?.persons ?? []);
+      setGroupingMode(snapshot?.sortBy ?? "date");
+      setSortDirection(snapshot?.sortDirection ?? "desc");
+      setPageSize(snapshot?.pageSize ?? DEFAULT_PAGE_SIZE);
+      setShowFolderFilter(false);
+      setRenameReview(null);
+      setRenameReport(null);
+      handleClearSelection();
+      setNavigationRevision((value) => value + 1);
+    },
+  });
   reviewOpenRef.current = renameReview !== null;
   useModalFocus(reviewDialogRef, () => setRenameReview(null), !isSubmitting, active && renameReview !== null);
 
@@ -204,18 +240,19 @@ const ImageRenamePage: React.FC<{
       }
       setItems(renameData.items);
       setAvailablePersons(renameData.available_persons);
-      setSelectedPersons((current) => {
-        const next = current.filter((person) =>
-          renameData.available_persons.includes(person),
-        );
-        return next.length === current.length ? current : next;
-      });
       if (renameData.total !== null) {
         setTotal(renameData.total);
       }
       setOffset(renameData.offset);
       setHasMore(renameData.has_more);
       setHasLoadedOnce(true);
+      const resume = pendingResume.current;
+      if (resume && nextOffset === resume.offset) {
+        pendingResume.current = undefined;
+        window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+          if (activeRequestRef.current === requestId) pageRef.current?.closest(".page-content")?.scrollTo({ top: resume.scrollTop });
+        }));
+      }
     } catch (error) {
       if (controller.signal.aborted) {
         return;
@@ -233,8 +270,9 @@ const ImageRenamePage: React.FC<{
   };
 
   useEffect(() => {
-    void loadData(0);
-  }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons]);
+    void loadData(pendingResume.current?.offset ?? 0);
+  }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons, navigationRevision]);
+
 
   useEffect(() => {
     return () => {
@@ -565,18 +603,18 @@ const ImageRenamePage: React.FC<{
   };
 
   const renderPaginationControls = (position: "top" | "bottom") => (
-    <div
+    <nav
       className={`rename-pagination rename-pagination--${position}`}
       aria-label={position === "top" ? "Seitennavigation oben" : "Seitennavigation unten"}
     >
       <div className="rename-pagination__summary">
         <span>
-          Zeige {pageStart}-{pageEnd}
-          {total === null ? " von …" : ` von ${total}`}
+          {number.format(pageStart)}–{number.format(pageEnd)}
+          {total === null ? " von …" : ` von ${number.format(total)}`}
         </span>
         <span>
-          Seite {currentPage}
-          {pageCount === null ? "" : ` von ${pageCount}`}
+          Seite {number.format(currentPage)}
+          {pageCount === null ? "" : ` von ${number.format(pageCount)}`}
         </span>
       </div>
 
@@ -627,11 +665,12 @@ const ImageRenamePage: React.FC<{
           </button>
         </div>
 
-        <label className="rename-pagination__field rename-pagination__field--jump">
-          <span>Gehe zu Seite</span>
+        <div className="rename-pagination__field rename-pagination__field--jump">
+          <label htmlFor={`rename-page-${position}`}>Gehe zu Seite</label>
           <div className="rename-pagination__jump">
             <input
               type="number"
+              id={`rename-page-${position}`}
               min="1"
               max={pageCount ?? undefined}
               value={pageJumpInput}
@@ -654,9 +693,9 @@ const ImageRenamePage: React.FC<{
               Springen
             </button>
           </div>
-        </label>
+        </div>
       </div>
-    </div>
+    </nav>
   );
 
   const renderSkeletonRows = () => (
@@ -715,6 +754,11 @@ const ImageRenamePage: React.FC<{
           {result.error_count > 0 && <li><strong>{result.error_count}</strong> mit Fehlern</li>}
           {unreported > 0 && <li><strong>{unreported}</strong> ohne Rückmeldung</li>}
         </ul>
+        {recoveryErrors.map((item) => <div className="rename-outcome__recovery" key={item.path}>
+          <strong>Datei zur Wiederherstellung</strong>
+          <code>{item.recovery_path}</code>
+          <button type="button" className="secondary-button" onClick={(event) => void copyCandidatePath(event, item.recovery_path!)}>Pfad kopieren</button>
+        </div>)}
         {details.length > 0 && (
           <details className="rename-outcome__details">
             <summary>Meldungen zu den Dateien</summary>
@@ -736,7 +780,7 @@ const ImageRenamePage: React.FC<{
   };
 
   return (
-    <div className="settings-page">
+    <div className="settings-page" ref={pageRef}>
       <div className="settings-page__header rename-page-header">
         <div>
           <div className="settings-page__eyebrow">Bibliothek</div>
@@ -771,6 +815,13 @@ const ImageRenamePage: React.FC<{
         resultCount={total}
         totalCount={libraryTotal}
         resultNoun="Dateien"
+        resultSingular="Datei"
+        resultsUnavailable={Boolean(loadError)}
+        onResetFilters={selectedFolders.length || selectedPersons.length ? () => {
+          pendingResume.current = undefined;
+          setSelectedFolders([]);
+          setSelectedPersons([]);
+        } : undefined}
       />
 
       {selectedFolders.length > 0 && (
@@ -813,14 +864,14 @@ const ImageRenamePage: React.FC<{
         <div className="rename-toolbar__controls">
           <div className="settings-actions">
             <button className="neon-card" onClick={handleSelectPage} disabled={selectableItems.length === 0 || isLoading || isSubmitting}>
-              Seite wählen ({selectableItems.length})
+              Diese Seite auswählen ({number.format(selectableItems.length)})
             </button>
             <button
               className="neon-card"
               onClick={handleSelectAll}
               disabled={total === null || total === 0 || isTotalLoading || isLoading || isSubmitting}
             >
-              Alle wählen ({total ?? "…"})
+              Alle Filtertreffer auswählen ({total === null ? "…" : number.format(total)})
             </button>
             <button className="neon-card" onClick={handleClearSelection} disabled={selectedCount === 0 || isSubmitting}>
               Auswahl aufheben
@@ -831,7 +882,7 @@ const ImageRenamePage: React.FC<{
             onClick={openRenameReview}
             disabled={!canReview}
           >
-            {isSubmitting ? "Dateinamen werden aktualisiert…" : `${selectedCount} Dateinamen aktualisieren`}
+            {isSubmitting ? "Dateien werden umbenannt …" : "Umbenennung prüfen"}
           </button>
         </div>
       </section>
@@ -846,7 +897,7 @@ const ImageRenamePage: React.FC<{
       <section className={`settings-card rename-list-card${!isLoading && items.length === 0 ? " rename-list-card--empty" : ""}`}>
         <div className="rename-list-status">
           <div className="rename-list-status__pill">
-            Ausgewählt: <strong>{selectionMode === "all" && total === null ? "…" : selectedCount}</strong>
+            <strong>{selectionMode === "all" && total === null ? "…" : countWithLabel(selectedCount, "Datei", "Dateien")}</strong> ausgewählt
           </div>
           {showLoadingOverlay && (
             <div className="rename-list-status__loading">
@@ -937,7 +988,7 @@ const ImageRenamePage: React.FC<{
               <h2 id="rename-review-title">Dateinamen prüfen</h2>
             </header>
             <div className="cluster-action-modal__confirmation">
-              <strong>{renameReview.count} ausgewählte {renameReview.count === 1 ? "Datei" : "Dateien"}</strong>
+              <strong>{countWithLabel(renameReview.count, "Datei", "Dateien")} ausgewählt</strong>
               <p id="rename-review-scope">Face Manager benennt die Dateien am jeweiligen Speicherort um.</p>
               {renameReview.payload.rename_all && (
                 <p>Die Auswahl umfasst alle Treffer des aktuellen Filters, auch auf anderen Seiten.</p>

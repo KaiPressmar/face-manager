@@ -190,3 +190,10 @@ class EventHub:
 
 # Process-wide singleton shared by the queue services and the API layer.
 event_hub = EventHub()
+
+
+def publish_cluster_change(reason: str) -> None:
+    """Carry the active library identity in every coalesced cluster event."""
+    from .storage import get_person_suggestion_epoch
+
+    event_hub.publish("clusters", {"reason": reason, "library_id": get_person_suggestion_epoch()})

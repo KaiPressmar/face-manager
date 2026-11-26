@@ -108,6 +108,7 @@ async function checkDesktopTour(browser, errors, newPage, webBase) {
     await tour.waitFor({ state: 'hidden' });
 
     await page.goto(`${webBase}/#/einstellungen/erkennung`);
+    await page.getByRole('heading', { name: 'Einstellungen', exact: true }).waitFor();
     await help.press('Enter');
     await tour.getByRole('heading', { name: 'Zuordnungen und Einstellungen sichern', exact: true }).waitFor();
     await topic.selectOption({ label: 'Fortschritt und Hilfe finden' });

@@ -7,7 +7,7 @@ import React, {
 import { useModalFocus } from "../../hooks/useModalFocus";
 import { fetchImageDetail, imageFileUrl, imageThumbnailUrl, openImageLocation, type FaceImage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
-import FaceOverlay from "./FaceOverlay";
+import FaceOverlay, { type NavigateToFaceGroup } from "./FaceOverlay";
 import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import { copyTextToClipboard } from "../../utils/clipboard";
@@ -67,7 +67,7 @@ export interface GalleryImage {
 interface FullscreenImageGalleryProps {
   images: GalleryImage[];
   activeIndex: number;
-  onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
+  onNavigateToCluster: NavigateToFaceGroup;
   onChange: (index: number) => void;
   onClose: () => void;
   closeLabel?: string;
@@ -357,7 +357,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             }
           >
             <span aria-hidden="true">⌗</span>
-            Gesichter
+            Gesichtsrahmen
           </button>
           <button type="button" disabled={!canMarkFace || nestedDialogOpen} onClick={markFace}
             title="Ein Gesicht auf diesem Foto markieren">
@@ -490,7 +490,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
               {activeMedia?.retryingOriginal ? "Original wird erneut geladen …" : "Die Bilddatei konnte nicht geöffnet werden."}
               {" "}
               {activeMedia?.previewStatus === "loaded"
-                ? "Die lokale Vorschau wird angezeigt."
+                ? "Die lokale Vorschau wird angezeigt. Verbinde den Bilderordner, um das Original zu öffnen."
                 : activeMedia?.previewStatus === "error" ? "Auch die Vorschau ist nicht verfügbar." : "Vorschau wird geladen …"}
               {activeMedia?.previewStatus === "loaded" && !canUsePreview &&
                 " Zum Markieren wird das Original benötigt, weil sich die Bildmaße der Vorschau nicht bestätigen lassen."}

@@ -139,6 +139,7 @@ export interface ReleaseNotes {
 export interface UnseenReleaseNotes {
   versions: ReleaseNotes[];
   seen: boolean;
+  fresh_install?: boolean;
 }
 
 export interface AvailableUpdate {
@@ -479,6 +480,14 @@ export async function fetchRuntimeInfo(): Promise<RuntimeInfo> {
     throw new Error("Informationen zur Bilderkennung sind nicht verfügbar.");
   }
   return await res.json();
+}
+
+export async function fetchLibraryIdentity(signal: AbortSignal): Promise<string> {
+  const res = await apiFetch(`${API_BASE}/library-identity`, { signal });
+  if (!res.ok) throw new Error("Die Bibliothek konnte noch nicht geprüft werden.");
+  const payload = await res.json() as { library_id?: string };
+  if (typeof payload.library_id !== "string" || !payload.library_id) throw new Error("Die Bibliothek konnte noch nicht geprüft werden.");
+  return payload.library_id;
 }
 
 export async function fetchUnseenReleaseNotes(): Promise<UnseenReleaseNotes> {
@@ -1169,6 +1178,42 @@ export async function dismissReviewSuggestion(item: ReviewSuggestion): Promise<v
   }
 }
 
+export interface FaceHistoryAction {
+  id: string;
+  action: "assign_person" | "mark_unknown_person" | "mark_not_face";
+  face_count: number;
+  person_name: string | null;
+  created_at: string;
+  undone: boolean;
+}
+
+export interface FaceActionHistory {
+  library_id: string;
+  revision: number;
+  undo: FaceHistoryAction | null;
+  redo: FaceHistoryAction | null;
+  entries: FaceHistoryAction[];
+  blocked_reason?: string;
+}
+
+export async function fetchFaceActionHistory(signal?: AbortSignal): Promise<FaceActionHistory> {
+  const response = await apiFetch(`${API_BASE}/faces/action-history`, { signal });
+  if (!response.ok) throw new Error(await readApiError(response, "Änderungen konnten nicht geladen werden."));
+  return response.json();
+}
+
+export async function replayFaceAction(
+  mode: "undo" | "redo", history: FaceActionHistory, action: FaceHistoryAction,
+): Promise<{ action: FaceHistoryAction; history: FaceActionHistory }> {
+  const response = await apiFetch(`${API_BASE}/faces/action-history/${mode}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ library_id: history.library_id, revision: history.revision, action_id: action.id }),
+  });
+  if (!response.ok) throw new Error(await readApiError(response, "Die Änderung konnte nicht übernommen werden."));
+  invalidatePersonsCache();
+  return response.json();
+}
+
 export async function batchUpdateFaces(payload: {
   action:
     | "remove_from_cluster"
@@ -1182,7 +1227,7 @@ export async function batchUpdateFaces(payload: {
   person_name?: string;
   expected_faces?: Pick<ClusterFace, "id" | "cluster_id" | "review_status" | "person_name">[];
   expected_library_id?: string;
-}): Promise<{ cluster_id?: number; updated_count?: number }> {
+}): Promise<{ cluster_id?: number; updated_count?: number; history_action?: FaceHistoryAction | null }> {
   const res = await apiFetch(`${API_BASE}/faces/batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
