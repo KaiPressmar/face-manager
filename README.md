@@ -67,7 +67,9 @@ Open a photo to browse its neighbors, toggle face labels, and find its original 
 
 ### Photo map
 
-**Karte** shows photos with GPS coordinates. Zoom, pan, select a region, and filter by capture date. The map works offline and coordinates stay on the device. An existing library may show more locations as Face Manager reads the original files in the background.
+**Karte** shows photos with GPS coordinates. Zoom, pan, search for a country, select a region, and filter by capture date. Choose the landscape style or show country names in either style. Open a map selection in the full-screen gallery or use it to filter the Pictures page.
+
+**Verlauf** groups dated photos into chronological stops. Open a stop to see only its photos. Dashed lines connect observed photo locations. Gaps and uncertain times distinguish observations that cannot be placed in a reliable sequence. The map and journey work offline. An existing library may show more locations and more precise times as Face Manager reads the original files in the background.
 
 ![Offline world map with clustered photo locations, date filters, and photos from the chosen area](docs/screenshots/photo-map.webp)
 

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from queue import Full, Queue
-from typing import List
+from typing import Annotated, List
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +27,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
@@ -86,7 +87,9 @@ from .services.shared_sync_import import SharedImportAnalysis
 from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
-from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points
+from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points, list_selected_map_images
+from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
+from .services.journey import get_journey
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -2658,11 +2661,49 @@ def api_face_image(request: Request, face_id: int, proposal_token: str | None = 
         return image
 
 
+def _validated_photo_selection(selection: GeoPhotoSelection) -> GeoPhotoSelection:
+    try:
+        validate_photo_selection(selection)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return selection
+
+
+class _GeoBoundsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    west: float
+    east: float
+    south: float
+    north: float
+
+
+class _GeoSelectionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bounds: _GeoBoundsBody | None = None
+    from_date: date | None = None
+    to_date: date | None = None
+    image_ids: list[Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]] | None = None
+
+    def to_selection(self) -> GeoPhotoSelection:
+        return _validated_photo_selection(GeoPhotoSelection(
+            bounds=GeoBounds(**self.bounds.model_dump()) if self.bounds else None,
+            from_date=self.from_date,
+            to_date=self.to_date,
+            image_ids=tuple(dict.fromkeys(self.image_ids)) if self.image_ids is not None else None,
+        ))
+
+
 def _validate_map_bounds(west, east, south, north, from_date, to_date):
-    if south > north:
-        raise HTTPException(status_code=422, detail="south must not exceed north")
-    if from_date and to_date and from_date > to_date:
-        raise HTTPException(status_code=422, detail="from_date must not exceed to_date")
+    _validated_photo_selection(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date))
+
+
+def _validate_map_cursor(offset, before_id, before_captured_at):
+    if before_id is None and before_captured_at is not None:
+        raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
+    if before_id is not None and offset:
+        raise HTTPException(status_code=422, detail="offset must be zero with before_id")
 
 
 @app.get("/api/map/points")
@@ -2678,8 +2719,11 @@ def get_map_points(
     grid_rows: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
 ):
     """Return bounded photo aggregates for a map viewport."""
+    generation = _get_media_library_generation()
     _validate_map_bounds(west, east, south, north, from_date, to_date)
-    return list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows)
+    result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows)
+    _get_media_library_generation(generation)
+    return result
 
 
 @app.get("/api/map/images")
@@ -2696,15 +2740,40 @@ def get_map_images(
     before_captured_at: str | None = Query(default=None, min_length=1, max_length=64),
 ):
     """Return a stable page of geotagged photos in a viewport."""
+    generation = _get_media_library_generation()
     _validate_map_bounds(west, east, south, north, from_date, to_date)
-    if before_id is None and before_captured_at is not None:
-        raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
-    if before_id is not None and offset:
-        raise HTTPException(status_code=422, detail="offset must be zero with before_id")
-    return list_map_images(
+    _validate_map_cursor(offset, before_id, before_captured_at)
+    page = list_map_images(
         west, east, south, north, from_date, to_date, limit, offset,
         before_id=before_id, before_captured_at=before_captured_at,
     )
+    _get_media_library_generation(generation)
+    return page
+
+
+@app.post("/api/map/images/selection")
+def get_selected_map_images(
+    selection: Annotated[_GeoSelectionBody, Body(embed=True)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 40,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    before_id: Annotated[int | None, Query(ge=1, le=2**63 - 1)] = None,
+    before_captured_at: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+):
+    """Return one map photo page for an explicit selection."""
+    generation = _get_media_library_generation()
+    _validate_map_cursor(offset, before_id, before_captured_at)
+    page = list_selected_map_images(selection.to_selection(), limit, offset, before_id, before_captured_at)
+    _get_media_library_generation(generation)
+    return page
+
+
+@app.get("/api/map/journey")
+def get_map_journey(from_date: date | None = None, to_date: date | None = None):
+    """Return observed journey groups for the specified capture period."""
+    generation = _get_media_library_generation()
+    result = get_journey(from_date, to_date)
+    _get_media_library_generation(generation)
+    return result
 
 
 @app.get("/api/images")
@@ -2718,6 +2787,12 @@ def get_images(
     offset: int = Query(default=0, ge=0),
     face_statuses: List[str] = Query(default=[]),
     all_photos: bool = False,
+    west: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    east: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    south: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    north: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ):
     """List images and oriented face boxes.
 
@@ -2732,6 +2807,38 @@ def get_images(
     Returns:
         Paginated image dictionaries containing nested face data.
     """
+    bounds = None
+    if any(value is not None for value in (west, east, south, north)):
+        if west is None or east is None or south is None or north is None:
+            raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
+        bounds = GeoBounds(west, east, south, north)
+    selection = None
+    if bounds or from_date or to_date:
+        selection = _validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date))
+    return _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
+                            face_statuses, all_photos, selection)
+
+
+@app.post("/api/images/search")
+def search_selected_images(
+    request: Request,
+    selection: Annotated[_GeoSelectionBody, Body(embed=True)],
+    folders: List[str] = Query(default=[]),
+    persons: List[str] = Query(default=[]),
+    sort_by: str = Query(default="date"),
+    sort_direction: str = Query(default="desc"),
+    limit: Annotated[int, Query(ge=1, le=200)] = 40,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    face_statuses: List[str] = Query(default=[]),
+    all_photos: bool = False,
+):
+    """Apply regular library filters to an explicit photo selection."""
+    return _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
+                            face_statuses, all_photos, selection.to_selection())
+
+
+def _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
+                     face_statuses, all_photos, selection):
     generation = _get_media_library_generation()
     display_platform = get_display_platform(request)
     normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
@@ -2744,6 +2851,7 @@ def get_images(
         limit=limit,
         offset=offset,
         all_photos=all_photos,
+        **({"selection": selection} if selection is not None else {}),
     )
     items = _group_image_rows(rows, display_platform)
     available_persons = list_available_image_persons(normalized_folders)

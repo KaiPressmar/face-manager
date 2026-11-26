@@ -64,12 +64,14 @@ interface FullscreenImageGalleryProps {
     activeIndex: number;
     length: number;
     onChange: (index: number) => void;
+    wrap?: boolean;
     highlightedFaceId?: number;
     itemLabel?: string;
     contextLabel?: string;
     groupLabel?: string;
     loading?: boolean;
     error?: string | null;
+    onRetry?: () => void;
   };
 }
 
@@ -138,8 +140,9 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const move = useCallback(
     (direction: number) => {
       if (isDeleting || navigationLength < 2 || sequence?.loading) return;
-      const nextIndex =
-        (navigationIndex + direction + navigationLength) % navigationLength;
+      const target = navigationIndex + direction;
+      if (sequence?.wrap === false && (target < 0 || target >= navigationLength)) return;
+      const nextIndex = (target + navigationLength) % navigationLength;
       if (sequence) {
         sequence.onChange(nextIndex);
       } else {
@@ -329,7 +332,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--previous"
             onClick={() => move(-1)}
-            disabled={isDeleting || sequence?.loading}
+            disabled={isDeleting || sequence?.loading || (sequence?.wrap === false && navigationIndex === 0)}
             aria-label={sequence?.itemLabel === "Foto" ? "Vorheriges Bild" : sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
           >
             ‹
@@ -404,7 +407,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--next"
             onClick={() => move(1)}
-            disabled={isDeleting || sequence?.loading}
+            disabled={isDeleting || sequence?.loading || (sequence?.wrap === false && navigationIndex >= navigationLength - 1)}
             aria-label={sequence?.itemLabel === "Foto" ? "Nächstes Bild" : sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
           >
             ›
@@ -485,7 +488,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       )}
       {sequence?.error && (
         <div className="gallery-toast gallery-toast--error" role="alert">
-          {sequence.error}
+          {sequence.error} {sequence.onRetry && <button type="button" className="gallery-action" onClick={sequence.onRetry}>Erneut versuchen</button>}
         </div>
       )}
     </div>

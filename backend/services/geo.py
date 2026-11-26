@@ -2,24 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
+import re
 import sqlite3
 import threading
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from PIL import Image
 
-from ..db.schema import get_conn
+from ..db.schema import HASH_CHUNK_SIZE, get_conn
 from .filesystem_paths import filesystem_path
+from .geo_query import GeoBounds, GeoPhotoSelection, photo_selection_sql
 
 logger = logging.getLogger("face_manager.geo")
 _GPS_TAG = 34853
-_DATE_TAGS = (36867, 36868)  # Original, then digitized.
+_DATE_OFFSET_TAGS = ((36867, 36881), (36868, 36882))  # Original, then digitized.
+_MAX_CLOCK_DISAGREEMENT = timedelta(minutes=5)
+_MAX_CLOCK_OFFSET = timedelta(hours=14)
 _BATCH_SIZE = 32
 MAP_GRID_SIZE = 32
+_LOCATION_IDENTITY_COLUMNS = ("file_device", "file_inode", "file_size", "modified_at_ns", "file_changed_at_ns")
+
+
+class CaptureMetadata(NamedTuple):
+    latitude: float | None
+    longitude: float | None
+    captured_at: str | None
+    captured_at_utc: str | None
+    capture_time_source: str
 
 
 def _degrees(value):
@@ -42,7 +57,75 @@ def _coordinate(value, reference, positive, negative, maximum):
     return -degrees if reference == negative else degrees
 
 
-def extract_image_metadata(path_or_file):
+def _exif_text(value):
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="ignore")
+    return value.strip(" \t\r\n\x00") if isinstance(value, str) else ""
+
+
+def _camera_time(exif, exif_ifd):
+    for date_tag, offset_tag in _DATE_OFFSET_TAGS:
+        raw = _exif_text(exif_ifd.get(date_tag) or exif.get(date_tag))
+        try:
+            local = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+        except ValueError:
+            continue
+        # Use the offset paired with the selected capture timestamp.
+        offset = _exif_text(exif_ifd.get(offset_tag) or exif.get(offset_tag))
+        if not re.fullmatch(r"[+-][0-9]{2}:[0-9]{2}", offset) or offset == "-00:00":
+            return local, None
+        hours, minutes = int(offset[1:3]), int(offset[4:])
+        if minutes >= 60 or hours * 60 + minutes > 14 * 60:
+            return local, None
+        delta = timedelta(hours=hours, minutes=minutes)
+        if offset[0] == "-":
+            delta = -delta
+        try:
+            utc = local.replace(tzinfo=timezone(delta)).astimezone(timezone.utc)
+        except OverflowError:
+            utc = None
+        return local, utc
+    return None, None
+
+
+def _gps_utc_time(gps):
+    # GPS time alone is ambiguous without the GPS date stamp.
+    try:
+        day = datetime.strptime(_exif_text(gps.get(29)), "%Y:%m:%d")
+        hours, minutes, seconds = (float(value) for value in gps[7])
+        if not (0 <= hours < 24 and hours.is_integer() and 0 <= minutes < 60 and
+                minutes.is_integer() and 0 <= seconds < 60):
+            return None
+        return (day + timedelta(hours=hours, minutes=minutes, seconds=seconds)).replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
+
+
+def _capture_time(exif, exif_ifd, gps):
+    local, offset_utc = _camera_time(exif, exif_ifd)
+    gps_utc = _gps_utc_time(gps)
+    if local and gps_utc:
+        if offset_utc:
+            disagrees = abs(gps_utc - offset_utc) > _MAX_CLOCK_DISAGREEMENT
+        else:
+            # A local clock and GPS can legitimately differ by a timezone.
+            # Larger gaps are inconsistent with any supported EXIF offset.
+            disagrees = abs(gps_utc - local.replace(tzinfo=timezone.utc)) > _MAX_CLOCK_OFFSET + _MAX_CLOCK_DISAGREEMENT
+        if disagrees:
+            return local.isoformat(timespec="seconds"), None, "conflict"
+    instant = offset_utc or gps_utc
+    if instant:
+        source = "exif_offset" if offset_utc else "gps_utc"
+        # Preserve the camera's calendar day. GPS supplies a UTC date only
+        # when there is no camera timestamp at all.
+        wall_time = local or instant.replace(tzinfo=None)
+        return wall_time.isoformat(timespec="seconds"), instant.isoformat(timespec="microseconds"), source
+    if local:
+        return local.isoformat(timespec="seconds"), None, "local"
+    return None, None, "missing"
+
+
+def extract_image_metadata(path_or_file, *, include_timing=False):
     """Read metadata from a path or open photo without decoding pixel data."""
     try:
         source = path_or_file if hasattr(path_or_file, "read") else filesystem_path(path_or_file)
@@ -53,42 +136,102 @@ def extract_image_metadata(path_or_file):
             longitude = _coordinate(gps.get(4), gps.get(3), "E", "W", 180)
             if latitude is None or longitude is None:
                 latitude = longitude = None
-            captured_at = None
             exif_ifd = exif.get_ifd(34665) if 34665 in exif else {}
-            for tag in _DATE_TAGS:
-                raw = exif_ifd.get(tag) or exif.get(tag)
-                if isinstance(raw, bytes):
-                    raw = raw.decode("ascii", errors="ignore")
-                if not isinstance(raw, str):
-                    continue
-                try:
-                    captured_at = datetime.strptime(raw.strip().rstrip("\x00"), "%Y:%m:%d %H:%M:%S").isoformat(timespec="seconds")
-                    break
-                except ValueError:
-                    continue
-            return latitude, longitude, captured_at
+            metadata = CaptureMetadata(latitude, longitude, *_capture_time(exif, exif_ifd, gps))
+    except OSError as exc:
+        if exc.errno is not None or getattr(exc, "winerror", None) is not None:
+            metadata = CaptureMetadata(None, None, None, None, "unavailable")
+        else:
+            logger.debug("Could not read optional photo metadata", exc_info=True)
+            metadata = CaptureMetadata(None, None, None, None, "missing")
     except Exception:
         # EXIF is optional and supplied by arbitrary cameras/editors. A corrupt
         # metadata block must not prevent an otherwise readable image import.
         logger.debug("Could not read optional photo metadata", exc_info=True)
-        return None, None, None
+        metadata = CaptureMetadata(None, None, None, None, "missing")
+    return metadata if include_timing else metadata[:3]
+
+
+def _with_timing(metadata) -> CaptureMetadata:
+    if isinstance(metadata, CaptureMetadata):
+        return metadata
+    latitude, longitude, captured_at = metadata
+    return CaptureMetadata(latitude, longitude, captured_at, None, "local" if captured_at else "missing")
 
 
 def record_image_metadata(cursor, image_id, path, *, metadata=None):
     """Save metadata once for a canonical image, including absent EXIF."""
     row = cursor.execute(
-        "SELECT metadata_scanned_at FROM image WHERE id = ?", (image_id,)
+        "SELECT metadata_scanned_at, capture_time_source FROM image WHERE id = ?", (image_id,)
     ).fetchone()
-    if row is None or row["metadata_scanned_at"] not in (None, "missing"):
+    if row is None or (row["metadata_scanned_at"] not in (None, "missing") and
+                       row["capture_time_source"] not in (None, "unavailable")):
         return
-    latitude, longitude, captured_at = (
-        metadata if metadata is not None else extract_image_metadata(path)
+    capture = _with_timing(metadata if metadata is not None else extract_image_metadata(path, include_timing=True))
+    _save_capture_metadata(cursor, image_id, capture)
+
+
+def _save_capture_metadata(connection, image_id, metadata: CaptureMetadata):
+    scanned_at = "missing" if metadata.capture_time_source == "unavailable" else datetime.now().isoformat()
+    connection.execute(
+        """UPDATE image SET latitude = COALESCE(latitude, ?),
+                  longitude = COALESCE(longitude, ?), captured_at = COALESCE(captured_at, ?),
+                  captured_at_utc = CASE WHEN captured_at IS NULL OR captured_at = ?
+                                         THEN ? ELSE captured_at_utc END,
+                  capture_time_source = CASE WHEN captured_at IS NULL OR captured_at = ?
+                                             THEN ? WHEN captured_at_utc IS NULL AND ? = 'unavailable'
+                                             THEN 'unavailable' ELSE COALESCE(capture_time_source, 'local') END,
+                  metadata_scanned_at = CASE WHEN metadata_scanned_at IS NULL OR metadata_scanned_at = 'missing'
+                                             THEN ? ELSE metadata_scanned_at END
+           WHERE id = ?
+             AND (metadata_scanned_at IS NULL OR metadata_scanned_at = 'missing'
+                  OR capture_time_source IS NULL OR capture_time_source = 'unavailable')""",
+        (metadata.latitude, metadata.longitude, metadata.captured_at, metadata.captured_at,
+         metadata.captured_at_utc, metadata.captured_at, metadata.capture_time_source,
+         metadata.capture_time_source, scanned_at, image_id),
     )
-    cursor.execute(
-        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?,
-                  metadata_scanned_at = CURRENT_TIMESTAMP WHERE id = ?""",
-        (latitude, longitude, captured_at, image_id),
-    )
+
+
+def _source_identity(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _legacy_capture(row, candidates, stop_event: threading.Event) -> CaptureMetadata:
+    """Read a new clock only from verified bytes or a registered file identity."""
+    content_hash = row["content_hash"]
+    unavailable = False
+    for path, recorded_identity in candidates:
+        if stop_event.is_set():
+            break
+        if not content_hash and (recorded_identity is None or None in recorded_identity):
+            continue
+        try:
+            with open(filesystem_path(path), "rb") as source:
+                original = _source_identity(os.fstat(source.fileno()))
+                if not content_hash and original != recorded_identity:
+                    continue
+                metadata = _with_timing(extract_image_metadata(source, include_timing=True))
+                if metadata.capture_time_source == "unavailable":
+                    unavailable = True
+                    continue
+                if metadata.captured_at_utc is None and row["captured_at"] is not None:
+                    # Historic wall time already exists. Only verify full
+                    # bytes when we can add an instant or flag a clock conflict.
+                    if metadata.capture_time_source != "conflict":
+                        continue
+                if content_hash:
+                    source.seek(0)
+                    digest = hashlib.sha256()
+                    while not stop_event.is_set() and (block := source.read(HASH_CHUNK_SIZE)):
+                        digest.update(block)
+                    if stop_event.is_set() or digest.hexdigest() != content_hash.casefold():
+                        continue
+                if _source_identity(os.fstat(source.fileno())) == original:
+                    return metadata
+        except OSError:
+            unavailable = True
+    source = "unavailable" if unavailable else ("local" if row["captured_at"] else "missing")
+    return CaptureMetadata(None, None, row["captured_at"], None, source)
 
 
 class GeoBackfill:
@@ -125,6 +268,9 @@ class GeoBackfill:
                         conn.execute(
                             "UPDATE image SET metadata_scanned_at = NULL WHERE metadata_scanned_at = 'missing'"
                         )
+                        conn.execute(
+                            "UPDATE image SET capture_time_source = NULL WHERE capture_time_source = 'unavailable'"
+                        )
                         conn.commit()
                         retry_missing = False
                     if not self._scan_batch(conn):
@@ -144,8 +290,9 @@ class GeoBackfill:
 
     def _scan_batch(self, conn):
         rows = conn.execute(
-            """SELECT id, path FROM image
+            """SELECT id, path, content_hash, latitude, longitude, captured_at, metadata_scanned_at FROM image
                WHERE metadata_scanned_at IS NULL
+                  OR (capture_time_source IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL)
                ORDER BY id LIMIT ?""",
             (_BATCH_SIZE,),
         ).fetchall()
@@ -154,22 +301,34 @@ class GeoBackfill:
                 break
             # Resolve locations and read EXIF before taking the write lock.
             locations = conn.execute(
-                "SELECT path FROM image_location WHERE image_id = ? ORDER BY id",
+                """SELECT path, file_device, file_inode, file_size, modified_at_ns, file_changed_at_ns
+                   FROM image_location WHERE image_id = ? ORDER BY id""",
                 (row["id"],),
             ).fetchall()
-            candidates = [location["path"] for location in locations]
-            candidates.append(row["path"])
-            available = next(
-                (path for path in candidates if os.path.isfile(filesystem_path(path))),
-                None,
-            )
-            metadata = extract_image_metadata(available) if available else (None, None, None)
-            conn.execute(
-                """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?,
-                          metadata_scanned_at = ?
-                   WHERE id = ? AND metadata_scanned_at IS NULL""",
-                (*metadata, datetime.now().isoformat() if available else "missing", row["id"]),
-            )
+            candidates = [
+                (location["path"], tuple(location[column] for column in _LOCATION_IDENTITY_COLUMNS))
+                for location in locations
+            ]
+            if all(path != row["path"] for path, _ in candidates):
+                candidates.append((row["path"], None))
+            if row["metadata_scanned_at"] is not None or (row["latitude"] is not None and row["longitude"] is not None):
+                metadata = _legacy_capture(row, candidates, self._stop)
+            else:
+                available = next((path for path, _ in candidates if os.path.isfile(filesystem_path(path))), None)
+                metadata = (
+                    _with_timing(extract_image_metadata(available, include_timing=True))
+                    if available else CaptureMetadata(None, None, None, None, "unavailable")
+                )
+            if (row["latitude"] is not None and row["longitude"] is not None and
+                    metadata.latitude is not None and metadata.longitude is not None and
+                    (abs(row["latitude"] - metadata.latitude) > 0.000001 or
+                     abs(row["longitude"] - metadata.longitude) > 0.000001)):
+                # A legacy file at the same path may have been replaced. Do
+                # not attach its clock to the older photo's known location.
+                metadata = CaptureMetadata(None, None, row["captured_at"], None, "conflict")
+            if self._stop.is_set():
+                break
+            _save_capture_metadata(conn, row["id"], metadata)
             conn.commit()
         return bool(rows)
 
@@ -178,22 +337,7 @@ geo_backfill = GeoBackfill()
 
 
 def _filter_sql(west, east, south, north, from_date, to_date):
-    clauses = ["i.latitude BETWEEN ? AND ?", "i.longitude IS NOT NULL"]
-    params = [south, north]
-    if west <= east:
-        clauses.append("i.longitude BETWEEN ? AND ?")
-        params.extend((west, east))
-    else:
-        clauses.append("(i.longitude >= ? OR i.longitude <= ?)")
-        params.extend((west, east))
-    if from_date:
-        clauses.append("i.captured_at >= ?")
-        params.append(from_date.isoformat())
-    if to_date:
-        clauses.append("i.captured_at <= ?")
-        # Dates are inclusive even when EXIF time is present.
-        params.append(to_date.isoformat() + "T23:59:59.999999")
-    return " AND ".join(clauses), params
+    return photo_selection_sql(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date))
 
 
 def _status(conn):
@@ -267,7 +411,15 @@ def list_map_images(
     before_id=None, before_captured_at=None,
 ):
     """Return canonical geotagged images and a cursor for the next page."""
-    where, params = _filter_sql(west, east, south, north, from_date, to_date)
+    return list_selected_map_images(
+        GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date),
+        limit, offset, before_id, before_captured_at,
+    )
+
+
+def list_selected_map_images(selection, limit=40, offset=0, before_id=None, before_captured_at=None):
+    """Return a cursor page for a map selection, including an exact stop's IDs."""
+    where, params = photo_selection_sql(selection, require_coordinates=True)
     page_where = where
     page_params = list(params)
     if before_id is not None:
