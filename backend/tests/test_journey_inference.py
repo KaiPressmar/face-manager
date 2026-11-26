@@ -13,8 +13,11 @@ from backend.services.journey import list_journey
 
 class JourneyInferenceTest(unittest.TestCase):
     def setUp(self):
-        folder = self.enterContext(tempfile.TemporaryDirectory())
-        self.enterContext(patch.object(schema, "DB_PATH", str(Path(folder) / "journey.sqlite")))
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        database = patch.object(schema, "DB_PATH", str(Path(folder.name) / "journey.sqlite"))
+        database.start()
+        self.addCleanup(database.stop)
         schema.init_db(scan_sources=False)
 
     def photo(self, image_id, minute, longitude, *, latitude=None, source="gps_utc", wall=True, verified_clock=True):
