@@ -5,13 +5,15 @@ import React, {
   useState,
 } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
-import { imageFileUrl, imageThumbnailUrl, openImageLocation } from "../../utils/api";
+import { fetchImageDetail, imageFileUrl, imageThumbnailUrl, openImageLocation, type FaceImage } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import FaceOverlay from "./FaceOverlay";
 import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
 import { assignLabelLanes } from "../../utils/faceLabels";
 import { copyTextToClipboard } from "../../utils/clipboard";
+import type { NormalizedFaceRectangle, SavedManualFace } from "../../utils/manualFaces";
 import AlbumPickerDialog from "../shared/AlbumPickerDialog";
+import ManualFaceEditor, { type ManualFaceEditorSource } from "./ManualFaceEditor";
 import "./FullscreenImageGallery.css";
 
 interface GalleryFace {
@@ -33,11 +35,20 @@ interface GalleryLocation {
 
 interface GalleryMediaState {
   url: string;
+  originalLoaded?: boolean;
   originalUnavailable?: boolean;
   retryingOriginal?: boolean;
   originalRetry?: number;
   previewStatus?: "loaded" | "error";
   previewRetry?: number;
+}
+
+interface GalleryManualFace {
+  mediaUrl: string;
+  id: number;
+  clusterId: number;
+  name: string;
+  rectangle: NormalizedFaceRectangle;
 }
 
 export interface GalleryImage {
@@ -61,6 +72,7 @@ interface FullscreenImageGalleryProps {
   onClose: () => void;
   closeLabel?: string;
   onDelete?: (image: GalleryImage) => Promise<boolean>;
+  onManualFaceSaved?: (detail: FaceImage, faceId: number) => void;
   /** Optional external sequence, e.g. all face crops in one group. */
   sequence?: {
     activeIndex: number;
@@ -109,6 +121,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   onClose,
   closeLabel = "Galerie schließen",
   onDelete,
+  onManualFaceSaved,
   sequence,
 }) => {
   const [message, setMessage] = useState("");
@@ -118,6 +131,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isDeleting, setIsDeleting] = useState(false);
   const [albumPhotoId, setAlbumPhotoId] = useState<number>();
+  const [faceEditor, setFaceEditor] = useState<(ManualFaceEditorSource & { mediaUrl: string })>();
+  const [manualFaces, setManualFaces] = useState<GalleryManualFace[]>([]);
   const stageRef = useRef<HTMLElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalFocus(dialogRef, onClose, !isDeleting);
@@ -129,6 +144,13 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const originalSrc = imageFileUrl(image.id, activeMedia?.originalRetry);
   const previewSrc = imageThumbnailUrl(image.id, activeMedia?.previewRetry);
   const naturalSize = measuredImage?.url === originalUrl ? measuredImage : { width: 0, height: 0 };
+  const matchingGeometry = Boolean(imageWidth && imageHeight &&
+    imageAspectRatiosMatch(imageWidth, imageHeight, naturalSize.width, naturalSize.height));
+  const canUsePreview = Boolean(originalUnavailable && activeMedia?.previewStatus === "loaded" &&
+    image.content_hash && matchingGeometry);
+  const canMarkFace = !isDeleting && !sequence?.loading && !activeMedia?.retryingOriginal &&
+    (Boolean(activeMedia?.originalLoaded && !originalUnavailable) || canUsePreview);
+  const nestedDialogOpen = albumPhotoId !== undefined || faceEditor !== undefined;
   const updateMedia = (change: Omit<GalleryMediaState, "url">) => {
     setMedia((current) => ({
       ...(current?.url === originalUrl ? current : { url: originalUrl }),
@@ -143,7 +165,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
 
   const move = useCallback(
     (direction: number) => {
-      if (isDeleting || navigationLength < 2 || sequence?.loading) return;
+      if (isDeleting || nestedDialogOpen || navigationLength < 2 || sequence?.loading) return;
       const target = navigationIndex + direction;
       if (sequence?.wrap === false && (target < 0 || target >= navigationLength)) return;
       const nextIndex = (target + navigationLength) % navigationLength;
@@ -154,7 +176,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       }
       setMessage("");
     },
-    [isDeleting, navigationIndex, navigationLength, onChange, sequence]
+    [isDeleting, navigationIndex, navigationLength, nestedDialogOpen, onChange, sequence]
   );
 
   useEffect(() => {
@@ -236,6 +258,55 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
     }
   };
 
+  const markFace = () => {
+    if (!canMarkFace) return;
+    const existing = imageWidth && imageHeight && matchingGeometry
+      ? image.faces.filter((face) => face.review_status !== "not_face").map((face) => ({
+          x: face.bbox_x / imageWidth, y: face.bbox_y / imageHeight,
+          width: face.bbox_w / imageWidth, height: face.bbox_h / imageHeight,
+        }))
+      : [];
+    const represented = matchingGeometry ? new Set(image.faces.map((face) => face.id)) : new Set<number>();
+    for (const face of manualFaces) {
+      if (face.mediaUrl === originalUrl && !represented.has(face.id)) existing.push(face.rectangle);
+    }
+    setFaceEditor({ imageId: image.id, contentHash: image.content_hash, mediaUrl: originalUrl,
+      allowSuggestions: !canUsePreview,
+      label: image.filename || pathBasename(image.image_path) || "Foto", existing });
+  };
+
+  const manualFaceSaved = (source: NonNullable<typeof faceEditor>, face: SavedManualFace,
+    name: string, rectangle: NormalizedFaceRectangle) => {
+    setManualFaces((previous) => [...previous, {
+      mediaUrl: source.mediaUrl, id: face.face_id, clusterId: face.cluster_id, name, rectangle,
+    }]);
+    setShowFaces(true);
+    setFaceEditor(undefined);
+    setMessage("Gesicht gespeichert");
+    if (onManualFaceSaved) {
+      void fetchImageDetail(source.imageId).then((detail) => {
+        if (detail.id === source.imageId && detail.content_hash === source.contentHash &&
+            imageFileUrl(detail.id) === source.mediaUrl) onManualFaceSaved(detail, face.face_id);
+      }).catch(() => {});
+    }
+  };
+
+  const hasOverlayGeometry = Boolean(imageWidth && imageHeight && (image.content_hash || matchingGeometry));
+  const renderedFaces: GalleryFace[] = [];
+  if (hasOverlayGeometry && imageWidth && imageHeight) {
+    for (const face of image.faces) {
+      if (sequence?.highlightedFaceId && face.id !== sequence.highlightedFaceId) continue;
+      renderedFaces.push({ ...face, bbox_x: face.bbox_x / imageWidth, bbox_y: face.bbox_y / imageHeight,
+        bbox_w: face.bbox_w / imageWidth, bbox_h: face.bbox_h / imageHeight });
+    }
+  }
+  for (const face of manualFaces) {
+    if (face.mediaUrl !== originalUrl || renderedFaces.some((visible) => visible.id === face.id)) continue;
+    renderedFaces.push({ id: face.id, cluster_id: face.clusterId, person_name: face.name, review_status: "active",
+      bbox_x: face.rectangle.x, bbox_y: face.rectangle.y, bbox_w: face.rectangle.width, bbox_h: face.rectangle.height });
+  }
+  const faceLanes = assignLabelLanes(renderedFaces, 1);
+
   return (
     <><div
       ref={dialogRef}
@@ -244,7 +315,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Bildansicht"
-      aria-hidden={albumPhotoId !== undefined || undefined}
+      aria-hidden={nestedDialogOpen || undefined}
       aria-busy={isDeleting}
       onKeyDown={(event) => {
         if (event.defaultPrevented || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
@@ -288,6 +359,11 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             <span aria-hidden="true">⌗</span>
             Gesichter
           </button>
+          <button type="button" disabled={!canMarkFace || nestedDialogOpen} onClick={markFace}
+            title="Ein Gesicht auf diesem Foto markieren">
+            <span aria-hidden="true">⊞</span>
+            Gesicht markieren
+          </button>
           <button type="button" onClick={copyImage} disabled={originalUnavailable} title="Bildinhalt in die Zwischenablage kopieren">
             <span aria-hidden="true">⧉</span>
             Bild kopieren
@@ -320,7 +396,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-close"
             onClick={onClose}
-            disabled={isDeleting}
+            disabled={isDeleting || nestedDialogOpen}
             aria-label={closeLabel}
             autoFocus
           >
@@ -341,7 +417,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--previous"
             onClick={() => move(-1)}
-            disabled={isDeleting || sequence?.loading || (sequence?.wrap === false && navigationIndex === 0)}
+            disabled={isDeleting || nestedDialogOpen || sequence?.loading || (sequence?.wrap === false && navigationIndex === 0)}
             aria-label={sequence?.itemLabel === "Foto" ? "Vorheriges Bild" : sequence ? "Vorheriges Gesicht der Gruppe" : "Vorheriges Bild"}
           >
             ‹
@@ -364,10 +440,10 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             alt={image.filename || ""}
             draggable={false}
             onLoad={(event) => {
-              updateMedia({ originalUnavailable: false, retryingOriginal: false });
+              updateMedia({ originalLoaded: true, originalUnavailable: false, retryingOriginal: false });
               measureImage(event.currentTarget);
             }}
-            onError={() => updateMedia({ originalUnavailable: true, retryingOriginal: false })}
+            onError={() => updateMedia({ originalLoaded: false, originalUnavailable: true, retryingOriginal: false })}
           />
           {originalUnavailable && activeMedia?.previewStatus !== "error" && (
             <img
@@ -383,28 +459,11 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
               onError={() => updateMedia({ previewStatus: "error" })}
             />
           )}
-          {showFaces && !isDeleting && naturalSize.width > 0 &&
-            imageWidth && imageHeight &&
-            (image.content_hash || imageAspectRatiosMatch(imageWidth, imageHeight, naturalSize.width, naturalSize.height)) &&
-            (() => {
-              const visibleFaces = sequence?.highlightedFaceId
-                ? image.faces.filter(
-                    (face) => face.id === sequence.highlightedFaceId,
-                  )
-                : image.faces;
-              const lanes = assignLabelLanes(visibleFaces, imageWidth);
-              return visibleFaces.map((face) => (
-                <FaceOverlay
-                  key={face.id}
-                  face={face}
-                  naturalWidth={imageWidth}
-                  naturalHeight={imageHeight}
-                  stackIndex={lanes.get(face.id) ?? 0}
-                  highlighted={face.id === sequence?.highlightedFaceId}
-                  onNavigateToCluster={onNavigateToCluster}
-                />
-              ));
-            })()}
+          {showFaces && !isDeleting && naturalSize.width > 0 && renderedFaces.map((face) => (
+            <FaceOverlay key={face.id} face={face} naturalWidth={1} naturalHeight={1}
+              stackIndex={faceLanes.get(face.id) ?? 0} highlighted={face.id === sequence?.highlightedFaceId}
+              onNavigateToCluster={onNavigateToCluster} />
+          ))}
         </div>
         {sequence?.loading && (
           <div className="gallery-sequence-loading" role="status">
@@ -416,7 +475,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             type="button"
             className="gallery-nav gallery-nav--next"
             onClick={() => move(1)}
-            disabled={isDeleting || sequence?.loading || (sequence?.wrap === false && navigationIndex >= navigationLength - 1)}
+            disabled={isDeleting || nestedDialogOpen || sequence?.loading || (sequence?.wrap === false && navigationIndex >= navigationLength - 1)}
             aria-label={sequence?.itemLabel === "Foto" ? "Nächstes Bild" : sequence ? "Nächstes Gesicht der Gruppe" : "Nächstes Bild"}
           >
             ›
@@ -433,6 +492,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
               {activeMedia?.previewStatus === "loaded"
                 ? "Die lokale Vorschau wird angezeigt."
                 : activeMedia?.previewStatus === "error" ? "Auch die Vorschau ist nicht verfügbar." : "Vorschau wird geladen …"}
+              {activeMedia?.previewStatus === "loaded" && !canUsePreview &&
+                " Zum Markieren wird das Original benötigt, weil sich die Bildmaße der Vorschau nicht bestätigen lassen."}
             </p>
             <button
               type="button"
@@ -503,6 +564,8 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
     </div>
     {albumPhotoId !== undefined && <AlbumPickerDialog imageIds={[albumPhotoId]}
       onClose={() => setAlbumPhotoId(undefined)} onSaved={(album) => setMessage(`Im Album „${album.name}“ gespeichert`)} />}
+    {faceEditor && <ManualFaceEditor source={faceEditor} onClose={() => setFaceEditor(undefined)}
+      onSaved={(face, name, rectangle) => manualFaceSaved(faceEditor, face, name, rectangle)} />}
     </>
   );
 };

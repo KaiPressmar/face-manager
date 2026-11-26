@@ -37,6 +37,7 @@ interface ImageGridProps {
   hasActiveFilters: boolean;
   onResetFilters: () => void;
   onImageDeleted: (imageId: number) => void;
+  onManualFaceSaved: (detail: FaceImage, faceId: number) => void;
   photoSelection?: { ids: ReadonlySet<number>; onToggle: (id: number) => void };
 }
 
@@ -88,6 +89,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   hasActiveFilters,
   onResetFilters,
   onImageDeleted,
+  onManualFaceSaved,
   photoSelection,
 }) => {
   const [galleryImageId, setGalleryImageId] = useState<number | null>(null);
@@ -476,6 +478,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
           onChange={(index) => setGalleryImageId(images[index]?.id ?? null)}
           onClose={() => setGalleryImageId(null)}
           onDelete={(image) => removeImage(image as FaceImage)}
+          onManualFaceSaved={onManualFaceSaved}
         />
       )}
     </>

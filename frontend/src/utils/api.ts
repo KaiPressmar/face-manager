@@ -263,6 +263,7 @@ export interface FaceImage {
     cluster_id: number | null;
     person_name: string | null;
     review_status: FaceReviewStatus;
+    is_manual?: true;
   }[];
 }
 

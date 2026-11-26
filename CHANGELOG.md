@@ -9,19 +9,20 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
-- In Bilder und Karte kannst du Fotoalben anlegen, befüllen und als Filter verwenden.
+- Unter „Bilder“ und „Karte“ kannst du Fotoalben anlegen, befüllen und als Filter verwenden.
 - Die Karte bietet eine Offline-Satellitenansicht sowie eine Auswahl aus den Orten deiner Fotos.
 - Reisevorschläge lassen sich nach Tagen und mit oder ohne An- und Rückreise ansehen und als Reisealbum speichern.
 - Unter „Hilfe“ findest du eine kurze Einführung zu Bildern, Personen, Karte, Reisealben, Fotobuch und Aktivitäten.
+- Fehlt ein Gesicht, kannst du es direkt im geöffneten Foto markieren und einer Person zuordnen.
 
 ### Verbessert
 
 - Im Standortverlauf lassen sich Zeitraum und Kartenausschnitt kombinieren und wiederkehrende Orte in der Stoppliste leichter finden.
-- Im Stadtmodus zeigt die Karte auch kurze Ortswechsel und lässt sich bis ins Stadtviertel vergrößern.
+- Mit „Stadt und Spaziergang“ zeigt die Karte auch kurze Ortswechsel und lässt sich bis ins Stadtviertel vergrößern.
 - Fotobuchbilder lassen sich mit eigenen Farben, Bildmaßen und Druckauflösungen gestalten und in Schrift und Seitenaufteilung anpassen.
 - Beim Gestalten einer Reise schlägt die App bei passenden Entfernungen und Zeiten mögliche Verkehrsmittel vor.
 - Unter Aktivitäten siehst du, wie weit die Prüfung von Fotostandorten und Aufnahmezeiten ist. Die Übersicht öffnet sich per Klick.
-- Aktivitäten zeigt auch die Pfadprüfung und den Fortschritt von Update-Downloads.
+- Unter „Aktivitäten“ siehst du auch, ob Ordner erreichbar sind und wie weit ein Update geladen ist.
 - Ob die Gesichtserkennung die Grafikkarte oder den Prozessor verwendet, siehst du oben in der Anwendung.
 - Fotobuchentwürfe lassen sich im Album speichern und später weiter gestalten.
 - Der Standortverlauf kann einzelne Fotos ohne Standort einem passenden Stopp zuordnen. Du erkennst sie am Hinweis zur Aufnahmezeit und kannst sie ausblenden.

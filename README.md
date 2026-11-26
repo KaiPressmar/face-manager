@@ -59,9 +59,13 @@ Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. Öffne in **B
 <details>
 <summary>Personen und Dateinamen</summary>
 
-Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. **Dateinamen** zeigt dir vor dem Umbenennen den aktuellen und den vorgeschlagenen Namen.
+Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person. **Dateinamen** zeigt dir vor dem Umbenennen den aktuellen und den vorgeschlagenen Namen.
 
 ![Gesichter prüfen mit einer vorgeschlagenen Zuordnung und Vergleichsfotos](docs/screenshots/people-review.webp)
+
+![Ein manuell gesetzter Rahmen um ein Gesicht am Bildrand](docs/screenshots/manual-face-marking.webp)
+
+[Bildnachweis für das Porträt der NASA](https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut)
 
 ![Vorschau der aktuellen und vorgeschlagenen Dateinamen](docs/screenshots/filenames.webp)
 

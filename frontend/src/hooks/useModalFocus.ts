@@ -38,9 +38,11 @@ export function useModalFocus(
   onClose: () => void,
   canClose = true,
   active = true,
+  deferEscape?: (target: EventTarget | null) => boolean,
 ) {
   const onCloseRef = useRef(onClose);
   const canCloseRef = useRef(canClose);
+  const deferEscapeRef = useRef(deferEscape);
   const openerRef = useRef<HTMLElement | null>(null);
   const wasActiveRef = useRef(false);
   if (active && !wasActiveRef.current) {
@@ -51,6 +53,7 @@ export function useModalFocus(
   wasActiveRef.current = active;
   onCloseRef.current = onClose;
   canCloseRef.current = canClose;
+  deferEscapeRef.current = deferEscape;
 
   useEffect(() => {
     if (!active) return;
@@ -61,6 +64,7 @@ export function useModalFocus(
       if (!dialog) return;
       if (activeModal() !== dialog) return;
       if (event.key === "Escape") {
+        if (deferEscapeRef.current?.(event.target)) return;
         event.preventDefault();
         event.stopPropagation();
         if (canCloseRef.current) onCloseRef.current();

@@ -35,7 +35,7 @@ const steps: HelpStep[] = [
       <>Wähle <strong>Ohne Namen</strong> und öffne eine Gruppe. Wenn du mehrere Personen in der Gruppe siehst, markiere zuerst die passenden Gesichter.</>,
       <>Tippe einen Namen in <strong>Person suchen oder neu anlegen…</strong>. Wähle den passenden Namen und bestätige mit <strong>zuweisen</strong> oder <strong>anlegen und zuweisen</strong>.</>,
     ],
-    note: <>Unter <strong>Personen korrigieren</strong> kannst du eine Zuordnung später ändern.</>,
+    note: <>Fehlt ein Gesicht? Öffne das Foto und wähle <strong>Gesicht markieren</strong>. Ziehe einen Rahmen auf und wähle die Person. Unter <strong>Personen korrigieren</strong> kannst du eine Zuordnung später ändern.</>,
     destination: "review",
     actionLabel: "Personen öffnen",
   },

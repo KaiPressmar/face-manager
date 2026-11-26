@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const albumLibraryFlow = require('./album-library-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
+const manualFaceFlow = require('./manual-face-flow.cjs');
 let chromium;
 try {
   ({ chromium } = require('playwright'));
@@ -1495,6 +1496,7 @@ async function backgroundActivitiesFlow(browser, errors) {
       pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
+      (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
     ];
     for (const flow of flows) await flow(browser, errors);
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);

@@ -101,6 +101,10 @@ changelog, and record the internal portion under **Developer notes**.
 Run `python3 scripts/changelog.py check` after editing the changelog and run
 `./scripts/check-all.sh` before handing off completed implementation work.
 
+For user-facing changes, check the README, its screenshots, and the affected
+in-app help in the same pull request. Keep examples, German instructions, and
+button labels aligned with the app. Repeat the check during release preparation.
+
 The full development, changelog, and release process is documented in
 `CONTRIBUTING.md`.
 

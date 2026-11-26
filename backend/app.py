@@ -13,11 +13,12 @@ from concurrent.futures import Future
 from functools import partial, wraps
 from contextlib import asynccontextmanager, nullcontext
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from queue import Full, Queue
 from typing import Annotated, List, Literal
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -57,11 +58,26 @@ from .services.desktop import (
     pick_folder,
     to_display_path,
 )
+from .services.face_box_suggestions import (
+    FaceBoxSuggestionBusy,
+    FaceBoxSuggestionPhotoUnavailable,
+    FaceBoxSuggestionUnavailable,
+    suggest_face_boxes,
+)
 from .services.face_thumbnails import ensure_face_thumbnail, get_cached_face_thumbnail, write_face_thumbnail
 from .services.image_thumbnails import (
     ensure_image_thumbnail, get_cached_image_thumbnail, read_legacy_preview_geometry, write_image_thumbnail,
 )
-from .services.preview_cache import decode_verified_preview, read_verified_preview_geometry
+from .services.manual_face_preview import (
+    PREVIEW_ORIGINAL_HEADER,
+    PREVIEW_PROOF_HEADER,
+    FacePreview,
+    find_preview_source,
+    issue_preview_proof,
+    read_preview_proof,
+    render_face_preview,
+)
+from .services.preview_cache import correct_bbox_for_orientation, decode_verified_preview, read_verified_preview_geometry
 from .services.preview_cache_budget import (
     DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
     get_preview_cache_policy,
@@ -106,6 +122,7 @@ from .services.storage import (
     DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
     DEFAULT_FILENAME_PERSON_JOINER,
     DEFAULT_UI_THEME,
+    ManualFaceConflictError,
     StalePersonSuggestionError,
     _safe_float,
     assign_cluster_to_person,
@@ -115,12 +132,14 @@ from .services.storage import (
     count_filename_rename_candidates,
     delete_image,
     create_cluster_from_faces,
+    create_manual_face,
     assign_faces_to_person,
     auto_tune_cluster_distance_threshold,
     get_faces_for_review_group,
     get_face_preview_source,
     get_image_detail_rows,
     get_image_preview_source,
+    get_recorded_face_boxes,
     get_available_image_path,
     invalidate_image_query_cache,
     invalidate_person_suggestion_epoch,
@@ -766,6 +785,7 @@ def configure_cors(application: FastAPI) -> None:
         allow_origins=allowed_origins,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[PREVIEW_PROOF_HEADER, PREVIEW_ORIGINAL_HEADER],
     )
 
 
@@ -2455,26 +2475,6 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
     return {"status": "opened"}
 
 
-def correct_bbox_for_orientation(geometry, x, y, w, h):
-    """Transform a raw-pixel face box to match an upright preview."""
-    orientation, width, height = geometry
-    if orientation == 2:
-        return width - x - w, y, w, h
-    if orientation == 3:
-        return width - x - w, height - y - h, w, h
-    if orientation == 4:
-        return x, height - y - h, w, h
-    if orientation == 5:
-        return y, x, h, w
-    if orientation == 6:
-        return height - y - h, x, h, w
-    if orientation == 7:
-        return height - y - h, width - x - w, h, w
-    if orientation == 8:
-        return y, width - x - w, h, w
-    return x, y, w, h
-
-
 @app.get("/api/folders")
 def get_folders(request: Request):
     """Return the imported folder hierarchy.
@@ -2505,9 +2505,9 @@ def api_start_image_path_cleanup():
 
 def _stored_image_geometry(row) -> tuple[int, int, int] | None:
     if {"exif_orientation", "raw_width", "raw_height"}.issubset(row.keys()):
-        orientation, width, height = row["exif_orientation"], row["raw_width"], row["raw_height"]
-        if orientation in range(1, 9) and width and height and width > 0 and height > 0:
-            return orientation, width, height
+        geometry = row["exif_orientation"], row["raw_width"], row["raw_height"]
+        if all(type(value) is int for value in geometry) and geometry[0] in range(1, 9) and min(geometry[1:]) > 0:
+            return geometry
     return None
 
 
@@ -2566,18 +2566,19 @@ def _group_image_rows(
         review_status = (
             r["review_status"] if "review_status" in r.keys() else "active"
         )
-        images[image_id]["faces"].append(
-            {
-                "id": r["face_id"],
-                "bbox_x": bbox_x,
-                "bbox_y": bbox_y,
-                "bbox_w": bbox_w,
-                "bbox_h": bbox_h,
-                "cluster_id": r["cluster_id"],
-                "person_name": r["person_name"],
-                "review_status": review_status,
-            }
-        )
+        face = {
+            "id": r["face_id"],
+            "bbox_x": bbox_x,
+            "bbox_y": bbox_y,
+            "bbox_w": bbox_w,
+            "bbox_h": bbox_h,
+            "cluster_id": r["cluster_id"],
+            "person_name": r["person_name"],
+            "review_status": review_status,
+        }
+        if "is_manual" in r.keys() and r["is_manual"]:
+            face["is_manual"] = True
+        images[image_id]["faces"].append(face)
 
     locations_by_image = list_image_locations(list(images.keys()))
     for image_id, image in images.items():
@@ -2629,27 +2630,217 @@ async def get_image_detail(request: Request, image_id: int, resolve_geometry: bo
     load_rows = partial(_image_detail_rows, image_id, include_archived=True)
     rows = await run_in_threadpool(load_rows)
     geometry = _stored_image_geometry(rows[0])
-    if geometry is None and any(row["face_id"] is not None for row in rows):
-        content_hash = rows[0]["content_hash"]
+    content_hash = rows[0]["content_hash"]
+    if geometry is None:
         with _media_library_lock:
             geometry = _pending_image_geometry.get((image_id, content_hash))
-        if geometry is None:
-            geometry, path = await _run_source_work(
-                partial(_resolve_image_geometry, image_id, content_hash, generation),
-            )
-            rows = await run_in_threadpool(load_rows)
-            if rows[0]["content_hash"] != content_hash:
-                raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
-            if geometry and not content_hash:
-                locations = await run_in_threadpool(list_image_locations, [image_id])
-                if not any(location["path"] == path for location in locations.get(image_id, ())):
-                    geometry = None
+    if geometry is None and any(row["face_id"] is not None for row in rows):
+        geometry, path = await _run_source_work(
+            partial(_resolve_image_geometry, image_id, content_hash, generation),
+        )
+        rows = await run_in_threadpool(load_rows)
+        if rows[0]["content_hash"] != content_hash:
+            raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
+        if geometry and not content_hash:
+            locations = await run_in_threadpool(list_image_locations, [image_id])
+            if not any(location["path"] == path for location in locations.get(image_id, ())):
+                geometry = None
 
     images = await run_in_threadpool(
         partial(_group_image_rows, rows, get_display_platform(request), geometry_override=geometry),
     )
     _get_media_library_generation(generation)
     return images[0]
+
+
+def _registered_face_preview(image_id: int, source) -> FacePreview | None:
+    content_hash = source["content_hash"]
+    if not content_hash:
+        return None
+    geometry = _stored_image_geometry(source)
+    if geometry is None:
+        with _media_library_lock:
+            geometry = _pending_image_geometry.get((image_id, content_hash))
+    if geometry is None:
+        return None
+    cached = get_cached_image_thumbnail(image_id, content_hash)
+    if cached is None:
+        return None
+    try:
+        body = read_preview_bytes(cached, 2 * 1024 * 1024 + 1)
+        if not body or len(body) > 2 * 1024 * 1024:
+            return None
+        with Image.open(BytesIO(body), formats=("JPEG",)) as thumbnail:
+            width, height = thumbnail.size
+    except (OSError, Image.DecompressionBombError):
+        return None
+    orientation, raw_width, raw_height = geometry
+    expected_width, expected_height = (raw_height, raw_width) if orientation >= 5 else (raw_width, raw_height)
+    if abs(width * expected_height - height * expected_width) > max(expected_width, expected_height):
+        return None
+    return FacePreview(body, geometry, content_hash)
+
+
+async def _face_preview_paths(image_id: int) -> list[str]:
+    locations = await run_in_threadpool(list_image_locations, [image_id])
+    return [location["path"] for location in locations.get(image_id, ())]
+
+
+@app.get("/api/images/{image_id}/manual-face-preview")
+async def api_manual_face_preview(image_id: int):
+    generation = _get_media_library_generation()
+    source = await run_in_threadpool(get_image_preview_source, image_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    content_hash = source["content_hash"]
+    paths = await _face_preview_paths(image_id)
+
+    try:
+        preview = await _run_source_work(partial(render_face_preview, paths, content_hash))
+    except HTTPException as error:
+        if error.status_code != 503:
+            raise
+        preview = await run_in_threadpool(_registered_face_preview, image_id, source)
+        if preview is None:
+            raise
+        original = False
+    else:
+        original = preview is not None
+        if preview is None:
+            preview = await run_in_threadpool(_registered_face_preview, image_id, source)
+    if preview is None:
+        raise HTTPException(status_code=422, detail="Für dieses Foto ist keine passende Vorschau verfügbar. Prüfe das verknüpfte Original.")
+
+    current = await run_in_threadpool(get_image_preview_source, image_id)
+    _get_media_library_generation(generation)
+    if current is None or current["content_hash"] != content_hash:
+        raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
+    registered_geometry = _stored_image_geometry(current)
+    if registered_geometry is not None and registered_geometry != preview.geometry:
+        raise HTTPException(status_code=409, detail="Die Bildausrichtung stimmt nicht mit dem registrierten Foto überein.")
+    return Response(preview.body, media_type="image/jpeg", headers={
+        "Cache-Control": "private, no-store",
+        PREVIEW_PROOF_HEADER: issue_preview_proof(image_id, generation, content_hash, preview),
+        PREVIEW_ORIGINAL_HEADER: "yes" if original else "no",
+    })
+
+
+def _require_face_preview_proof(token, image_id: int, generation: int, content_hash: str | None):
+    proof = read_preview_proof(token, image_id, generation, content_hash)
+    if proof is None:
+        raise HTTPException(status_code=409, detail="Die Vorschau ist nicht mehr gültig. Öffne die Markierung erneut.")
+    return proof
+
+
+def _raw_manual_face_box(geometry, normalized_box):
+    orientation, width, height = geometry
+    upright_width, upright_height = (height, width) if orientation in {5, 6, 7, 8} else (width, height)
+    x, y, w, h = normalized_box
+    left, top = round(x * upright_width), round(y * upright_height)
+    right = round(min(1, x + w) * upright_width)
+    bottom = round(min(1, y + h) * upright_height)
+    if right <= left or bottom <= top:
+        raise HTTPException(status_code=422, detail="Die Gesichtsmarkierung ist zu klein.")
+    inverse_orientation = {6: 8, 8: 6}.get(orientation, orientation)
+    return correct_bbox_for_orientation(
+        (inverse_orientation, upright_width, upright_height), left, top, right - left, bottom - top,
+    )
+
+
+@safe_cluster_mutation
+def _commit_manual_face(image_id, content_hash, geometry, box, person_name, generation, source_path):
+    _get_media_library_generation(generation)
+    try:
+        face_id, cluster_id = create_manual_face(
+            image_id, content_hash, geometry, box, person_name, source_path=source_path,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ManualFaceConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+            raise
+        raise HTTPException(
+            status_code=503, detail="Die Bibliothek wird gerade aktualisiert. Bitte versuche es erneut.",
+            headers={"Retry-After": "2"},
+        ) from exc
+    notify_clusters_changed("manual_face_created")
+    return {"face_id": face_id, "cluster_id": cluster_id}
+
+
+@app.post("/api/images/{image_id}/manual-faces", status_code=201)
+async def api_create_manual_face(image_id: int, data: dict = Body(...)):
+    normalized_box = tuple(data.get(key) for key in ("x", "y", "width", "height"))
+    if not all(type(value) in (int, float) and 0 <= value <= 1 for value in normalized_box):
+        raise HTTPException(status_code=422, detail="Die Gesichtsmarkierung muss innerhalb des Bildes liegen.")
+    x, y, w, h = normalized_box
+    if w <= 0 or h <= 0 or x + w > 1 + 1e-9 or y + h > 1 + 1e-9:
+        raise HTTPException(status_code=422, detail="Die Gesichtsmarkierung muss innerhalb des Bildes liegen und eine Fläche haben.")
+    person_name = data.get("person_name")
+    person_name = person_name.strip() if isinstance(person_name, str) else ""
+    if not person_name or len(person_name) > 255 or any(
+        character == "\x00" or "\ud800" <= character <= "\udfff" for character in person_name
+    ):
+        raise HTTPException(status_code=422, detail="Gib einen gültigen Personennamen mit höchstens 255 Zeichen ein.")
+
+    generation = _get_media_library_generation()
+    source = await run_in_threadpool(get_image_preview_source, image_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    content_hash = source["content_hash"]
+    if "expected_content_hash" in data and content_hash != data["expected_content_hash"]:
+        raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
+
+    geometry, source_hash = _require_face_preview_proof(data.get("preview_token"), image_id, generation, content_hash)
+    source_path = None
+    if not content_hash:
+        paths = await _face_preview_paths(image_id)
+        source_path = await _run_source_work(
+            partial(find_preview_source, paths, source_hash),
+        )
+        if source_path is None:
+            raise HTTPException(status_code=409, detail="Das Originalfoto ist nicht mehr verfügbar oder wurde geändert. Öffne die Markierung erneut.")
+    box = _raw_manual_face_box(geometry, normalized_box)
+    return await run_in_threadpool(
+        _commit_manual_face, image_id, content_hash, geometry, box, person_name, generation, source_path,
+    )
+
+
+@app.get("/api/images/{image_id}/face-box-suggestions")
+async def api_face_box_suggestions(
+    image_id: int, preview_token: Annotated[str | None, Header(alias=PREVIEW_PROOF_HEADER)] = None,
+):
+    generation = _get_media_library_generation()
+    source = await run_in_threadpool(get_image_preview_source, image_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
+    paths = await _face_preview_paths(image_id)
+    content_hash = source["content_hash"]
+    source_hash = content_hash
+    if preview_token is not None:
+        _, source_hash = _require_face_preview_proof(preview_token, image_id, generation, content_hash)
+    boxes = await run_in_threadpool(get_recorded_face_boxes, image_id)
+    try:
+        items = await _run_source_work(
+            partial(suggest_face_boxes, paths, source_hash, boxes, _import_processor.resources.get_model),
+        )
+    except FaceBoxSuggestionBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc), headers={"Retry-After": "2"}) from exc
+    except FaceBoxSuggestionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FaceBoxSuggestionPhotoUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    current_source = await run_in_threadpool(get_image_preview_source, image_id)
+    current_boxes = await run_in_threadpool(get_recorded_face_boxes, image_id)
+    if not content_hash:
+        current_paths = await _face_preview_paths(image_id)
+    else:
+        current_paths = paths
+    _get_media_library_generation(generation)
+    if current_source is None or current_source["content_hash"] != content_hash or boxes != current_boxes or paths != current_paths:
+        raise HTTPException(status_code=409, detail="Das Bild oder seine Markierungen wurden geändert. Bitte lade es erneut.")
+    return {"items": items}
 
 
 @app.get("/api/faces/{face_id}/image")
