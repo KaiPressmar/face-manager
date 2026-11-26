@@ -553,6 +553,86 @@ async function existingFlow(browser, errors) {
   }
 }
 
+async function mapSelectionAndJourneyFlow(browser, errors) {
+  const page = await newPage(browser, 1440, 1000, errors);
+  const localOrigin = new URL(webBase).origin;
+  try {
+    await page.route('**/*', (route) =>
+      new URL(route.request().url()).origin === localOrigin ? route.continue() : route.abort());
+    await page.goto(`${webBase}/#/weltkarte`);
+    const results = page.locator('#gps-map-results');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+    await page.getByLabel('Ländernamen anzeigen').check();
+    await page.locator('.gps-map__place-label--country').first().waitFor();
+    const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
+    await page.getByLabel('Kartenstil').selectOption('landscape');
+    await reliefLoaded;
+    await page.locator('.gps-map__relief image').waitFor({ state: 'attached' });
+    await page.getByLabel('Ländernamen anzeigen').uncheck();
+    assert.equal(await page.locator('.gps-map__place-label--country').count(), 0);
+    assert.equal(await page.locator('.gps-map__relief image').count(), 1);
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Welt');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
+    await page.getByRole('button', { name: 'Sichtbaren Bereich wählen' }).click();
+    await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+
+    const opener = results.getByRole('button', { name: 'Galerie öffnen' });
+    await opener.click();
+    const grid = page.getByRole('dialog', { name: 'Galerie der Kartenauswahl' });
+    await grid.waitFor();
+    await assertTabTrap(page, grid);
+    const lastTile = grid.locator('[data-gallery-index="35"]');
+    await lastTile.click();
+    const viewer = page.getByRole('dialog', { name: 'Bildansicht' });
+    await viewer.getByText('Foto 36 von 85', { exact: true }).waitFor();
+    await viewer.getByRole('button', { name: 'Nächstes Bild', exact: true }).click();
+    await viewer.getByText('Foto 37 von 85', { exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await grid.waitFor();
+    await page.waitForFunction(() => document.activeElement?.getAttribute('data-gallery-index') === '36');
+    const filtered = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/images' && url.searchParams.get('west') === '-180' && response.ok();
+    });
+    await grid.getByRole('button', { name: 'In Bilder öffnen' }).click();
+    assert.equal((await (await filtered).json()).total, 85);
+    await page.waitForURL('**/#/bilder/auswahl');
+    await page.goBack();
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+
+    const stop = { id: '1', number: 1, section: 1, latitude: 52.52, longitude: 13.405, start: '2024-01-01T12:00:00', end: '2024-01-01T12:00:00', image_ids: [1], uncertain: false };
+    const next = { ...stop, id: '2', number: 2, latitude: 48.85, longitude: 2.35, start: '2024-01-01T17:00:00', end: '2024-01-01T17:00:00', image_ids: [2] };
+    let journeyRequests = 0;
+    await page.route('**/api/map/journey?**', (route) => {
+      journeyRequests += 1;
+      const indexing = journeyRequests === 1;
+      return route.fulfill({ json: {
+        stops: [indexing ? stop : { ...stop, image_ids: [1, 3] }, next],
+        connections: [{ from: stop, to: next }], photo_count: indexing ? 2 : 3,
+        missing_location_count: 0, missing_time_count: 0, uncertain_count: 0, indexing,
+      } });
+    });
+    await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
+    await page.locator('.gps-map__journey-line').first().waitFor();
+    await page.locator('.gps-map__journey-stop').first().press('Enter');
+    await results.getByRole('heading', { name: 'Fotos von Stopp 1' }).waitFor();
+    await results.getByRole('button', { name: /Berlin-000/ }).waitFor();
+    await screenshot(page, 'map-journey');
+    await results.getByRole('button', { name: /Tokio-002/ }).waitFor();
+    const exactSelection = page.waitForResponse((response) => response.url().includes('/api/images/search?') && response.ok());
+    await results.getByRole('button', { name: 'In Bilder öffnen' }).click();
+    const exact = await exactSelection;
+    assert.deepEqual(exact.request().postDataJSON().selection.image_ids, [1, 3]);
+    assert.equal((await exact.json()).total, 2);
+    console.log('PASS map workspace: offline styles, fullscreen cross-page gallery, filter transfer and exact journey stop photos');
+  } finally {
+    await page.close();
+  }
+}
+
 async function pagedLibraryFacesFlow(browser, errors) {
   const page = await newPage(browser, 1024, 650, errors);
   const face = {
@@ -1141,6 +1221,7 @@ async function selectReviewFaces(dialog, proposal, selection) {
     await collectSourcesFlow(browser, errors);
     await localRecoveryFlow(browser, errors);
     await mapFlow(browser, errors);
+    await mapSelectionAndJourneyFlow(browser, errors);
     await pagedLibraryFacesFlow(browser, errors);
     await liveWorkflowFlow(browser, errors);
     await existingFlow(browser, errors);

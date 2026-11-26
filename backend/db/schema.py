@@ -429,7 +429,7 @@ def _merge_duplicate_image_faces(cur, canonical_id, duplicate_id):
 
 def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
     rows = cur.execute(
-        """SELECT id, latitude, longitude, captured_at, metadata_scanned_at,
+        """SELECT id, latitude, longitude, captured_at, captured_at_utc, capture_time_source, metadata_scanned_at,
                   raw_width, raw_height, exif_orientation
            FROM image WHERE id IN (?, ?)""",
         (canonical_id, duplicate_id),
@@ -442,6 +442,11 @@ def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
     ):
         latitude, longitude = duplicate["latitude"], duplicate["longitude"]
     captured_at = canonical["captured_at"] or duplicate["captured_at"]
+    timing = canonical
+    if (captured_at == duplicate["captured_at"] and
+            (canonical["captured_at"] is None or canonical["capture_time_source"] in (None, "unavailable") or
+             canonical["captured_at_utc"] is None and duplicate["captured_at_utc"] is not None)):
+        timing = duplicate
     scanned_at = canonical["metadata_scanned_at"]
     if scanned_at in (None, "missing") and duplicate["metadata_scanned_at"] not in (None, "missing"):
         scanned_at = duplicate["metadata_scanned_at"]
@@ -452,10 +457,12 @@ def _merge_duplicate_image_metadata(cur, canonical_id, duplicate_id):
         if all(value is not None for value in duplicate_geometry):
             geometry = duplicate_geometry
     cur.execute(
-        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?, metadata_scanned_at = ?,
+        """UPDATE image SET latitude = ?, longitude = ?, captured_at = ?, captured_at_utc = ?,
+                            capture_time_source = ?, metadata_scanned_at = ?,
                             raw_width = ?, raw_height = ?, exif_orientation = ?
            WHERE id = ?""",
-        (latitude, longitude, captured_at, scanned_at, *geometry, canonical_id),
+        (latitude, longitude, captured_at, timing["captured_at_utc"], timing["capture_time_source"],
+         scanned_at, *geometry, canonical_id),
     )
 
 
@@ -846,6 +853,8 @@ def _initialize_schema(conn, *, scan_sources: bool):
         ("latitude", "REAL"),
         ("longitude", "REAL"),
         ("captured_at", "TEXT"),
+        ("captured_at_utc", "TEXT"),
+        ("capture_time_source", "TEXT"),
         ("metadata_scanned_at", "TEXT"),
         ("raw_width", "INTEGER"),
         ("raw_height", "INTEGER"),
@@ -885,6 +894,14 @@ def _initialize_schema(conn, *, scan_sources: bool):
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_metadata_pending "
         "ON image(id) WHERE metadata_scanned_at IS NULL"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_timing_pending "
+        "ON image(id) WHERE capture_time_source IS NULL AND latitude IS NOT NULL AND longitude IS NOT NULL"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_capture_date "
+        "ON image(captured_at) WHERE captured_at IS NOT NULL"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_location_image_id "

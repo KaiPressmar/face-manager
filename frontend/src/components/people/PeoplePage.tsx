@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FaceImage, fetchImageDetail, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
+import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import LibraryFilterBar from "../shared/LibraryFilterBar";
 import ImageGrid, {
   type FaceOverlayMode,
@@ -87,9 +88,11 @@ interface PeoplePageProps {
   active: boolean;
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onOpenPeople: () => void;
+  geoSelection?: GeoPhotoSelection;
+  onChangeGeoSelection: (selection?: GeoPhotoSelection) => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople, geoSelection, onChangeGeoSelection }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -116,6 +119,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [groupingMode, setGroupingMode] = useState<ImageGroupingMode>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const latestQueryRef = useRef(0);
+  const lastRequestedGeoSelection = useRef(geoSelection);
   const loadMoreRequestRef = useRef(0);
   const isFetchingFirstPageRef = useRef(true);
   const isMountedRef = useRef(true);
@@ -201,10 +205,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       folders: selectedFolders,
       persons: selectedPersons,
       faceStatuses,
+      geoSelection,
       sortBy: groupingMode,
       sortDirection,
     });
-  }, [faceStatuses, groupingMode, selectedFolders, selectedPersons, sortDirection]);
+  }, [faceStatuses, geoSelection, groupingMode, selectedFolders, selectedPersons, sortDirection]);
 
   const scheduleNextPagePrefetch = async (
     requestId: number,
@@ -218,6 +223,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         folders: selectedFolders,
         persons: selectedPersons,
         faceStatuses,
+        selection: geoSelection,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -256,6 +262,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       folders: selectedFolders,
       persons: selectedPersons,
       faceStatuses,
+      geoSelection,
       sortBy: groupingMode,
       sortDirection,
     });
@@ -267,7 +274,15 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     prefetchPromiseRef.current = null;
     loadMoreRequestRef.current += 1;
     isFetchingFirstPageRef.current = true;
-    setIsLoading(images.length === 0);
+    const selectionChanged = lastRequestedGeoSelection.current !== geoSelection;
+    lastRequestedGeoSelection.current = geoSelection;
+    if (selectionChanged) {
+      setImages([]);
+      setTotalImages(0);
+      setHasMore(false);
+      pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: 0 });
+    }
+    setIsLoading(selectionChanged || images.length === 0);
     setIsLoadingMore(false);
     setLoadError(false);
     setLoadMoreError(false);
@@ -279,6 +294,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           folders: selectedFolders,
           persons: selectedPersons,
           faceStatuses,
+          selection: geoSelection,
           sortBy: groupingMode,
           sortDirection,
           limit,
@@ -318,7 +334,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     return () => {
       isMounted = false;
     };
-  }, [clearGeometryRequests, faceStatuses, galleryRevision, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
+  }, [clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
     const closeGalleryAfterRestore = (update: { reason?: string }) => {
@@ -403,6 +419,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
             folders: selectedFolders,
             persons: selectedPersons,
             faceStatuses,
+            selection: geoSelection,
             sortBy: groupingMode,
             sortDirection,
             limit: Math.min(REFRESH_PAGE_SIZE, count - offset),
@@ -572,7 +589,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, clearGeometryRequests, faceStatuses, galleryRevision, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
     if (!isMountedRef.current || isLoading || isLoadingMore || isFetchingFirstPageRef.current || refreshImagesRequestRef.current || loadError || !hasMore) return;
@@ -618,6 +635,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         folders: selectedFolders,
         persons: selectedPersons,
         faceStatuses,
+        selection: geoSelection,
         sortBy: groupingMode,
         sortDirection,
         limit: PAGE_SIZE,
@@ -635,7 +653,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   };
 
   const hasActiveFilters =
-    selectedPersons.length > 0 ||
+    Boolean(geoSelection) || selectedPersons.length > 0 ||
     selectedFolders.length > 0 ||
     faceStatuses.length > 0;
   // Only the unfiltered total can decide whether setup is still required.
@@ -692,6 +710,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     setSelectedPersons([]);
     setSelectedFolders([]);
     setFaceStatuses([]);
+    if (geoSelection) onChangeGeoSelection();
   };
 
   if (libraryIsEmpty) {
@@ -806,6 +825,32 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           <option value="none">Keine Markierungen</option>
         </select>
       </LibraryFilterBar>
+
+      {geoSelection && (
+        <div className="active-folder-filters" aria-label="Auswahl aus der Fotokarte">
+          <span>Auswahl aus der Fotokarte</span>
+          {geoSelection.bounds && (
+            <button type="button" aria-label="Kartenausschnitt entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, bounds: undefined })}>
+              Kartenausschnitt <b aria-hidden="true">×</b>
+            </button>
+          )}
+          {(geoSelection.from_date || geoSelection.to_date) && (
+            <button type="button" aria-label="Aufnahmezeitraum entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, from_date: undefined, to_date: undefined })}>
+              {[geoSelection.from_date, geoSelection.to_date]
+                .map((date) => date ? new Date(`${date}T12:00:00`).toLocaleDateString("de-DE") : "offen")
+                .join(" – ")} <b aria-hidden="true">×</b>
+            </button>
+          )}
+          {geoSelection.image_ids && (
+            <button type="button" aria-label="Reisestopp entfernen"
+              onClick={() => onChangeGeoSelection({ ...geoSelection, image_ids: undefined })}>
+              Reisestopp <b aria-hidden="true">×</b>
+            </button>
+          )}
+        </div>
+      )}
 
       {selectedFolders.length > 0 && (
         <div className="active-folder-filters">

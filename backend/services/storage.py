@@ -36,6 +36,7 @@ from ..models.clustering import (
 )
 from .cache import app_cache
 from .filesystem_paths import filesystem_path
+from .geo_query import GeoPhotoSelection, photo_selection_sql
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.storage")
@@ -1727,13 +1728,14 @@ def normalize_face_status_filters(face_statuses):
     return sorted({str(status) for status in face_statuses} & allowed)
 
 
-def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_photos=False):
+def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_photos=False, selection=None):
     """Build the common CTE used for image pagination queries."""
     folders = folders or []
     persons = _normalize_person_filters(persons)
     face_statuses = normalize_face_status_filters(face_statuses)
     conditions, params = _descendant_filter(folders)
     location_where = f"WHERE {' OR '.join(conditions)}" if conditions else ""
+    selection_sql, selection_params = photo_selection_sql(selection) if selection is not None else ("1 = 1", [])
 
     face_clause = ""
     face_params = []
@@ -1805,13 +1807,13 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_
         FROM image i
         JOIN ranked_locations location
             ON location.image_id = i.id AND location.location_rank = 1
-        WHERE 1 = 1
+        WHERE {selection_sql}
         {face_clause}
         {person_clause}
         {status_clause}
     )
     """
-    return sql, [*params, *face_params, *person_params, *status_params]
+    return sql, [*params, *selection_params, *face_params, *person_params, *status_params]
 
 
 def _image_order_by(prefix: str, sort_by: str, sort_direction: str):
@@ -1821,13 +1823,13 @@ def _image_order_by(prefix: str, sort_by: str, sort_direction: str):
         return (
             f"{prefix}directory COLLATE NOCASE {direction}, "
             f"{prefix}filename COLLATE NOCASE ASC, "
-            f"{prefix}image_path COLLATE NOCASE ASC"
+            f"{prefix}image_path COLLATE NOCASE ASC, {prefix}image_id ASC"
         )
     return (
         f"{prefix}created_at IS NULL ASC, "
         f"{prefix}created_at {direction}, "
         f"{prefix}filename COLLATE NOCASE ASC, "
-        f"{prefix}image_path COLLATE NOCASE ASC"
+        f"{prefix}image_path COLLATE NOCASE ASC, {prefix}image_id ASC"
     )
 
 
@@ -1876,6 +1878,7 @@ def list_images_page(
     face_statuses=None,
     *,
     all_photos: bool = False,
+    selection: GeoPhotoSelection | None = None,
 ):
     """List one page of images with clustered faces and preferred locations."""
     folders = folders or []
@@ -1904,12 +1907,14 @@ def list_images_page(
     def load_page():
         cte, params = _matching_images_cte(
             folders=folders, persons=persons, face_statuses=face_statuses, all_photos=all_photos,
+            selection=selection,
         )
         matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
         paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
         visible_placeholders = ",".join("?" for _ in visible_statuses)
 
         conn = get_conn()
+        conn.execute("BEGIN")
         total = conn.execute(
             f"""
             {cte}
@@ -1961,6 +1966,9 @@ def list_images_page(
         conn.close()
         return rows, total
 
+    # Metadata backfill can change a geographic selection between requests.
+    if selection is not None:
+        return load_page()
     return app_cache.get_or_set(
         cache_key,
         load_page,

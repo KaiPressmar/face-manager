@@ -26,7 +26,7 @@ from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
 from .image_thumbnails import write_image_thumbnail
 from .preview_cache import get_image_geometry
 from .shared_sync_transport import TransportError
-from .geo import extract_image_metadata, record_image_metadata
+from .geo import CaptureMetadata, extract_image_metadata, record_image_metadata
 from .filesystem_paths import (
     filesystem_path as _filesystem_path,
     is_confirmed_missing,
@@ -152,7 +152,7 @@ class HashedImage:
     file_size: int
     modified_at_ns: int
     identity: tuple[int, int, int, int, int]
-    metadata: tuple[float | None, float | None, str | None]
+    metadata: CaptureMetadata | tuple[float | None, float | None, str | None]
     geometry: tuple[int, int, int] | None = None
 
     def verify_current(self) -> None:
@@ -197,7 +197,7 @@ class ImagePreparer:
             while chunk := source.read(HASH_CHUNK_SIZE):
                 digest.update(chunk)
             source.seek(0)
-            metadata = extract_image_metadata(source)
+            metadata = extract_image_metadata(source, include_timing=True)
             if _file_identity(os.fstat(source.fileno())) != identity:
                 raise SourceChangedError("Die Datei wurde während des Imports geändert.")
         result = HashedImage(

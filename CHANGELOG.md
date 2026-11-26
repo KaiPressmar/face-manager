@@ -9,6 +9,10 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Der Standortverlauf ordnet Fotos nach Aufnahmezeit und zeigt Stopps und Ortswechsel auf der Karte.
+- Die Fotokarte bietet eine Landschaftsansicht und einblendbare Ländernamen.
+- Kartenauswahlen lassen sich als große Galerie öffnen oder zum Filtern in die Bilderbibliothek übernehmen.
+
 ### Verbessert
 
 - Der Import zeigt getrennt an, wie viele Bilder unlesbar oder nicht erreichbar waren.

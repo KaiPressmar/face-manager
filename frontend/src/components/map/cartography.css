@@ -1,0 +1,126 @@
+.gps-map__svg {
+  --map-lake: #244659;
+  --map-river: #718ea0;
+  --map-label: #e0e8d9;
+  --map-city-label: #e6eff2;
+  --map-label-outline: #192e36;
+  isolation: isolate;
+}
+
+.gps-map__svg--landscape {
+  --map-lake: #426a79;
+  --map-river: #759cac;
+  --map-label: #f2ead8;
+  --map-city-label: #f1f1dd;
+  --map-label-outline: #22372f;
+}
+
+.gps-map__svg--landscape .gps-map__sea {
+  fill: #254454;
+}
+
+.gps-map__svg--landscape .gps-map__land {
+  fill: #718571;
+  stroke: #aeb6a0;
+}
+
+.gps-map__svg--landscape .gps-map__border {
+  stroke: #f0e4cd;
+  stroke-opacity: .57;
+}
+
+.gps-map__labels,
+.gps-map__relief,
+.gps-map__water,
+.gps-map__journey-route {
+  pointer-events: none;
+}
+
+.gps-map__relief image {
+  mix-blend-mode: multiply;
+  opacity: .68;
+}
+
+.gps-map__lake {
+  fill: var(--map-lake);
+}
+
+.gps-map__river {
+  fill: none;
+  stroke: var(--map-river);
+  stroke-opacity: .63;
+  stroke-width: .8;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.gps-map__place-label text {
+  fill: var(--map-label);
+  stroke: var(--map-label-outline);
+  stroke-width: 2.3;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: .15px;
+}
+
+.gps-map__place-label--city text,
+.gps-map__place-label--city circle {
+  fill: var(--map-city-label);
+}
+
+.gps-map__place-label--city text {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.gps-map__journey-line,
+.gps-map__journey-line-outline {
+  stroke-linecap: round;
+  stroke-dasharray: 5 6;
+  vector-effect: non-scaling-stroke;
+}
+
+.gps-map__journey-line-outline {
+  stroke: #3b2b27;
+  stroke-opacity: .7;
+  stroke-width: 4;
+}
+
+.gps-map__journey-line {
+  stroke: #ffd895;
+  stroke-width: 2;
+}
+
+.gps-map__journey-direction {
+  fill: none;
+  stroke: #fff2d5;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.gps-map__journey-stop-halo {
+  fill: #ffd895;
+  opacity: .25;
+}
+
+.gps-map__journey-stop-core {
+  fill: #ffd895;
+  stroke: #fff4dc;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+
+.gps-map__journey-stop:hover .gps-map__journey-stop-core,
+.gps-map__journey-stop:focus-visible .gps-map__journey-stop-core,
+.gps-map__journey-stop[aria-pressed="true"] .gps-map__journey-stop-core {
+  fill: #fff4dc;
+  stroke-width: 2.6;
+}
+
+.gps-map__marker.gps-map__journey-stop text {
+  fill: #51331a;
+}

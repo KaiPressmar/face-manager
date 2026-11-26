@@ -21,6 +21,15 @@ test('review and settings deep links preserve their targets', () => {
   ]) assert.deepEqual(parseNavigationHash(navigationHash(target)), target);
 });
 
+test('image selection survives browser history without putting photo IDs in the URL', () => {
+  const entry = { page: 'people', geoSelection: { image_ids: [2, 100], from_date: '2025-06-01' }, geoSelectionEpoch: 3 };
+  const hash = navigationHash(entry);
+  assert.equal(hash, '#/bilder/auswahl');
+  assert.deepEqual(parseNavigationHash(hash, entry), entry);
+  assert.deepEqual(parseNavigationHash(hash), { page: 'people' });
+  assert.deepEqual(parseNavigationHash('#/bilder', entry), { page: 'people' });
+});
+
 test('malformed group IDs never silently navigate to another group', () => {
   for (const id of ['1oops', '1.5', '-1', '0', 'Infinity', '9007199254740992', '1e2', '']) {
     assert.deepEqual(parseNavigationHash(`#/gesichter-pruefen/gruppe/${id}`), { page: 'review' });
