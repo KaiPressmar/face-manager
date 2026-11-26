@@ -112,7 +112,10 @@ def build_journey(observations: list[Observation]) -> dict:
         })
         if (previous_anchor and not previous_uncertain and not stop_uncertain and duration
                 and timedelta(0) < duration <= JOURNEY_GAP and first.location() != previous_anchor.location()):
-            connections.append({"from": previous_anchor.location(), "to": first.location()})
+            connections.append({
+                "from": previous_anchor.location(), "to": first.location(),
+                "from_stop_id": str(previous_anchor.image_id), "to_stop_id": str(first.image_id),
+            })
         previous, previous_anchor, previous_uncertain = last, first, stop_uncertain
     return {
         "stops": stops,

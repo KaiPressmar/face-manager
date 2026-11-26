@@ -1,0 +1,565 @@
+import type { JourneyConnection, MapBounds, MapStyle } from "./WorldMap";
+import countries from "./world-countries.json";
+import overviewWater from "./world-water-overview.json";
+
+interface AlbumPosition {
+  latitude: number;
+  longitude: number;
+}
+
+interface AlbumPoint extends AlbumPosition {
+  count?: number;
+}
+
+export interface MapAlbumStop extends AlbumPosition {
+  id: string;
+  number: number;
+  title: string;
+  subtitle?: string;
+  arrivalMode?: AlbumTransport;
+}
+
+export const albumTransports = {
+  car: { label: "Auto", path: "M3 16v-4l2-2 2-5h10l2 5 2 2v4M3 12h18M5 16v3m14-3v3M8 15h.01m8 0h.01M3 16h18" },
+  train: { label: "Zug", path: "M8 19l-3 3m11-3 3 3M6 5c0-3 12-3 12 0v11c0 4-12 4-12 0ZM6 11h12M9 15h.01m6 0h.01" },
+  plane: { label: "Flugzeug", path: "M12 3v18M3 14l9-5 9 5M8 21l4-2 4 2" },
+  walk: { label: "Zu Fuß", path: "M13 4a1 1 0 1 0 0-2 1 1 0 0 0 0 2ZM5 12l4-3 3-2 3 4 4 1M12 7l-2 7 4 3 2 5m-6-8-2 4-4 3" },
+  bike: { label: "Fahrrad", path: "M8 17a3 3 0 1 0-6 0 3 3 0 0 0 6 0Zm14 0a3 3 0 1 0-6 0 3 3 0 0 0 6 0ZM5 17l4-9 5 9H5m9 0 3-11h3M7 8h5" },
+  boat: { label: "Schiff", path: "M4 15l8-3 8 3-2 4H6l-2-4Zm3-1V8h10v6m-5-6V4M3 22h18" },
+} as const;
+export type AlbumTransport = keyof typeof albumTransports;
+type AlbumConnection = JourneyConnection & { transport?: AlbumTransport };
+
+export const albumAccents = {
+  automatic: { name: "Automatisch", color: "" },
+  rust: { name: "Terrakotta", color: "#94402e" },
+  ocean: { name: "Ozeanblau", color: "#205b79" },
+  pine: { name: "Tannengrün", color: "#305a39" },
+  plum: { name: "Pflaume", color: "#713f69" },
+} as const;
+export type AlbumAccent = keyof typeof albumAccents;
+
+export interface MapAlbumArtworkInput {
+  format: "a4" | "portrait" | "square";
+  title: string;
+  subtitle?: string;
+  period?: string;
+  style: MapStyle;
+  palette?: "sand" | "coast";
+  accent?: AlbumAccent;
+  wideFrame?: boolean;
+  showCountryNames?: boolean;
+  showStopsList?: boolean;
+  bounds: MapBounds;
+  points?: readonly AlbumPoint[];
+  stops?: readonly MapAlbumStop[];
+  connections?: readonly AlbumConnection[];
+  fitJourney?: boolean;
+}
+
+export interface MapAlbumPage {
+  svg: string;
+  height: number;
+  width: number;
+  number: number;
+  total: number;
+}
+
+interface Pixel {
+  x: number;
+  y: number;
+}
+
+interface Frame extends Pixel {
+  width: number;
+  height: number;
+}
+
+const palettes = {
+  sand: { paper: "#f8f3e8", ink: "#253b35", muted: "#4b6259", rule: "#b7c1aa", routeInk: "#945035", mapInk: "#2b535a",
+    sea: "#d8e8e6", land: "#cee0c9", reliefLand: "#d1d7b9", lake: "#adcdd0", river: "#77a5a9", shore: "#9eb29d", border: "#7d8e7d", labelHalo: "#edf1da" },
+  coast: { paper: "#f0f5f6", ink: "#223b45", muted: "#405e69", rule: "#b1c4cb", routeInk: "#8d4939", mapInk: "#244f66",
+    sea: "#d0e5ee", land: "#e3e9d9", reliefLand: "#d7e4cf", lake: "#a9c9d6", river: "#729fae", shore: "#96aea9", border: "#718d88", labelHalo: "#edf4ec" },
+} as const;
+type Palette = Record<keyof typeof palettes.sand, string>;
+const serif = "Georgia, 'Times New Roman', serif";
+const sans = "Arial, Helvetica, sans-serif";
+const zoomInset = 0.12;
+const atlasWidth = 1000;
+const atlasHeight = 500;
+const printerPixelsPerMeter = 11811;
+const layouts = {
+  a4: { width: 3508, height: 2480, margin: 156, mapHeight: 1370, firstStops: 4, continuedStops: 16 },
+  portrait: { width: 2480, height: 3508, margin: 145, mapHeight: 1500, firstStops: 14, continuedStops: 26 },
+  square: { width: 3000, height: 3000, margin: 150, mapHeight: 1510, firstStops: 8, continuedStops: 20 },
+} as const;
+type Layout = (typeof layouts)[keyof typeof layouts];
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+const turn = (longitude: number) => ((longitude % 360) + 360) % 360;
+const atlasX = (longitude: number) => (longitude + 180) / 360 * atlasWidth;
+const atlasY = (latitude: number) => (90 - latitude) / 180 * atlasHeight;
+const nearLongitude = (longitude: number, center: number) => longitude + 360 * Math.round((center - longitude) / 360);
+const direction = (from: number, to: number) => {
+  const difference = to - from;
+  return Math.abs(difference) > 180 ? difference - Math.sign(difference) * 360 : difference;
+};
+
+const number = (value: number) => Number(value.toFixed(2));
+const xml = (value: string) => value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/gu, "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+
+/** Return the smallest longitude arc containing all stops and observed connections. */
+export function fitAlbumJourney(stops: readonly AlbumPosition[], connections: readonly JourneyConnection[]): MapBounds {
+  const spans = stops.map(({ longitude }) => {
+    const start = turn(longitude + 180);
+    return { start, end: start };
+  });
+  for (const { from, to } of connections) {
+    const start = turn(from.longitude + 180);
+    const end = start + direction(from.longitude, to.longitude);
+    const low = Math.min(start, end), high = Math.max(start, end);
+    if (low < 0) spans.push({ start: low + 360, end: 360 }, { start: 0, end: high });
+    else if (high > 360) spans.push({ start: low, end: 360 }, { start: 0, end: high - 360 });
+    else spans.push({ start: low, end: high });
+  }
+  if (spans.length === 0) return { west: -180, east: 180, south: -90, north: 90 };
+
+  const merged: typeof spans = [];
+  for (const span of spans.sort((a, b) => a.start - b.start)) {
+    const previous = merged[merged.length - 1];
+    if (previous && previous.end >= span.start) previous.end = Math.max(previous.end, span.end);
+    else merged.push(span);
+  }
+  let gap = -1;
+  let west = 0;
+  merged.forEach((span, index) => {
+    const next = index === merged.length - 1 ? merged[0].start + 360 : merged[index + 1].start;
+    if (next - span.end > gap) {
+      west = turn(next) - 180;
+      gap = next - span.end;
+    }
+  });
+  let south = 90;
+  let north = -90;
+  const measure = ({ latitude }: AlbumPosition) => {
+    south = Math.min(south, latitude);
+    north = Math.max(north, latitude);
+  };
+  stops.forEach(measure);
+  connections.forEach(({ from, to }) => { measure(from); measure(to); });
+  const longitudeSpan = 360 - gap;
+  const latitudeSpan = north - south;
+  const longitudePadding = Math.max(1, longitudeSpan * zoomInset);
+  const latitudePadding = Math.max(1, latitudeSpan * zoomInset);
+  return longitudeSpan + longitudePadding * 2 >= 360
+    ? { west: -180, east: 180, south: Math.max(-90, south - latitudePadding), north: Math.min(90, north + latitudePadding) }
+    : { west: west - longitudePadding, east: west + longitudeSpan + longitudePadding,
+        south: Math.max(-90, south - latitudePadding), north: Math.min(90, north + latitudePadding) };
+}
+
+function fitFrame(bounds: MapBounds, frame: Frame): MapBounds {
+  const originalWidth = Math.max(bounds.east - bounds.west, .01);
+  const originalHeight = Math.max(bounds.north - bounds.south, .01);
+  const aspect = frame.width / frame.height;
+  const width = Math.min(360, Math.max(originalWidth, originalHeight * aspect));
+  const height = Math.min(180, Math.max(originalHeight, originalWidth / aspect));
+  const longitude = (bounds.east + bounds.west) / 2;
+  const latitude = clamp((bounds.north + bounds.south) / 2, -90 + height / 2, 90 - height / 2);
+  if (width === 360) return { west: -180, east: 180, south: latitude - height / 2, north: latitude + height / 2 };
+  let west = longitude - width / 2;
+  // Keep ordinary map views at their original edge. Journey windows can wrap.
+  if (bounds.west >= -180 && bounds.east <= 180) west = clamp(west, -180, 180 - width);
+  return { west, east: west + width, south: latitude - height / 2, north: latitude + height / 2 };
+}
+
+function mapPixel(bounds: MapBounds, frame: Frame, longitude: number, latitude: number): Pixel {
+  return {
+    x: frame.x + (longitude - bounds.west) / (bounds.east - bounds.west) * frame.width,
+    y: frame.y + (bounds.north - latitude) / (bounds.north - bounds.south) * frame.height,
+  };
+}
+
+function inside(point: Pixel, frame: Frame, margin = 0) {
+  return point.x >= frame.x + margin && point.x <= frame.x + frame.width - margin &&
+    point.y >= frame.y + margin && point.y <= frame.y + frame.height - margin;
+}
+
+function textWidth(value: string, size: number) {
+  return Array.from(value).reduce((width, char) => width + (
+    /[ilI.,' :]/u.test(char) ? .3 : /[MW@&m]/u.test(char) ? .82 : .61
+  ), 0) * size;
+}
+
+function text(x: number, y: number, value: string, attrs: string) {
+  return `<text x="${number(x)}" y="${number(y)}" ${attrs}>${xml(value)}</text>`;
+}
+
+function titleLines(title: string, width: number) {
+  const words = title.trim().split(/\s+/);
+  const longTitle = textWidth(title, 145) > width;
+  if (!longTitle) return { lines: [title], size: 145 };
+  const characters = Array.from(title);
+  const midpoint = Math.ceil(characters.length / 2);
+  const balanced = words.slice(1).map((_, index) => [
+    words.slice(0, index + 1).join(" "), words.slice(index + 1).join(" "),
+  ]).reduce<string[] | null>((best, lines) => {
+    const widest = (parts: string[]) => Math.max(...parts.map((line) => textWidth(line, 1)));
+    return !best || widest(lines) < widest(best) ? lines : best;
+  }, null) ?? [characters.slice(0, midpoint).join(""), characters.slice(midpoint).join("")];
+  const size = Math.floor(Math.min(117, ...balanced.map((line) => width * .98 / Math.max(1, textWidth(line, 1)))));
+  return { lines: balanced, size };
+}
+
+function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted, rule }: Palette) {
+  const { height, width, margin } = layout;
+  const title = input.title.trim() || "Meine Fotokarte";
+  const { lines, size } = titleLines(title, width - 2 * margin);
+  const titleTop = 124;
+  let lastBaseline = titleTop + size * (1 + (lines.length - 1) * .99);
+  const captions = [input.subtitle, input.period].flatMap((value) => {
+    const caption = value?.trim();
+    if (!caption) return [];
+    const captionSize = Math.min(44, (width - margin * 2 - 8) / Math.max(1, textWidth(caption, 1)));
+    lastBaseline += Math.max(57, captionSize + 17);
+    return [text(margin + 3, lastBaseline, caption, `fill="${muted}" font-family="${sans}" font-size="${number(captionSize)}"`)];
+  });
+  const divider = number(lastBaseline + 40);
+  return {
+    mapTop: divider + 45,
+    svg: `<rect width="${width}" height="${height}" fill="${paper}"/>
+      ${lines.map((line, index) => text(margin, titleTop + size * (1 + index * .99), line,
+        `fill="${ink}" font-family="${serif}" font-size="${size}" font-weight="600"`)).join("")}
+      ${captions.join("")}
+      <line x1="${margin}" x2="${width - margin}" y1="${divider}" y2="${divider}" stroke="${rule}" stroke-width="2"/>`,
+  };
+}
+
+function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number, bottom: number, continued: boolean,
+  transportOnly: boolean, { ink, muted, rule, routeInk }: Palette) {
+  if (!stops.length) return "";
+  const { margin, width } = layout;
+  const heading = transportOnly ? "Verkehrsmittel nach Zielstopp" : continued ? "Weitere Stationen" : "Stationen";
+  const columnWidth = (width - margin * 2 - 68) / 2;
+  const rowHeight = Math.min(161, (bottom - top - 87) / Math.ceil(stops.length / 2));
+  return text(margin, top + 47, heading, `fill="${ink}" font-family="${serif}" font-size="58"`) +
+    stops.map((stop, index) => {
+      const col = index % 2;
+      const x = margin + col * (columnWidth + 68);
+      const y = top + 81 + Math.floor(index / 2) * rowHeight;
+      const label = stop.title.trim() || `Stopp ${stop.number}`;
+      const titleSize = Math.min(48, (columnWidth - 105) / Math.max(1, textWidth(label, 1)));
+      const arrival = stop.arrivalMode ? `Anreise: ${albumTransports[stop.arrivalMode].label}` : "";
+      const subtitle = [transportOnly ? "" : stop.subtitle, arrival].filter(Boolean).join(" · ");
+      const subSize = Math.min(33, (columnWidth - 105) / Math.max(1, textWidth(subtitle, 1)));
+      return `<g data-album-stop="${xml(stop.id)}">
+        <line x1="${number(x)}" x2="${number(x + columnWidth)}" y1="${number(y)}" y2="${number(y)}" stroke="${rule}" stroke-width="2"/>
+        ${text(x + 1, y + 52, String(stop.number), `fill="${routeInk}" font-family="${serif}" font-size="48" font-weight="600"`)}
+        ${text(x + 90, y + 49, label, `fill="${ink}" font-family="${sans}" font-size="${number(titleSize)}" font-weight="600"`)}
+        ${subtitle ? text(x + 90, y + 90, subtitle, `fill="${muted}" font-family="${sans}" font-size="${number(subSize)}"`) : ""}
+      </g>`;
+    }).join("");
+}
+
+function frameShape(frame: Frame, attrs: string) {
+  return `<rect x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}" rx="32" ${attrs}/>`;
+}
+
+type Detail = typeof import("./world-detail.json");
+
+function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, relief: string, palette: Palette) {
+  const scale = 360 / (bounds.east - bounds.west);
+  const landscape = style === "landscape";
+  const reliefOpacity = number(.57 * Math.min(1, Math.sqrt(6 / scale)));
+  const waters = [
+    ...overviewWater.rivers, ...detail.rivers,
+  ].filter(({ minZoom }) => minZoom <= scale * 1.7).map(({ path }) =>
+    `<path d="${path}" fill="none" stroke="${palette.river}" stroke-opacity=".68" stroke-width="2" vector-effect="non-scaling-stroke"/>`).join("");
+  const lakes = [
+    ...overviewWater.lakes, ...detail.lakes,
+  ].filter(({ minZoom }) => minZoom <= scale * 1.7).map(({ path }) =>
+    `<path d="${path}" fill="${palette.lake}" fill-rule="evenodd"/>`).join("");
+  const tile = `<g id="album-atlas">
+    <use href="#album-land" fill="${landscape ? palette.reliefLand : palette.land}" stroke="${palette.shore}" stroke-width="2.4"/>
+    ${relief ? `<image href="${relief}" width="1000" height="500" preserveAspectRatio="none" clip-path="url(#album-land-clip)" opacity="${reliefOpacity}" style="mix-blend-mode:multiply"/>` : ""}
+    ${waters}${lakes}
+    <path d="${detail.borders.international}" fill="none" stroke="${palette.border}" stroke-opacity=".75" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <path d="${detail.borders.other}" fill="none" stroke="${palette.border}" stroke-opacity=".58" stroke-width="1.7" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>
+  </g>`;
+  const minTile = Math.floor((bounds.west + 180) / 360);
+  const maxTile = Math.ceil((bounds.east + 180) / 360) - 1;
+  const tiles = Array.from({ length: maxTile - minTile + 1 }, (_, i) =>
+    `<use href="#album-atlas" x="${(minTile + i) * atlasWidth}"/>`).join("");
+  return `${frameShape(frame, `fill="${palette.sea}"`)}
+    <svg x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}"
+      viewBox="${atlasX(bounds.west)} ${atlasY(bounds.north)} ${atlasX(bounds.east) - atlasX(bounds.west)} ${atlasY(bounds.south) - atlasY(bounds.north)}" preserveAspectRatio="none">
+      <defs>
+        <path id="album-land" d="${detail.land}" fill-rule="evenodd" clip-rule="evenodd" vector-effect="non-scaling-stroke"/>
+        <clipPath id="album-land-clip"><use href="#album-land"/></clipPath>
+        ${tile}
+      </defs>
+      ${tiles}
+    </svg>`;
+}
+
+function clipLine(start: Pixel, end: Pixel, frame: Frame): [Pixel, Pixel] | null {
+  const dx = end.x - start.x, dy = end.y - start.y;
+  let from = 0, to = 1;
+  for (const [delta, min, max] of [
+    [dx, frame.x - start.x, frame.x + frame.width - start.x],
+    [dy, frame.y - start.y, frame.y + frame.height - start.y],
+  ]) {
+    if (delta === 0) {
+      if (min > 0 || max < 0) return null;
+      continue;
+    }
+    from = Math.max(from, Math.min(min / delta, max / delta));
+    to = Math.min(to, Math.max(min / delta, max / delta));
+    if (from >= to) return null;
+  }
+  const at = (position: number) => ({ x: start.x + dx * position, y: start.y + dy * position });
+  return [at(from), at(to)];
+}
+
+function transportIcon(mode: AlbumTransport, x: number, y: number, color: string, size: number) {
+  return `<path d="${albumTransports[mode].path}" transform="translate(${number(x - size / 2)} ${number(y - size / 2)}) scale(${size / 24})"
+    fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds, frame: Frame, { routeInk, paper }: Palette) {
+  const center = (bounds.west + bounds.east) / 2;
+  const badges: string[] = [];
+  const used: Pixel[] = [];
+  const lines = connections.flatMap(({ from, to, transport }) => {
+    const base = nearLongitude(from.longitude, center);
+    const finish = base + direction(from.longitude, to.longitude);
+    const segments = [-360, 0, 360].flatMap((shift) => {
+      const start = mapPixel(bounds, frame, base + shift, from.latitude);
+      const end = mapPixel(bounds, frame, finish + shift, to.latitude);
+      const clipped = clipLine(start, end, frame);
+      if (!clipped) return [];
+      const [a, b] = clipped;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const length = Math.hypot(dx, dy);
+      const angle = number(Math.atan2(dy, dx) * 180 / Math.PI);
+      const x = number(a.x + dx * .62), y = number(a.y + dy * .62);
+      const line = `<line x1="${number(a.x)}" y1="${number(a.y)}" x2="${number(b.x)}" y2="${number(b.y)}"`;
+      return [{ a, dx, dy, length, svg: `${line} stroke="${paper}" stroke-width="16" stroke-linecap="round"/>
+        ${line} data-album-connection="true"
+        stroke="${routeInk}" stroke-width="10" stroke-dasharray="17 19" stroke-linecap="round"/>
+        ${length > 132 ? `<path d="M-13 -12 L4 0 L-13 12" fill="none" stroke="${routeInk}" stroke-width="9"
+          stroke-linecap="round" stroke-linejoin="round" transform="translate(${x} ${y}) rotate(${angle})"/>` : ""}` }];
+    });
+    if (transport) {
+      const candidates = [...segments].sort((a, b) => b.length - a.length)
+        .filter(({ length }) => length > 110)
+        .flatMap(({ a, dx, dy }) => [.37, .52, .72].map((fraction) => ({
+          x: number(a.x + dx * fraction), y: number(a.y + dy * fraction),
+        })));
+      const position = candidates.find((point) => inside(point, frame, 32) &&
+        used.every((other) => Math.hypot(point.x - other.x, point.y - other.y) > 70));
+      if (position) {
+        used.push(position);
+        badges.push(`<g data-album-transport="${transport}"><circle cx="${position.x}" cy="${position.y}" r="29"
+          fill="${paper}" stroke="${routeInk}" stroke-width="4"/>${transportIcon(transport, position.x, position.y, routeInk, 37)}</g>`);
+      }
+    }
+    return segments.map(({ svg }) => svg);
+  });
+  return lines.join("") + badges.join("");
+}
+
+const markerOffsets: Pixel[] = [{ x: 0, y: 0 }, ...[1, 1.7, 2.4, 3.2, 4.1].flatMap((radius) =>
+  Array.from({ length: 8 }, (_, index) => ({
+    x: radius * Math.cos(index * Math.PI / 4),
+    y: radius * Math.sin(index * Math.PI / 4),
+  })))];
+
+function albumMarkers(input: MapAlbumArtworkInput, bounds: MapBounds, frame: Frame, { mapInk, paper, routeInk }: Palette) {
+  const stops = input.stops ?? [];
+  const points = stops.length ? stops.map((stop) => ({ ...stop, label: String(stop.number) }))
+    : (input.points ?? []).map((point, index) => ({ ...point, label: String(point.count ?? index + 1) }));
+  const radius = points.length > 100 ? 30 : 41;
+  const placed: Pixel[] = [];
+  const center = (bounds.west + bounds.east) / 2;
+  const svg = points.map((point) => {
+    const origin = mapPixel(bounds, frame, nearLongitude(point.longitude, center), point.latitude);
+    if (!inside(origin, frame)) return "";
+    const candidate = markerOffsets.map((offset) => ({
+      x: origin.x + offset.x * radius * 2.22,
+      y: origin.y + offset.y * radius * 2.22,
+    })).find((position) => inside(position, frame, radius + 10) &&
+      placed.every((other) => Math.hypot(position.x - other.x, position.y - other.y) >= radius * 2.18)) ??
+      { x: clamp(origin.x, frame.x + radius + 10, frame.x + frame.width - radius - 10),
+        y: clamp(origin.y, frame.y + radius + 10, frame.y + frame.height - radius - 10) };
+    placed.push(candidate);
+    const { x, y } = candidate;
+    const color = stops.length ? routeInk : mapInk;
+    const fontSize = Math.min(radius, radius * 2.55 / point.label.length);
+    return `<g data-album-marker="${xml(point.label)}">
+      ${x !== origin.x || y !== origin.y ? `<line x1="${number(origin.x)}" y1="${number(origin.y)}" x2="${number(x)}" y2="${number(y)}" stroke="${color}" stroke-width="4"/>` : ""}
+      <circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="${paper}" stroke="${color}" stroke-width="6"/>
+      ${text(x, y + fontSize * .34, point.label, `fill="${color}" text-anchor="middle" font-family="${sans}" font-weight="700" font-size="${number(fontSize)}"`)}
+    </g>`;
+  }).join("");
+  return { svg, positions: placed.map((position) => ({ ...position, radius })) };
+}
+
+function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel & { radius: number })[], { ink, labelHalo }: Palette) {
+  const center = (bounds.west + bounds.east) / 2;
+  const zoom = 360 / (bounds.east - bounds.west);
+  const used = markers.map(({ x, y, radius }) => ({ left: x - radius - 12, right: x + radius + 12,
+    top: y - radius - 12, bottom: y + radius + 12 }));
+  return [...countries].sort((left, right) => right.priority - left.priority).map((country) => {
+    if (country.minZoom > zoom * 1.35) return "";
+    const { x, y } = mapPixel(bounds, frame, nearLongitude(country.longitude, center), country.latitude);
+    const halfWidth = textWidth(country.label, 35) / 2 + 11;
+    const box = { left: x - halfWidth, right: x + halfWidth, top: y - 22, bottom: y + 22 };
+    if (!inside({ x: box.left, y: box.top }, frame, 11) || !inside({ x: box.right, y: box.bottom }, frame, 11)) return "";
+    if (used.some((area) => box.left < area.right && box.right > area.left && box.top < area.bottom && box.bottom > area.top)) return "";
+    used.push(box);
+    return text(x, y + 11, country.label, `fill="${ink}" paint-order="stroke" stroke="${labelHalo}" stroke-width="6"
+      stroke-linejoin="round" text-anchor="middle" font-family="${sans}" font-weight="600" font-size="35"`);
+  }).join("");
+}
+
+async function readRelief() {
+  const response = await fetch(new URL("map/world-relief.webp", document.baseURI));
+  if (!response.ok) throw new Error("Das Geländerelief konnte nicht geladen werden.");
+  const data = await response.blob();
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Das Geländerelief konnte nicht gelesen werden."));
+    reader.readAsDataURL(data);
+  });
+}
+
+export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise<MapAlbumPage[]> {
+  const layout = layouts[input.format];
+  const basePalette = palettes[input.palette ?? "sand"];
+  const accent = albumAccents[input.accent ?? "automatic"].color;
+  const palette = { ...basePalette, routeInk: accent || basePalette.routeInk, mapInk: accent || basePalette.mapInk };
+  const { width, height, margin, mapHeight, firstStops, continuedStops } = layout;
+  const stops = input.stops ?? [];
+  const transportOnly = input.showStopsList === false;
+  const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode) : stops;
+  const connections = input.connections ?? [];
+  const [{ default: detail }, relief] = await Promise.all([
+    import("./world-detail.json"),
+    input.style === "landscape" ? readRelief() : Promise.resolve(""),
+  ]);
+  const head = header(input, layout, palette);
+  const availableHeight = height - head.mapTop - 245;
+  const frameWidth = width - 2 * margin;
+  const coverRows = Math.ceil(Math.min(listedStops.length, firstStops) / 2);
+  const frameHeight = coverRows
+    ? Math.max(mapHeight, Math.min(frameWidth * 1.05, availableHeight - 72 - coverRows * 142))
+    : Math.min(availableHeight, frameWidth * .78);
+  const frameArea = { x: margin, y: number(head.mapTop + (listedStops.length ? 0 : (availableHeight - frameHeight) * .38)),
+    width: frameWidth, height: number(frameHeight) };
+  const rawSubject = input.fitJourney && (stops.length || connections.length)
+    ? fitAlbumJourney(stops, connections) : input.bounds;
+  const wraps = rawSubject.west > rawSubject.east;
+  const subject = wraps ? { ...rawSubject, east: rawSubject.east + 360 } : rawSubject;
+  const longitudePadding = input.wideFrame ? (subject.east - subject.west) * .26 : 0;
+  const latitudePadding = input.wideFrame ? (subject.north - subject.south) * .26 : 0;
+  const bounds = fitFrame({
+    west: input.fitJourney || wraps ? subject.west - longitudePadding : Math.max(-180, subject.west - longitudePadding),
+    east: input.fitJourney || wraps ? subject.east + longitudePadding : Math.min(180, subject.east + longitudePadding),
+    south: Math.max(-90, subject.south - latitudePadding),
+    north: Math.min(90, subject.north + latitudePadding),
+  }, frameArea);
+  const scale = Math.min(frameArea.width / (bounds.east - bounds.west), frameArea.height / (bounds.north - bounds.south));
+  const fittedWidth = (bounds.east - bounds.west) * scale;
+  const fittedHeight = (bounds.north - bounds.south) * scale;
+  const frame = { x: number(frameArea.x + (frameArea.width - fittedWidth) / 2),
+    y: number(frameArea.y + (frameArea.height - fittedHeight) / 2),
+    width: number(fittedWidth), height: number(fittedHeight) };
+  const markers = albumMarkers(input, bounds, frame, palette);
+  const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "")}</clipPath></defs>
+    <g clip-path="url(#album-map-clip)">
+      ${baseMap(detail, frame, bounds, input.style, relief, palette)}
+      ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, palette) : ""}
+      ${journeyLines(connections, bounds, frame, palette)}${markers.svg}
+    </g>
+    ${frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
+
+  const groups = [listedStops.slice(0, firstStops)];
+  for (let start = firstStops; start < listedStops.length; start += continuedStops) groups.push(listedStops.slice(start, start + continuedStops));
+
+  return groups.map((group, index) => {
+    const continuation = index > 0;
+    const listTop = continuation ? head.mapTop + 35 : frameArea.y + frameArea.height + 41;
+    const legend = continuation ? "" : stops.length ? "Gestrichelte Linien verbinden Aufnahmeorte in zeitlicher Reihenfolge."
+      : input.points?.length ? "Zahlen zeigen die Anzahl der Fotos je Kartenpunkt." : "";
+    const pageNumber = groups.length > 1 ? `${index + 1} / ${groups.length}` : "";
+    const footer = `<line x1="${margin}" x2="${width - margin}" y1="${height - 147}" y2="${height - 147}" stroke="${palette.rule}" stroke-width="2"/>
+      ${text(margin, height - 92, continuation ? "Fotokarte · Stationen" : "Kartendaten von Natural Earth", `fill="${palette.muted}" font-family="${sans}" font-size="31"`)}
+      ${legend ? text(margin + 515, height - 92, legend, `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
+      ${pageNumber ? text(width - margin, height - 92, pageNumber, `fill="${palette.ink}" font-family="${sans}" font-size="31" text-anchor="end"`) : ""}`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+      <title>${xml(input.title.trim() || "Meine Fotokarte")}</title>
+      ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly, palette)}${footer}
+    </svg>`;
+    return { svg, width, height, number: index + 1, total: groups.length };
+  });
+}
+
+function densityChunk() {
+  const chunk = new Uint8Array(21);
+  const view = new DataView(chunk.buffer);
+  view.setUint32(0, 9);
+  chunk.set([112, 72, 89, 115], 4); // pHYs
+  view.setUint32(8, printerPixelsPerMeter);
+  view.setUint32(12, printerPixelsPerMeter);
+  chunk[16] = 1;
+  let crc = 0xFFFFFFFF;
+  for (const byte of chunk.subarray(4, 17)) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+  }
+  view.setUint32(17, crc ^ 0xFFFFFFFF);
+  return chunk;
+}
+
+/** Set the PNG pixel density to 300 dpi so print applications use the intended dimensions. */
+export async function setMapAlbumPngDensity(png: Blob): Promise<Blob> {
+  const data = await png.arrayBuffer();
+  const view = new DataView(data);
+  const chunks: BlobPart[] = [data.slice(0, 8)];
+  for (let offset = 8; offset + 12 <= data.byteLength;) {
+    const length = view.getUint32(offset);
+    const type = view.getUint32(offset + 4);
+    const end = offset + 12 + length;
+    if (end > data.byteLength) throw new Error("Die PNG-Datei ist unvollständig.");
+    if (type !== 0x70485973) chunks.push(data.slice(offset, end)); // pHYs
+    if (type === 0x49484452) chunks.push(densityChunk()); // IHDR
+    offset = end;
+  }
+  return new Blob(chunks, { type: "image/png" });
+}
+
+export async function mapAlbumPageToPng(page: MapAlbumPage): Promise<Blob> {
+  const url = URL.createObjectURL(new Blob([page.svg], { type: "image/svg+xml;charset=utf-8" }));
+  const canvas = document.createElement("canvas");
+  canvas.width = page.width;
+  canvas.height = page.height;
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Das Bild konnte nicht gerendert werden.");
+    context.drawImage(image, 0, 0);
+    const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Die PNG-Datei konnte nicht erstellt werden."));
+    }, "image/png"));
+    return await setMapAlbumPngDensity(png);
+  } finally {
+    URL.revokeObjectURL(url);
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}

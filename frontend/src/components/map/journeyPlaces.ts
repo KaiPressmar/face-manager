@@ -1,5 +1,12 @@
 export type JourneyPlace = readonly [latitude: number, longitude: number, name: string];
 
+export async function loadJourneyPlaces(): Promise<JourneyPlace[]> {
+  const { default: data } = await import("./journey-places.json");
+  return data.flatMap<JourneyPlace>(([latitude, longitude, name]) =>
+    typeof latitude === "number" && typeof longitude === "number" && typeof name === "string"
+      ? [[latitude, longitude, name]] : []);
+}
+
 const EARTH_RADIUS_KM = 6371.0088;
 const NEARBY_KM = 12;
 const TIE_KM = 1;

@@ -58,6 +58,7 @@ interface FullscreenImageGalleryProps {
   onNavigateToCluster: (clusterId: number, personName?: string | null) => void;
   onChange: (index: number) => void;
   onClose: () => void;
+  closeLabel?: string;
   onDelete?: (image: GalleryImage) => Promise<boolean>;
   /** Optional external sequence, e.g. all face crops in one group. */
   sequence?: {
@@ -105,6 +106,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   onNavigateToCluster,
   onChange,
   onClose,
+  closeLabel = "Galerie schließen",
   onDelete,
   sequence,
 }) => {
@@ -312,7 +314,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             className="gallery-close"
             onClick={onClose}
             disabled={isDeleting}
-            aria-label="Galerie schließen"
+            aria-label={closeLabel}
             autoFocus
           >
             ×

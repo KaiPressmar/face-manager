@@ -12,12 +12,14 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 import webview
 
 from backend.config import APP_VERSION, get_error_log_path
 from backend.error_logging import configure_error_logging, install_global_exception_hooks
+from backend.services.album_export import AlbumPngExport
 from backend.services.desktop import start_native_folder_picker, stop_native_folder_picker
 from backend.services.update_manager import register_shutdown_callback
 
@@ -163,13 +165,34 @@ def main() -> None:
         raise RuntimeError(message)
 
     try:
+        origin = f"http://{host}:{port}"
         window = webview.create_window(
             title=f"Face Manager {APP_VERSION}",
-            url=f"http://{host}:{port}",
+            url=origin,
             width=1100,
             height=700,
             min_size=(320, 400),
         )
+
+        def choose_album_destination(filename: str) -> str | None:
+            page = urlsplit(window.get_current_url() or "")
+            if f"{page.scheme}://{page.netloc}" != origin:
+                raise ValueError("Albumblätter können nur aus Face Manager gespeichert werden.")
+            selection = window.create_file_dialog(
+                webview.SAVE_DIALOG, save_filename=filename, file_types=("PNG (*.png)",),
+            )
+            # PyWebView 5.4's Windows picker returns a path, GTK a sequence.
+            if isinstance(selection, str):
+                return selection or None
+            return selection[0] if selection else None
+
+        def confirm_album_overwrite(filename: str) -> bool:
+            return window.create_confirmation_dialog("Datei ersetzen", f"„{filename}“ ersetzen?")
+
+        # Expose only one callable. The Windows picker confirms replacement
+        # itself. GTK's native picker does not enable that confirmation.
+        album_export = AlbumPngExport(choose_album_destination, confirm_album_overwrite if sys.platform == "linux" else None)
+        window.expose(album_export.save_album_png)
         register_shutdown_callback(window.destroy)
         webview.start(debug=False)
     except Exception:

@@ -336,7 +336,13 @@ const WorldMap: React.FC<Props> = ({
   const coastPath = requiresDetailedMap && detail ? detail.land : landPaths;
   const rivers = [...overviewWater.rivers, ...(detail?.rivers ?? [])];
   const lakes = [...overviewWater.lakes, ...(detail?.lakes ?? [])];
-  const stopPositions = journeyStops.map((stop) => ({ stop, x: projectX(stop.longitude), y: projectY(stop.latitude) }));
+  // A later visit can occupy the same pixels as an earlier one. Give the
+  // selected marker visual and pointer priority at an overlapping location.
+  const chosenStop = journeyStops.find((stop) => stop.id === activeJourneyStop);
+  const orderedStops = chosenStop
+    ? [...journeyStops.filter((stop) => stop.id !== chosenStop.id), chosenStop]
+    : journeyStops;
+  const stopPositions = orderedStops.map((stop) => ({ stop, x: projectX(stop.longitude), y: projectY(stop.latitude) }));
   const journeySegments = useMemo(() => journeyConnections.flatMap(journeyConnectionSegments), [journeyConnections]);
   const labels = showCountryNames || zoom >= 4 ? layoutMapLabels(
     showCountryNames ? [...countryCandidates, ...cityCandidates] : cityCandidates, zoom, displayBounds, viewportSize,
@@ -528,7 +534,7 @@ const WorldMap: React.FC<Props> = ({
               <line x1={x1} y1={y1} x2={x2} y2={y2} className="gps-map__journey-line-outline" />
               <line x1={x1} y1={y1} x2={x2} y2={y2} className="gps-map__journey-line" />
               {Math.hypot(dx, dy) >= 42 && <path d="M-4,-4 L3,0 L-4,4" className="gps-map__journey-direction"
-                transform={`translate(${(x1 + x2) / 2} ${(y1 + y2) / 2}) scale(${scaleX} ${scaleY}) rotate(${angle})`} />}
+                transform={`translate(${x1 + (x2 - x1) * .62} ${y1 + (y2 - y1) * .62}) scale(${scaleX} ${scaleY}) rotate(${angle})`} />}
             </g>;
           })}
         </g>}

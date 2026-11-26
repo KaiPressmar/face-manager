@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Journey, JourneyStop } from "./mapData";
-import { findNearbyPlace, type JourneyPlace } from "./journeyPlaces";
+import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
 
 const numbers = new Intl.NumberFormat("de-DE");
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
@@ -35,11 +35,8 @@ export default function MapJourney({ journey, selected, onSelect }: Props) {
   useEffect(() => {
     if (!hasStops) return;
     let active = true;
-    void import("./journey-places.json").then(({ default: data }) => {
-      if (!active) return;
-      setPlaces(data.flatMap<JourneyPlace>(([latitude, longitude, name]) =>
-        typeof latitude === "number" && typeof longitude === "number" && typeof name === "string"
-          ? [[latitude, longitude, name]] : []));
+    void loadJourneyPlaces().then((data) => {
+      if (active) setPlaces(data);
     }).catch(() => {
       // Coordinates remain available if the optional place index cannot load.
     });

@@ -5,6 +5,7 @@ import {
 } from "../../utils/api";
 import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
 import MapGallery, { type MapGalleryOpening } from "./MapGallery";
+import MapAlbumDialog, { type MapAlbumOpening } from "./MapAlbumDialog";
 import MapJourney from "./MapJourney";
 import { fetchJourney, fetchMapSelection, type Journey } from "./mapData";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
@@ -74,7 +75,9 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
   const resultsRef = useRef<HTMLElement>(null);
   const moreController = useRef<AbortController | null>(null);
   const galleryOpenerRef = useRef<HTMLElement | null>(null);
+  const albumOpenerRef = useRef<HTMLButtonElement | null>(null);
   const [gallery, setGallery] = useState<MapGalleryOpening | null>(null);
+  const [album, setAlbum] = useState<MapAlbumOpening | null>(null);
   const [pointRefresh, setPointRefresh] = useState(0);
   const [imageRefresh, setImageRefresh] = useState(0);
   const [libraryRevision, setLibraryRevision] = useState(0);
@@ -118,7 +121,9 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
   const openedGallery = active ? gallery : null;
 
   const clearGallery = useCallback(() => setGallery(null), []);
-  useEffect(() => { if (!active) clearGallery(); }, [active, clearGallery]);
+  useEffect(() => {
+    if (!active) { clearGallery(); setAlbum(null); }
+  }, [active, clearGallery]);
 
   useEffect(() => {
     if (!canLoad || !isJourney) return;
@@ -146,6 +151,7 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
       if (!update?.reason || !MAP_LIBRARY_EVENTS.has(update.reason)) return;
       if (update.reason === "database_import") {
         clearGallery();
+        setAlbum(null);
         setJourneyStopId(undefined);
         window.clearTimeout(timer);
         timer = undefined;
@@ -272,6 +278,14 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
       else resultsRef.current?.focus();
     });
   };
+  const closeAlbum = () => {
+    setAlbum(null);
+    window.requestAnimationFrame(() => {
+      const opener = albumOpenerRef.current;
+      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+      else resultsRef.current?.focus({ preventScroll: true });
+    });
+  };
   const loadMore = async () => {
     if (moreController.current || !canLoadImages || !nextCursor) return;
     const controller = new AbortController();
@@ -306,7 +320,7 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
   return <main className="gps-page">
     <header className="gps-page__header">
       <div><span className="gps-page__eyebrow">FOTOBIBLIOTHEK · STANDORTE</span><h1>Fotokarte</h1><p>Entdecke deine Fotos dort, wo sie aufgenommen wurden.</p></div>
-      <div className="gps-page__stat"><strong>{collection ? formatCount(collection.located_total) : "…"}</strong><span>Fotos mit Standort</span></div>
+      {!isJourney && <div className="gps-page__stat"><strong>{collection ? formatCount(collection.located_total) : "…"}</strong><span>Fotos mit Standort</span></div>}
     </header>
 
     <section className="gps-page__toolbar" aria-label="Kartenfilter">
@@ -334,7 +348,9 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
       }}><option value="">Land auswählen</option>{countries.map((country) =>
         <option key={country.code} value={country.code}>{country.name}</option>)}</select></label>
     </div>
-    <p className="gps-page__hint">Der Zeitraum bezieht sich auf das Aufnahmedatum. Fotos ohne Aufnahmedatum erscheinen nur ohne Zeitfilter.</p>
+    <p className="gps-page__hint">{isJourney
+      ? "Der Verlauf nutzt Fotos mit Standort und Aufnahmezeit. Der Zeitraum folgt dem Aufnahmedatum."
+      : "Der Zeitraum bezieht sich auf das Aufnahmedatum. Fotos ohne Aufnahmedatum erscheinen nur ohne Zeitfilter."}</p>
     {invalidDate && <p id="gps-date-error" className="gps-page__error" role="alert">Das Enddatum muss am oder nach dem Startdatum liegen.</p>}
 
     {((region && !isJourney) || fromDate || toDate) && <div className="gps-page__filters" aria-label="Aktive Filter">
@@ -356,6 +372,11 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
             {selectMode && <button type="button" onClick={() => { setRegion(viewport); setSelectMode(false); }}>Sichtbaren Bereich wählen</button>}
             {region && !isJourney && <button type="button" onClick={() => setRegion(null)}>Auswahl löschen</button>}
             <button type="button" className="gps-page__skip" onClick={() => resultsRef.current?.focus()}>{isJourney ? "Zu den Stopps" : "Zu den Fotos"}</button>
+            <button type="button" disabled={!canLoad || (isJourney && !journey?.stops.length)} onClick={(event) => {
+              albumOpenerRef.current = event.currentTarget;
+              setAlbum({ bounds: filterBounds, viewport, hasSelection: Boolean(region), fromDate, toDate, style: mapStyle,
+                showCountryNames: showNames, journey: isJourney ? journey ?? undefined : undefined });
+            }}>Bild exportieren</button>
           </div>
         </div>
         {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
@@ -410,13 +431,16 @@ const MapPage: React.FC<Props> = ({ active, onNavigateToCluster, onOpenImages })
       </section>
     </div>
     <aside className="gps-page__collection" aria-label="Standortübersicht">
+      {!isJourney && <>
       <span><strong>{collection ? formatCount(collection.located_total) : "…"}</strong> Fotos mit Standort</span>
       <span><strong>{collection ? formatCount(Math.max(0, collection.library_total - collection.located_total - collection.pending_total)) : "…"}</strong> ohne Standort</span>
       {!!collection?.pending_total && <span className="gps-page__pending">{formatCount(collection.pending_total)} werden noch geprüft</span>}
+      </>}
       <span className="gps-page__privacy">Deine Fotostandorte bleiben privat. Die Karte funktioniert auch offline.</span>
     </aside>
     {openedGallery && <MapGallery opening={openedGallery} onClose={closeGallery}
       onOpenImages={onOpenImages ? openInImages : undefined} onNavigateToCluster={onNavigateToCluster} />}
+    {active && album && <MapAlbumDialog opening={album} onClose={closeAlbum} />}
   </main>;
 };
 

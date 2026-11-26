@@ -22,7 +22,7 @@ interface JourneyPoint {
 
 export interface Journey {
   stops: JourneyStop[];
-  connections: { from: JourneyPoint; to: JourneyPoint }[];
+  connections: { from: JourneyPoint; to: JourneyPoint; from_stop_id: string; to_stop_id: string }[];
   photo_count: number;
   missing_location_count: number;
   missing_time_count: number;
