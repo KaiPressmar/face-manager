@@ -90,14 +90,17 @@ export function applyTripSelection(journey: Journey, wanted: ReadonlySet<number>
     if (!image_ids.length) return;
     if (previousIndex !== index - 1 || journey.stops[previousIndex]?.section !== stop.section) section += 1;
     previousIndex = index;
-    const split = image_ids.length !== stop.image_ids.length;
+    const inferred = new Set(stop.inferred_image_ids);
+    const split = stop.image_ids.some((id) => !wanted.has(id) && !inferred.has(id));
     if (!split) keep.add(stop.id);
-    stops.push({ ...stop, image_ids, section, number: stops.length + 1, uncertain: stop.uncertain || split });
+    const inferred_image_ids = stop.inferred_image_ids?.filter((id) => wanted.has(id));
+    stops.push({ ...stop, image_ids, inferred_image_ids, section, number: stops.length + 1, uncertain: stop.uncertain || split });
   });
   return {
     ...journey, stops,
     connections: journey.connections.filter((leg) => keep.has(leg.from_stop_id) && keep.has(leg.to_stop_id)),
     photo_count: stops.reduce((count, stop) => count + stop.image_ids.length, 0),
+    inferred_location_count: stops.reduce((count, stop) => count + (stop.inferred_image_ids?.length ?? 0), 0),
     uncertain_count: stops.reduce((count, stop) => count + (stop.uncertain ? stop.image_ids.length : 0), 0),
   };
 }

@@ -43,6 +43,11 @@
 .gps-journey__stop-number { min-width: 28px; font-weight: 800; text-align: center; }
 .gps-journey__notes { padding-left: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .gps-journey__gap { margin: 12px 0 5px; color: var(--text-muted); font-size: 11px; }
+.gps-journey-inference { margin: 10px 0; color: var(--text-muted); font-size: 12px; }
+.gps-journey-inference label { display: flex; align-items: center; gap: 8px; min-height: 34px; color: var(--text-strong); }
+.gps-journey-inference input { flex-shrink: 0; width: 17px; height: 17px; accent-color: var(--accent); }
+.gps-journey-inference p { margin: 4px 0; line-height: 1.45; }
+.gps-page__photo small { padding: 0 6px 6px; color: var(--text-strong); font-size: 11px; }
 
 .gps-selection-gallery {
   position: fixed;

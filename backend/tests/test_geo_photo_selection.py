@@ -79,8 +79,9 @@ class GeoPhotoSelectionTest(unittest.TestCase):
         first = app.get_selected_map_images(selection, limit=2)
         second = app.get_selected_map_images(selection, limit=2, **first["next_cursor"])
         self.assertEqual([item["id"] for item in first["items"]], [4, 2])
-        self.assertEqual([item["id"] for item in second["items"]], [1])
-        self.assertEqual(first["total"], second["total"], 3)
+        self.assertEqual([item["id"] for item in second["items"]], [1, 5])
+        self.assertEqual(first["total"], 4)
+        self.assertEqual(first["total"], second["total"])
 
         empty = app._GeoSelectionBody(image_ids=[])
         self.assertEqual(app.search_selected_images(

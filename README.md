@@ -70,7 +70,7 @@ Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannt
 <details>
 <summary>Fotokarte, Reiseverlauf und Alben</summary>
 
-Kombiniere in **Karte** einen **Zeitraum** mit **Bereich wählen** oder wähle einen Aufnahmeort unter **Orte aus meinen Fotos**. Die Stile **Standard**, **Landschaft** und **Satellit** funktionieren offline. **Verlauf** zeigt die Stopps in zeitlicher Reihenfolge. Für kurze Wege wähle unter **Stoppabstand** den Modus **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte.
+Kombiniere in **Karte** einen **Zeitraum** mit **Bereich wählen** oder wähle einen Aufnahmeort unter **Orte aus meinen Fotos**. Die Stile **Standard**, **Landschaft** und **Satellit** funktionieren offline. **Verlauf** zeigt die Stopps in zeitlicher Reihenfolge. Für kurze Wege wähle unter **Stoppabstand** den Modus **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
 
 Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
 

@@ -13,6 +13,7 @@ export interface JourneyStop {
   start_utc?: string | null;
   end_utc?: string | null;
   image_ids: number[];
+  inferred_image_ids?: number[];
   uncertain: boolean;
 }
 
@@ -26,12 +27,29 @@ export interface Journey {
   connections: { from: JourneyPoint; to: JourneyPoint; from_stop_id: string; to_stop_id: string }[];
   photo_count: number;
   missing_location_count: number;
+  inferred_location_count?: number;
   missing_time_count: number;
   uncertain_count: number;
   indexing: boolean;
 }
 
 export type JourneyDetail = "trip" | "city";
+
+export function omitInferredPhotos(journey: Journey): Journey {
+  const count = journey.inferred_location_count ?? 0;
+  if (!count) return journey;
+  return {
+    ...journey,
+    photo_count: journey.photo_count - count,
+    missing_location_count: journey.missing_location_count + count,
+    inferred_location_count: 0,
+    stops: journey.stops.map((stop) => {
+      if (!stop.inferred_image_ids?.length) return stop;
+      const inferred = new Set(stop.inferred_image_ids);
+      return { ...stop, image_ids: stop.image_ids.filter((id) => !inferred.has(id)), inferred_image_ids: [] };
+    }),
+  };
+}
 
 export async function fetchJourney(
   from: string, to: string, bounds: MapBounds | null, detail: JourneyDetail, signal: AbortSignal, albumId = "",

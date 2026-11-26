@@ -13,7 +13,7 @@ import AlbumPickerDialog from "../shared/AlbumPickerDialog";
 import { updatePhotoAlbum, usePhotoAlbums } from "../../utils/photoAlbums";
 import { applyTripSelection, photoIdsForTrip, type TravelHome, type TripSelection } from "./journeyTrips";
 import { fitAlbumJourney } from "./MapAlbumArtwork";
-import { fetchJourney, fetchMapSelection, type Journey, type JourneyDetail } from "./mapData";
+import { fetchJourney, fetchMapSelection, omitInferredPhotos, type Journey, type JourneyDetail } from "./mapData";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import { subscribeToTopic } from "../../utils/events";
 import "./map.css";
@@ -72,6 +72,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   const [journeyStopId, setJourneyStopId] = useState<string | undefined>();
   const [journeyRetry, setJourneyRetry] = useState(0);
   const [journeyDetail, setJourneyDetail] = useState<JourneyDetail>("trip");
+  const [includeInferred, setIncludeInferred] = useState(true);
   const isJourney = mode === "journey";
   const [pointGrid, setPointGrid] = useState<MapGrid | null>(null);
   const [region, setRegion] = useState<MapBounds | null>(null);
@@ -122,7 +123,11 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
   const journeyState = isJourney && canLoad && journeyResult?.key === journeyKey ? journeyResult : null;
   const baseJourney = journeyState?.data;
   const tripsSource = baseJourney ?? (trip ? journeyResult?.data : null);
-  const journey = useMemo(() => baseJourney && trip ? applyTripSelection(baseJourney, photoIdsForTrip(trip)) : baseJourney, [baseJourney, trip]);
+  const journey = useMemo(() => {
+    if (!baseJourney) return baseJourney;
+    const scope = includeInferred ? baseJourney : omitInferredPhotos(baseJourney);
+    return trip ? applyTripSelection(scope, photoIdsForTrip(trip)) : scope;
+  }, [baseJourney, includeInferred, trip]);
   const journeyStop = journey?.stops.find((stop) => stop.id === journeyStopId);
   const stopDay = journeyStop?.start.slice(0, 10);
   const canLoadImages = canLoad && (!isJourney || Boolean(journeyStop));
@@ -309,7 +314,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     setJourneyStopId(undefined);
     setSelectMode(false);
   };
-  const reset = () => { selectRegion(null); setView(INITIAL_VIEW); setPreset("all"); setJourneyDetail("trip"); setAlbumId(""); };
+  const reset = () => { selectRegion(null); setView(INITIAL_VIEW); setPreset("all"); setJourneyDetail("trip"); setAlbumId(""); setIncludeInferred(true); };
   const clearArea = () => {
     selectRegion(null);
     if (isJourney) setView(INITIAL_VIEW);
@@ -371,6 +376,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
     galleryOpenerRef.current = opener;
     const area = journeyStop ? `Stopp ${journeyStop.number}` : region ? "Gewählter Bereich" : "Kartenausschnitt";
     setGallery({ selection, index, items: images, total: imageTotal, cursor: nextCursor ?? null,
+      inferredImageIds: journeyStop?.inferred_image_ids,
       label: fromDate || toDate ? `${area} · ${dateLabel}` : area });
   };
   const openInImages = (chosen: GeoPhotoSelection) => {
@@ -549,6 +555,11 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
           {canLoad && !journeyState && <p role="status">Standortverlauf wird geladen …</p>}
           {journeyState?.error && <p className="gps-page__error" role="alert">{journeyState.error}{" "}
             <button type="button" onClick={() => { setJourneyResult(null); setJourneyRetry((value) => value + 1); }}>Erneut versuchen</button></p>}
+          {Boolean(baseJourney?.inferred_location_count) && <div className="gps-journey-inference">
+            <label><input type="checkbox" checked={includeInferred} onChange={(event) => setIncludeInferred(event.target.checked)}
+              aria-describedby="gps-journey-inference-note" />Passende Fotos ohne Standort einbeziehen</label>
+            <p id="gps-journey-inference-note">Ein Foto ohne Standort kann zu einem Stopp passen, wenn es kurz zwischen zwei Fotos von dort aufgenommen wurde.</p>
+          </div>}
           {tripsSource && <MapTrips journey={tripsSource} home={home} onClearHome={() => setHome(undefined)}
             selection={trip} canSave={Boolean(journeySelection)} onChange={changeTrip} onSave={(opener) => {
               if (journeySelection && journey) openAlbumPicker(opener, journeySelection, journey.photo_count, true);
@@ -575,7 +586,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onNavigateToCluster, on
         {imagesLoading && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
         <div className="gps-page__grid">{images.map((image, index) => <button type="button" className="gps-page__photo" key={image.id} onClick={(event) => {
           openGallery(event.currentTarget, index);
-        }} aria-label={`${image.filename || "Foto"} öffnen`}><img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span></button>)}</div>
+        }} aria-label={`${image.filename || "Foto"} öffnen`} aria-describedby={journeyStop?.inferred_image_ids?.includes(image.id) ? `gps-inference-${image.id}` : undefined}>
+          <img src={imageThumbnailUrl(image.id)} alt="" loading="lazy" /><span>{image.filename || "Foto"}</span>
+          {journeyStop?.inferred_image_ids?.includes(image.id) && <small id={`gps-inference-${image.id}`}>Nach Aufnahmezeit zugeordnet</small>}
+        </button>)}</div>
         {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
         {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
         </>}

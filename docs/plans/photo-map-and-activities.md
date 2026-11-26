@@ -71,6 +71,18 @@ Wir verwenden ausschließlich verbundene Etappen mit verlässlicher Zeit. Die Di
 
 Die Tests enthalten einen Stadtspaziergang in Wien, eine plausible Flugzeit Berlin–Paris, eine mögliche Autofahrt oder Zugfahrt Berlin–München, einen Sprung über die Datumsgrenze sowie fehlende, widersprüchliche und zu weit auseinanderliegende Aufnahmezeiten. Weitere Hinweise wie Flughafennähe kommen erst nach Tests mit Reisen in unterschiedlichen Regionen hinzu.
 
+## Fehlende und widersprüchliche Fotodaten
+
+Ein einzelnes Foto ohne Standort kann zu einem bestehenden Stopp passen. Dafür muss es nach verlässlicher Aufnahmezeit zwischen zwei belegten Fotos desselben Stopps liegen. Jedes der beiden Fotos darf höchstens 15 Minuten vom fraglichen Foto entfernt sein. Ihre belegten Aufnahmeorte liegen höchstens 100 Meter auseinander. Die Anzeige erklärt die Zuordnung. Der Nutzer kann solche Fotos ausblenden. Originaldatei, gespeicherte Koordinaten und Routenlinien bleiben unverändert. Mehrere Fotos ohne Koordinaten hintereinander, gleiche oder widersprüchliche Zeiten, Abstecher aus dem Gebiet und Belege außerhalb des Albums führen zu keiner Zuordnung.
+
+Bei der Sortierung gilt weiterhin der örtliche Aufnahmetag für den Datumsfilter. Für eine verlässliche Reihenfolge nutzen wir eine eindeutig zuordenbare Zeitzone oder die GPS-Zeit. Das Erstellungsdatum einer Kopie und der Zeitpunkt eines Scans können Jahre nach der Aufnahme liegen. Eine fehlende Aufnahmezeit bleibt daher sichtbar. Auch bei vorübergehend fehlenden Originalen bleibt die lokale Vorschau zugänglich, wenn sie vorhanden ist. [Adobe über Aufnahmezeiten, Zeitzonen und Scans](https://helpx.adobe.com/lightroom-classic/desktop/organize-photos-in-lightroom-classic/metadata-basics-actions.html) · [Google Fotos über geschätzte Orte](https://support.google.com/photos/answer/6153599)
+
+### Personen als zusätzlicher Prüfhinweis
+
+Face Manager lädt das Modell zur Gesichtserkennung und das Modell zum Vergleichen von Gesichtern. Die Gesichtsdatenbank enthält keine Altersschätzungen. Das separat verfügbare Altersmodell aus dem Paket würde beim zeitlichen Einordnen nur eine Altersspanne liefern. NIST bewertet die Abweichungen solcher Modelle in Jahren und untersucht Abhängigkeiten von Bildern und Personengruppen. Eine Altersschätzung liefert damit weder einen Aufnahmetag noch einen Ort. In 0.17.0 werden für diesen Zweck keine Alterswerte berechnet oder gespeichert. [InsightFace-Modellübersicht](https://github.com/deepinsight/insightface/blob/master/python-package/docs/model_zoo.md) · [NIST-Studie zur Altersschätzung](https://www.nist.gov/publications/face-analysis-technology-evaluation-age-estimation-and-verification)
+
+Für eine später freiwillig aufrufbare Prüfung eignet sich eher der Vergleich mit sicher datierten Fotos und bereits bestätigten Personen. Eine bestätigte Person kann die Vergleichsfotos eingrenzen, nachdem andere Hinweise wie Ordner, Datum und belegter Ort widersprechen. Die Oberfläche sollte die Vergleichsfotos und den Unterschied zeigen. Wiederholte Familienfeiern, gleich aussehende Personen, gescannte Bilder, unsichere Zuordnungen und unterschiedliche Zeitzonen sind Testfälle. Der Nutzer entscheidet über jede Berichtigung. Der erste Prototyp misst, wie oft brauchbare Hinweise gefunden werden und wie viele Fotos fälschlich als widersprüchlich erscheinen.
+
 ## Aktivitäten
 
 Die Kopfzeile bietet einen festen Einstieg per Klick. Import, Gruppierung und Bildvorschauen behalten ihre Aktionen. Der Standort- und Zeitabgleich meldet geprüfte Fotos, nicht erreichbare Dateien und den Abschluss. Detailansichten können weiterhin kurz zeigen, warum ihre Daten noch unvollständig sind.

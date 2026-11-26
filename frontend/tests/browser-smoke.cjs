@@ -1386,6 +1386,15 @@ async function denseJourneyReview(browser, errors) {
     await page.getByLabel('Stoppabstand', { exact: true }).selectOption('city');
     await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
     await results.getByRole('list', { name: 'Chronologische Stopps' }).getByRole('button').nth(1).click();
+    const inferredPhoto = results.getByRole('button', { name: 'Reise-09-02-3-Stephansplatz.jpg öffnen' });
+    await inferredPhoto.waitFor();
+    const includeInferred = results.getByRole('checkbox', { name: 'Passende Fotos ohne Standort einbeziehen' });
+    await includeInferred.uncheck();
+    await page.getByText('7 Stopps · 34 Fotos', { exact: true }).waitFor();
+    await inferredPhoto.waitFor({ state: 'hidden' });
+    await includeInferred.check();
+    await inferredPhoto.waitFor();
+    await results.getByText('Nach Aufnahmezeit zugeordnet', { exact: true }).waitFor();
     const cityView = (await map.getAttribute('viewBox')).split(' ').map(Number);
     assert.ok(cityView[2] < 1, 'City stop did not zoom below a district-wide view');
     await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
@@ -1430,7 +1439,7 @@ async function denseJourneyReview(browser, errors) {
     await album.waitFor({ state: 'hidden' });
     await page.getByRole('button', { name: 'Bild exportieren' }).click();
     assert.equal(await album.getByLabel('Titel', { exact: true }).inputValue(), 'Wiener Spaziergang');
-    console.log('PASS dense journey fixture: 9 trips, city and transport hints, separate transfers, journey album and draft reload');
+    console.log('PASS dense journey fixture: 9 trips, inferred photo, city and transport hints, separate transfers, journey album and draft reload');
   } finally {
     await page.close();
   }

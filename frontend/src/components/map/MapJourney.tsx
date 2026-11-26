@@ -78,6 +78,7 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
     <ol aria-label="Chronologische Stopps" className="gps-journey__stops">
       {visibleStops.map((stop, index) => {
         const match = nearby.get(stop.id);
+        const inferredCount = stop.inferred_image_ids?.length ?? 0;
         return <li key={stop.id}>
         {index > 0 && stop.section !== visibleStops[index - 1].section && <p className="gps-journey__gap">{areaFiltered
           ? "Neuer Abschnitt im gewählten Bereich" : "Neuer Abschnitt nach mehr als einem Tag ohne Beobachtung"}</p>}
@@ -91,6 +92,7 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
               : `${place.format(stop.latitude)}°, ${place.format(stop.longitude)}°`}
               {" · "}{numbers.format(stop.image_ids.length)} {stop.image_ids.length === 1 ? "Foto" : "Fotos"}</small>
             {stop.uncertain && <small>Reihenfolge unsicher</small>}
+            {inferredCount > 0 && <small>{numbers.format(inferredCount)} nach Aufnahmezeit zugeordnet</small>}
           </span>
         </button>
         </li>;
