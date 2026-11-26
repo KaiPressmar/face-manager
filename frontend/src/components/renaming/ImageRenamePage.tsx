@@ -405,7 +405,7 @@ const ImageRenamePage: React.FC<{
       refreshInFlight = true;
       try {
         await Promise.all([
-          loadData(offset),
+          loadData(pendingOffsetRef.current),
           loadTotalCount(),
           refreshLibraryTotal(),
         ]);
@@ -473,7 +473,7 @@ const ImageRenamePage: React.FC<{
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, groupingMode, offset, pageSize, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, groupingMode, pageSize, selectedFolders, selectedPersons, sortDirection]);
 
   const openRenameReview = () => {
     if (!canReview) return;

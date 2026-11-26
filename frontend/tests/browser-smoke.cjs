@@ -944,10 +944,16 @@ async function liveWorkflowFlow(browser, errors) {
       detected_person_names: ['Anna'], current_suffix_person_names: [],
     }));
     await page.route('**/api/image-renames/count?**', (route) => route.fulfill({ json: { total } }));
-    await page.route('**/api/image-renames?**', (route) => {
+    const nextPageGate = gate();
+    let holdNextPage = true;
+    await page.route('**/api/image-renames?**', async (route) => {
       const query = new URL(route.request().url()).searchParams;
       const offset = Number(query.get('offset'));
       const limit = Number(query.get('limit'));
+      if (offset === 25 && holdNextPage) {
+        holdNextPage = false;
+        await nextPageGate.ready;
+      }
       return route.fulfill({ json: {
         items: candidates.slice(0, total).slice(offset, offset + limit),
         offset, limit, total: null, has_more: offset + limit < total, available_persons: ['Anna'],
@@ -973,7 +979,20 @@ async function liveWorkflowFlow(browser, errors) {
     await page.goto(`${webBase}/#/dateinamen`);
     const pagination = page.locator('.rename-pagination--top');
     await pagination.getByText('Seite 1 von 2').waitFor();
-    await pagination.getByRole('button', { name: 'Weiter' }).click();
+    try {
+      const openingNextPage = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return url.pathname === '/api/image-renames' && url.searchParams.get('offset') === '25';
+      });
+      await pagination.getByRole('button', { name: 'Weiter' }).click();
+      await openingNextPage;
+      const liveRefresh = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/image-renames');
+      await publishLibraryChange('import_completed');
+      const liveOffset = new URL((await liveRefresh).url()).searchParams.get('offset');
+      assert.equal(liveOffset, '25', 'Live refresh returned to the previous rename page');
+    } finally {
+      nextPageGate.release();
+    }
     await page.getByRole('button', { name: 'Diese Seite auswählen (2)' }).click();
     await page.getByRole('button', { name: 'Umbenennung prüfen', exact: true }).click();
     const confirmRename = page.getByRole('dialog', { name: 'Dateinamen prüfen' });

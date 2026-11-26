@@ -23,6 +23,7 @@ Requests, nicht in diese Versionshinweise.
 
 - Der erste Start führt direkt zur Bibliothek und zur freiwilligen Einführung.
 - Beim Wechsel von Bilderfiltern lassen sich nur Fotos aus der aktuellen Auswahl bearbeiten.
+- Beim Umblättern in „Dateinamen“ bleibt die gewählte Seite auch bei einer Aktualisierung erhalten.
 
 ## [0.17.1] - 2026-11-26
 
