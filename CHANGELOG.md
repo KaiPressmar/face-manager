@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.17.1] - 2026-11-26
+
+### Neu
+
 - Unter „Daten und Wartung“ kannst du in früheren Sicherungen nachsehen und ein versehentlich wieder benanntes Gesicht erneut aussortieren.
 
 ### Verbessert
