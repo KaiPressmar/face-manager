@@ -9,6 +9,8 @@ import ImageGrid, {
 } from "./ImageGrid";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import FolderPickerModal from "../shared/FolderPickerModal";
+import AlbumPickerDialog, { AlbumLibraryDialog } from "../shared/AlbumPickerDialog";
+import { removePhotoAlbumImages, updatePhotoAlbum, usePhotoAlbums, type PhotoAlbum } from "../../utils/photoAlbums";
 import { subscribeToTopic } from "../../utils/events";
 
 export type ImageGroupingMode = "date" | "folder";
@@ -90,9 +92,10 @@ interface PeoplePageProps {
   onOpenPeople: () => void;
   geoSelection?: GeoPhotoSelection;
   onChangeGeoSelection: (selection?: GeoPhotoSelection) => void;
+  onOpenAlbumMap?: (id: string) => void;
 }
 
-const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople, geoSelection, onChangeGeoSelection }) => {
+const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, onOpenPeople, geoSelection, onChangeGeoSelection, onOpenAlbumMap }) => {
   const [images, setImages] = useState<FaceImage[]>([]);
   const [availablePersons, setAvailablePersons] = useState<string[]>([]);
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
@@ -100,6 +103,15 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [showImport, setShowImport] = useState(false);
   const [importPending, setImportPending] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
+  const [showAlbumLibrary, setShowAlbumLibrary] = useState(false);
+  const [albumPickerIds, setAlbumPickerIds] = useState<readonly number[] | null>(null);
+  const [selectedAlbumImages, setSelectedAlbumImages] = useState<ReadonlySet<number> | null>(null);
+  const [albumStatus, setAlbumStatus] = useState<{ text: string; error?: boolean }>();
+  const [albumPending, setAlbumPending] = useState(false);
+  const albumMutation = useRef(false);
+  const { albums, loading: albumsLoading, error: albumsError, reload: reloadAlbums } = usePhotoAlbums(active);
+  const albumId = geoSelection?.album_id;
+  const activeAlbum = albums.find((album) => album.id === albumId);
   // Archived faces are hidden unless explicitly filtered for.
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
@@ -337,6 +349,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   }, [clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
+    setSelectedAlbumImages(null);
+  }, [faceStatuses, geoSelection, selectedFolders, selectedPersons]);
+
+  useEffect(() => {
     const closeGalleryAfterRestore = (update: { reason?: string }) => {
       if (update?.reason !== "database_import") return;
       latestQueryRef.current += 1;
@@ -349,6 +365,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       clearGeometryRequests();
       refreshImagesRequestRef.current?.abort();
       setImages([]);
+      setShowAlbumLibrary(false);
+      setAlbumPickerIds(null);
+      setSelectedAlbumImages(null);
+      setAlbumStatus(undefined);
       setAvailablePersons([]);
       setTotalImages(0);
       setLibraryTotal(null);
@@ -663,6 +683,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const libraryIsEmpty =
     !isLoading &&
     !loadError &&
+    !albumId &&
     knownLibraryTotal === 0;
 
   useEffect(() => {
@@ -712,6 +733,65 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     setFaceStatuses([]);
     if (geoSelection) onChangeGeoSelection();
   };
+  const setAlbumFilter = (album?: PhotoAlbum) => {
+    setShowAlbumLibrary(false);
+    onChangeGeoSelection({ ...geoSelection, album_id: album?.id });
+  };
+  const openAlbumLibrary = () => {
+    setAlbumStatus(undefined);
+    setShowAlbumLibrary(true);
+  };
+  const selectedCount = selectedAlbumImages?.size ?? 0;
+  const toggleAlbumPhoto = (id: number) => {
+    setSelectedAlbumImages((current) => {
+      if (!current) return null;
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const updateActiveAlbum = async (action: "cover" | "remove") => {
+    if (!albumId || !selectedAlbumImages?.size || albumMutation.current) return;
+    const ids = [...selectedAlbumImages];
+    if (action === "cover" && ids.length !== 1) return;
+    if (action === "remove" && !window.confirm(
+      `Ausgewählte Fotos aus „${activeAlbum?.name ?? "Album"}“ entfernen? Sie bleiben in der Bibliothek.`,
+    )) return;
+    albumMutation.current = true;
+    setAlbumPending(true);
+    setAlbumStatus(undefined);
+    try {
+      if (action === "cover") {
+        await updatePhotoAlbum(albumId, { cover_image_id: ids[0] });
+        setAlbumStatus({ text: "Titelbild gespeichert." });
+      } else {
+        await removePhotoAlbumImages(albumId, ids);
+        setRetryLoad((value) => value + 1);
+        setAlbumStatus({ text: "Fotos aus dem Album entfernt." });
+      }
+      setSelectedAlbumImages(null);
+    } catch (error) {
+      setAlbumStatus({ text: error instanceof Error ? error.message : "Das Album konnte nicht bearbeitet werden.", error: true });
+    } finally {
+      albumMutation.current = false;
+      setAlbumPending(false);
+    }
+  };
+  const albumDialogs = <>
+    {showAlbumLibrary && albumPickerIds === null && <AlbumLibraryDialog
+      albums={albums} loading={albumsLoading} error={albumsError} reload={reloadAlbums} activeAlbumId={albumId}
+      onClose={() => setShowAlbumLibrary(false)} onSelect={setAlbumFilter}
+      onCreate={() => setAlbumPickerIds([])}
+      onDeleted={(id) => { if (albumId === id) setAlbumFilter(); }}
+    />}
+    {albumPickerIds !== null && <AlbumPickerDialog imageIds={albumPickerIds}
+      onClose={() => setAlbumPickerIds(null)} onSaved={(album) => {
+        if (albumPickerIds.length === 0) setAlbumFilter(album);
+        setSelectedAlbumImages(null);
+        setAlbumStatus({ text: `Album „${album.name}“ gespeichert.` });
+      }} />}
+  </>;
 
   if (libraryIsEmpty) {
     return (
@@ -729,6 +809,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
             <button className="neon-button" onClick={() => setShowImport(true)} type="button">
               {importPending ? "Weitere Ordner hinzufügen" : "Bilderordner auswählen"}
             </button>
+            <button className="secondary-button" type="button" onClick={openAlbumLibrary}>Alben</button>
           </div>
           <ul className="collection-start__steps">
             <li><strong>Doppelte Fotos zusammenfassen</strong><span>Identische Dateien erscheinen einmal. Alle Speicherorte bleiben erhalten.</span></li>
@@ -737,6 +818,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           </ul>
         </section>
         {importDialog}
+        {albumDialogs}
       </>
     );
   }
@@ -769,6 +851,16 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         faceStatuses={faceStatuses}
         onFaceStatusesChange={setFaceStatuses}
         onResetFilters={hasActiveFilters ? resetFilters : undefined}
+        actions={<>
+          <button type="button" className={`filter-bar__control${albumId ? " filter-bar__control--active" : ""}`}
+            onClick={openAlbumLibrary}>Alben</button>
+          {images.length > 0 && <button type="button" className="filter-bar__control"
+            aria-pressed={selectedAlbumImages !== null} disabled={albumPending || isLoading}
+            onClick={() => {
+              setAlbumStatus(undefined);
+              setSelectedAlbumImages(selectedAlbumImages ? null : new Set());
+            }}>{selectedAlbumImages ? "Auswahl beenden" : "Fotos auswählen"}</button>}
+        </>}
       >
         <label
           className="filter-bar__grid-size"
@@ -826,7 +918,15 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         </select>
       </LibraryFilterBar>
 
-      {geoSelection && (
+      {albumId && <div className="active-folder-filters" aria-label="Albumfilter">
+        <span>Album</span>
+        <button type="button" aria-label="Albumfilter entfernen" onClick={() => setAlbumFilter()}>
+          {activeAlbum?.name ?? "Album"} <b aria-hidden="true">×</b>
+        </button>
+        {activeAlbum && onOpenAlbumMap && <button type="button" onClick={() => onOpenAlbumMap(albumId)}>Auf Karte zeigen</button>}
+      </div>}
+
+      {geoSelection && (geoSelection.bounds || geoSelection.from_date || geoSelection.to_date || geoSelection.image_ids) && (
         <div className="active-folder-filters" aria-label="Auswahl aus der Fotokarte">
           <span>Auswahl aus der Fotokarte</span>
           {geoSelection.bounds && (
@@ -851,6 +951,21 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           )}
         </div>
       )}
+
+      {selectedAlbumImages && <div className="active-folder-filters" aria-label="Fotoauswahl für Alben">
+        <span role="status">{selectedCount.toLocaleString("de-DE")} ausgewählt</span>
+        <button type="button" disabled={albumPending || isLoading}
+          onClick={() => setSelectedAlbumImages(new Set(images.map((image) => image.id)))}>Geladene Fotos auswählen</button>
+        <button type="button" disabled={albumPending || selectedCount === 0}
+          onClick={() => setAlbumPickerIds([...selectedAlbumImages])}>Zum Album hinzufügen</button>
+        {albumId && <>
+          {selectedCount === 1 && <button type="button" disabled={albumPending}
+            onClick={() => void updateActiveAlbum("cover")}>Als Titelbild festlegen</button>}
+          <button type="button" disabled={albumPending || selectedCount === 0}
+            onClick={() => void updateActiveAlbum("remove")}>Aus Album entfernen</button>
+        </>}
+      </div>}
+      {albumStatus && <p className="image-grid-status" role={albumStatus.error ? "alert" : "status"}>{albumStatus.text}</p>}
 
       {selectedFolders.length > 0 && (
         <div className="active-folder-filters">
@@ -914,6 +1029,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         onImageGeometryNeeded={requestImageGeometry}
         hasActiveFilters={hasActiveFilters}
         onResetFilters={resetFilters}
+        photoSelection={selectedAlbumImages ? { ids: selectedAlbumImages, onToggle: toggleAlbumPhoto } : undefined}
         onImageDeleted={(imageId) => {
           setImages((current) => current.filter((image) => image.id !== imageId));
           setTotalImages((current) => Math.max(0, current - 1));
@@ -935,6 +1051,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         />
       )}
       {importDialog}
+      {albumDialogs}
     </>
   );
 };

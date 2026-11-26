@@ -26,7 +26,7 @@ class AlbumPngExportTest(unittest.TestCase):
             destination = Path(folder) / "Ausgewählt.PNG"
             picker = Mock(return_value=str(destination))
             exporter = album_export.AlbumPngExport(picker)
-            for size in ((3508, 2480), (2480, 3508), (3000, 3000)):
+            for size in ((3508, 2480), (2480, 3508), (3000, 3000), (3700, 2077), (1200, 2400)):
                 with self.subTest(size=size):
                     data = png_page(size)
                     self.assertEqual(exporter.save_album_png(r"..\Fotos\CON.jpg", encoded(data)), {"status": "saved"})
@@ -37,7 +37,9 @@ class AlbumPngExportTest(unittest.TestCase):
     def test_invalid_payloads_do_not_open_disk_picker(self):
         picker = Mock()
         exporter = album_export.AlbumPngExport(picker)
-        for data in ("@", encoded(b"not PNG"), encoded(png_page((40, 40))), encoded(png_page()[:50])):
+        for data in ("@", encoded(b"not PNG"), encoded(png_page((40, 40))), encoded(png_page()[:50]),
+                     encoded(png_page((1200, 2401))), encoded(png_page((4200, 4200))),
+                     encoded(png_page((4801, 2500)))):
             with self.subTest(data=data[:20]):
                 self.assertEqual(exporter.save_album_png("Album.png", data)["status"], "error")
         with patch.object(album_export, "_MAX_ENCODED_LENGTH", 8):

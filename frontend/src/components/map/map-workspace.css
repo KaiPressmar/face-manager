@@ -82,7 +82,7 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
-  width: min(900px, 100%);
+  width: min(1080px, 100%);
   max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   overflow: auto;
@@ -101,10 +101,12 @@
 }
 .gps-album-dialog__header { justify-content: space-between; }
 .gps-album-dialog__header h2 { margin: 0; font-size: clamp(16px, 2.8vw, 23px); }
+.gps-album-dialog__editor { display: grid; min-width: 0; gap: 12px; }
 .gps-album-dialog fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 .gps-album-dialog__options { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(170px, 260px); gap: 10px 12px; }
-.gps-album-dialog__options label { display: grid; gap: 5px; color: var(--text-muted); font-size: 13px; }
-.gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]), .gps-album-dialog select {
+.gps-album-dialog__options label { display: grid; min-width: 0; gap: 5px; color: var(--text-muted); font-size: 13px; }
+.gps-album-dialog__options input, .gps-album-dialog__options select { width: 100%; min-width: 0; }
+.gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]):not([type="range"]), .gps-album-dialog select {
   min-height: 40px;
   padding: 6px 10px;
   border: 1px solid var(--border-strong);
@@ -116,8 +118,10 @@
 .gps-album-dialog__footer {
   position: sticky;
   bottom: 0;
+  z-index: 1;
   justify-content: flex-end;
   padding: 8px 0;
+  border-top: 1px solid var(--border);
   background: var(--surface-1);
 }
 .gps-album-dialog__pages { margin-right: auto; font-size: 13px; }
@@ -125,13 +129,29 @@
 .gps-album-dialog button:disabled { opacity: .55; cursor: default; }
 .gps-album-dialog__details { color: var(--text-muted); font-size: 13px; }
 .gps-album-dialog__details summary { cursor: pointer; width: fit-content; }
-.gps-album-dialog__details fieldset { display: flex; flex-wrap: wrap; gap: 7px 16px; margin-top: 8px; }
-.gps-album-dialog__details label { display: inline-flex; align-items: center; gap: 6px; }
+.gps-album-dialog__details fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 16px; margin-top: 8px; }
+.gps-album-dialog__details label { display: inline-flex; align-items: center; max-width: 100%; min-width: 0; gap: 6px; }
+.gps-album-dialog__details label select { min-width: 0; }
 .gps-album-dialog__details input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
 .gps-album-dialog__swatch { width: 14px; height: 14px; flex: none; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--accent); }
+.gps-album-dialog__dimensions { font-variant-numeric: tabular-nums; }
+.gps-album-dialog__field-error { grid-column: 1 / -1; width: 100%; margin: 3px 0; color: var(--danger-text, var(--text-strong)); font-size: 13px; }
+.gps-album-dialog__slider { width: 100%; min-height: 32px; }
+.gps-album-dialog__slider input[type="range"] { width: 145px; min-width: 60px; accent-color: var(--accent); }
+.gps-album-dialog__slider span:last-child { min-width: 3em; font-variant-numeric: tabular-nums; }
+.gps-album-dialog__colors fieldset { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.gps-album-dialog__colors button { justify-self: start; grid-column: 1 / -1; }
+.gps-album-dialog__color { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 5px 7px; min-width: 0; }
+.gps-album-dialog__color span { grid-column: 1 / -1; }
+.gps-album-dialog__color input { width: 100%; min-width: 0; }
+.gps-album-dialog__color input[type="text"] { font: 12px ui-monospace, monospace; }
+.gps-album-dialog__color input[type="color"] { padding: 3px; cursor: pointer; }
+.gps-album-dialog input[aria-invalid="true"] { border-color: var(--danger); }
 .gps-album-dialog__route fieldset { display: grid; gap: 6px; max-height: 220px; overflow-y: auto; }
 .gps-album-dialog__route label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(125px, 190px); padding: 5px; }
 .gps-album-dialog__route label span { overflow-wrap: anywhere; }
+.gps-album-dialog__transport-hint { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 0 5px 5px; }
+.gps-album-dialog__transport-hint button { font-size: 12px; }
 .gps-album-dialog__preview {
   display: grid;
   place-items: center;
@@ -148,9 +168,16 @@
   border-radius: 2px;
   box-shadow: 0 8px 30px rgb(0 0 0 / .18);
 }
+@media (min-width: 960px) {
+  .gps-album-dialog { display: grid; grid-template-columns: minmax(370px, .9fr) minmax(0, 1fr); align-items: start; }
+  .gps-album-dialog__header, .gps-album-dialog__footer { grid-column: 1 / -1; }
+  .gps-album-dialog__preview { position: sticky; top: 0; }
+}
 @media (max-width: 540px) {
   .gps-album-dialog__options { grid-template-columns: 1fr; }
-  .gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]), .gps-album-dialog select { min-height: 44px; max-width: 100%; }
+  .gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]):not([type="range"]), .gps-album-dialog select { min-height: 44px; max-width: 100%; }
+  .gps-album-dialog__slider { min-height: 44px; }
+  .gps-album-dialog__slider input[type="range"] { height: 44px; flex: 1; }
   .gps-album-dialog__preview { min-height: 150px; }
   .gps-album-dialog__route label { grid-template-columns: 1fr; }
 }

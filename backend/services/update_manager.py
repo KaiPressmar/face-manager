@@ -15,7 +15,10 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
+
+from .events import event_hub
 
 
 logger = logging.getLogger("face_manager.updates")
@@ -146,13 +149,15 @@ def _validate_final_download_url(url: str) -> None:
 class UpdateManager:
     """Thread-safe hourly release cache and one-at-a-time download worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_download_change: Callable[[dict[str, object]], None] | None = None) -> None:
         self._check_lock = threading.Lock()
         self._last_checked = 0.0
         self._cached_result: dict[str, object] | None = None
         self._candidate: dict[str, str] | None = None
         self._download_lock = threading.RLock()
         self._download_state: dict[str, object] = {"status": "idle"}
+        self._on_download_change = on_download_change
+        self._last_download_notice = 0.0
 
     @staticmethod
     def _request(url: str, timeout: float = 15.0):
@@ -224,6 +229,7 @@ class UpdateManager:
                 "downloaded_bytes": 0,
                 "total_bytes": None,
             }
+            self._notify_download_change()
 
             try:
                 threading.Thread(
@@ -245,6 +251,22 @@ class UpdateManager:
                 "installer_name": candidate["installer_name"],
                 "error": str(error),
             }
+            self._notify_download_change()
+
+    def _notify_download_change(self, *, progress: bool = False) -> None:
+        """Publish a compact activity snapshot while holding the download lock."""
+        if self._on_download_change is None:
+            return
+        now = time.monotonic()
+        if progress and now - self._last_download_notice < 0.5:
+            return
+        self._last_download_notice = now
+        fields = ("status", "version", "downloaded_bytes", "total_bytes")
+        snapshot = {key: self._download_state[key] for key in fields if key in self._download_state}
+        try:
+            self._on_download_change(snapshot)
+        except Exception:
+            logger.exception("Could not publish update download activity")
 
     def _download(self, candidate: dict[str, str], target_directory: Path) -> None:
         final_path = target_directory / candidate["installer_name"]
@@ -259,6 +281,7 @@ class UpdateManager:
                 total = int(total_header) if total_header else None
                 with self._download_lock:
                     self._download_state["total_bytes"] = total
+                    self._notify_download_change()
                 downloaded = 0
                 with partial_path.open("wb") as output:
                     while True:
@@ -270,6 +293,7 @@ class UpdateManager:
                         downloaded += len(chunk)
                         with self._download_lock:
                             self._download_state["downloaded_bytes"] = downloaded
+                            self._notify_download_change(progress=True)
             actual_checksum = digest.hexdigest()
             if actual_checksum != expected_checksum:
                 raise UpdateError("Die SHA-256-Prüfung des Installers ist fehlgeschlagen.")
@@ -284,6 +308,7 @@ class UpdateManager:
                     "path": str(final_path),
                     "sha256": actual_checksum,
                 }
+                self._notify_download_change()
         except Exception as exc:
             logger.exception("Face Manager update download failed")
             try:
@@ -359,7 +384,7 @@ class UpdateManager:
             raise UpdateError("Die GitHub-Release-Seite konnte nicht geöffnet werden.")
 
 
-update_manager = UpdateManager()
+update_manager = UpdateManager(lambda snapshot: event_hub.publish("update-download", snapshot))
 
 _shutdown_callback = None
 

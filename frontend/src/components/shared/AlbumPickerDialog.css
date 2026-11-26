@@ -1,0 +1,118 @@
+.photo-album-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20010;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  background: rgb(7 15 24 / .72);
+}
+
+.photo-album-dialog {
+  width: min(560px, 100%);
+  max-height: min(740px, calc(100dvh - 24px));
+  overflow: auto;
+  padding: clamp(12px, 3vw, 24px);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  color: var(--text);
+  background: var(--surface-1);
+  box-shadow: 0 14px 48px rgb(0 0 0 / .25);
+}
+
+.photo-album-dialog header,
+.photo-album-form footer,
+.photo-album-library__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.photo-album-dialog h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.photo-album-form,
+.photo-album-library {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.photo-album-dialog button:not(.neon-button),
+.photo-album-dialog input,
+.photo-album-dialog select {
+  min-height: 40px;
+  padding: 6px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.photo-album-dialog button:disabled {
+  opacity: .65;
+}
+
+.photo-album-form label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.photo-album-form footer {
+  justify-content: flex-end;
+}
+
+.photo-album-library ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.photo-album-library li {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.photo-album-library__item {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 8px;
+}
+
+.photo-album-library__item img {
+  width: 52px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.photo-album-library__item div {
+  display: grid;
+  flex: 1 0 135px;
+  overflow-wrap: anywhere;
+}
+
+.photo-album-library__item small,
+.photo-album-dialog p {
+  color: var(--text-muted);
+}
+
+.photo-album-library__editing {
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.photo-album-dialog button.photo-album-delete {
+  color: var(--danger-text, var(--text));
+}

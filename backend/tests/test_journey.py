@@ -12,6 +12,7 @@ from PIL import Image, TiffImagePlugin
 
 from backend.db import schema
 from backend.services.geo import GeoBackfill, extract_image_metadata, list_map_images, list_map_points
+from backend.services.geo_query import GeoBounds
 from backend.services.journey import Observation, build_journey, get_journey, list_journey
 
 
@@ -34,6 +35,33 @@ class JourneyTest(unittest.TestCase):
             [(leg["from_stop_id"], leg["to_stop_id"]) for leg in result["connections"]],
             [("1", "3"), ("3", "4")],
         )
+
+    def test_city_detail_separates_city_blocks_and_visits_over_45_minutes_apart(self):
+        photos = [
+            self.photo(1, 0, 0), self.photo(2, 0.0008, 0.75),
+            self.photo(3, 0.0012, 0.9), self.photo(4, 0.0012, 1.651),
+        ]
+        trip = build_journey(photos)
+        city = build_journey(photos, "city")
+
+        self.assertEqual([stop["image_ids"] for stop in trip["stops"]], [[1, 2, 3, 4]])
+        self.assertEqual([stop["image_ids"] for stop in city["stops"]], [[1, 2], [3], [4]])
+        self.assertEqual([stop["section"] for stop in city["stops"]], [1, 1, 1])
+        self.assertEqual(city["photo_count"], trip["photo_count"])
+
+    def test_city_detail_uses_its_own_radius_for_simultaneous_locations(self):
+        photos = [
+            self.photo(1, 0, 0), self.photo(2, 0.002, 0),
+            self.photo(3, 0.006, 1),
+        ]
+        trip = build_journey(photos)
+        city = build_journey(photos, "city")
+
+        self.assertEqual(trip["uncertain_count"], 0)
+        self.assertEqual([stop["image_ids"] for stop in city["stops"]], [[1], [2], [3]])
+        self.assertEqual([stop["uncertain"] for stop in city["stops"]], [True, True, False])
+        self.assertEqual(city["uncertain_count"], 2)
+        self.assertEqual(city["connections"], [])
 
     def test_dateline_neighbours_group_and_gaps_break_only_after_twenty_four_hours(self):
         result = build_journey([
@@ -82,6 +110,93 @@ class JourneyTest(unittest.TestCase):
             with self.assertRaises(HTTPException) as raised:
                 get_journey(day, date(2024, 1, 1))
             self.assertEqual(raised.exception.status_code, 422)
+
+    def test_area_returns_exact_members_and_restarts_the_route_after_leaving(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(schema, "DB_PATH", str(Path(folder) / "journey.sqlite")):
+            schema.init_db(scan_sources=False)
+            photos = [
+                self.photo(1, -0.002, 0), self.photo(2, 0, 0.1), self.photo(3, 0.006, 0.2),
+                self.photo(4, -0.002, 0.3), self.photo(5, 0.005, 0.4), self.photo(6, 0.2, 1),
+            ]
+            self._insert_photos(photos)
+            whole_journey = list_journey(None, None)
+            self.assertEqual([stop["image_ids"] for stop in whole_journey["stops"]], [[1, 2, 3, 4, 5], [6]])
+
+            area_journey = list_journey(None, None, GeoBounds(0, 1, -1, 1))
+            self.assertEqual([stop["image_ids"] for stop in area_journey["stops"]], [[2, 3], [5], [6]])
+            self.assertEqual([stop["section"] for stop in area_journey["stops"]], [1, 2, 2])
+            self.assertEqual(area_journey["photo_count"], 4)
+            self.assertEqual(
+                [(leg["from_stop_id"], leg["to_stop_id"]) for leg in area_journey["connections"]],
+                [("5", "6")],
+            )
+
+    def test_wrapped_area_keeps_dates_counts_and_hidden_timing_conflicts(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(schema, "DB_PATH", str(Path(folder) / "journey.sqlite")):
+            schema.init_db(scan_sources=False)
+            self._insert_photos([
+                self.photo(1, 179, 0), self.photo(2, 0, 1), self.photo(3, -179, 1),
+                self.photo(4, -178, 2), self.photo(5, 178, 3), self.photo(6, 177, 25),
+            ])
+            with closing(schema.get_conn()) as connection:
+                connection.executemany(
+                    "INSERT INTO image (id, path, directory, filename, latitude, longitude, captured_at) "
+                    "VALUES (?, ?, '', '', ?, ?, ?)",
+                    [(7, "undated-inside", 0, 179, None), (8, "undated-outside", 0, 0, None),
+                     (9, "no-location", None, None, "2024-01-01T12:00:00")],
+                )
+                connection.commit()
+            day = date(2024, 1, 1)
+            result = get_journey(day, day, GeoBounds(170, -170, -1, 1))
+            self.assertEqual([stop["image_ids"] for stop in result["stops"]], [[1], [3], [4], [5]])
+            self.assertEqual([stop["section"] for stop in result["stops"]], [1, 2, 2, 2])
+            self.assertTrue(result["stops"][1]["uncertain"])
+            self.assertEqual(result["photo_count"], 4)
+            self.assertEqual(result["uncertain_count"], 1)
+            self.assertEqual(result["missing_location_count"], 1)
+            self.assertEqual(result["missing_time_count"], 1)
+            self.assertEqual(
+                [(leg["from_stop_id"], leg["to_stop_id"]) for leg in result["connections"]],
+                [("4", "5")],
+            )
+
+    def test_journey_endpoint_rejects_partial_or_invalid_bounds(self):
+        from backend.app import get_map_journey
+
+        for query in ({"west": 0}, {"west": 170, "east": -170, "south": 10, "north": 0}):
+            with self.subTest(query=query), self.assertRaises(HTTPException) as raised:
+                get_map_journey(**query)
+            self.assertEqual(raised.exception.status_code, 422)
+
+    def test_journey_detail_query_defaults_to_trip_and_respects_area_and_dates(self):
+        from backend.app import app, get_map_journey
+
+        parameters = app.openapi()["paths"]["/api/map/journey"]["get"]["parameters"]
+        detail = next(parameter["schema"] for parameter in parameters if parameter["name"] == "detail")
+        self.assertEqual(detail["enum"], ["trip", "city"])
+        self.assertEqual(detail["default"], "trip")
+        with tempfile.TemporaryDirectory() as folder, patch.object(schema, "DB_PATH", str(Path(folder) / "journey.sqlite")):
+            schema.init_db(scan_sources=False)
+            self._insert_photos([
+                self.photo(1, 0, 0), self.photo(2, 0.005, 1),
+                self.photo(3, 0.1, 2), self.photo(4, 0.001, 25),
+            ])
+            area = {"west": -0.01, "east": 0.01, "south": -1, "north": 1}
+            day = date(2024, 1, 1)
+            trip = get_map_journey(from_date=day, to_date=day, **area)
+            city = get_map_journey(from_date=day, to_date=day, detail="city", **area)
+            self.assertEqual([stop["image_ids"] for stop in trip["stops"]], [[1, 2]])
+            self.assertEqual([stop["image_ids"] for stop in city["stops"]], [[1], [2]])
+
+    def _insert_photos(self, photos):
+        with closing(schema.get_conn()) as connection:
+            connection.executemany(
+                "INSERT INTO image (id, path, directory, filename, latitude, longitude, captured_at, captured_at_utc) "
+                "VALUES (?, ?, '', '', ?, ?, ?, ?)",
+                [(photo.image_id, str(photo.image_id), photo.latitude, photo.longitude, photo.wall_time.isoformat(),
+                  photo.utc_time.isoformat() if photo.utc_time else None) for photo in photos],
+            )
+            connection.commit()
 
 
 class CaptureClockTest(unittest.TestCase):

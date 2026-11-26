@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
-import { fetchRuntimeInfo, type ImportQueueState, type RuntimeInfo, type SharedLibraryState } from "../../utils/api";
+import { fetchRuntimeInfo, type ImportQueueState, type SharedLibraryState } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
 import { ThemeMode } from "../../utils/theme";
 import { subscribeToTopic } from "../../utils/events";
 import BackgroundTasksStatus from "../import/BackgroundTasksStatus";
 import FolderPickerModal from "../shared/FolderPickerModal";
+import RuntimeStatus, { type RuntimeStatusInfo } from "./RuntimeStatus";
 
 const THEME_CYCLE: Record<ThemeMode, ThemeMode> = {
   system: "light",
@@ -19,13 +20,12 @@ const THEME_META: Record<ThemeMode, { icon: string; label: string }> = {
 };
 
 const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibraryReadError?: string | null }> = ({ sharedLibrary, sharedLibraryReadError }) => {
-  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const [runtime, setRuntime] = useState<RuntimeStatusInfo | null>(null);
   const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   // Adding pictures is the one setup action that stays relevant forever, so it
   // lives here and is reachable from every view instead of behind a page.
   const [showImport, setShowImport] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
-  const [openImportsRequest, setOpenImportsRequest] = useState(0);
   const importNoticeTimer = useRef<number>();
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
 
@@ -68,7 +68,8 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
       for (const job of jobs) {
         // The pipeline advances to index loading only after the face model is ready.
         // The final snapshot also catches provider fallback during inference.
-        const checkpoint = job.finished_at ?? (job.stage === "loading_index" ? "model-ready" : null);
+        const checkpoint = job.finished_at ?? (job.stage === "loading_model" ? "model-loading"
+          : job.stage === "loading_index" ? "model-ready" : null);
         if (checkpoint && checkpoint !== checkedCheckpoints.get(job.id)) {
           checkedCheckpoints.set(job.id, checkpoint);
           changed = true;
@@ -88,25 +89,6 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
     };
   }, []);
 
-  const waitingForModel = runtime?.provider_initialized === false;
-  const mode = waitingForModel ? undefined : runtime?.compute_mode;
-  const modeLabel = mode
-    ? mode.toUpperCase()
-    : runtimeUnavailable
-      ? "Nicht verfügbar"
-      : "Wird erkannt";
-  const modeTitle = waitingForModel
-    ? "Die Grafikkarte wird beim ersten Import geprüft"
-    : runtime
-    ? mode === "gpu"
-      ? runtime.execution_provider === "CUDAExecutionProvider"
-        ? "Gesichtserkennung nutzt NVIDIA CUDA"
-        : "Gesichtserkennung nutzt die Intel-Grafik über OpenVINO"
-      : "Gesichtserkennung nutzt den Prozessor"
-    : runtimeUnavailable
-      ? "Die verwendete Beschleunigung konnte nicht ermittelt werden"
-      : "Verwendete Beschleunigung wird ermittelt";
-
   const themeMeta = THEME_META[themeMode];
 
   return (
@@ -123,7 +105,7 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
             <span className="topbar-import-button__icon" aria-hidden="true">＋</span>
             <span className="topbar-import-button__label">Bilder hinzufügen</span>
           </button>
-          <BackgroundTasksStatus openImportsRequest={openImportsRequest} sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
+          <BackgroundTasksStatus sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} />
           {importNotice && (
             <span className="topbar-import-notice" role="status">
               {importNotice}
@@ -132,13 +114,7 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
         </div>
 
         <div className="topbar__utilities">
-          <span
-            className={`compute-mode-badge compute-mode-badge--${mode ?? "unknown"}`}
-            title={modeTitle}
-          >
-            <span className="compute-mode-badge__indicator" aria-hidden="true" />
-            {modeLabel}
-          </span>
+          <RuntimeStatus runtime={runtime} unavailable={runtimeUnavailable} />
           <button
             type="button"
             className="theme-toggle"
@@ -157,7 +133,6 @@ const Topbar: React.FC<{ sharedLibrary?: SharedLibraryState | null; sharedLibrar
           onClose={(started) => {
             setShowImport(false);
             if (started) {
-              setOpenImportsRequest((current) => current + 1);
               setImportNotice("Import eingereiht");
               window.clearTimeout(importNoticeTimer.current);
               importNoticeTimer.current = window.setTimeout(() => setImportNotice(null), 6000);

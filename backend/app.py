@@ -11,11 +11,11 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from functools import partial, wraps
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date
 from pathlib import Path
 from queue import Full, Queue
-from typing import Annotated, List
+from typing import Annotated, List, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,7 +47,8 @@ from .error_logging import (
     configure_error_logging,
     install_global_exception_hooks,
 )
-from .models.face_model import get_compute_mode, get_execution_provider_status
+from .models.face_model import get_runtime_provider_details
+from .services import albums
 from .services.desktop import (
     is_windows_host,
     is_wsl_host,
@@ -87,9 +88,11 @@ from .services.shared_sync_import import SharedImportAnalysis
 from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
-from .services.geo import MAP_GRID_SIZE, geo_backfill, list_map_images, list_map_points, list_selected_map_images
+from .services.background_activities import background_activities
+from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_selected_map_images
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
-from .services.journey import get_journey
+from .services.journey import JourneyDetail, get_journey
+from .services.observed_places import list_observed_places
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -988,14 +991,20 @@ def api_runtime():
     Returns:
         Runtime provider details used by the UI badge.
     """
-    execution_provider, provider_initialized = get_execution_provider_status()
     return {
-        "compute_mode": get_compute_mode(execution_provider),
-        "execution_provider": execution_provider,
-        "provider_initialized": provider_initialized,
+        **get_runtime_provider_details(),
         "host_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
         "display_platform": "android" if os.environ.get("FACE_MANAGER_PLATFORM") == "android" else "windows" if is_windows_host() else "linux",
     }
+
+
+@app.post("/api/runtime/gpu-diagnostic")
+def api_gpu_diagnostic():
+    from .services.gpu_diagnostics import run_gpu_diagnostic
+
+    if import_queue.snapshot()["running_count"]:
+        raise HTTPException(status_code=409, detail="Führe die GPU-Diagnose nach dem laufenden Import aus.")
+    return run_gpu_diagnostic()
 
 
 def get_display_platform(request: Request) -> str:
@@ -1498,6 +1507,7 @@ def api_import_database(payload: bytes = Body(..., media_type="application/octet
         if restore_gate:
             if replaced:
                 invalidate_person_suggestion_epoch()
+                background_activities.discard(PHOTO_METADATA_ACTIVITY)
             face_thumbnail_warmup_queue.invalidate_library()
             with _media_library_lock:
                 _database_restore_in_progress = False
@@ -2685,6 +2695,7 @@ class _GeoSelectionBody(BaseModel):
     from_date: date | None = None
     to_date: date | None = None
     image_ids: list[Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]] | None = None
+    album_id: str | None = None
 
     def to_selection(self) -> GeoPhotoSelection:
         return _validated_photo_selection(GeoPhotoSelection(
@@ -2692,11 +2703,202 @@ class _GeoSelectionBody(BaseModel):
             from_date=self.from_date,
             to_date=self.to_date,
             image_ids=tuple(dict.fromkeys(self.image_ids)) if self.image_ids is not None else None,
+            album_id=self.album_id,
         ))
 
 
-def _validate_map_bounds(west, east, south, north, from_date, to_date):
-    _validated_photo_selection(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date))
+class _AlbumJourneyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    from_date: date | None = None
+    to_date: date | None = None
+    detail: JourneyDetail = "trip"
+    title: Annotated[str, Field(max_length=albums.MAX_ALBUM_NAME)] | None = None
+    arrival_included: bool | None = None
+    departure_included: bool | None = None
+
+    def metadata(self) -> dict:
+        _validated_photo_selection(GeoPhotoSelection(from_date=self.from_date, to_date=self.to_date))
+        result = self.model_dump(mode="json", exclude_none=True)
+        if self.title:
+            result["title"] = self.title.strip()
+        return result
+
+
+class _AlbumDraftOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class _AlbumDraftDimensions(_AlbumDraftOptions):
+    width: Annotated[int, Field(ge=0, le=99_999)]
+    height: Annotated[int, Field(ge=0, le=99_999)]
+
+
+_AlbumColor = Annotated[str, Field(max_length=7, pattern=r"^(?:#?[0-9a-fA-F]{3}|#?[0-9a-fA-F]{6})?$")]
+
+
+class _AlbumDraftColors(_AlbumDraftOptions):
+    paper: _AlbumColor | None = None
+    accent: _AlbumColor | None = None
+    land: _AlbumColor | None = None
+    water: _AlbumColor | None = None
+
+
+class _AlbumDraftFormatting(_AlbumDraftOptions):
+    typeface: Literal["serif", "sans"] | None = None
+    alignment: Literal["left", "center"] | None = None
+    titleScale: Annotated[int, Field(ge=75, le=130)] | None = None
+    margins: Literal["narrow", "normal", "wide"] | None = None
+    listColumns: Literal[1, 2] | None = None
+
+
+class _AlbumLayoutDraftBody(_AlbumDraftOptions):
+    version: Literal[1]
+    title: Annotated[str, Field(max_length=72)] | None = None
+    subtitle: Annotated[str, Field(max_length=100)] | None = None
+    format: Literal["a4", "portrait", "square", "custom"] | None = None
+    dimensions: _AlbumDraftDimensions | None = None
+    dpi: Literal[150, 240, 300, 400] | None = None
+    palette: Literal["sand", "coast"] | None = None
+    accent: Literal["automatic", "rust", "ocean", "pine", "plum"] | None = None
+    colors: _AlbumDraftColors | None = None
+    formatting: _AlbumDraftFormatting | None = None
+    contextPercent: Annotated[int, Field(ge=0, le=100)] | None = None
+    markerScale: Annotated[int, Field(ge=70, le=140)] | None = None
+    useViewport: bool | None = None
+    transports: dict[
+        Annotated[str, Field(pattern=r"^[0-9]{1,19}:[0-9]{1,19}$")],
+        Literal["car", "train", "plane", "walk", "bike", "boat"],
+    ] | None = None
+    style: Literal["standard", "landscape", "satellite"] | None = None
+    showNames: bool | None = None
+    showPeriod: bool | None = None
+    showStopsList: bool | None = None
+
+
+_AlbumImageId = Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]
+
+
+class _AlbumPhotoSelectionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_ids: list[_AlbumImageId] | None = None
+    selection: _GeoSelectionBody | None = None
+
+    def photo_kwargs(self):
+        return {
+            "image_ids": self.image_ids,
+            "selection": self.selection.to_selection() if self.selection is not None else None,
+        }
+
+
+class _AlbumCreateBody(_AlbumPhotoSelectionBody):
+    name: str
+    journey: _AlbumJourneyBody | None = None
+    layout_draft: _AlbumLayoutDraftBody | None = None
+
+
+class _AlbumUpdateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    cover_image_id: _AlbumImageId | None = None
+    journey: _AlbumJourneyBody | None = None
+    layout_draft: _AlbumLayoutDraftBody | None = None
+
+
+class _AlbumRemovePhotosBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image_ids: list[_AlbumImageId]
+
+
+def _album_call(operation, *args, write=False, **kwargs):
+    generation = _get_media_library_generation()
+    # The database restore takes the same operation lock before it replaces
+    # the library. A write cannot commit into a newly imported database.
+    with (_cluster_operation_lock if write else nullcontext()):
+        _get_media_library_generation(generation)
+        try:
+            result = operation(*args, **kwargs)
+        except albums.AlbumPhotosMissingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _get_media_library_generation(generation)
+        if write:
+            event_hub.publish("clusters", {"reason": "albums_changed"})
+        return result
+
+
+def _validate_album_id(album_id: str) -> None:
+    _validated_photo_selection(GeoPhotoSelection(album_id=album_id))
+
+
+@app.get("/api/albums")
+def get_albums():
+    return {"albums": _album_call(albums.list_albums)}
+
+
+@app.get("/api/albums/{album_id}")
+def get_album(album_id: str):
+    _validate_album_id(album_id)
+    return _album_call(albums.get_album, album_id)
+
+
+@app.post("/api/albums", status_code=201)
+def create_album(data: _AlbumCreateBody):
+    return _album_call(
+        albums.create_album, data.name, write=True, **data.photo_kwargs(),
+        journey=data.journey.metadata() if data.journey is not None else None,
+        layout_draft=data.layout_draft.model_dump(exclude_none=True) if data.layout_draft is not None else None,
+    )
+
+
+@app.patch("/api/albums/{album_id}")
+def update_album(album_id: str, data: _AlbumUpdateBody):
+    _validate_album_id(album_id)
+    changes = data.model_dump(exclude_unset=True)
+    if "name" in changes and data.name is None:
+        raise HTTPException(status_code=422, detail="Gib einen Albumname an.")
+    if data.journey is not None:
+        changes["journey"] = data.journey.metadata()
+    if data.layout_draft is not None:
+        changes["layout_draft"] = data.layout_draft.model_dump(exclude_none=True)
+    return _album_call(albums.update_album, album_id, changes, write=True)
+
+
+@app.delete("/api/albums/{album_id}")
+def delete_album(album_id: str):
+    _validate_album_id(album_id)
+    _album_call(albums.delete_album, album_id, write=True)
+    return {"status": "deleted"}
+
+
+@app.post("/api/albums/{album_id}/photos")
+def add_album_photos(album_id: str, data: _AlbumPhotoSelectionBody):
+    _validate_album_id(album_id)
+    return _album_call(albums.add_album_photos, album_id, write=True, **data.photo_kwargs())
+
+
+@app.delete("/api/albums/{album_id}/photos")
+def remove_album_photos(album_id: str, data: _AlbumRemovePhotosBody):
+    _validate_album_id(album_id)
+    return _album_call(albums.remove_album_photos, album_id, data.image_ids, write=True)
+
+
+def _validate_map_bounds(west, east, south, north, from_date, to_date, album_id=None):
+    _validated_photo_selection(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date, album_id=album_id))
+
+
+def _optional_map_bounds(west, east, south, north) -> GeoBounds | None:
+    if all(value is None for value in (west, east, south, north)):
+        return None
+    if west is None or east is None or south is None or north is None:
+        raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
+    return GeoBounds(west, east, south, north)
 
 
 def _validate_map_cursor(offset, before_id, before_captured_at):
@@ -2717,11 +2919,12 @@ def get_map_points(
     zoom: int = Query(default=2, ge=0, le=20),
     grid_columns: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
     grid_rows: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
+    album_id: str | None = None,
 ):
     """Return bounded photo aggregates for a map viewport."""
     generation = _get_media_library_generation()
-    _validate_map_bounds(west, east, south, north, from_date, to_date)
-    result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows)
+    _validate_map_bounds(west, east, south, north, from_date, to_date, album_id)
+    result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows, album_id=album_id)
     _get_media_library_generation(generation)
     return result
 
@@ -2738,14 +2941,15 @@ def get_map_images(
     offset: int = Query(default=0, ge=0),
     before_id: int | None = Query(default=None, ge=1, le=2**63 - 1),
     before_captured_at: str | None = Query(default=None, min_length=1, max_length=64),
+    album_id: str | None = None,
 ):
     """Return a stable page of geotagged photos in a viewport."""
     generation = _get_media_library_generation()
-    _validate_map_bounds(west, east, south, north, from_date, to_date)
+    _validate_map_bounds(west, east, south, north, from_date, to_date, album_id)
     _validate_map_cursor(offset, before_id, before_captured_at)
     page = list_map_images(
         west, east, south, north, from_date, to_date, limit, offset,
-        before_id=before_id, before_captured_at=before_captured_at,
+        before_id=before_id, before_captured_at=before_captured_at, album_id=album_id,
     )
     _get_media_library_generation(generation)
     return page
@@ -2768,10 +2972,36 @@ def get_selected_map_images(
 
 
 @app.get("/api/map/journey")
-def get_map_journey(from_date: date | None = None, to_date: date | None = None):
+def get_map_journey(
+    from_date: date | None = None,
+    to_date: date | None = None,
+    west: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    east: Annotated[float | None, Query(ge=-180, le=180)] = None,
+    south: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    north: Annotated[float | None, Query(ge=-90, le=90)] = None,
+    detail: JourneyDetail = "trip",
+    album_id: str | None = None,
+):
     """Return observed journey groups for the specified capture period."""
     generation = _get_media_library_generation()
-    result = get_journey(from_date, to_date)
+    result = get_journey(from_date, to_date, _optional_map_bounds(west, east, south, north), detail, album_id=album_id)
+    _get_media_library_generation(generation)
+    return result
+
+
+@app.get("/api/map/observed-places")
+def get_observed_places(
+    from_date: date | None = None,
+    to_date: date | None = None,
+    album_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=300)] = 150,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    generation = _get_media_library_generation()
+    selection = _validated_photo_selection(GeoPhotoSelection(
+        from_date=from_date, to_date=to_date, album_id=album_id,
+    ))
+    result = list_observed_places(selection, limit, offset)
     _get_media_library_generation(generation)
     return result
 
@@ -2793,6 +3023,7 @@ def get_images(
     north: Annotated[float | None, Query(ge=-90, le=90)] = None,
     from_date: date | None = None,
     to_date: date | None = None,
+    album_id: str | None = None,
 ):
     """List images and oriented face boxes.
 
@@ -2807,14 +3038,10 @@ def get_images(
     Returns:
         Paginated image dictionaries containing nested face data.
     """
-    bounds = None
-    if any(value is not None for value in (west, east, south, north)):
-        if west is None or east is None or south is None or north is None:
-            raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
-        bounds = GeoBounds(west, east, south, north)
+    bounds = _optional_map_bounds(west, east, south, north)
     selection = None
-    if bounds or from_date or to_date:
-        selection = _validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date))
+    if bounds or from_date or to_date or album_id is not None:
+        selection = _validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date, album_id=album_id))
     return _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
                             face_statuses, all_photos, selection)
 

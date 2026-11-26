@@ -1,5 +1,6 @@
 import { API_BASE, apiFetch, fetchMapImages, readApiError, type MapImageCursor, type MapImagesResponse } from "../../utils/api";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
+import type { MapBounds } from "./WorldMap";
 
 export interface JourneyStop {
   id: string;
@@ -30,12 +31,19 @@ export interface Journey {
   indexing: boolean;
 }
 
+export type JourneyDetail = "trip" | "city";
+
 export async function fetchJourney(
-  from: string, to: string, signal: AbortSignal,
+  from: string, to: string, bounds: MapBounds | null, detail: JourneyDetail, signal: AbortSignal, albumId = "",
 ): Promise<Journey> {
   const query = new URLSearchParams();
   if (from) query.set("from_date", from);
   if (to) query.set("to_date", to);
+  if (detail === "city") query.set("detail", detail);
+  if (albumId) query.set("album_id", albumId);
+  if (bounds) {
+    for (const [edge, value] of Object.entries(bounds)) query.set(edge, String(value));
+  }
   const response = await apiFetch(`${API_BASE}/map/journey?${query}`, { signal });
   if (!response.ok) throw new Error(await readApiError(response, "Der Standortverlauf konnte nicht geladen werden."));
   return response.json();
@@ -46,7 +54,7 @@ export async function fetchMapSelection(
 ): Promise<MapImagesResponse> {
   if (!selection.image_ids) {
     return fetchMapImages({
-      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, ...cursor, limit,
+      ...selection.bounds, from_date: selection.from_date, to_date: selection.to_date, album_id: selection.album_id, ...cursor, limit,
     }, signal);
   }
   const query = new URLSearchParams({ limit: String(limit) });

@@ -88,6 +88,7 @@ const App: React.FC = () => {
   const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
+  const [mapAlbumId, setMapAlbumId] = useState(initialEntry.mapAlbumId);
   const [clusterNavigationTarget, setClusterNavigationTarget] =
     useState<ClusterNavigationTarget | null>(() => {
       if (initialEntry.clusterId !== undefined) {
@@ -136,6 +137,7 @@ const App: React.FC = () => {
     }
     setSettingsSection(entry.page === "settings" ? entry.settingsSection : undefined);
     if (entry.page === "people") setGeoSelection(entry.geoSelection);
+    if (entry.page === "map") setMapAlbumId(entry.mapAlbumId);
     setPage(entry.page);
   }, []);
 
@@ -289,8 +291,11 @@ const App: React.FC = () => {
     } catch {
       // History selections are still invalidated in the open application.
     }
-    if (parseNavigationHash(window.location.hash, window.history.state).geoSelection) {
+    const current = parseNavigationHash(window.location.hash, window.history.state);
+    if (current.geoSelection) {
       navigate({ page: "people" }, true);
+    } else if (current.mapAlbumId) {
+      navigate({ page: "map" }, true);
     } else {
       setGeoSelection(undefined);
     }
@@ -336,13 +341,14 @@ const App: React.FC = () => {
             onOpenPeople={handleOpenPeople}
             geoSelection={geoSelection}
             onChangeGeoSelection={handleChangeGeoSelection}
+            onOpenAlbumMap={(id) => navigate({ page: "map", mapAlbumId: id })}
           />
         );
       case "map":
         return (
           <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
             <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
+              <MapPage active={active} openAlbumId={mapAlbumId} onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
             </Suspense>
           </ErrorBoundary>
         );

@@ -28,4 +28,18 @@ four decimal places. It uses German names when available and falls back to the
 primary Natural Earth name. Historic places and scientific and meteorological
 stations are omitted. [Natural Earth 1:10m populated places v5.1.2](https://www.naturalearthdata.com/downloads/10m-cultural-vectors/10m-populated-places/)
 
-All datasets ship with the app for offline use. [Natural Earth public-domain terms](https://www.naturalearthdata.com/about/terms-of-use/)
+These Natural Earth datasets ship with the app for offline use. [Natural Earth public-domain terms](https://www.naturalearthdata.com/about/terms-of-use/)
+
+`public/map/world-satellite.webp` contains the August 2004 global Blue Marble
+Next Generation composite with topography and bathymetry. The original NASA
+Earth Observatory JPEG was converted to WebP without cropping or changing its
+5400 × 2700 dimensions. The equirectangular raster covers longitude −180° to
+180° and latitude 90° to −90°. At this bundled resolution it is an overview,
+with about 7.4 km per pixel at the equator. It is embedded locally in exports
+with NASA attribution. [NASA Earth Observatory dataset and credits](https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/) · [Original raster](https://assets.science.nasa.gov/dynamicimage/assets/science/esd/eo/images/bmng/bmng-topography-bathymetry/august/world.topo.bathy.200408.3x5400x2700.jpg?w=5400&h=2700&fit=clip)
+
+NASA Earth Observatory credits the dataset to Reto Stöckli (NASA Goddard
+Space Flight Center). NASA describes its imagery as generally exempt from
+U.S. copyright and permits informational use, including photo collections,
+with source acknowledgment. NASA does not endorse Face Manager.
+[NASA media usage guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/)
