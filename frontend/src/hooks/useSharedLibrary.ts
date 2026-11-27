@@ -1,12 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchSharedLibrary, sharedLibraryFolders, type SharedLibraryState } from "../utils/api";
 
 export function useSharedLibrary() {
   const [resource, setResource] = useState<SharedLibraryState | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
+  const resourceJson = useRef<string>();
   const readInFlight = useRef<AbortController | null>(null);
   const mutationInFlight = useRef(false);
+
+  const publish = useCallback((next: SharedLibraryState) => {
+    // Keep workspace props stable when polling returns the same snapshot.
+    const json = JSON.stringify(next);
+    if (resourceJson.current !== json) {
+      resourceJson.current = json;
+      setResource(next);
+    }
+    setReadError(null);
+  }, []);
 
   const refresh = useCallback(async (force = false) => {
     if (mutationInFlight.current || (readInFlight.current && !force)) return null;
@@ -16,8 +27,7 @@ export function useSharedLibrary() {
     try {
       const next = await fetchSharedLibrary(controller.signal);
       if (controller.signal.aborted) return null;
-      setResource(next);
-      setReadError(null);
+      publish(next);
       return next;
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -27,7 +37,7 @@ export function useSharedLibrary() {
     } finally {
       if (readInFlight.current === controller) readInFlight.current = null;
     }
-  }, []);
+  }, [publish]);
 
   const mutate = useCallback(async (action: () => Promise<SharedLibraryState>) => {
     if (mutationInFlight.current) return null;
@@ -37,14 +47,13 @@ export function useSharedLibrary() {
     setWorking(true);
     try {
       const next = await action();
-      setResource(next);
-      setReadError(null);
+      publish(next);
       return next;
     } finally {
       mutationInFlight.current = false;
       setWorking(false);
     }
-  }, []);
+  }, [publish]);
 
   useEffect(() => {
     void refresh();
@@ -54,7 +63,7 @@ export function useSharedLibrary() {
     };
   }, [refresh]);
 
-  const folders = sharedLibraryFolders(resource);
+  const folders = useMemo(() => sharedLibraryFolders(resource), [resource]);
   const configured = folders.length > 0;
   useEffect(() => {
     if (!configured) return;
@@ -67,7 +76,8 @@ export function useSharedLibrary() {
     };
   }, [configured, refresh]);
 
-  return { resource, readError, working, configured, folders, refresh, mutate };
+  return useMemo(() => ({ resource, readError, working, configured, folders, refresh, mutate }),
+    [resource, readError, working, configured, folders, refresh, mutate]);
 }
 
 export type SharedLibraryController = ReturnType<typeof useSharedLibrary>;

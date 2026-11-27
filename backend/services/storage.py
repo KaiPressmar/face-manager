@@ -3211,7 +3211,20 @@ def _proposal_token(row) -> str:
 
 def list_person_suggestions() -> list[dict]:
     """Return current snapshots without presenting other cluster faces as evidence."""
+    suggestions, _, _ = get_person_suggestion_snapshot()
+    return suggestions
+
+
+def get_person_suggestion_snapshot() -> tuple[list[dict], bool, str]:
+    """Read the suggestions, pending flag, and library identity consistently."""
     with _person_suggestion_epoch_lock, closing(get_conn()) as conn:
+        conn.execute("BEGIN")
+        pending = bool(conn.execute(
+            """SELECT EXISTS(SELECT 1 FROM person_suggestion_state
+                            WHERE id = 1 AND generation > processed_generation)"""
+        ).fetchone()[0])
+        if pending:
+            return [], True, _person_suggestion_epoch
         rows = conn.execute(
             f"""{_CURRENT_PERSON_SUGGESTIONS}
                 ORDER BY p.name COLLATE NOCASE, s.confidence DESC, s.face_count DESC, s.cluster_id"""
@@ -3235,7 +3248,7 @@ def list_person_suggestions() -> list[dict]:
                 "preview_face_ids": face_ids[:_PERSON_SUGGESTION_PREVIEW_LIMIT],
                 "reference_face_ids": json.loads(row["reference_face_ids"]),
             })
-    return result
+        return result, False, _person_suggestion_epoch
 
 
 def _require_person_suggestion(cur, cluster_id: int, proposal_token: str):

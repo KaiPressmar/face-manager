@@ -133,7 +133,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
   const [albumPhotoId, setAlbumPhotoId] = useState<number>();
   const [faceEditor, setFaceEditor] = useState<(ManualFaceEditorSource & { mediaUrl: string })>();
   const [manualFaces, setManualFaces] = useState<GalleryManualFace[]>([]);
-  const stageRef = useRef<HTMLElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   useModalFocus(dialogRef, onClose, !isDeleting);
   const image = images[activeIndex];
@@ -405,7 +405,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
         </div>
       </header>
 
-      <main
+      <div
         ref={stageRef}
         className="gallery-stage"
         onMouseDown={(event) => {
@@ -481,7 +481,7 @@ const FullscreenImageGallery: React.FC<FullscreenImageGalleryProps> = ({
             ›
           </button>
         )}
-      </main>
+      </div>
 
       <footer className={`gallery-footer${originalUnavailable ? " gallery-footer--source-error" : ""}`}>
         {originalUnavailable && (

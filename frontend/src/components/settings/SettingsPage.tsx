@@ -120,13 +120,94 @@ const SETTINGS_NAV_ITEMS: { section: SettingsSection; label: string }[] = [
   { section: "daten", label: "Daten und Wartung" },
 ];
 
-type FeedbackArea = "erkennung" | "updates" | "protokoll" | "speicherorte";
+type FeedbackArea = "erkennung" | "updates" | "protokoll";
+
+const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }: { active: boolean }) {
+  const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const next = await fetchImagePathCleanup();
+        if (cancelled) return;
+        setPathCleanup(next);
+        if (next.status === "queued" || next.status === "running") {
+          timer = window.setTimeout(refresh, 1000);
+        }
+      } catch {
+        if (!cancelled) timer = window.setTimeout(refresh, 5000);
+      }
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [active, revision]);
+
+  const running = pathCleanup?.status === "queued" || pathCleanup?.status === "running";
+  const start = async () => {
+    if (!window.confirm(
+      "Fehlende Dateien aus der Bibliothek entfernen? Wenn ein Bild keinen weiteren Speicherort hat, gehen auch seine Gesichtszuordnungen verloren. Schließe vorher alle Fotolaufwerke an.",
+    )) return;
+    setError(null);
+    try {
+      setPathCleanup(await startImagePathCleanup());
+      setRevision((current) => current + 1);
+    } catch (cleanupError) {
+      setError(cleanupError instanceof Error ? cleanupError.message : "Die Pfadprüfung konnte nicht gestartet werden.");
+    }
+  };
+
+  let summary = "Der Status der letzten Prüfung wird geladen…";
+  switch (pathCleanup?.status) {
+    case "queued":
+      summary = "Die Prüfung wartet, bis keine wichtigeren Hintergrundaufgaben laufen.";
+      break;
+    case "running":
+      summary = `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft…`;
+      break;
+    case "completed":
+      summary = `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${countWithLabel(pathCleanup.removed_paths, "Speicherort", "Speicherorte")} und ${countWithLabel(pathCleanup.removed_images, "Bild", "Bilder")} entfernt.`;
+      break;
+    case "failed":
+      summary = "Die letzte Pfadprüfung konnte nicht abgeschlossen werden.";
+      break;
+    case "idle":
+      summary = "Noch keine Pfadprüfung in dieser Sitzung ausgeführt.";
+      break;
+  }
+
+  return (
+    <section className="settings-card">
+      <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
+      <p className="settings-card__copy">
+        Die automatische Prüfung meldet fehlende Bilder. Bei einer manuellen
+        Bereinigung lassen sich Einträge für fehlende Dateien an erreichbaren
+        Speicherorten entfernen.
+      </p>
+      <div className="settings-maintenance-status" aria-live="polite">{summary}</div>
+      <div className="settings-actions">
+        <button className="neon-card" type="button" onClick={() => void start()} disabled={running}>
+          {running ? "Pfadprüfung läuft…" : "Fehlende Bildpfade bereinigen"}
+        </button>
+      </div>
+      {error && <p className="settings-feedback settings-feedback--error" role="alert">{error}</p>}
+    </section>
+  );
+});
 
 const SettingsPage: React.FC<{
+  active: boolean;
   activeSection?: SettingsSection;
   sharedLibrary: SharedLibraryController;
   onNavigateSection: (section: SettingsSection) => void;
-}> = ({ activeSection, sharedLibrary, onNavigateSection }) => {
+}> = ({ active, activeSection, sharedLibrary, onNavigateSection }) => {
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [strictnessInput, setStrictnessInput] = useState("0.50");
@@ -150,7 +231,6 @@ const SettingsPage: React.FC<{
   const [backupFeedback, setBackupFeedback] = useState<{ text: string; error?: boolean } | null>(null);
   const backupInFlight = useRef(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
-  const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
   const [feedback, setFeedback] = useState<Partial<Record<FeedbackArea, { text: string; error: boolean }>>>({});
   const [filenameFeedback, setFilenameFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -226,39 +306,6 @@ const SettingsPage: React.FC<{
       }
     };
   }, [settingsLoadAttempt]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetchImagePathCleanup()
-      .then((next) => {
-        if (!cancelled) setPathCleanup(next);
-      })
-      .catch(() => {
-        // Maintenance state is supplementary; the settings remain usable.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const pathCleanupIsActive =
-    pathCleanup?.status === "queued" || pathCleanup?.status === "running";
-
-  useEffect(() => {
-    if (!pathCleanupIsActive) return;
-    let cancelled = false;
-    const timer = window.setInterval(() => {
-      void fetchImagePathCleanup()
-        .then((next) => {
-          if (!cancelled) setPathCleanup(next);
-        })
-        .catch(() => undefined);
-    }, 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [pathCleanupIsActive]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -617,44 +664,11 @@ const SettingsPage: React.FC<{
     }
   };
 
-  const handleImagePathCleanup = async () => {
-    if (!window.confirm(
-      "Fehlende Dateien aus der Bibliothek entfernen? Wenn ein Bild keinen weiteren Speicherort hat, gehen auch seine Gesichtszuordnungen verloren. Schließe vorher alle Fotolaufwerke an.",
-    )) return;
-    report("speicherorte");
-    try {
-      const next = await startImagePathCleanup();
-      setPathCleanup(next);
-    } catch (cleanupError) {
-      report("speicherorte",
-        cleanupError instanceof Error
-          ? cleanupError.message
-          : "Die Pfadprüfung konnte nicht gestartet werden.",
-        true,
-      );
-    }
-  };
-
-  const cleanupSummary = pathCleanup
-    ? pathCleanup.status === "queued"
-      ? "Die Prüfung wartet, bis keine wichtigeren Hintergrundaufgaben laufen."
-      : pathCleanup.status === "running"
-        ? `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft…`
-        : pathCleanup.status === "completed"
-          ? `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${countWithLabel(pathCleanup.removed_paths, "Speicherort", "Speicherorte")} und ${countWithLabel(pathCleanup.removed_images, "Bild", "Bilder")} entfernt.`
-          : pathCleanup.status === "failed"
-            ? "Die letzte Pfadprüfung konnte nicht abgeschlossen werden."
-            : "Noch keine Pfadprüfung in dieser Sitzung ausgeführt."
-    : "Der Status der letzten Prüfung wird geladen…";
-
   return (
     <div className="settings-page">
       <div className="settings-page__header" id="settings-start">
         <div>
           <h1 className="settings-page__title">Einstellungen</h1>
-          <p className="settings-page__copy">
-            Passe Erkennung, Dateinamen und Darstellung an oder sichere deine Daten.
-          </p>
         </div>
       </div>
 
@@ -1146,11 +1160,11 @@ const SettingsPage: React.FC<{
                 hidden
                 onChange={handleImportChange}
               />
-              {pendingRestore && <RestoreConfirmation file={pendingRestore.file} preview={pendingRestore.preview}
+              {active && pendingRestore && <RestoreConfirmation file={pendingRestore.file} preview={pendingRestore.preview}
                 onClose={() => setPendingRestore(null)} onConfirm={() => void confirmRestore()} />}
             </section>
 
-            <ArchiveRepair />
+            <ArchiveRepair active={active} />
 
             <section className="settings-card">
               <h2 className="settings-card__title">Fehlerprotokoll</h2>
@@ -1215,28 +1229,7 @@ const SettingsPage: React.FC<{
             </section>
             {settings && <PreviewCacheSettings settings={settings} />}
             <SharedLibrarySettings controller={sharedLibrary} />
-            <section className="settings-card">
-              <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
-              <p className="settings-card__copy">
-                Die automatische Prüfung meldet fehlende Bilder. Bei einer manuellen
-                Bereinigung lassen sich Einträge für fehlende Dateien an erreichbaren
-                Speicherorten entfernen.
-              </p>
-              <div className="settings-maintenance-status" aria-live="polite">
-                {cleanupSummary}
-              </div>
-              <div className="settings-actions">
-                <button
-                  className="neon-card"
-                  type="button"
-                  onClick={() => void handleImagePathCleanup()}
-                  disabled={pathCleanupIsActive}
-                >
-                  {pathCleanupIsActive ? "Pfadprüfung läuft…" : "Fehlende Bildpfade bereinigen"}
-                </button>
-              </div>
-              {sectionFeedback("speicherorte")}
-            </section>
+            <ImagePathCleanupCard active={active} />
               </div>
             </section>
           </div>

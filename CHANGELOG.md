@@ -11,9 +11,31 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.19.0] - 2026-11-27
+
+### Neu
+
+- Unter Ubuntu kannst du Updates direkt in Face Manager herunterladen und die Installation aus der App starten.
+
+### Verbessert
+
+- Face Manager räumt nicht mehr benötigte Update-Dateien automatisch auf.
 - Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
+- Face Manager merkt sich Kartenstil, Ländernamen, Rastergröße und den Status der Einführung über Neustarts hinweg.
+- Ansichten öffnen sich direkt. Kartenfotos, Bildauswahl und der aktuelle Bildausschnitt bleiben bei Hintergrundaktualisierungen und beim Wiederöffnen erhalten.
+- Mit der Tastatur kannst du direkt zum Hauptinhalt springen.
+- Statusangaben unter „Personen“ sind im hellen Design besser lesbar.
+- In kleinen Fenstern kannst du Gesichtsgruppen auf voller Breite prüfen und direkt zur Gruppenliste zurückkehren.
+- Auf der Fotokarte wechselst du in kleinen Fenstern direkt zwischen Karte, Fotos und Reisestopps.
+- Navigation und Filter brauchen in kleinen Fenstern weniger Platz, sodass du Fotos, Dateien und Einstellungen früher siehst.
 
 ### Behoben
+
+- Die Fotokarte öffnet sich unter Ubuntu wieder.
+- Der Ansichtsverlauf funktioniert auch nach dem Neuladen bei gesperrtem Browserspeicher.
+- Beim Bestätigen einer Zuordnung bleiben die übrigen Vorschläge und die Scrollposition erhalten.
 
 ## [0.18.0] - 2026-11-26
 

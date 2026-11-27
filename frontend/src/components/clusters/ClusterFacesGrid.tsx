@@ -12,6 +12,7 @@ interface ClusterFacesGridProps {
   loaded?: boolean;
   /** Item count used to reserve height while faces are not yet loaded. */
   reservedCount?: number;
+  getScrollContainer: () => HTMLElement | null;
 }
 
 const TILE_SIZE = 120;
@@ -84,6 +85,7 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({
   onOpenImage,
   loaded = true,
   reservedCount,
+  getScrollContainer,
 }) => {
   const safeFaces = Array.isArray(faces) ? faces : [];
   const selectedSet = new Set(selectedFaceIds);
@@ -128,11 +130,12 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({
   useEffect(() => {
     const element = containerRef.current;
     if (!element) return;
-    const scroller = element.closest("[data-cluster-scroll-container='true']") as HTMLElement | null;
+    const pageScroller = element.closest<HTMLElement>(".page-content");
 
     const recompute = () => {
       const container = containerRef.current;
       if (!container) return;
+      const scroller = getScrollContainer();
       const containerRect = container.getBoundingClientRect();
       const viewportHeight = scroller ? scroller.clientHeight : window.innerHeight;
       const scrollerTop = scroller ? scroller.getBoundingClientRect().top : 0;
@@ -160,14 +163,14 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({
     };
 
     recompute();
-    const scrollTarget: HTMLElement | Window = scroller ?? window;
-    scrollTarget.addEventListener("scroll", onScrollOrResize, { passive: true });
+    const scrollTarget = pageScroller ?? window;
+    scrollTarget.addEventListener("scroll", onScrollOrResize, { capture: true, passive: true });
     window.addEventListener("resize", onScrollOrResize, { passive: true });
     return () => {
-      scrollTarget.removeEventListener("scroll", onScrollOrResize);
+      scrollTarget.removeEventListener("scroll", onScrollOrResize, true);
       window.removeEventListener("resize", onScrollOrResize);
     };
-  }, [columns, itemCount, totalRows]);
+  }, [columns, getScrollContainer, itemCount, totalRows]);
 
   const startRow = Math.floor(range.start / columns);
   const visibleFaces = loaded ? arrangedFaces.slice(range.start, range.end) : [];

@@ -3,9 +3,14 @@ const assert = require('node:assert/strict');
 const marker = (page) => page.evaluate(() => window.history.state.faceManagerWorkspace);
 const waitForEntry = (page, id) => page.waitForFunction((entryId) => window.history.state?.faceManagerWorkspace?.id === entryId, id);
 
-module.exports = async function workspaceNavigationFlow(browser, errors, newPage, webBase) {
+module.exports = async function workspaceNavigationFlow(browser, errors, newPage, webBase, storageBlocked = false) {
   const page = await newPage(browser, 1212, 799, errors);
   try {
+    if (storageBlocked) await page.addInitScript(() => {
+      Object.defineProperty(window, 'sessionStorage', {
+        get() { throw new DOMException('Session storage is disabled', 'SecurityError'); },
+      });
+    });
     await page.route('**/api/changelog/current', (route) => route.fulfill({ json: {
       seen: false, fresh_install: true,
       versions: [{ version: '1.0.0', date: null, sections: [{ title: 'Neu', items: ['Neue Funktionen'] }] }],
@@ -22,6 +27,11 @@ module.exports = async function workspaceNavigationFlow(browser, errors, newPage
     assert.equal(await back.isDisabled(), true);
     const pictures = page.locator('[data-workspace-page="people"] > .page-content');
     await pictures.locator('[data-image-id]').first().waitFor();
+    const skipLink = page.getByRole('link', { name: 'Zum Hauptinhalt', exact: true });
+    await skipLink.press('Enter');
+    assert.ok(await page.getByRole('main').evaluate((element) => element === document.activeElement));
+    assert.equal(new URL(page.url()).hash, '#/bilder', 'Skipping navigation changed the current route');
+    assert.equal((await marker(page)).id, first.id, 'Skipping navigation added a history entry');
     const savedScroll = await pictures.evaluate((pane) => { pane.scrollTop = 400; return pane.scrollTop; });
     assert.ok(savedScroll > 150, 'Fixture does not have enough photos to test scroll restoration');
     await reset.click();
@@ -41,6 +51,10 @@ module.exports = async function workspaceNavigationFlow(browser, errors, newPage
     const map = await marker(page);
     await back.click();
     await waitForEntry(page, review.id);
+    await page.reload();
+    await waitForEntry(page, review.id);
+    await forward.waitFor();
+    assert.equal(await forward.isEnabled(), true, 'Reload discarded Forward in the middle of history');
     const help = page.getByRole('button', { name: 'Hilfe', exact: true });
     await help.click();
     const dialog = page.getByRole('dialog', { name: 'Erste Schritte' });
@@ -77,35 +91,34 @@ module.exports = async function workspaceNavigationFlow(browser, errors, newPage
     console.log('PASS workspace history: same-route reset, keyboard, browser overlay Back and Forward, native bridge, fresh install and 320px');
 
     await page.setViewportSize({ width: 1212, height: 799 });
-    await invalidLibraryHistory(page, sidebar, back);
+    if (storageBlocked) {
+      await page.evaluate(() => { location.hash = '#/einstellungen/dateinamen'; });
+      await page.waitForFunction(() => history.state?.settingsSection === 'dateinamen');
+      assert.equal(await forward.isEnabled(), false, 'Direct navigation did not discard the old forward branch');
+      await page.evaluate(() => history.go(-2));
+      await waitForEntry(page, second.id);
+      await page.reload();
+      await forward.click();
+      await waitForEntry(page, review.id);
+      await page.reload();
+      assert.equal(await forward.isEnabled(), true, 'Reload discarded a forward entry created by a direct hash change');
+      await forward.click();
+      await page.waitForFunction(() => location.hash === '#/einstellungen/dateinamen');
+    }
   } finally {
     await page.close();
   }
-  await libraryIdentityFlow(browser, errors, newPage, webBase);
+  await libraryIdentityFlow(browser, errors, newPage, webBase, storageBlocked);
 };
 
-async function invalidLibraryHistory(page, sidebar, back) {
-  await page.evaluate(() => { location.hash = '#/einstellungen/dateinamen'; });
-  await page.waitForFunction(() => history.state?.settingsSection === 'dateinamen');
-  const previous = await marker(page);
-  await sidebar.getByRole('button', { name: 'Karte', exact: true }).click();
-  // Model reopening the tab after a library-generation change while the old
-  // browser entry still points at the previous library's workspace.
-  await page.evaluate((generation) => sessionStorage.setItem('face-manager:geo-selection-epoch', String(generation)), previous.generation + 1);
-  await page.reload();
-  await page.waitForFunction((generation) => history.state?.faceManagerWorkspace?.generation === generation, previous.generation + 1);
-  await back.click();
-  await page.getByText('Dieser Verlaufseintrag gehört zur vorherigen Bibliothek. Die Übersicht ist geöffnet.', { exact: true }).waitFor();
-  assert.equal(new URL(page.url()).hash, '#/einstellungen');
-}
-
-async function libraryIdentityFlow(browser, errors, newPage, webBase) {
+async function libraryIdentityFlow(browser, errors, newPage, webBase, storageBlocked) {
   const page = await newPage(browser, 1212, 799, errors);
   let library = 'workspace-library-a';
   let verification;
   let releaseVerification;
   try {
-    await page.addInitScript(() => {
+    await page.addInitScript((blocked) => {
+      if (blocked) Reflect.deleteProperty(window, 'sessionStorage');
       window.EventSource = class WorkspaceTestEvents extends EventTarget {
         static CONNECTING = 0;
         readyState = 1;
@@ -116,7 +129,7 @@ async function libraryIdentityFlow(browser, errors, newPage, webBase) {
         }
         close() { this.readyState = 2; }
       };
-    });
+    }, storageBlocked);
     await page.route('**/api/library-identity', async (route) => {
       if (verification) await verification;
       return route.fulfill({ json: { library_id: library } });
@@ -160,6 +173,10 @@ async function libraryIdentityFlow(browser, errors, newPage, webBase) {
     await publish(library, 'settings_update');
     assert.equal((await marker(page)).libraryId, library, 'A stale hint retired the genuine current library');
 
+    const sidebar = page.getByRole('navigation', { name: 'Hauptnavigation' });
+    const history = page.getByRole('navigation', { name: 'Ansichtsverlauf' });
+    const oldSettings = await marker(page);
+    await sidebar.getByRole('button', { name: 'Karte', exact: true }).click();
     library = 'workspace-library-d';
     await page.evaluate(() => {
       const source = window.workspaceTestEvents;
@@ -170,6 +187,36 @@ async function libraryIdentityFlow(browser, errors, newPage, webBase) {
     });
     await waitForLibrary(library);
     assert.equal((await marker(page)).generation, first.generation + 3);
+
+    await page.locator('#gps-map-results').getByRole('button', { name: 'In Bilder öffnen', exact: true }).click();
+    const selection = await marker(page);
+    await page.reload();
+    await page.getByRole('button', { name: 'Kartenausschnitt entfernen' }).waitFor();
+    assert.equal((await marker(page)).generation, selection.generation);
+
+    verification = new Promise((resolve) => { releaseVerification = resolve; });
+    await page.reload();
+    await page.getByText('Bibliothek wird geprüft …', { exact: true }).waitFor();
+    await page.evaluate(() => window.history.go(-2));
+    await waitForEntry(page, oldSettings.id);
+    releaseVerification();
+    verification = undefined;
+    await page.getByText('Bibliothek wird geprüft …', { exact: true }).waitFor({ state: 'hidden' });
+    assert.equal((await marker(page)).generation, selection.generation, 'Going Back before verification changed the active library generation');
+    const forward = history.getByRole('button', { name: 'Vorwärts', exact: true });
+    await forward.click();
+    await page.waitForFunction(() => location.hash === '#/weltkarte');
+    await forward.click();
+    await page.getByRole('button', { name: 'Kartenausschnitt entfernen' }).waitFor();
+
+    await history.getByRole('button', { name: 'Zurück', exact: true }).click();
+    await page.waitForFunction(() => location.hash === '#/weltkarte');
+    library = 'workspace-library-e';
+    await publish(library, 'database_import');
+    await waitForLibrary(library);
+    await history.getByRole('button', { name: 'Vorwärts', exact: true }).click();
+    await page.getByText('Dieser Verlaufseintrag gehört zur vorherigen Bibliothek. Die Übersicht ist geöffnet.', { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).hash, '#/bilder');
     console.log('PASS library identity: startup guard, valid deep link, duplicate/missed and out-of-order SSE, reconnect');
   } finally {
     releaseVerification?.();

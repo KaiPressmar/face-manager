@@ -120,7 +120,10 @@ const Topbar: React.FC<{
             title="Bilder aus einem oder mehreren Ordnern hinzufügen"
           >
             <span className="topbar-import-button__icon" aria-hidden="true">＋</span>
-            <span className="topbar-import-button__label">Bilder hinzufügen</span>
+            <span className="topbar-import-button__label" aria-hidden="true">
+              <span className="topbar-import-button__full-label">Bilder hinzufügen</span>
+              <span className="topbar-import-button__short-label">Bilder</span>
+            </span>
           </button>
           <BackgroundTasksStatus sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError}
             openRequest={action?.destination === "activities" ? action.sequence : undefined} />

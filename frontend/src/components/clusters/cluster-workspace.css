@@ -1,0 +1,192 @@
+.review-page[data-compact-review] {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
+.review-page[data-compact-review] .review-page-tabs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 10px;
+}
+
+.review-page[data-compact-review] .review-page-tab {
+  overflow-wrap: anywhere;
+}
+
+.review-page[data-compact-detail] .review-page__header,
+.review-page[data-compact-review] .review-page-tab small:not([data-pending]) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.review-page[data-compact-detail] .review-page-tabs {
+  display: none;
+}
+
+.review-page[data-compact-detail] .face-action-history {
+  margin: 0;
+}
+
+.review-page[data-compact-list] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: start;
+}
+
+.review-page[data-compact-list] > * {
+  grid-column: 1 / -1;
+}
+
+.review-page[data-compact-list] > .review-page__header,
+.review-page[data-compact-list] > .cluster-workspace-navigation {
+  grid-row: 1;
+  align-self: start;
+}
+
+.review-page[data-compact-list] > .review-page__header {
+  grid-column: 1;
+  margin: 4px 0 8px;
+}
+
+.review-page[data-compact-list] > .cluster-workspace-navigation {
+  grid-column: 2;
+  max-width: 45vw;
+}
+
+.review-page[data-compact-list] .face-action-history {
+  margin: 0;
+}
+
+.review-page[data-compact-review] .face-action-history summary {
+  font-size: .85rem;
+}
+
+.review-page[data-compact-review] .face-action-history details {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+
+.review-page[data-compact-list] .cluster-nav-search__topline,
+.review-page[data-compact-list] .cluster-nav-detail-title {
+  display: none;
+}
+
+@media (min-width: 760px) {
+  .review-page[data-compact-review] .review-page-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  }
+}
+
+.review-page[data-compact-review] .cluster-workspace {
+  display: block;
+}
+
+.review-page[data-compact-review] .cluster-workspace__sidebar,
+.review-page[data-compact-review] .cluster-nav-section__body--person-browser {
+  height: auto;
+  overflow: visible;
+}
+
+.review-page[data-compact-review] .cluster-workspace__sidebar[hidden] {
+  display: none;
+}
+
+.review-page[data-compact-review] .cluster-workspace__main,
+.review-page[data-compact-review] .cluster-detail-layout__content,
+.review-page[data-compact-review] .cluster-nav-section__body--scroll,
+.review-page[data-compact-review] .cluster-person-tree__list {
+  overflow: visible;
+}
+
+.review-page[data-compact-review] .cluster-detail-layout__content,
+.review-page[data-compact-review] .cluster-person-tree__list {
+  padding: 0;
+  scrollbar-gutter: auto;
+}
+
+.review-page[data-compact-review] .cluster-person-tree {
+  grid-template-rows: auto auto;
+  height: auto;
+}
+
+.review-page[data-compact-review] .cluster-nav-overview--archive {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-page[data-compact-review] .cluster-nav-overview__item,
+.review-page[data-compact-review] .cluster-nav-load-more,
+.review-page[data-compact-review] .cluster-person-browser__person,
+.review-page[data-compact-review] .cluster-selection-status__link {
+  min-height: 44px;
+  overflow-wrap: anywhere;
+}
+
+.review-page[data-compact-review] .cluster-person-browser__cluster-card,
+.review-page[data-compact-review] .cluster-group-card__header {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.cluster-compact-navigation {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  align-self: stretch;
+  padding: 4px 0 8px;
+  background: var(--bg);
+}
+
+.cluster-compact-back {
+  min-height: 44px;
+}
+
+.cluster-compact-back span {
+  margin-inline-end: 5px;
+}
+
+.cluster-quick-actions-compact {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+}
+
+.cluster-quick-actions-compact summary {
+  align-content: center;
+  min-height: 44px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cluster-quick-actions-compact .cluster-action-button {
+  min-height: 44px;
+}
+
+.review-page[data-compact-detail] .cluster-detail-toolbar__selection:empty {
+  display: none;
+}
+
+@media (min-width: 481px) {
+  .review-page[data-compact-detail] .cluster-assign-bar > button {
+    width: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .review-page[data-compact-review] .cluster-detail-topbar,
+  .review-page[data-compact-review] .cluster-group-card {
+    padding: 10px;
+  }
+}

@@ -3,7 +3,7 @@ import {
   fetchMapPoints,
   type MapImage, type MapImageCursor, type MapPoint, type MapPointsResponse,
 } from "../../utils/api";
-import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapStyle, type MapView } from "./WorldMap";
+import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
 import MapGallery, { type MapGalleryOpening } from "./MapGallery";
 import MapPhotoTile from "./MapPhotoTile";
 import MapAlbumDialog, { type MapAlbumOpening } from "./MapAlbumDialog";
@@ -20,11 +20,14 @@ import { countWithLabel } from "../../utils/germanFormatting";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import { subscribeToTopic } from "../../utils/events";
 import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
+import { useUiPreferences } from "../../hooks/useUiPreferences";
 import "./map.css";
 import "./cartography.css";
 import "./map-workspace.css";
 
 const PAGE_SIZE = 36;
+const MAX_IMAGE_REQUEST_SIZE = 200;
+const COMPACT_MAP_QUERY = "(max-width: 960px)";
 const MAP_LIBRARY_EVENTS = new Set([
   "database_import", "delete_image", "image_path_cleanup", "image_rename", "import_completed", "albums_changed",
 ]);
@@ -32,6 +35,7 @@ const EMPTY_POINTS: MapPoint[] = [];
 const EMPTY_IMAGES: MapImage[] = [];
 type MapResult<T> = { key: string; data: T | null; error: string };
 type DateFields = { from: string; to: string };
+type MapPane = "map" | "results";
 type DateError = { field: keyof DateFields | "both"; text: string };
 const reversedDates: DateError = { field: "both", text: "Das Enddatum muss am oder nach dem Startdatum liegen." };
 type ImagePage = {
@@ -40,6 +44,7 @@ type ImagePage = {
   nextCursor: MapImageCursor | null;
   extended: boolean;
 };
+type MapImageResult = MapResult<ImagePage> & { revision: number };
 const INITIAL_VIEW: MapView = { longitude: 0, latitude: 0, zoom: 1 };
 const REGIONS: { label: string; view: MapView }[] = [
   { label: "Welt", view: INITIAL_VIEW },
@@ -76,7 +81,9 @@ interface MapWorkspace {
   home?: TravelHome;
   trip?: TripSelection;
   resultScroll: number;
-  loadedResults?: MapResult<ImagePage>;
+  compactPane: MapPane;
+  filtersOpen: boolean;
+  loadedResults?: MapImageResult;
 }
 
 const formatter = new Intl.NumberFormat("de-DE");
@@ -85,17 +92,11 @@ const shortDate = new Intl.DateTimeFormat("de-DE", { day: "numeric", month: "sho
 const year = new Date().getFullYear();
 
 const countries = [...countryLabels].sort((a, b) => a.name.localeCompare(b.name, "de"));
-const MAP_STYLE_KEY = "face-manager:map-style";
-const MAP_NAMES_KEY = "face-manager:map-country-names";
 
 const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNavigateToCluster, onOpenImages }) => {
   const [view, setView] = useState<MapView>(INITIAL_VIEW);
   const [mode, setMode] = useState<"locations" | "journey">("locations");
-  const [mapStyle, setMapStyle] = useState<MapStyle>(() => {
-    const value = localStorage.getItem(MAP_STYLE_KEY);
-    return value === "landscape" || value === "satellite" ? value : "standard";
-  });
-  const [showNames, setShowNames] = useState(() => localStorage.getItem(MAP_NAMES_KEY) === "true");
+  const { values: { map_style: mapStyle, map_country_names: showNames }, setPreference } = useUiPreferences();
   const [journeyResult, setJourneyResult] = useState<MapResult<Journey> | null>(null);
   const [journeyStopId, setJourneyStopId] = useState<string | undefined>();
   const [journeyRetry, setJourneyRetry] = useState(0);
@@ -111,8 +112,18 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const [dateDraft, setDateDraft] = useState<DateFields>();
   const [dateEntryError, setDateEntryError] = useState<DateError>();
   const [datePreset, setDatePreset] = useState("all");
+  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia(COMPACT_MAP_QUERY).matches);
+  const [compactPane, setCompactPane] = useState<MapPane>("map");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersButton = useRef<HTMLButtonElement>(null);
+  const periodFilter = useRef<HTMLSelectElement>(null);
+  const mapPaneButton = useRef<HTMLButtonElement>(null);
+  const resultsPaneButton = useRef<HTMLButtonElement>(null);
+  const mapPanelRef = useRef<HTMLElement>(null);
+  const focusResults = useRef(false);
+  const savedResultScroll = useRef(0);
   const [pointsResult, setPointsResult] = useState<MapResult<MapPointsResponse> | null>(null);
-  const [imagesResult, setImagesResult] = useState<MapResult<ImagePage> | null>(null);
+  const [imagesResult, setImagesResult] = useState<MapImageResult | null>(null);
   const [moreLoading, setMoreLoading] = useState(false);
   const [moreError, setMoreError] = useState("");
   const resultsRef = useRef<HTMLElement>(null);
@@ -125,6 +136,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const [pointRefresh, setPointRefresh] = useState(0);
   const [imageRefresh, setImageRefresh] = useState(0);
   const [libraryRevision, setLibraryRevision] = useState(0);
+  const [placeLibraryEpoch, setPlaceLibraryEpoch] = useState(0);
   const [albumId, setAlbumId] = useState("");
   const { albums, loading: albumsLoading, error: albumsError, reload: reloadAlbums } = usePhotoAlbums(active);
   const selectedAlbum = albums.find((item) => item.id === albumId);
@@ -135,11 +147,27 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const openedAlbumRoute = useRef<string>();
   const [albumRouteRevision, setAlbumRouteRevision] = useState(0);
   const [routeNotice, setRouteNotice] = useState("");
+  const showResultsPane = !compactLayout || compactPane === "results";
+
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_MAP_QUERY);
+    const updateLayout = () => {
+      if (media.matches) {
+        if (resultsRef.current?.contains(document.activeElement)) setCompactPane("results");
+        else if (mapPanelRef.current?.contains(document.activeElement)) setCompactPane("map");
+      }
+      setCompactLayout(media.matches);
+    };
+    updateLayout();
+    media.addEventListener("change", updateLayout);
+    return () => media.removeEventListener("change", updateLayout);
+  }, []);
 
   const { checkpoint } = useWorkspaceNavigation<MapWorkspace>("map", {
     capture: () => ({ view, mode, region, regionName, fromDate, toDate, datePreset, dateDraft, dateEntryError,
-      albumId, journeyDetail, journeyStopId, includeInferred, home, trip, resultScroll: resultsRef.current?.scrollTop ?? 0,
-      loadedResults: imageResult?.data?.extended ? imageResult : undefined }),
+      albumId, journeyDetail, journeyStopId, includeInferred, home, trip, compactPane, filtersOpen,
+      resultScroll: showResultsPane ? resultsRef.current?.scrollTop ?? 0 : savedResultScroll.current,
+      loadedResults: imageResult?.data?.extended && imageResult.revision === libraryRevision ? imageResult : undefined }),
     restore: (saved) => {
       setView(saved?.view ?? INITIAL_VIEW);
       setMode(saved?.mode ?? "locations");
@@ -159,6 +187,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       setTrip(saved?.trip);
       setSelectMode(false);
       setRouteNotice("");
+      setCompactPane(saved?.compactPane ?? "map");
+      setFiltersOpen(saved?.filtersOpen ?? Boolean(saved?.dateEntryError));
       openedAlbumRoute.current = saved?.albumId || undefined;
       restoreResultScroll.current = saved?.resultScroll ?? 0;
       setAlbumRouteRevision((revision) => revision + 1);
@@ -167,8 +197,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
 
   const dateError = dateEntryError ?? (fromDate && toDate && fromDate > toDate ? reversedDates : undefined);
   const waitingForRouteAlbum = Boolean(openAlbumId && albumId !== openAlbumId);
-  const canLoad = active && !dateError && !waitingForRouteAlbum;
-  const canLoadPoints = canLoad && !isJourney && pointGrid !== null;
+  const canShowResults = !dateError && !waitingForRouteAlbum;
+  const canLoad = active && canShowResults;
+  const showPoints = canShowResults && !isJourney && pointGrid !== null;
+  const canLoadPoints = active && showPoints;
   const handleGridChange = useCallback((grid: MapGrid) => {
     setPointGrid((current) => current?.columns === grid.columns && current.rows === grid.rows ? current : grid);
   }, []);
@@ -185,7 +217,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const dates = { from_date: queryFrom || undefined, to_date: queryTo || undefined, album_id: albumId || undefined };
   // A background refresh can keep displaying the last route for this exact selection.
   const journeyKey = JSON.stringify([queryFrom, queryTo, region, journeyDetail, albumId]);
-  const journeyState = isJourney && canLoad && journeyResult?.key === journeyKey ? journeyResult : null;
+  const journeyState = isJourney && canShowResults && journeyResult?.key === journeyKey ? journeyResult : null;
   const baseJourney = journeyState?.data;
   const tripsSource = baseJourney ?? (trip ? journeyResult?.data : null);
   const journey = useMemo(() => {
@@ -195,11 +227,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   }, [baseJourney, includeInferred, trip]);
   const journeyStop = journey?.stops.find((stop) => stop.id === journeyStopId);
   const stopDay = journeyStop?.start.slice(0, 10);
-  const canLoadImages = canLoad && (!isJourney || Boolean(journeyStop));
+  const showImages = canShowResults && (!isJourney || Boolean(journeyStop));
+  const canLoadImages = active && showImages;
   const selection: GeoPhotoSelection = isJourney && journeyStop
     ? { ...dates, image_ids: journeyStop.image_ids }
     : { ...dates, bounds: filterBounds };
   const stopMembership = useMemo(() => journeyStop?.image_ids.join(","), [journeyStop]);
+  const inferredIds = useMemo(() => journeyStop?.inferred_image_ids?.length
+    ? new Set(journeyStop.inferred_image_ids) : undefined, [journeyStop]);
   const journeySelection: GeoPhotoSelection | undefined = journey?.photo_count
     ? { ...dates, image_ids: journey.stops.flatMap((stop) => stop.image_ids) }
     : undefined;
@@ -209,18 +244,19 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     grid_rows: pointGrid?.rows,
   };
   const filterKey = JSON.stringify(isJourney ? ["journey", journeyKey, journeyStopId, stopMembership] : selection);
-  const pointKey = JSON.stringify([pointQuery, libraryRevision]);
-  const imageKey = JSON.stringify([filterKey, libraryRevision]);
-  const pointResult = canLoadPoints && pointsResult?.key === pointKey ? pointsResult : null;
-  const imageResult = canLoadImages && imagesResult?.key === imageKey ? imagesResult : null;
-  const points = pointResult?.error ? null : pointResult?.data;
+  // A library update refreshes the current query without hiding its last results.
+  const pointKey = JSON.stringify(pointQuery);
+  const pointResult = showPoints && pointsResult?.key === pointKey ? pointsResult : null;
+  const imageResult = showImages && imagesResult?.key === filterKey ? imagesResult : null;
+  const points = pointResult?.data;
   const collection = pointsResult?.data;
   const images = imageResult?.data?.items ?? EMPTY_IMAGES;
   const imageTotal = imageResult?.data?.total ?? 0;
   const nextCursor = imageResult?.data?.nextCursor;
+  const canLoadMore = Boolean(nextCursor) && imageResult?.revision === libraryRevision;
   const hasExtendedResults = imageResult?.data?.extended ?? false;
-  const pointsLoading = canLoadPoints && !pointResult;
-  const imagesLoading = canLoadImages && !imageResult;
+  const pointsLoading = showPoints && !pointResult;
+  const imagesLoading = showImages && !imageResult;
   const openedGallery = active ? gallery : null;
 
   const clearGallery = useCallback(() => setGallery(null), []);
@@ -265,10 +301,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     void fetchJourney(queryFrom, queryTo, region, journeyDetail, controller.signal, albumId).then((data) => {
       if (!controller.signal.aborted) setJourneyResult({ key: journeyKey, data, error: "" });
     }).catch((error) => {
-      if (!controller.signal.aborted) setJourneyResult({
-        key: journeyKey, data: null,
+      if (!controller.signal.aborted) setJourneyResult((current) => ({
+        key: journeyKey, data: current?.key === journeyKey ? current.data : null,
         error: error instanceof Error ? error.message : "Der Standortverlauf konnte nicht geladen werden.",
-      });
+      }));
     });
     return () => controller.abort();
   }, [canLoad, isJourney, queryFrom, queryTo, region, journeyDetail, journeyKey, journeyRetry, albumId, libraryRevision]);
@@ -286,12 +322,15 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       if (update.reason === "database_import") {
         clearGallery();
         setJourneyResult(null);
+        setPointsResult(null);
+        setImagesResult(null);
         setAlbum(null);
         setSaveSelection(undefined);
         setAlbumId("");
         setTrip(undefined);
         setHome(undefined);
         setJourneyStopId(undefined);
+        setPlaceLibraryEpoch((value) => value + 1);
         window.clearTimeout(timer);
         timer = undefined;
         setLibraryRevision((value) => value + 1);
@@ -317,57 +356,81 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         .then((data) => { if (!controller.signal.aborted) setPointsResult({ key: pointKey, data, error: "" }); })
         .catch((reason) => {
           if (!controller.signal.aborted) setPointsResult((current) => ({
-            key: pointKey, data: current?.data ?? null,
+            key: pointKey, data: current?.key === pointKey ? current.data : null,
             error: reason instanceof Error ? reason.message : "Standorte konnten nicht geladen werden.",
           }));
         });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-    // The key encodes every query value. The debounce only starts for a changed query.
-  }, [canLoadPoints, pointKey, pointRefresh]);
-
-  useEffect(() => {
-    if (restoreResultScroll.current === undefined) resultsRef.current?.scrollTo({ top: 0 });
-  }, [canLoadImages, filterKey]);
+    // The key encodes every query value.
+  }, [canLoadPoints, pointKey, pointRefresh, libraryRevision]);
 
   useLayoutEffect(() => {
-    if (restoreResultScroll.current === undefined || !active || !resultsRef.current) return;
+    if (restoreResultScroll.current !== undefined) return;
+    savedResultScroll.current = 0;
+    resultsRef.current?.scrollTo({ top: 0 });
+  }, [filterKey]);
+
+  useLayoutEffect(() => {
+    if (!active || !showResultsPane || !resultsRef.current) return;
+    if (focusResults.current) {
+      focusResults.current = false;
+      resultsRef.current.focus();
+    }
+    if (restoreResultScroll.current === undefined) return;
     if (canLoad && (canLoadImages ? !imageResult : isJourney && !journeyState)) return;
     resultsRef.current.scrollTop = restoreResultScroll.current;
     restoreResultScroll.current = undefined;
-  }, [active, albumRouteRevision, canLoad, canLoadImages, imageResult, isJourney, journeyState]);
+  }, [active, albumRouteRevision, canLoad, canLoadImages, imageResult, isJourney, journeyState, showResultsPane]);
 
   useEffect(() => {
     setMoreError("");
     return () => { moreController.current?.abort(); };
-  }, [canLoadImages, imageKey]);
+  }, [canLoadImages, filterKey, libraryRevision]);
 
   useEffect(() => {
     if (!canLoadImages) return;
+    const current = imagesResult?.key === filterKey ? imagesResult : null;
+    if (current?.revision === libraryRevision && current.data?.extended && !current.error) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      void fetchMapSelection(selection, PAGE_SIZE, null, controller.signal)
-        .then((page) => {
-          if (controller.signal.aborted || moreController.current) return;
-          setImagesResult((current) => {
-            // Keep the cursor and already loaded pages together during indexing.
-            if (current?.key === imageKey && current.data?.extended) return current;
-            return {
-              key: imageKey,
-              data: { items: page.items, total: page.total, nextCursor: page.next_cursor, extended: false },
-              error: "",
-            };
-          });
-        })
-        .catch((reason) => {
-          if (!controller.signal.aborted && !moreController.current) setImagesResult((current) => ({
-            key: imageKey, data: current?.key === imageKey ? current.data : null,
-            error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
-          }));
+    const publish = (result: MapImageResult) => {
+      if (controller.signal.aborted || moreController.current?.signal.aborted === false) return;
+      setImagesResult((latest) => {
+        // Pagination may already have delivered a newer, more complete result.
+        if (latest !== current && latest?.key === filterKey && latest.revision === libraryRevision &&
+            latest.data?.extended) return latest;
+        return result;
+      });
+    };
+    const refresh = async () => {
+      try {
+        // Refill the visible extent and publish the items and new cursor together.
+        const target = Math.max(PAGE_SIZE, current?.data?.items.length ?? 0);
+        const items: MapImage[] = [];
+        let cursor: MapImageCursor | null = null;
+        let page;
+        do {
+          page = await fetchMapSelection(selection, Math.min(MAX_IMAGE_REQUEST_SIZE, target - items.length), cursor, controller.signal);
+          if (controller.signal.aborted) return;
+          items.push(...page.items);
+          cursor = page.next_cursor;
+        } while (items.length < target && cursor && page.items.length > 0);
+        publish({
+          key: filterKey, revision: libraryRevision,
+          data: { items, total: page.total, nextCursor: cursor, extended: current?.data?.extended ?? false },
+          error: "",
         });
-    }, 180);
+      } catch (reason) {
+        publish({
+          key: filterKey, revision: current?.revision ?? libraryRevision,
+          data: current?.data ?? null,
+          error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
+        });
+      }
+    };
+    const timer = window.setTimeout(() => { void refresh(); }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [canLoadImages, imageKey, imageRefresh]);
+  }, [canLoadImages, filterKey, imageRefresh, libraryRevision]);
 
   useEffect(() => {
     if (!canLoad || !points?.indexing || openedGallery || moreLoading) return;
@@ -503,6 +566,18 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     setSaveSelection(undefined);
     requestAnimationFrame(() => albumPickerOpener.current?.focus());
   };
+  const switchCompactPane = (pane: MapPane, fromMapSelection = false) => {
+    if (pane === compactPane) return;
+    if (pane === "map") {
+      savedResultScroll.current = resultsRef.current?.scrollTop ?? 0;
+    } else if (fromMapSelection) {
+      restoreResultScroll.current = 0;
+      focusResults.current = true;
+    } else {
+      restoreResultScroll.current ??= savedResultScroll.current;
+    }
+    setCompactPane(pane);
+  };
   const selectJourneyStop = (id: string) => {
     const stop = journey?.stops.find((item) => item.id === id);
     if (!stop) return;
@@ -524,25 +599,28 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const handleMarkerClick = (marker: MapPoint) => {
     selectRegion({ west: marker.west, east: marker.east, south: marker.south, north: marker.north });
     if (view.zoom < 8) setView({ longitude: marker.longitude, latitude: marker.latitude, zoom: Math.min(8, view.zoom * 2) });
+    if (compactLayout) switchCompactPane("results", true);
   };
   const closeGallery = () => {
     clearGallery();
     const opener = galleryOpenerRef.current;
     window.requestAnimationFrame(() => {
-      if (opener?.isConnected) opener.focus();
-      else resultsRef.current?.focus();
+      if (opener?.isConnected && !opener.closest("[hidden]")) opener.focus();
+      else if (showResultsPane) resultsRef.current?.focus();
+      else resultsPaneButton.current?.focus();
     });
   };
   const closeAlbum = () => {
     setAlbum(null);
     window.requestAnimationFrame(() => {
       const opener = albumOpenerRef.current;
-      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+      if (opener?.isConnected && !opener.disabled && !opener.closest("[hidden]")) opener.focus({ preventScroll: true });
+      else if (compactLayout) mapPaneButton.current?.focus({ preventScroll: true });
       else resultsRef.current?.focus({ preventScroll: true });
     });
   };
   const loadMore = async () => {
-    if (moreController.current || !canLoadImages || !nextCursor) return;
+    if (moreController.current || !canLoadImages || !canLoadMore || !nextCursor) return;
     const controller = new AbortController();
     const loadedImages = images;
     moreController.current = controller;
@@ -553,7 +631,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       if (controller.signal.aborted) return;
       const seen = new Set(loadedImages.map((image) => image.id));
       setImagesResult({
-        key: imageKey,
+        key: filterKey, revision: libraryRevision,
         data: {
           items: loadedImages.concat(page.items.filter((image) => !seen.has(image.id))),
           total: page.total,
@@ -572,7 +650,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     }
   };
 
-  return <main className="gps-page">
+  return <div className="gps-page">
     <header className="gps-page__header">
       <h1>Fotokarte</h1>
       <div className="gps-map-options__modes" role="group" aria-label="Kartenmodus">
@@ -581,15 +659,31 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       </div>
     </header>
 
-    <section className="gps-page__toolbar" aria-label="Kartenfilter">
+    {compactLayout && <div className="gps-page__compact-controls">
+      <div className="gps-map-options__modes gps-page__pane-switch" role="group" aria-label="Kartenansicht">
+        <button type="button" ref={mapPaneButton} aria-controls="gps-map-panel" aria-pressed={compactPane === "map"}
+          onClick={() => switchCompactPane("map")}>Karte</button>
+        <button type="button" ref={resultsPaneButton} aria-controls="gps-map-results" aria-pressed={compactPane === "results"}
+          onClick={() => switchCompactPane("results")}>{isJourney ? "Stopps" : "Fotos"}</button>
+      </div>
+      <button type="button" ref={filtersButton} className="gps-page__filter-button" aria-expanded={filtersOpen}
+        aria-controls="gps-map-filters" onClick={() => setFiltersOpen((open) => !open)}>Kartenfilter</button>
+    </div>}
+
+    <section className="gps-page__toolbar" id="gps-map-filters" aria-label="Kartenfilter" hidden={compactLayout && !filtersOpen}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !compactLayout) return;
+        setFiltersOpen(false);
+        filtersButton.current?.focus();
+      }}>
       <label className="gps-page__field gps-page__field--region"><span>{isJourney ? "Verlaufsbereich" : "Kartenausschnitt"}</span><select aria-label={isJourney ? "Verlaufsbereich" : "Kartenausschnitt"} value={regionChoice} onChange={(event) => {
         const item = REGIONS.find((entry) => entry.label === event.target.value);
         if (!item) return;
         setView(item.view);
         if (isJourney) selectRegion(item.view === INITIAL_VIEW ? null : boundsForView(item.view), item.label);
       }}><option value="custom" disabled>Eigener Ausschnitt</option>{REGIONS.map((item) => <option key={item.label}>{item.label}</option>)}</select></label>
-      <label className="gps-page__field gps-page__field--period"><span>Zeitraum</span><select aria-label="Zeitraum" value={datePreset} onChange={(event) => setPreset(event.target.value)}><option value="all">Alle Zeiten</option><option value="last-30-days">Letzte 30 Tage</option><option value="this-year">Dieses Jahr</option><option value="last-year">Letztes Jahr</option><option value="custom">Eigener Zeitraum</option></select></label>
-      {([["from", "Von"], ["to", "Bis"]] as const).map(([field, label]) => {
+      <label className="gps-page__field gps-page__field--period"><span>Zeitraum</span><select ref={periodFilter} aria-label="Zeitraum" value={datePreset} onChange={(event) => setPreset(event.target.value)}><option value="all">Alle Zeiten</option><option value="last-30-days">Letzte 30 Tage</option><option value="this-year">Dieses Jahr</option><option value="last-year">Letztes Jahr</option><option value="custom">Eigener Zeitraum</option></select></label>
+      {datePreset === "custom" && ([["from", "Von"], ["to", "Bis"]] as const).map(([field, label]) => {
         const invalid = dateError?.field === field || dateError?.field === "both";
         return <label key={field} className="gps-page__field"><span>{label}</span>
           <input type="text" inputMode="numeric" autoComplete="off" maxLength={10} placeholder="TT.MM.JJJJ"
@@ -612,10 +706,13 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         setJourneyDetail(detail);
         setJourneyStopId(undefined);
       }}><option value="trip">Reiseüberblick</option><option value="city">Stadt und Spaziergang</option></select></label>}
-      {hasFilters && <button type="button" className="gps-page__reset" onClick={reset}>Filter zurücksetzen</button>}
-      <p id="gps-date-help" className="gps-page__date-help">TT.MM.JJJJ, z. B. 05.07.2025. Beide Tage zählen.</p>
-      {dateError && <p id="gps-date-error" className="gps-page__error gps-page__date-help" role="alert">{dateError.text}</p>}
+      {hasFilters && <button type="button" className="gps-page__reset" onClick={() => {
+        reset();
+        periodFilter.current?.focus({ preventScroll: true });
+      }}>Filter zurücksetzen</button>}
+      {datePreset === "custom" && <p id="gps-date-help" className="gps-page__date-help">TT.MM.JJJJ, z. B. 05.07.2025. Beide Tage zählen.</p>}
     </section>
+    {dateError && <p id="gps-date-error" className="gps-page__error" role="alert">{dateError.text}</p>}
     {routeNotice && <p className="gps-page__route-note" role="status">{routeNotice}</p>}
     {waitingForRouteAlbum && (albumsError
       ? <p className="gps-page__error" role="alert">{albumsError} <button type="button" onClick={reloadAlbums}>Erneut versuchen</button></p>
@@ -628,27 +725,21 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       {selectedAlbum && <button type="button" onClick={() => chooseAlbum("")} aria-label="Albumfilter entfernen">{selectedAlbum.name} <span aria-hidden="true">×</span></button>}
     </div>}
     <div className="gps-page__layout">
-      <section className="gps-page__map-card" aria-label="Fotostandorte auf der Weltkarte">
+      <section ref={mapPanelRef} className="gps-page__map-card" id="gps-map-panel" aria-label="Fotostandorte auf der Weltkarte" hidden={compactLayout && showResultsPane}>
         <div className="gps-page__map-head">
           <div>
             <strong>{isJourney ? "Standortverlauf" : "Fotostandorte"}</strong>
-            <span aria-live="polite">{isJourney
+            {(!compactLayout || !showResultsPane) && <span aria-live="polite">{isJourney
               ? journey ? `${countWithLabel(journey.stops.length, "Stopp", "Stopps")} · ${countWithLabel(journey.photo_count, "Foto", "Fotos")}` : "–"
-              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${countWithLabel(points.total, "Foto", "Fotos")} im sichtbaren Ausschnitt` : "–"}</span>
+              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${countWithLabel(points.total, "Foto", "Fotos")} im sichtbaren Ausschnitt` : "–"}</span>}
           </div>
           <div className="gps-page__map-actions">
             <button type="button" className={selectMode ? "gps-page__tool--active" : ""} aria-pressed={selectMode} onClick={() => setSelectMode((value) => !value)}>{selectMode ? "Auswahl beenden" : "Bereich wählen"}</button>
             {selectMode && <button type="button" onClick={() => selectRegion(viewport)}>Sichtbaren Bereich wählen</button>}
             {region && !isJourney && <button type="button" onClick={() => selectRegion(null)}>Auswahl löschen</button>}
             {isJourney && !areaInView && !selectMode && <button type="button" onClick={showArea}>Filterbereich zeigen</button>}
-            {view.zoom > 1 && <button type="button" onClick={() => setView(INITIAL_VIEW)}>Ganze Karte zeigen</button>}
-            <button type="button" className="gps-page__skip" onClick={() => resultsRef.current?.focus()}>{isJourney ? "Zu den Stopps" : "Zu den Fotos"}</button>
-            <button type="button" disabled={!canLoad || (isJourney && !journey?.stops.length)} onClick={(event) => {
-              albumOpenerRef.current = event.currentTarget;
-              setAlbum({ bounds: filterBounds, viewport, hasSelection: Boolean(region), fromDate: queryFrom, toDate: queryTo, style: mapStyle,
-                albumId: albumId || undefined, draft: selectedAlbum?.layout_draft,
-                showCountryNames: showNames, journey: isJourney ? journey ?? undefined : undefined });
-            }}>Bild exportieren</button>
+            {!compactLayout && view.zoom > 1 && <button type="button" onClick={() => setView(INITIAL_VIEW)}>Ganze Karte zeigen</button>}
+            {!compactLayout && <button type="button" className="gps-page__skip" onClick={() => resultsRef.current?.focus()}>{isJourney ? "Zu den Stopps" : "Zu den Fotos"}</button>}
           </div>
         </div>
         {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
@@ -661,10 +752,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           selection={region}
           style={mapStyle}
           showCountryNames={showNames}
+          compactControls={compactLayout}
           journeyStops={journey?.stops}
           journeyConnections={journey?.connections}
           activeJourneyStop={journeyStopId}
-          onJourneyStopClick={selectJourneyStop}
+          onJourneyStopClick={(id) => {
+            selectJourneyStop(id);
+            if (compactLayout) switchCompactPane("results", true);
+          }}
           onSelectionChange={selectRegion}
           onCancelSelection={() => setSelectMode(false)}
           onMarkerClick={handleMarkerClick}
@@ -674,34 +769,45 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           <span>{selectMode ? "Einen Bereich mit Maus oder Finger aufziehen" : isJourney ? "Stopp wählen, um seine Fotos zu sehen" : "Karte ziehen · +/− zum Zoomen · Ort anklicken für Fotos"}</span>
           {mapStyle === "satellite" ? <a className="gps-map__credit" href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/" target="_blank" rel="noreferrer">NASA Earth Observatory · Natural Earth</a>
             : <a className="gps-map__credit" href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">Kartendaten: Natural Earth</a>}
-          <span>{region ? "Fester Bereichsfilter" : isJourney ? "Alle Orte im Zeitraum" : "Sichtbarer Kartenausschnitt"}</span>
+          {region && <span>Fester Bereichsfilter</span>}
         </div>
         <div className="gps-page__map-settings">
           <details className="gps-map-discovery">
-            <summary>Kartendarstellung</summary>
+            <summary>Kartendarstellung und Export</summary>
             <div className="gps-map-discovery__content gps-map-options">
               <label>Kartenstil<select value={mapStyle} onChange={(event) => {
                 const style = event.target.value === "landscape" || event.target.value === "satellite" ? event.target.value : "standard";
-                setMapStyle(style); localStorage.setItem(MAP_STYLE_KEY, style);
+                setPreference("map_style", style);
               }}><option value="standard">Standard</option><option value="landscape">Landschaft</option><option value="satellite">Satellit</option></select></label>
               <label><input type="checkbox" checked={showNames} onChange={(event) => {
-                setShowNames(event.target.checked); localStorage.setItem(MAP_NAMES_KEY, String(event.target.checked));
+                setPreference("map_country_names", event.target.checked);
               }} />Ländernamen anzeigen</label>
               <label>Land finden<select value="" onChange={(event) => {
                 const country = countries.find((item) => item.code === event.target.value);
                 if (country) setView(normalizedView(country.focus));
               }}><option value="">Land auswählen</option>{countries.map((country) =>
                 <option key={country.code} value={country.code}>{country.name}</option>)}</select></label>
+              <button type="button" disabled={!canLoad || (isJourney && !journey?.stops.length)} onClick={(event) => {
+                albumOpenerRef.current = event.currentTarget;
+                setAlbum({ bounds: filterBounds, viewport, hasSelection: Boolean(region), fromDate: queryFrom, toDate: queryTo, style: mapStyle,
+                  albumId: albumId || undefined, draft: selectedAlbum?.layout_draft,
+                  showCountryNames: showNames, journey: isJourney ? journey ?? undefined : undefined });
+              }}>Bild exportieren</button>
             </div>
           </details>
-          <MapObservedPlaces key={JSON.stringify([fromDate, toDate, albumId, libraryRevision])} from={fromDate} to={toDate} albumId={albumId}
+          <MapObservedPlaces key={JSON.stringify([fromDate, toDate, albumId, placeLibraryEpoch])}
+            active={active && (!compactLayout || compactPane === "map")} revision={libraryRevision}
+            from={fromDate} to={toDate} albumId={albumId}
             onSelect={(place) => { selectRegion(place.bounds, place.name); frameBounds(place.bounds); }}
             onSetHome={isJourney ? setHome : undefined} />
         </div>
       </section>
-      <section ref={resultsRef} id="gps-map-results" tabIndex={-1} className="gps-page__results" aria-label={isJourney ? "Standortverlauf und Fotos" : "Fotos im gewählten Kartenausschnitt"} aria-busy={imagesLoading}>
+      <section ref={resultsRef} id="gps-map-results" tabIndex={-1} className="gps-page__results" aria-label={isJourney ? "Standortverlauf und Fotos" : "Fotos im gewählten Kartenausschnitt"} aria-busy={imagesLoading} hidden={!showResultsPane}>
         {isJourney && <>
           <h2>Chronologische Stopps</h2>
+          {compactLayout && showResultsPane && journey && <p className="gps-page__results-hint" role="status">
+            {countWithLabel(journey.stops.length, "Stopp", "Stopps")} · {countWithLabel(journey.photo_count, "Foto", "Fotos")}
+          </p>}
           {selectedAlbum?.journey && <p className="gps-page__results-hint">Reisealbum
             {selectedAlbum.journey.arrival_included && " · Anreise enthalten"}
             {selectedAlbum.journey.departure_included && " · Rückreise enthalten"}</p>}
@@ -745,13 +851,11 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
             : hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}
         </div>}
         {imagesLoading && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
-        <div className="gps-page__grid">{images.map((image, index) => {
-          const inferred = journeyStop?.inferred_image_ids;
-          return <MapPhotoTile key={image.id} image={image} inferred={inferred?.length ? inferred.includes(image.id) : undefined}
-            onOpen={(event) => openGallery(event.currentTarget, index)} />;
-        })}</div>
+        <div className="gps-page__grid">{images.map((image, index) =>
+          <MapPhotoTile key={image.id} image={image} inferred={inferredIds?.has(image.id)}
+            onOpen={(event) => openGallery(event.currentTarget, index)} />)}</div>
         {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
-        {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
+        {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading || !canLoadMore} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
         </>}
       </section>
     </div>
@@ -775,7 +879,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         to_date: tripDays?.[tripDays.length - 1], arrival_included: trip?.includeArrival,
         departure_included: trip?.includeDeparture } : undefined}
       onClose={closeAlbumPicker} />}
-  </main>;
+  </div>;
 };
 
 export default MapPage;

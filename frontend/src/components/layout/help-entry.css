@@ -3,10 +3,12 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 12px 22px;
+  margin-bottom: 12px;
   padding: 12px clamp(12px, 3vw, 32px);
   background: var(--surface-1);
   color: var(--text-strong);
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
 }
 .help-invitation p { margin: 4px 0 0; line-height: 1.5; color: var(--text-muted); }
 .help-invitation__actions { display: flex; flex-wrap: wrap; gap: 8px; }

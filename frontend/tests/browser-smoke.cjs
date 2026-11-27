@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const albumLibraryFlow = require('./album-library-flow.cjs');
 const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
+const compactReviewFlow = require('./compact-review-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
@@ -30,12 +31,26 @@ const screenshot = async (page, name) => {
   if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, `${name}.png`), fullPage: true });
 };
 
-async function newPage(browser, width, height, errors, options = {}) {
+async function newPage(browser, width, height, errors, { persistentPreferences = false, ...options } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, ...options });
   page.setDefaultTimeout(12000);
   page.on('pageerror', (error) => errors.push(error.message));
   // Android 12's system WebView in CI lacks Array.prototype.at.
   await page.addInitScript(() => Reflect.deleteProperty(Array.prototype, 'at'));
+  if (!persistentPreferences) {
+    // Each flow starts with fresh presentation preferences unless it exercises
+    // installation-wide persistence against the actual test backend.
+    const preferences = {};
+    await page.route('**/api/ui-preferences', (route) => {
+      if (route.request().method() === 'PATCH') {
+        const { values, only_if_absent } = route.request().postDataJSON();
+        for (const [key, value] of Object.entries(values)) {
+          if (!only_if_absent || !Object.hasOwn(preferences, key)) preferences[key] = value;
+        }
+      }
+      return route.fulfill({ json: preferences });
+    });
+  }
   return page;
 }
 
@@ -140,7 +155,8 @@ async function firstAssignmentFlow(browser, errors) {
     await assign.click();
     await page.waitForURL(reviewHash);
     await openTab.waitFor();
-    await page.locator('.cluster-detail-topbar').waitFor();
+    await page.locator('.cluster-workspace__sidebar').waitFor();
+    assert.equal(await page.locator('.cluster-detail-topbar').isVisible(), false);
     await page.reload();
     await openTab.waitFor();
     await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
@@ -325,6 +341,7 @@ async function mapFlow(browser, errors) {
       await new Promise((resolve) => setTimeout(resolve, 600));
       await route.continue().catch(() => {});
     });
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await mapRequest;
     assert.equal(await markers.count(), 0, 'Markers from the previous filter stayed active during loading');
@@ -342,6 +359,7 @@ async function mapFlow(browser, errors) {
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await waitForCount(29);
     await borders.first().waitFor();
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await page.getByLabel('Bis', { exact: true }).fill('2025-12-31');
     await waitForCount(14);
@@ -368,7 +386,7 @@ async function mapFlow(browser, errors) {
     const firstMarker = markers.first();
     const markerLabel = await firstMarker.getAttribute('aria-label');
     const markerCount = Number(markerLabel?.match(/^([\d.]+) Foto/)?.[1].replaceAll('.', ''));
-    assert.ok(markerCount > 1, 'Fixture marker needs multiple photos to test the viewer sequence');
+    assert.ok(markerCount > 2, 'Fixture marker needs multiple photos to test the viewer sequence and an uncached original');
     await firstMarker.press('Enter');
     await waitForCount(markerCount);
     const galleryTile = page.locator('.gps-page__photo').first();
@@ -417,11 +435,13 @@ async function mapFlow(browser, errors) {
     await gallery.waitFor();
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
-    await page.route('**/api/images/*/file', (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
-    await galleryTile.click();
+    const originalFile = /\/api\/images\/\d+\/file(?:\?.*)?$/;
+    await page.route(originalFile, (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
+    // Open a photo whose original has not already been decoded in this document.
+    await page.locator('.gps-page__photo').nth(2).click();
     await gallery.getByRole('alert').filter({ hasText: 'Die Bilddatei konnte nicht geöffnet werden.' }).waitFor();
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
-    await page.unroute('**/api/images/*/file');
+    await page.unroute(originalFile);
 
     const resetMapFilters = page.getByRole('button', { name: 'Filter zurücksetzen', exact: true });
     if (await resetMapFilters.count()) await resetMapFilters.click();
@@ -583,17 +603,107 @@ async function existingFlow(browser, errors) {
   }
 }
 
+async function mapWithoutStorageFlow(browser, errors) {
+  for (const storageBlocked of [false, true]) {
+    const page = await newPage(browser, 1440, 1000, errors);
+    try {
+      await page.addInitScript((blocked) => {
+        if (blocked) {
+          Object.defineProperty(window, 'localStorage', {
+            get() { throw new DOMException('Storage is disabled', 'SecurityError'); },
+          });
+        } else {
+          Reflect.deleteProperty(window, 'localStorage');
+        }
+      }, storageBlocked);
+      await page.goto(`${webBase}/#/weltkarte`);
+      await page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' }).waitFor();
+      await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+      await page.getByText('Kartendarstellung und Export', { exact: true }).click();
+      const style = page.getByLabel('Kartenstil');
+      const names = page.getByLabel('Ländernamen anzeigen');
+      assert.equal(await style.inputValue(), 'standard');
+      assert.equal(await names.isChecked(), false);
+      await style.selectOption('landscape');
+      await page.locator('.gps-map__svg--landscape').waitFor();
+      await names.check();
+      await page.locator('.gps-map__place-label--country').first().waitFor();
+    } finally {
+      await page.close();
+    }
+  }
+  console.log('PASS map: defaults and display controls with missing or blocked localStorage');
+}
+
+async function durablePreferencesFlow(browser, errors) {
+  const options = { persistentPreferences: true };
+  const first = await newPage(browser, 1440, 1000, errors, options);
+  const waitForPreferenceWrite = (page, status) => page.waitForResponse((response) =>
+    response.url().endsWith('/api/ui-preferences') && response.request().method() === 'PATCH' && response.status() === status);
+  try {
+    await first.addInitScript(() => {
+      localStorage.setItem('face-manager:map-style', 'satellite');
+      localStorage.setItem('face-manager:map-country-names', 'false');
+      localStorage.setItem('face-manager:image-grid-size', 'large');
+      localStorage.setItem('face-manager:help-introduction-v1', 'seen');
+    });
+    const imported = waitForPreferenceWrite(first, 200);
+    await first.goto(`${webBase}/#/weltkarte`);
+    assert.deepEqual(await (await imported).json(), {
+      map_style: 'satellite', map_country_names: false, image_grid_size: 'large', help_introduction_seen: true,
+    });
+    await first.getByText('Kartendarstellung und Export', { exact: true }).click();
+    const style = first.getByLabel('Kartenstil');
+    assert.equal(await style.inputValue(), 'satellite');
+
+    await first.route('**/api/ui-preferences', (route) => route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 503, json: {} }) : route.continue());
+    const rejected = waitForPreferenceWrite(first, 503);
+    await style.selectOption('landscape');
+    await rejected;
+    await first.locator('.gps-map__svg--landscape').waitFor();
+    await first.unroute('**/api/ui-preferences');
+    const retry = first.getByRole('alert').filter({ hasText: 'Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden.' })
+      .getByRole('button', { name: 'Erneut versuchen', exact: true });
+    await retry.waitFor();
+    const [retried] = await Promise.all([waitForPreferenceWrite(first, 200), retry.click()]);
+    assert.equal((await retried.json()).map_style, 'landscape');
+
+    const labels = waitForPreferenceWrite(first, 200);
+    await first.getByLabel('Ländernamen anzeigen').check();
+    assert.equal((await (await labels).json()).map_country_names, true);
+  } finally {
+    await first.close();
+  }
+
+  const reopened = await newPage(browser, 1440, 1000, errors, options);
+  try {
+    await reopened.addInitScript(() => Reflect.deleteProperty(window, 'localStorage'));
+    await reopened.goto(`${webBase}/#/weltkarte`);
+    await reopened.locator('.gps-map__svg--landscape').waitFor();
+    await reopened.getByText('Kartendarstellung und Export', { exact: true }).click();
+    assert.equal(await reopened.getByLabel('Ländernamen anzeigen').isChecked(), true);
+    await reopened.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Bilder', exact: true }).click();
+    await reopened.getByText('Ansicht', { exact: true }).click();
+    assert.equal(await reopened.getByRole('slider', { name: 'Bildgröße im Raster' }).getAttribute('aria-valuetext'), 'Groß');
+    assert.equal(await reopened.getByText('Möchtest du Face Manager kennenlernen?', { exact: true }).count(), 0);
+  } finally {
+    await reopened.close();
+  }
+  console.log('PASS preferences: import, failed save and retry, persistence across isolated browser contexts with missing storage');
+}
+
 async function mapSelectionAndJourneyFlow(browser, errors) {
   const page = await newPage(browser, 1440, 1000, errors);
   const localOrigin = new URL(webBase).origin;
   try {
     await page.route('**/*', (route) =>
-      new URL(route.request().url()).origin === localOrigin ? route.continue() : route.abort());
+      new URL(route.request().url()).origin === localOrigin ? route.fallback() : route.abort());
     await page.goto(`${webBase}/#/weltkarte`);
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
-    await page.getByText('Kartendarstellung', { exact: true }).click();
+    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
     await page.getByLabel('Ländernamen anzeigen').check();
     await page.locator('.gps-map__place-label--country').first().waitFor();
     const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
@@ -772,6 +882,8 @@ async function pagedLibraryFacesFlow(browser, errors) {
   const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
   let detailRequests = 0;
   let refreshing = false;
+  let releaseRefresh;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
   const refreshPages = [];
   try {
     await page.addInitScript(() => {
@@ -784,11 +896,14 @@ async function pagedLibraryFacesFlow(browser, errors) {
         close() {}
       };
     });
-    await page.route('**/api/images?**', (route) => {
+    await page.route('**/api/images?**', async (route) => {
       const params = new URL(route.request().url()).searchParams;
       const offset = Number(params.get('offset'));
       const limit = Number(params.get('limit'));
-      if (refreshing && limit > 1) refreshPages.push([offset, limit]);
+      if (refreshing && limit > 1) {
+        refreshPages.push([offset, limit]);
+        await refreshGate;
+      }
       const items = photos.slice(offset, offset + limit).map((photo) =>
         refreshing && photo.id === 1205 ? { ...photo, filename: 'Aktualisiertes Foto' } : photo);
       return route.fulfill({ json: { items, offset, limit, total: photos.length, has_more: offset + items.length < photos.length, available_persons: [] } });
@@ -829,15 +944,31 @@ async function pagedLibraryFacesFlow(browser, errors) {
       await scrollToEnd();
       await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
     }
+    const pendingRefresh = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/images' && url.searchParams.get('limit') === '200';
+    });
     refreshing = true;
     await page.evaluate(() => {
       window.pagedLibraryEvents.dispatchEvent(new MessageEvent('clusters', { data: '{"reason":"assignment"}' }));
     });
+    await pendingRefresh;
+    const viewport = page.locator('[data-workspace-page="people"] .page-content');
+    const desiredScroll = await viewport.evaluate((element) => {
+      element.scrollTop = 460;
+      return element.scrollTop;
+    });
+    assert.ok(desiredScroll > 100);
+    releaseRefresh();
     await page.getByRole('button', { name: 'Aktualisiertes Foto in Galerie öffnen' }).waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)))));
+    assert.ok(Math.abs(await viewport.evaluate((element) => element.scrollTop) - desiredScroll) <= 3,
+      'The photo refresh returned to the scroll position from before the request');
     assert.deepEqual(refreshPages, [[0, 200], [200, 40]]);
     assert.equal(await cards.count(), photos.length);
-    console.log('PASS paged library faces: lazy metadata, gallery, and refresh beyond 200 photos');
+    console.log('PASS paged library faces: lazy metadata, gallery, and scroll during refresh beyond 200 photos');
   } finally {
+    releaseRefresh();
     await page.close();
   }
 }
@@ -901,23 +1032,42 @@ async function liveWorkflowFlow(browser, errors) {
     await page.getByRole('status').filter({ hasText: /^85 Fotos$/ }).waitFor();
     await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
     await page.waitForFunction(() => document.querySelectorAll('.gps-page__photo').length === 72);
-    await page.locator('.gps-page__photo').nth(36).click();
+    const removedPhoto = await page.locator('.gps-page__photo').first().getAttribute('aria-label');
+    const keptPhoto = await page.locator('.gps-page__photo').nth(36).getAttribute('aria-label');
+    const keptTile = page.getByRole('button', { name: keptPhoto, exact: true });
+    await keptTile.click();
     await gallery.waitFor();
     await page.route('**/api/map/images?**', async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({ response, json: { ...await response.json(), total: 84 } });
+      const url = new URL(route.request().url());
+      const limit = Number(url.searchParams.get('limit'));
+      const firstPage = !url.searchParams.has('before_id');
+      if (firstPage) url.searchParams.set('limit', String(limit + 1));
+      const response = await route.fetch({ url: url.href });
+      const result = await response.json();
+      await route.fulfill({ response, json: { ...result, total: 84, items: firstPage ? result.items.slice(1) : result.items } });
     });
     await publishLibraryChange('delete_image');
     await page.getByRole('status').filter({ hasText: /^84 Fotos$/ }).waitFor();
-    assert.equal(await page.locator('.gps-page__photo').count(), 36, 'Old pages survived a library change');
+    assert.equal(await page.locator('.gps-page__photo').count(), 72, 'Library refresh discarded the loaded extent');
+    assert.equal(await page.getByRole('button', { name: removedPhoto, exact: true }).count(), 0, 'Library refresh kept a deleted photo');
     assert.ok(await gallery.isVisible(), 'Library refresh closed the open map gallery');
     await page.keyboard.press('Escape');
-    await page.waitForFunction(() => document.activeElement?.id === 'gps-map-results');
+    await keptTile.and(page.locator(':focus')).waitFor();
     await page.unroute('**/api/map/images?**');
     await page.locator('.gps-page__photo').first().click();
     await gallery.waitFor();
-    await publishLibraryChange('database_import');
-    await gallery.waitFor({ state: 'hidden' });
+    const restoredMap = gate();
+    await page.route('**/api/map/images?**', async (route) => {
+      await restoredMap.ready;
+      await route.continue();
+    }, { times: 1 });
+    try {
+      await publishLibraryChange('database_import');
+      await gallery.waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('.gps-page__photo').count(), 0, 'Photos from the replaced library stayed visible');
+    } finally {
+      restoredMap.release();
+    }
     await page.goto(`${webBase}/#/bilder`);
     await firstPhoto.waitFor();
     assert.equal(await gallery.count(), 0, 'A hidden library gallery reopened after restore');
@@ -943,13 +1093,19 @@ async function liveWorkflowFlow(browser, errors) {
       current_filename: `foto-${index + 1}.jpg`, proposed_filename: `foto-${index + 1} Anna.jpg`,
       detected_person_names: ['Anna'], current_suffix_person_names: [],
     }));
-    await page.route('**/api/image-renames/count?**', (route) => route.fulfill({ json: { total } }));
+    let renameCountRequests = 0;
+    const renamePageRequests = [];
+    await page.route('**/api/image-renames/count?**', (route) => {
+      renameCountRequests += 1;
+      return route.fulfill({ json: { total } });
+    });
     const nextPageGate = gate();
     let holdNextPage = true;
     await page.route('**/api/image-renames?**', async (route) => {
       const query = new URL(route.request().url()).searchParams;
       const offset = Number(query.get('offset'));
       const limit = Number(query.get('limit'));
+      renamePageRequests.push({ offset, limit });
       if (offset === 25 && holdNextPage) {
         holdNextPage = false;
         await nextPageGate.ready;
@@ -988,6 +1144,8 @@ async function liveWorkflowFlow(browser, errors) {
       await openingNextPage;
       const liveRefresh = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/image-renames');
       await publishLibraryChange('import_completed');
+      // The live refresh uses the requested page once its foreground load finishes.
+      nextPageGate.release();
       const liveOffset = new URL((await liveRefresh).url()).searchParams.get('offset');
       assert.equal(liveOffset, '25', 'Live refresh returned to the previous rename page');
     } finally {
@@ -1001,6 +1159,20 @@ async function liveWorkflowFlow(browser, errors) {
     await confirmRename.getByRole('button', { name: 'Dateien jetzt umbenennen' }).click();
     await pagination.getByText('Seite 1 von 1').waitFor();
     assert.equal(await page.locator('.rename-row').count(), 25);
+
+    await page.clock.install();
+    const requestsBeforeResize = renamePageRequests.length;
+    const countsBeforeResize = renameCountRequests;
+    const resizedPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/image-renames' && url.searchParams.get('limit') === '50';
+    });
+    await pagination.getByLabel('Pro Seite').selectOption('50');
+    await (await resizedPage).finished();
+    await page.clock.runFor(1200);
+    assert.deepEqual(renamePageRequests.slice(requestsBeforeResize), [{ offset: 0, limit: 50 }],
+      'Changing the page size triggered an extra background reload');
+    assert.equal(renameCountRequests, countsBeforeResize, 'Changing the page size refetched the unchanged count');
     console.log('PASS live workflows: stable gallery, map refresh, missing review link, rename page correction');
   } finally {
     await page.close();
@@ -1176,16 +1348,43 @@ async function responsiveFlow(browser, errors) {
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
     await page.locator('.topbar-import-button__label').waitFor();
-    await nav.getByRole('button', { name: 'Personen' }).click();
-    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    for (const width of [320, 390, 768, 901]) {
+      await page.setViewportSize({ width, height: 568 });
+      await assertReviewFits(page, [page.locator('.workspace-header')], `Compact app header at ${width}px`);
+    }
+    await page.setViewportSize({ width: 320, height: 568 });
+    const filters = page.getByRole('button', { name: 'Filter und Sortierung', exact: true });
+    assert.equal(await filters.getAttribute('aria-expanded'), 'false');
+    assert.ok(await page.getByRole('button', { name: 'Fotos auswählen', exact: true }).isVisible());
+    await filters.press('Enter');
+    await page.getByRole('combobox', { name: 'Sortierung' }).waitFor();
+    await filters.press('Enter');
+    await page.getByRole('combobox', { name: 'Sortierung' }).waitFor({ state: 'hidden' });
     const more = nav.getByRole('button', { name: /^Mehr/ });
-    await more.press('Enter');
+    await nav.getByRole('button', { name: 'Personen' }).evaluate((button) => {
+      button.focus();
+      button.click();
+      // Simulate moving to the next navigation control before route restoration.
+      button.closest('nav').querySelector('.workflow-sidebar__more').focus();
+    });
+    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.ok(await more.evaluate((button) => document.activeElement === button), 'Navigation restored focus after the user moved it');
+    await page.keyboard.press('Enter');
     await nav.getByRole('button', { name: 'Dateinamen' }).waitFor();
     await page.keyboard.press('Escape');
     assert.equal(await more.getAttribute('aria-expanded'), 'false');
     await more.press('Enter');
     await nav.getByRole('button', { name: 'Dateinamen' }).click();
     await page.getByRole('heading', { name: 'Dateinamen', exact: true }).waitFor();
+    const fileSelection = page.getByRole('region', { name: 'Dateiauswahl' });
+    const bulk = fileSelection.getByRole('button', { name: 'Auswahl', exact: true });
+    assert.equal(await bulk.getAttribute('aria-expanded'), 'false');
+    await bulk.press('Enter');
+    await fileSelection.getByRole('button', { name: /Diese Seite auswählen/ }).waitFor();
+    await bulk.press('Enter');
+    const preview = await fileSelection.getByRole('button', { name: 'Umbenennung prüfen' }).boundingBox();
+    assert.ok(preview && preview.y >= 0 && preview.y + preview.height <= 568, 'Rename review requires scrolling at 320×568');
     await page.setViewportSize({ width: 390, height: 844 });
 
     for (const route of ['weltkarte', 'bilder', 'dateinamen', 'gesichter-pruefen', 'einstellungen']) {
@@ -1311,8 +1510,7 @@ async function reviewInboxFlow(browser, errors) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
-    // The entering page briefly transforms the fixed dialog's containing block.
-    // Check the actual paint order once the responsive layout has settled.
+    // Check the paint order once the responsive layout has settled.
     await page.waitForFunction(() => {
       const brand = document.querySelector('.sidebar__brand-mark');
       if (!brand) return false;
@@ -1384,6 +1582,7 @@ async function denseJourneyReview(browser, errors) {
     assert.ok(await results.getByRole('button', { name: /Bei Paris/ }).count() >= 8);
     await search.clear();
     await scope.selectOption('Europa');
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2024-07-13');
     const delivery = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -1406,6 +1605,8 @@ async function denseJourneyReview(browser, errors) {
     await screenshot(page, 'reise-europa');
 
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Karte', exact: true }).click();
+    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
     await page.getByRole('button', { name: 'Bild exportieren' }).click();
     const album = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     await album.getByLabel('Format', { exact: true }).selectOption({ label: 'Eigene Größe' });
@@ -1430,7 +1631,9 @@ async function denseJourneyReview(browser, errors) {
     assert.equal(png.readUInt32BE(png.indexOf(Buffer.from('pHYs')) + 4), 9449);
     await page.keyboard.press('Escape');
     await album.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Kartenfilter', exact: true }).click();
     await scope.selectOption('Asien');
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Stopps', exact: true }).click();
     await results.getByText('Keine Stopps in diesem Bereich und Zeitraum.', { exact: true }).waitFor();
     await results.getByRole('button', { name: 'Bereich entfernen' }).click();
     await page.getByText('4 Stopps · 20 Fotos', { exact: true }).waitFor();
@@ -1572,17 +1775,77 @@ async function freshInstallFlow(browser, errors) {
   }
 }
 
+async function suggestionRefreshFlow(browser, errors) {
+  const page = await newPage(browser, 1580, 740, errors);
+  const proposals = Array.from({ length: 15 }, (_, index) => ({
+    cluster_id: index + 1, person_id: 1, person_name: `Person ${index + 1}`,
+    confidence: 0.95, support_count: 1, face_count: 1, recommended: true,
+    proposal_token: `proposal-${index + 1}`, face_ids: [601],
+    preview_face_ids: [601], reference_face_ids: [],
+  }));
+  let pending = false;
+  let accepted;
+  try {
+    await page.route('**/api/person-suggestions', (route) => route.fulfill({
+      headers: { 'X-Person-Suggestions-Pending': pending ? '1' : '0', 'X-Assignment-Library-Id': 'fixture' },
+      json: pending ? [] : proposals.filter((item) => item.cluster_id !== accepted),
+    }));
+    await page.route('**/api/review-suggestions', (route) => route.fulfill({ json: [] }));
+    await page.route(/\/api\/faces\/601\/crop\?/, (route) => route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>',
+    }));
+    await page.route('**/api/person-suggestions/accept', (route) => {
+      accepted = route.request().postDataJSON().assignments[0].cluster_id;
+      pending = true;
+      return route.fulfill({ json: { accepted_count: 1 } });
+    });
+
+    await page.goto(`${webBase}/#/gesichter-pruefen`);
+    const counter = page.getByRole('button', { name: /^Vorschläge / }).locator('b');
+    const action = page.getByRole('article', { name: 'Personenvorschlag für Person 7', exact: true })
+      .getByRole('button', { name: 'Auswahl zuordnen', exact: true });
+    const scroller = page.locator('[data-workspace-page="review"] .page-content');
+    await action.scrollIntoViewIfNeeded();
+    await action.and(page.locator('button:enabled')).waitFor();
+    const startingScroll = await scroller.evaluate((element) => element.scrollTop);
+    assert.ok(startingScroll > 100);
+    const pendingResponse = page.waitForResponse((response) => response.url().endsWith('/api/person-suggestions')
+      && response.headers()['x-person-suggestions-pending'] === '1');
+    await action.click();
+    await (await pendingResponse).finished();
+    await page.getByText('Vorschläge werden aktualisiert …', { exact: true }).waitFor();
+    const survivor = page.getByRole('article', { name: 'Personenvorschlag für Person 8', exact: true });
+    assert.ok(await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).isDisabled());
+    assert.equal(await counter.textContent(), '14');
+    assert.equal(await page.getByRole('heading', { name: 'Keine Vorschläge offen' }).count(), 0);
+    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Pending refresh reset the review scroll');
+
+    pending = false;
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).and(page.locator('button:enabled')).waitFor();
+    assert.equal(await counter.textContent(), '14');
+    assert.equal(await action.count(), 0);
+    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Completed refresh reset the review scroll');
+    console.log('PASS suggestion refresh: completed card removed, pending list retained, count and scroll stable');
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
     const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
-      previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
+      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
+      durablePreferencesFlow,
+      mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
       (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
-      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
+      (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
+      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
-      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase),
       (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
       (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
       freshInstallFlow,

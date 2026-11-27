@@ -83,51 +83,24 @@ button:disabled {
   overflow: hidden;
 }
 
-/* Keep each workspace mounted, with a restrained transition when it opens. */
+/* Keep each workspace and its scroll state mounted between visits. */
 .page-pane {
   position: absolute;
   inset: 0;
-  opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 120ms ease, visibility 0s linear 120ms;
 }
 
 .page-pane--active {
-  opacity: 1;
   visibility: visible;
   pointer-events: auto;
   z-index: 1;
-  transition: visibility 0s;
-  animation: page-enter 140ms ease;
-}
-
-@keyframes page-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 .page-content {
   padding: clamp(14px, 2vw, 24px);
   overflow-y: auto;
   height: 100%;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .page-pane {
-    transition:
-      opacity 1ms linear,
-      visibility 0s;
-    transform: none;
-  }
-
-  .page-pane--active {
-    animation: none;
-  }
 }
 
 /* Outcome-oriented home and review workflow */
@@ -799,8 +772,8 @@ button:disabled {
 .cluster-nav-detail-title span {
   font-size: 10px;
   font-weight: 700;
-  color: var(--on-accent);
-  background: var(--neon-cyan);
+  color: var(--text-strong);
+  background: var(--accent-soft);
   border-radius: 999px;
   padding: 2px 8px;
 }
@@ -3123,10 +3096,7 @@ button:disabled {
   font-size: 14px;
 }
 
-.rename-toolbar__heading span {
-  color: var(--text-muted);
-  font-size: 12px;
-}
+.rename-toolbar .rename-toolbar__toggle { display: none; }
 
 .rename-toolbar__controls {
   display: flex;
@@ -3485,7 +3455,43 @@ button:disabled {
   .rename-page-header {
     align-items: flex-start;
     flex-direction: column;
+    gap: 6px;
   }
+
+  .settings-layout .settings-nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .settings-nav__link { min-height: 40px; }
+
+  .settings-layout { overflow-wrap: anywhere; }
+  .settings-group__cards { grid-template-columns: minmax(0, 1fr); }
+  .settings-group__cards > * { min-width: 0; }
+  .settings-card .settings-actions button {
+    min-width: 0;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .rename-toolbar { padding: 10px; }
+  .rename-toolbar .rename-toolbar__heading { display: none; }
+  .rename-toolbar .rename-toolbar__controls {
+    display: grid;
+    grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+    gap: 8px;
+  }
+  .rename-toolbar .rename-toolbar__toggle { display: inline-flex; min-height: 40px; }
+  .rename-toolbar__bulk { grid-column: 1 / -1; grid-row: 2; }
+  .rename-toolbar__bulk[data-open="false"] { display: none; }
+  .rename-toolbar__apply { min-height: 40px; }
+  .rename-pagination--top.rename-pagination--single,
+  .rename-pagination--top .rename-pagination__field,
+  .rename-pagination--top .rename-pagination__buttons button:first-child,
+  .rename-pagination--top .rename-pagination__buttons button:last-child { display: none; }
+  .rename-list-card { min-height: 0; }
 
   .settings-threshold-row {
     flex-direction: column;

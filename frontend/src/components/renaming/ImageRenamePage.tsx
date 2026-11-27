@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   type ApplyImageRenamePayload,
   type ApplyImageRenameResult,
@@ -126,11 +126,15 @@ const ImageRenamePage: React.FC<{
   const pendingOffsetRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
+  const libraryTotalAbortRef = useRef<AbortController | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
   const reviewDialogRef = useRef<HTMLElement>(null);
   const reportRef = useRef<HTMLElement>(null);
   const submittingRef = useRef(false);
   const reviewOpenRef = useRef(false);
+  const hasFilters = selectedFolders.length > 0 || selectedPersons.length > 0;
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
+  const bulkActionsId = useId();
 
   useWorkspaceNavigation<RenameWorkspace>("renaming", {
     capture: () => ({
@@ -184,28 +188,29 @@ const ImageRenamePage: React.FC<{
     if (active && renameReport) reportRef.current?.focus();
   }, [renameReport]);
 
-  const loadTotalCount = async () => {
+  const loadTotalCount = async (background = false) => {
     const controller = new AbortController();
     totalAbortRef.current?.abort();
     totalAbortRef.current = controller;
-    setIsTotalLoading(true);
-    setTotal(null);
+    if (!background) {
+      setIsTotalLoading(true);
+      setTotal(null);
+    }
     try {
       const nextTotal = await fetchImageRenameCandidateCount({
         folders: selectedFolders,
         persons: selectedPersons,
-        sortBy: groupingMode,
-        sortDirection,
         signal: controller.signal,
       });
       if (!controller.signal.aborted) {
         setTotal(nextTotal);
-        if (selectedFolders.length === 0 && selectedPersons.length === 0) {
+        if (!hasFilters) {
+          libraryTotalAbortRef.current?.abort();
           setLibraryTotal(nextTotal);
         }
       }
     } catch {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && !background) {
         setTotal(null);
       }
     } finally {
@@ -215,7 +220,7 @@ const ImageRenamePage: React.FC<{
     }
   };
 
-  const loadData = async (nextOffset = 0) => {
+  const loadData = async (nextOffset = 0, background = false) => {
     pendingOffsetRef.current = nextOffset;
     const requestId = activeRequestRef.current + 1;
     activeRequestRef.current = requestId;
@@ -223,8 +228,8 @@ const ImageRenamePage: React.FC<{
     const controller = new AbortController();
     activeAbortRef.current = controller;
 
-    setIsLoading(true);
-    setLoadError(null);
+    if (!background) setIsLoading(true);
+    if (!background) setLoadError(null);
     try {
       const renameData = await fetchImageRenameCandidates({
         folders: selectedFolders,
@@ -235,9 +240,10 @@ const ImageRenamePage: React.FC<{
         offset: nextOffset,
         signal: controller.signal,
       });
-      if (activeRequestRef.current !== requestId) {
+      if (controller.signal.aborted || activeRequestRef.current !== requestId) {
         return;
       }
+      setLoadError(null);
       setItems(renameData.items);
       setAvailablePersons(renameData.available_persons);
       if (renameData.total !== null) {
@@ -254,7 +260,7 @@ const ImageRenamePage: React.FC<{
         }));
       }
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || background) {
         return;
       }
       setLoadError(
@@ -264,15 +270,33 @@ const ImageRenamePage: React.FC<{
       );
     } finally {
       if (activeRequestRef.current === requestId) {
+        activeAbortRef.current = null;
         setIsLoading(false);
       }
     }
   };
 
+  const refreshLibraryTotal = useCallback(async () => {
+    const controller = new AbortController();
+    libraryTotalAbortRef.current?.abort();
+    libraryTotalAbortRef.current = controller;
+    try {
+      const count = await fetchImageRenameCandidateCount({ signal: controller.signal });
+      if (!controller.signal.aborted) setLibraryTotal(count);
+    } catch {
+      // Keep the previous library count until another update is available.
+    }
+  }, []);
+
+  // Keep queued automatic updates attached to the workspace through filter changes.
+  const liveQuery = useRef({ loadData, loadTotalCount, hasFilters });
+  useLayoutEffect(() => {
+    liveQuery.current = { loadData, loadTotalCount, hasFilters };
+  });
+
   useEffect(() => {
     void loadData(pendingResume.current?.offset ?? 0);
   }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons, navigationRevision]);
-
 
   useEffect(() => {
     return () => {
@@ -281,9 +305,14 @@ const ImageRenamePage: React.FC<{
     };
   }, []);
 
+  // Sorting and pagination only change which rows are displayed.
   useEffect(() => {
     void loadTotalCount();
-  }, [groupingMode, sortDirection, selectedFolders, selectedPersons]);
+  }, [selectedFolders, selectedPersons]);
+
+  useEffect(() => {
+    if (active && hasFilters && libraryTotal === null) void refreshLibraryTotal();
+  }, [active, hasFilters, libraryTotal, refreshLibraryTotal]);
 
   useEffect(() => {
     if (!mutationRefresh) return;
@@ -373,23 +402,9 @@ const ImageRenamePage: React.FC<{
     let refreshTimer: number | null = null;
     let userBusyUntil = 0;
 
-    // Unfiltered candidate count, kept independent of the active filter so the
-    // bar can always say how much the filter narrowed things down.
-    const libraryTotalController = new AbortController();
-    const refreshLibraryTotal = async () => {
-      // The visible count already supplies this value when no filter is active.
-      if (selectedFolders.length === 0 && selectedPersons.length === 0) return;
-      try {
-        const count = await fetchImageRenameCandidateCount({ signal: libraryTotalController.signal });
-        if (isMounted) setLibraryTotal(count);
-      } catch {
-        // Keep the existing total and retry at the next live checkpoint.
-      }
-    };
-
     const refreshVisibleData = async () => {
       if (document.visibilityState !== "visible") return;
-      if (reviewOpenRef.current || submittingRef.current) {
+      if (reviewOpenRef.current || submittingRef.current || activeAbortRef.current) {
         scheduleRefresh();
         return;
       }
@@ -404,10 +419,11 @@ const ImageRenamePage: React.FC<{
       }
       refreshInFlight = true;
       try {
+        const query = liveQuery.current;
         await Promise.all([
-          loadData(pendingOffsetRef.current),
-          loadTotalCount(),
-          refreshLibraryTotal(),
+          query.loadData(pendingOffsetRef.current, true),
+          query.loadTotalCount(true),
+          query.hasFilters ? refreshLibraryTotal() : undefined,
         ]);
       } finally {
         refreshInFlight = false;
@@ -460,12 +476,11 @@ const ImageRenamePage: React.FC<{
       scheduleRefresh(FINAL_REFRESH_DELAY_MS, true);
     } else {
       hasActivatedLiveRefreshRef.current = true;
-      void refreshLibraryTotal();
     }
 
     return () => {
       isMounted = false;
-      libraryTotalController.abort();
+      libraryTotalAbortRef.current?.abort();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -473,7 +488,7 @@ const ImageRenamePage: React.FC<{
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, groupingMode, pageSize, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, refreshLibraryTotal]);
 
   const openRenameReview = () => {
     if (!canReview) return;
@@ -604,7 +619,7 @@ const ImageRenamePage: React.FC<{
 
   const renderPaginationControls = (position: "top" | "bottom") => (
     <nav
-      className={`rename-pagination rename-pagination--${position}`}
+      className={`rename-pagination rename-pagination--${position}${pageCount === 1 ? " rename-pagination--single" : ""}`}
       aria-label={position === "top" ? "Seitennavigation oben" : "Seitennavigation unten"}
     >
       <div className="rename-pagination__summary">
@@ -783,11 +798,9 @@ const ImageRenamePage: React.FC<{
     <div className="settings-page" ref={pageRef}>
       <div className="settings-page__header rename-page-header">
         <div>
-          <div className="settings-page__eyebrow">Bibliothek</div>
           <h1 className="settings-page__title">Dateinamen</h1>
           <p className="settings-page__copy">
-            Ergänze auf Wunsch die Namen zugeordneter Personen. Prüfe die Vorschläge
-            und wähle die Fotos, deren Dateien du umbenennen möchtest.
+            Wähle Fotos und prüfe die vorgeschlagenen Dateinamen.
           </p>
         </div>
         <button
@@ -856,13 +869,16 @@ const ImageRenamePage: React.FC<{
         </div>
       )}
 
-      <section className="settings-card rename-toolbar">
+      <section className="settings-card rename-toolbar" aria-label="Dateiauswahl">
         <div className="rename-toolbar__heading">
           <strong>Dateien zur Prüfung auswählen</strong>
-          <span>Markiere einzelne Dateien, diese Seite oder alle Treffer des Filters.</span>
         </div>
         <div className="rename-toolbar__controls">
-          <div className="settings-actions">
+          <button type="button" className="secondary-button rename-toolbar__toggle" aria-expanded={bulkActionsOpen}
+            aria-controls={bulkActionsId} onClick={() => setBulkActionsOpen((open) => !open)}>
+            Auswahl{selectedCount > 0 ? ` (${number.format(selectedCount)})` : ""}
+          </button>
+          <div id={bulkActionsId} className="settings-actions rename-toolbar__bulk" data-open={bulkActionsOpen}>
             <button className="neon-card" onClick={handleSelectPage} disabled={selectableItems.length === 0 || isLoading || isSubmitting}>
               Diese Seite auswählen ({number.format(selectableItems.length)})
             </button>

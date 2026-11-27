@@ -17,7 +17,7 @@ Wähle unter **Assets** das Paket für dein System. Zu den Installationspaketen 
 | Windows 11 x64 | `FaceManager-Setup-X.Y.Z.exe` | Öffne den Installer. |
 | Ubuntu 26.04 amd64 | `face-manager_X.Y.Z_amd64.deb` | Installiere die heruntergeladene Datei mit APT. |
 
-Ersetze unter Ubuntu im Download-Ordner `X.Y.Z` durch die Version im Dateinamen. Für ein Update verwendest du denselben Befehl mit der neuen Datei.
+Ersetze unter Ubuntu im Download-Ordner `X.Y.Z` durch die Version im Dateinamen. Für ein manuelles Update schließt du zuerst Face Manager und verwendest denselben Befehl mit der neuen Datei.
 
 ```bash
 sudo apt install ./face-manager_X.Y.Z_amd64.deb
@@ -25,7 +25,9 @@ sudo apt install ./face-manager_X.Y.Z_amd64.deb
 
 Öffne Face Manager im Anwendungsmenü. Bei der ersten Gesichtserkennung lädt die Desktop-App das Gesichtsmodell bei Bedarf herunter.
 
-Unter **Einstellungen → Updates → Jetzt nach Updates suchen** kannst du von Hand prüfen, ob eine neue Version verfügbar ist. Beim manuellen Update unter Windows wähle **Keep current data and update the application (recommended)**, falls der Installer nachfragt. Windows SmartScreen kann beim unsignierten Installer einen Hinweis anzeigen. [Versionshinweise](CHANGELOG.md)
+Unter **Einstellungen → Updates → Jetzt nach Updates suchen** kannst du prüfen, ob eine neue Version verfügbar ist. Wähle **Update herunterladen** und anschließend **Update installieren**. Unter Ubuntu schließt sich Face Manager und du bestätigst die Installation im Terminal. Falls dein System den Start der Installation aus der App nicht unterstützt, erreichst du das Paket über **GitHub öffnen**.
+
+Beim manuellen Update unter Windows wähle **Keep current data and update the application (recommended)**, falls der Installer nachfragt. Windows SmartScreen kann beim unsignierten Installer einen Hinweis anzeigen. [Versionshinweise](CHANGELOG.md)
 
 Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub-Releases enthalten Installationspakete für Windows und Ubuntu. [Android-Bauanleitung](android/README.md)
 
@@ -34,7 +36,7 @@ Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub
 ## Erste Schritte
 
 1. Öffne **Bilder hinzufügen** und wähle einen oder mehrere Bilderordner. Unter **Aktivitäten** siehst du den Fortschritt.
-2. Öffne **Personen → Ohne Namen** und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
+2. Öffne **Personen → Ohne Namen**, wähle eine Gesichtsgruppe und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
 3. In **Bilder** kannst du nach Personen, Ordnern oder Alben filtern. Unter **Karte** findest du Fotos mit gespeicherten Aufnahmeorten.
 
 Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel über die Seitenleiste bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite.
@@ -76,6 +78,8 @@ Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannt
 
 Kombiniere in **Karte** einen **Zeitraum** mit **Bereich wählen** oder wähle einen Aufnahmeort unter **Orte aus meinen Fotos**. Die Stile **Standard**, **Landschaft** und **Satellit** funktionieren offline. **Verlauf** zeigt die Stopps in zeitlicher Reihenfolge. Für kurze Wege wähle unter **Stoppabstand** den Modus **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
 
+In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps**. Unter **Kartenfilter** findest du den Zeitraum und weitere Filter. Öffne **Kartendarstellung und Export**, um den Kartenstil zu ändern oder ein Fotobuchbild zu erstellen.
+
 Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
 
 ![Offline-Fotokarte mit Standortmarkierungen, Filtern und Fotos aus dem Ausschnitt](docs/screenshots/photo-map.webp)
@@ -89,7 +93,7 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 <details>
 <summary>Fotobuchbild gestalten</summary>
 
-Öffne in **Karte** die gewünschte Auswahl und wähle **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
+Öffne in **Karte** die gewünschte Auswahl und wähle unter **Kartendarstellung und Export** die Aktion **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
 
 ![Fotobuchvorschau mit Wiener Reiseverlauf, Format und Druckmaß](docs/screenshots/photobook-0180.webp)
 

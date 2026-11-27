@@ -122,6 +122,18 @@ const Sidebar: React.FC<{
           <div id="additional-navigation" className="workflow-sidebar__additional">
             <div className="sidebar__section-label">Werkzeuge</div>
             {SECONDARY_ITEMS.map(renderItem)}
+            <div className="workflow-sidebar__compact-info">
+              {onShowReleaseNotes ? <button type="button" className="secondary-button" onClick={() => {
+                moreRef.current?.focus();
+                setMoreOpen(false);
+                onShowReleaseNotes();
+              }}>Face Manager {__APP_VERSION__}</button> : <span>Face Manager {__APP_VERSION__}</span>}
+              {onShowUpdate && <button type="button" className="secondary-button" onClick={() => {
+                moreRef.current?.focus();
+                setMoreOpen(false);
+                onShowUpdate();
+              }}>Update verfügbar</button>}
+            </div>
           </div>
         </div>
       </nav>

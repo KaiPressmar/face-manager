@@ -117,6 +117,7 @@ from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, 
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
 from .services.journey import JourneyDetail, get_journey
 from .services.observed_places import list_observed_places
+from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -176,7 +177,7 @@ from .services.storage import (
     list_images_page,
     list_cluster_summaries,
     list_persons,
-    list_person_suggestions,
+    get_person_suggestion_snapshot,
     list_review_suggestions,
     mark_faces_with_review_status,
     dismiss_person_suggestion,
@@ -230,6 +231,8 @@ _image_geometry_timer: threading.Timer | None = None
 _IMAGE_GEOMETRY_RETRY_SECONDS = 1.0
 _IMAGE_GEOMETRY_RETRY_BATCH = 32
 _MAX_PENDING_IMAGE_GEOMETRY = 1024
+PERSON_SUGGESTIONS_PENDING_HEADER = "X-Person-Suggestions-Pending"
+ASSIGNMENT_LIBRARY_ID_HEADER = "X-Assignment-Library-Id"
 
 
 def _describe_background_activity() -> str | None:
@@ -738,6 +741,7 @@ async def lifespan(_app: FastAPI):
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
             schedule_preview_cache_cleanup()
+            update_manager.cleanup_cache(get_data_root() / "updates", APP_VERSION)
             auto_cluster_queue.resume_after_shutdown()
             idle_recluster_scheduler.start()
             import_queue.start()
@@ -801,7 +805,10 @@ def configure_cors(application: FastAPI) -> None:
         allow_origins=allowed_origins,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=[PREVIEW_PROOF_HEADER, PREVIEW_ORIGINAL_HEADER],
+        expose_headers=[
+            PREVIEW_PROOF_HEADER, PREVIEW_ORIGINAL_HEADER,
+            PERSON_SUGGESTIONS_PENDING_HEADER, ASSIGNMENT_LIBRARY_ID_HEADER,
+        ],
     )
 
 
@@ -1006,7 +1013,7 @@ def api_open_update_release(data: dict = Body(...)):
 
 @app.post("/api/updates/install")
 def api_install_update(data: dict = Body(...)):
-    """Launch a verified Windows installer, then close the current app."""
+    """Hand off a verified installer and close the desktop app when required."""
     activity = _describe_background_activity()
     if activity is not None:
         raise HTTPException(
@@ -1245,6 +1252,40 @@ def _preview_cache_fields(limit: int | None, unreadable: bool) -> dict:
         "preview_cache_limit_mib_default": DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
         "preview_cache_limit_error": unreadable,
     }
+
+
+@app.get("/api/ui-preferences")
+def api_get_ui_preferences(response: Response) -> dict:
+    """Return the UI preferences saved for this installation."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return load_ui_preferences()
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        logger.warning("Could not read UI preferences", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Die Anzeigeeinstellungen konnten nicht geladen werden.",
+        ) from exc
+
+
+@app.patch("/api/ui-preferences")
+def api_update_ui_preferences(payload: object = Body(...)) -> dict:
+    """Merge validated UI preferences without changing the photo library."""
+    if not isinstance(payload, dict) or "values" not in payload or payload.keys() - {"values", "only_if_absent"}:
+        raise HTTPException(status_code=422, detail="Die Anfrage für die Anzeigeeinstellungen ist ungültig.")
+    only_if_absent = payload.get("only_if_absent", False)
+    if not isinstance(only_if_absent, bool):
+        raise HTTPException(status_code=422, detail="Die Anfrage für die Anzeigeeinstellungen ist ungültig.")
+    try:
+        values = validate_ui_preferences(payload["values"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return update_ui_preferences(values, only_if_absent=only_if_absent)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        logger.warning("Could not save UI preferences", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Die Anzeigeeinstellungen konnten nicht gespeichert werden.",
+        ) from exc
 
 
 @app.get("/api/settings")
@@ -2005,10 +2046,16 @@ def _assignment_snapshot(read):
 
 
 @app.get("/api/person-suggestions")
-def api_person_suggestions():
+def api_person_suggestions(response: Response):
     """List conservative, reviewable matches for existing people."""
+    generation = _get_media_library_generation()
     with _cluster_operation_lock:
-        return list_person_suggestions()
+        suggestions, pending, library_id = get_person_suggestion_snapshot()
+    _get_media_library_generation(generation)
+    response.headers[PERSON_SUGGESTIONS_PENDING_HEADER] = "1" if pending else "0"
+    response.headers[ASSIGNMENT_LIBRARY_ID_HEADER] = library_id
+    response.headers["Cache-Control"] = "no-store"
+    return suggestions
 
 
 @app.post("/api/person-suggestions/accept")

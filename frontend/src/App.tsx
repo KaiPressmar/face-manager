@@ -1,14 +1,15 @@
-import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
 import Layout from "./components/layout/Layout";
 import type { TopbarAction } from "./components/layout/Topbar";
 import type { HelpDestination, HelpTopic } from "./components/shared/HelpTour";
-import PeoplePage from "./components/people/PeoplePage";
-import ClusterPage from "./components/clusters/ClusterPage";
-import ImageRenamePage from "./components/renaming/ImageRenamePage";
-import SettingsPage from "./components/settings/SettingsPage";
+import PeopleWorkspace from "./components/people/PeoplePage";
+import ReviewWorkspace from "./components/clusters/ClusterPage";
+import RenameWorkspace from "./components/renaming/ImageRenamePage";
+import SettingsWorkspace from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
-import { LIBRARY_GENERATION_KEY, useAppNavigation } from "./hooks/useAppNavigation";
+import { useAppNavigation } from "./hooks/useAppNavigation";
+import { useUiPreferences } from "./hooks/useUiPreferences";
 import { WorkspaceNavigationContext } from "./hooks/useWorkspaceNavigation";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { hasGeoPhotoSelection, type GeoPhotoSelection } from "./utils/geoPhotoSelection";
@@ -44,16 +45,22 @@ export interface ClusterNavigationTarget {
   token: number;
 }
 
-const MapPage = lazy(() => import("./components/map/MapPage"));
+const PeoplePage = memo(PeopleWorkspace);
+const ClusterPage = memo(ReviewWorkspace);
+const ImageRenamePage = memo(RenameWorkspace);
+const SettingsPage = memo(SettingsWorkspace);
+const MapPage = memo(lazy(() => import("./components/map/MapPage")));
 const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const HELP_INVITATION_KEY = "face-manager:help-introduction-v1";
-
-function helpInvitationSeen() {
-  try { return localStorage.getItem(HELP_INVITATION_KEY) === "seen"; } catch { return false; }
-}
+const pageErrorTitles: Record<AppPage, string> = {
+  people: "Die Bilderansicht konnte nicht angezeigt werden",
+  map: "Die Weltkarte konnte nicht angezeigt werden",
+  renaming: "Die Dateinamen konnten nicht angezeigt werden",
+  review: "„Gesichter prüfen“ konnte nicht angezeigt werden",
+  settings: "Die Einstellungen konnten nicht angezeigt werden",
+};
 
 const helpTopicForPage: Record<AppPage, HelpTopic> = {
   people: "photos", map: "map", review: "people", renaming: "files", settings: "settings",
@@ -63,19 +70,11 @@ function focusHelpButton() {
   window.requestAnimationFrame(() => document.getElementById("app-help-trigger")?.focus());
 }
 
-function readGeoSelectionEpoch() {
-  try {
-    return Number(window.sessionStorage.getItem(LIBRARY_GENERATION_KEY)) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function readNavigationEntry(geoSelectionEpoch: number): NavigationEntry {
+function readNavigationEntry(): NavigationEntry {
   const entry = parseNavigationHash(window.location.hash, window.history.state);
   const marker = workspaceHistoryMarker(window.history.state);
-  if (marker && marker.generation !== geoSelectionEpoch) return { page: entry.page };
-  return entry.geoSelection && entry.geoSelectionEpoch !== geoSelectionEpoch ? { page: "people" } : entry;
+  return entry.geoSelection && (!marker?.libraryId || entry.geoSelectionEpoch !== marker.generation)
+    ? { page: "people" } : entry;
 }
 
 function reviewTarget(entry: NavigationEntry, token: number): ClusterNavigationTarget | null {
@@ -111,8 +110,7 @@ const PagePane: React.FC<{ active: boolean; page: AppPage; children: React.React
 
 const App: React.FC = () => {
   const sharedLibrary = useSharedLibrary();
-  const [initialGeoSelectionEpoch] = useState(readGeoSelectionEpoch);
-  const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
+  const [initialEntry] = useState(readNavigationEntry);
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
   const [mapAlbumId, setMapAlbumId] = useState(initialEntry.mapAlbumId);
@@ -129,15 +127,15 @@ const App: React.FC = () => {
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [showUpdate, setShowUpdate] = useState(false);
   const [initialNotesChecked, setInitialNotesChecked] = useState(false);
-  const [introSeen, setIntroSeen] = useState(helpInvitationSeen);
+  const { values: { help_introduction_seen: introSeen }, loading: preferencesLoading,
+    failure: preferenceFailure, setPreference, retry: retryPreferences } = useUiPreferences();
   const [helpTopic, setHelpTopic] = useState<HelpTopic | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [topbarAction, setTopbarAction] = useState<TopbarAction>();
   const helpSequence = useRef(0);
 
   const dismissIntroduction = () => {
-    setIntroSeen(true);
-    try { localStorage.setItem(HELP_INVITATION_KEY, "seen"); } catch { /* Keep the choice in this session. */ }
+    if (!introSeen) setPreference("help_introduction_seen", true);
   };
   const showHelp = (topic: HelpTopic) => { dismissIntroduction(); setHelpTopic(topic); };
   const queuedDialog = showReleaseNotes || showChangelog || showUpdate;
@@ -165,7 +163,7 @@ const App: React.FC = () => {
     setMapAlbumId(undefined);
     setClusterNavigationTarget(null);
   }, []);
-  const navigation = useAppNavigation(initialEntry, applyEntry, initialGeoSelectionEpoch, clearLibraryTargets);
+  const navigation = useAppNavigation(initialEntry, applyEntry, clearLibraryTargets);
   const { navigate } = navigation;
 
   useEffect(() => {
@@ -306,6 +304,9 @@ const App: React.FC = () => {
     navigate({ page: "map", mapAlbumId: id }, { replace: options?.replace, preserveWorkspace: true });
   }, [navigate]);
 
+  const handleOpenAlbumMap = useCallback((id: string) => navigate({ page: "map", mapAlbumId: id }), [navigate]);
+  const handleLeaveSharedReview = useCallback(() => navigate({ page: "review" }), [navigate]);
+
   const openHelpDestination = (destination: HelpDestination) => {
     setHelpTopic(null);
     if (destination === "import" || destination === "activities") {
@@ -334,29 +335,25 @@ const App: React.FC = () => {
             onOpenPeople={handleOpenPeople}
             geoSelection={geoSelection}
             onChangeGeoSelection={handleChangeGeoSelection}
-            onOpenAlbumMap={(id) => navigate({ page: "map", mapAlbumId: id })}
+            onOpenAlbumMap={handleOpenAlbumMap}
           />
         );
       case "map":
         return (
-          <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
-            <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} openAlbumId={mapAlbumId} onAlbumChange={handleMapAlbumChange}
-                onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
-            </Suspense>
-          </ErrorBoundary>
+          <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
+            <MapPage active={active} openAlbumId={mapAlbumId} onAlbumChange={handleMapAlbumChange}
+              onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
+          </Suspense>
         );
       case "review":
         return (
-          <ErrorBoundary title="„Gesichter prüfen“ konnte nicht angezeigt werden">
-            <ClusterPage
-              navigationTarget={clusterNavigationTarget}
-              active={active}
-              sharedLibrary={sharedLibrary}
-              onNavigateReview={handleNavigateReview}
-              onLeaveSharedReview={() => navigate({ page: "review" })}
-            />
-          </ErrorBoundary>
+          <ClusterPage
+            navigationTarget={clusterNavigationTarget}
+            active={active}
+            sharedLibrary={sharedLibrary}
+            onNavigateReview={handleNavigateReview}
+            onLeaveSharedReview={handleLeaveSharedReview}
+          />
         );
       case "renaming":
         return (
@@ -368,6 +365,7 @@ const App: React.FC = () => {
       case "settings":
         return (
           <SettingsPage
+            active={active}
             activeSection={settingsSection}
             onNavigateSection={handleNavigateSettingsSection}
             sharedLibrary={sharedLibrary}
@@ -388,21 +386,14 @@ const App: React.FC = () => {
         onShowHelp={() => showHelp(helpTopicForPage[page])}
         onImportStateChange={setImportDialogOpen}
         topbarAction={topbarAction}
-        invitation={initialNotesChecked && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
-          <aside className="help-invitation" aria-labelledby="help-invitation-title">
-            <div>
-              <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
-              <p>Wir zeigen dir die ersten Schritte. Du findest die Einführung auch jederzeit unter „Hilfe“.</p>
-            </div>
-            <div className="help-invitation__actions">
-              <button type="button" onClick={() => showHelp("photos")}>Einführung starten</button>
-              <button type="button" onClick={() => { dismissIntroduction(); focusHelpButton(); }}>Später</button>
-            </div>
-          </aside>
-        )}
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
+        preferenceNotice={preferenceFailure && <div className="workspace-history__notice" role="alert">
+          {preferenceFailure === "load" ? "Die Ansichts- und Hilfeeinstellungen konnten nicht geladen werden."
+            : "Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden."}{" "}
+          <button type="button" className="secondary-button" onClick={retryPreferences}>Erneut versuchen</button>
+        </div>}
       >
         {!navigation.ready && <p className="workspace-history__notice" role="status">Bibliothek wird geprüft …</p>}
         {navigation.ready && PAGE_ORDER.filter((target) => visitedRef.current.has(target)).map(
@@ -410,7 +401,19 @@ const App: React.FC = () => {
             const active = target === page;
             return (
               <PagePane key={target} page={target} active={active}>
-                {renderPage(target, active)}
+                {target === "people" && initialNotesChecked && !preferencesLoading && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
+                  <aside className="help-invitation" aria-labelledby="help-invitation-title">
+                    <div>
+                      <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
+                      <p>Wir zeigen dir die ersten Schritte. Du findest die Einführung auch jederzeit unter „Hilfe“.</p>
+                    </div>
+                    <div className="help-invitation__actions">
+                      <button type="button" onClick={() => showHelp("photos")}>Einführung starten</button>
+                      <button type="button" onClick={() => { dismissIntroduction(); focusHelpButton(); }}>Später</button>
+                    </div>
+                  </aside>
+                )}
+                <ErrorBoundary title={pageErrorTitles[target]}>{renderPage(target, active)}</ErrorBoundary>
               </PagePane>
             );
           },
@@ -442,6 +445,7 @@ const App: React.FC = () => {
       )}
       {!helpTopic && !importDialogOpen && showUpdate && availableUpdate && !showReleaseNotes && !showChangelog && (
         <UpdateAvailableModal
+          key={availableUpdate.latest_version}
           update={availableUpdate}
           onClose={() => setShowUpdate(false)}
           onSkip={() => {

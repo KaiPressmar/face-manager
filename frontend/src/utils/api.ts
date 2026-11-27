@@ -1092,15 +1092,20 @@ export async function assignClusterToPerson(
   invalidatePersonsCache();
 }
 
-export async function fetchPersonSuggestions(): Promise<PersonSuggestion[]> {
-  const res = await apiFetch(`${API_BASE}/person-suggestions`);
+export async function fetchPersonSuggestions(signal?: AbortSignal) {
+  const res = await apiFetch(`${API_BASE}/person-suggestions`, { signal });
   if (!res.ok) {
     throw new Error("Die Personenvorschläge konnten nicht geladen werden.");
   }
   const payload = await res.json();
-  return Array.isArray(payload)
+  const items: PersonSuggestion[] = Array.isArray(payload)
     ? payload.filter((item) => typeof item?.proposal_token === "string" && Array.isArray(item.face_ids))
     : [];
+  return {
+    items,
+    pending: res.headers.get("X-Person-Suggestions-Pending") === "1",
+    libraryId: res.headers.get("X-Assignment-Library-Id"),
+  };
 }
 
 export async function acceptPersonSuggestions(
@@ -1130,8 +1135,8 @@ export async function dismissPersonSuggestion(item: PersonSuggestion): Promise<v
   }
 }
 
-export async function fetchReviewSuggestions(): Promise<ReviewSuggestion[]> {
-  const res = await apiFetch(`${API_BASE}/review-suggestions`);
+export async function fetchReviewSuggestions(signal?: AbortSignal): Promise<ReviewSuggestion[]> {
+  const res = await apiFetch(`${API_BASE}/review-suggestions`, { signal });
   if (!res.ok) {
     throw new Error("Die Vorschläge für aussortierte Gesichter konnten nicht geladen werden.");
   }

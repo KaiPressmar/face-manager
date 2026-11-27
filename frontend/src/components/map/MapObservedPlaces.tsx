@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { API_BASE, apiFetch, readApiError } from "../../utils/api";
 import { findNearbyPlace, loadJourneyPlaces } from "./journeyPlaces";
 import type { TravelHome } from "./journeyTrips";
@@ -24,6 +24,8 @@ function cellBounds(cell: Cell, pad: number): MapBounds {
 }
 
 interface Props {
+  active: boolean;
+  revision: number;
   from: string;
   to: string;
   albumId: string;
@@ -31,18 +33,21 @@ interface Props {
   onSetHome?: (place: TravelHome) => void;
 }
 
-export default function MapObservedPlaces({ from, to, albumId, onSelect, onSetHome }: Props) {
+export default function MapObservedPlaces({ active, revision, from, to, albumId, onSelect, onSetHome }: Props) {
   const [open, setOpen] = useState(false);
-  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState({ revision, offset: 0 });
   const [next, setNext] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [places, setPlaces] = useState<ObservedPlace[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [retry, setRetry] = useState(0);
+  const completedRequest = useRef("");
+  const offset = page.revision === revision ? page.offset : 0;
 
   useEffect(() => {
-    if (!open) return;
+    const requestKey = JSON.stringify([from, to, albumId, revision, offset, retry]);
+    if (!active || !open || completedRequest.current === requestKey) return;
     const controller = new AbortController();
     const search = new URLSearchParams({ offset: String(offset) });
     if (from) search.set("from_date", from);
@@ -56,6 +61,7 @@ export default function MapObservedPlaces({ from, to, albumId, onSelect, onSetHo
     });
     void Promise.all([request, loadJourneyPlaces().catch(() => [])]).then(([data, locations]) => {
       if (controller.signal.aborted) return;
+      completedRequest.current = requestKey;
       setPlaces((current) => {
         const grouped = [...(offset ? current : [])];
         const byName = new Map<string, number[]>();
@@ -87,13 +93,19 @@ export default function MapObservedPlaces({ from, to, albumId, onSelect, onSetHo
       setLoading(false);
     });
     return () => controller.abort();
-  }, [open, from, to, albumId, offset, retry]);
+  }, [active, open, from, to, albumId, offset, retry, revision]);
 
-  const visible = places.filter((place) => nameKey(place.name).includes(nameKey(query.trim())));
+  const searchTerm = nameKey(query.trim());
+  const visible = places.filter((place) => nameKey(place.name).includes(searchTerm));
   return <details className="gps-map-discovery" onToggle={(event) => {
     const expanded = event.currentTarget.open;
     setOpen(expanded);
-    if (expanded) { setOffset(0); setPlaces([]); setNext(null); }
+    if (expanded) {
+      completedRequest.current = "";
+      setPage({ revision, offset: 0 });
+      setPlaces([]);
+      setNext(null);
+    }
   }}>
     <summary>Orte aus meinen Fotos</summary>
     {open && <div className="gps-map-discovery__content">
@@ -110,7 +122,7 @@ export default function MapObservedPlaces({ from, to, albumId, onSelect, onSetHo
       {!loading && !error && visible.length === 0 && <p>{next !== null && query.trim()
         ? "Unter den geladenen Fotoorten gibt es keinen Treffer. Lade weitere Orte, um weiterzusuchen."
         : "Für diese Auswahl wurden keine passenden Orte gefunden."}</p>}
-      {next !== null && <button type="button" disabled={loading} onClick={() => setOffset(next)}>Weitere Orte laden</button>}
+      {next !== null && <button type="button" disabled={loading} onClick={() => setPage({ revision, offset: next })}>Weitere Orte laden</button>}
     </div>}
   </details>;
 }
