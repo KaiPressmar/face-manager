@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.19.0] - 2026-11-27
+
+### Neu
+
 - Unter Ubuntu kannst du Updates direkt in Face Manager herunterladen und die Installation aus der App starten.
 
 ### Verbessert
