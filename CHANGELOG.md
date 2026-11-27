@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.21.0] - 2026-11-27
+
+### Verbessert
+
 - In „Karte“ findest du wiederkehrende Reiseziele über die Ortssuche und kannst direkt die Fotos eines Aufnahmejahres auswählen.
 - Der Reiseverlauf passt die Karte an die Auswahl an. Liegen mehrere Stopps nah beieinander, kannst du sie über eine gemeinsame Markierung einzeln öffnen.
 - „Fotobuchbild gestalten“ ist direkt in der Fotokarte erreichbar. Eine übersichtliche Kartenseite ist voreingestellt, und du kannst quadratische Buchformate, einen eigenen Kartenausschnitt oder eine zusätzliche Stoppliste wählen.
