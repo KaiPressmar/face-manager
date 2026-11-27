@@ -80,6 +80,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
     await page.waitForURL('**/#/gesichter-pruefen/gruppe/30');
     await back.and(page.locator(':focus')).waitFor();
     assert.equal(await list.isVisible(), false);
+    await page.locator('.cluster-group-card').first().waitFor();
     assert.equal(await page.locator('.cluster-group-card').count(), 1);
     await page.locator('.cluster-group-card__header').scrollIntoViewIfNeeded();
     await page.getByRole('checkbox', { name: 'Gesicht 3001 auswählen' }).waitFor();
