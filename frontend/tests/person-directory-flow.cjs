@@ -24,7 +24,37 @@ module.exports = async function personDirectoryFlow(browser, errors, newPage, we
     }
   });
   try {
-    await page.addInitScript(() => localStorage.setItem('face-manager:help-introduction-v1', 'seen'));
+    await page.addInitScript(() => {
+      localStorage.setItem('face-manager:help-introduction-v1', 'seen');
+      window.EventSource = class ObservedEventSource extends window.EventSource {
+        constructor(...args) {
+          super(...args);
+          window.directoryTestEvents = this;
+        }
+      };
+    });
+    let signalPageRequest;
+    let releasePage;
+    const pageRequested = new Promise((resolve) => { signalPageRequest = resolve; });
+    const pendingPage = new Promise((resolve) => { releasePage = resolve; });
+    const directoryRequest = (url) => url.pathname === '/api/person-directory' && url.searchParams.get('search') === '';
+    await page.route(directoryRequest, async (route) => {
+      const offset = Number(new URL(route.request().url()).searchParams.get('offset'));
+      if (offset === 0) {
+        return route.fulfill({ json: {
+          items: [{ id: 1, name: personName, photo_count: 1 }, { id: 2, name: 'Ben Beispiel', photo_count: 1 }],
+          offset: 0, limit: 2, total: 3, has_more: true,
+        } });
+      }
+      if (signalPageRequest) {
+        signalPageRequest();
+        signalPageRequest = undefined;
+        await pendingPage;
+      }
+      return route.fulfill({ json: {
+        items: [{ id: 3, name: 'Carla Beispiel', photo_count: 1 }], offset: 2, limit: 2, total: 3, has_more: false,
+      } });
+    });
     await page.goto(`${webBase}/#/bilder`);
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     const history = page.getByRole('navigation', { name: 'Ansichtsverlauf' });
@@ -39,6 +69,23 @@ module.exports = async function personDirectoryFlow(browser, errors, newPage, we
     const search = workspace.getByRole('searchbox', { name: 'Person suchen' });
     const portrait = action(workspace, /^Anna Beispiel\b/);
     await portrait.waitFor();
+    await action(workspace, 'Weitere Personen laden').click();
+    await pageRequested;
+    const refresh = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return directoryRequest(url) && url.searchParams.get('offset') === '0';
+    });
+    try {
+      await page.evaluate(() => window.directoryTestEvents.dispatchEvent(new MessageEvent('clusters', {
+        data: JSON.stringify({ reason: 'assign_person' }),
+      })));
+      await refresh;
+    } finally {
+      releasePage();
+    }
+    await action(workspace, /^Carla Beispiel\b/).waitFor();
+    await portrait.waitFor();
+    await page.unroute(directoryRequest);
     await search.fill('Diese Person gibt es nicht');
     await workspace.getByText(/Keine Personen.*gefunden/).waitFor();
     assert.equal(await portrait.count(), 0, 'An unmatched search still showed a portrait');

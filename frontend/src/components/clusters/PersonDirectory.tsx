@@ -36,10 +36,12 @@ function usePagedResults<T extends { id: number }>(
   const [loading, setLoading] = useState(false);
   const completed = useRef<PagedResult<T>>();
   const request = useRef<AbortController>();
+  const pendingPage = useRef<{ key: string; offset: number }>();
   const current = result?.key === key ? result : undefined;
 
   const load = useCallback(async (offset = 0) => {
     if (!active || request.current) return;
+    if (offset > 0) pendingPage.current = { key, offset };
     const controller = new AbortController();
     request.current = controller;
     setLoading(true);
@@ -47,7 +49,9 @@ function usePagedResults<T extends { id: number }>(
       const prior = completed.current;
       const items = new Map<number, T>();
       if (offset && prior?.key === key) prior.page?.items.forEach((item) => items.set(item.id, item));
-      const loadedUntil = offset === 0 && prior?.key === key ? prior.page?.items.length ?? 0 : offset;
+      const loadedCount = prior?.key === key ? prior.page?.items.length ?? 0 : 0;
+      const requestedCount = pendingPage.current?.key === key ? pendingPage.current.offset + 1 : 0;
+      const loadedUntil = offset ? offset : Math.max(loadedCount, requestedCount);
       let page = await fetchPage(offset, controller.signal);
       for (;;) {
         if (controller.signal.aborted) return;
@@ -61,6 +65,7 @@ function usePagedResults<T extends { id: number }>(
         page: { ...page, items: [...items.values()], has_more: page.has_more && page.items.length > 0 },
         nextOffset: page.offset + page.items.length,
       };
+      if (pendingPage.current?.key === key) pendingPage.current = undefined;
       completed.current = next;
       setResult(next);
     } catch (error) {
@@ -79,8 +84,9 @@ function usePagedResults<T extends { id: number }>(
   }, [active, fetchPage, key, revision]);
 
   useEffect(() => {
+    if (pendingPage.current?.key !== key) pendingPage.current = undefined;
     const last = completed.current;
-    if (active && (last?.key !== key || last.revision !== revision)) void load();
+    if (active && (last?.key !== key || last.revision !== revision || pendingPage.current?.key === key)) void load();
     return () => {
       request.current?.abort();
       request.current = undefined;
@@ -170,6 +176,7 @@ export default function PersonDirectory({
   useEffect(() => {
     let refreshTimer: number | undefined;
     const unsubscribe = subscribeToTopic<{ reason?: string }>("clusters", (event) => {
+      if (event?.reason === "library_identity") return;
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => setLocalRevision((value) => value + 1),
         event?.reason === "background_progress" ? 1800 : 300);
