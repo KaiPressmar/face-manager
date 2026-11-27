@@ -110,6 +110,7 @@ function journeyView(journey: Journey, detail: JourneyDetail) {
 const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNavigateToCluster, onOpenImages }) => {
   const [view, setView] = useState<MapView>(INITIAL_VIEW);
   const [mode, setMode] = useState<"locations" | "journey">("locations");
+  const [onlineDetails, setOnlineDetails] = useState(false);
   const { values: { map_style: mapStyle, map_country_names: showNames }, setPreference } = useUiPreferences();
   const [journeyResult, setJourneyResult] = useState<MapResult<Journey> | null>(null);
   const [journeyStopId, setJourneyStopId] = useState<string | undefined>();
@@ -859,6 +860,11 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           </div>
         </div>
         {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
+        <div className="gps-page__online-details">
+          <label><input type="checkbox" checked={onlineDetails} aria-describedby="gps-online-details-note"
+            onChange={(event) => setOnlineDetails(event.target.checked)} />Kartendetails online</label>
+          <span id="gps-online-details-note">Fragt beim Zoomen den sichtbaren Bereich bei Kartenanbietern ab.</span>
+        </div>
         <WorldMap
           view={view}
           onViewChange={setView}
@@ -869,6 +875,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           style={mapStyle}
           showCountryNames={showNames}
           compactControls={compactLayout}
+          onlineDetails={onlineDetails && active && (!compactLayout || compactPane === "map")}
           journeyStops={journey?.stops}
           journeyConnections={journey?.connections}
           activeJourneyStop={journeyStopId}
@@ -940,11 +947,16 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           }}>Zur Stoppliste</button>
           <button type="button" onClick={() => {
             setView(normalizedView({ latitude: journeyStop.latitude, longitude: journeyStop.longitude,
-              zoom: Math.max(view.zoom, journeyDetail === "city" ? 1600 : 60) }));
+              zoom: Math.max(view.zoom, journeyDetail === "city" ? 6400 : 3200) }));
             if (compactLayout) switchCompactPane("map");
           }}>Stopp auf Karte zeigen</button>
         </div>}
         {images.length > 0 && <div className="gps-results-actions">
+          {!isJourney && region && <button type="button" onClick={() => {
+            const frame = viewForBounds(region);
+            setView(normalizedView({ ...frame, zoom: Math.min(frame.zoom, 12000) }));
+            if (compactLayout) switchCompactPane("map");
+          }}>Fotoorte auf Karte zeigen</button>}
           {stopDay && (fromDate !== stopDay || fromDate !== toDate) &&
             <button type="button" onClick={() => showStopDay(stopDay)}>{shortDate.format(new Date(stopDay))} zeigen</button>}
           <button type="button" onClick={(event) => openGallery(event.currentTarget, null)}>Galerie öffnen</button>
@@ -982,7 +994,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       <span>{collection ? countWithLabel(Math.max(0, collection.library_total - collection.located_total - collection.pending_total), "Foto ohne Standort", "Fotos ohne Standort") : "… Fotos ohne Standort"}</span>
       {!!collection?.pending_total && <span className="gps-page__pending">{formatCount(collection.pending_total)} werden noch geprüft</span>}
       </>}
-      <span className="gps-page__privacy">Deine Fotostandorte bleiben privat. Die Karte funktioniert auch offline.</span>
+      <span className="gps-page__privacy">Kartenübersicht und Fotobuch-Export funktionieren offline.</span>
     </aside>
     {openedGallery && <MapGallery opening={openedGallery} onClose={closeGallery}
       onOpenImages={onOpenImages ? openInImages : undefined} onNavigateToCluster={onNavigateToCluster}
