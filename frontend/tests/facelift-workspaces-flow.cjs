@@ -59,35 +59,60 @@ async function checkPhotoFilter(page, webBase) {
   await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
   await sameCard.and(page.locator('[aria-pressed="true"]')).waitFor();
 
-  const photosPane = page.locator('[data-workspace-page="people"] > .page-content');
-  const savedScroll = await photosPane.evaluate((pane) => {
-    pane.scrollTop = 350;
-    return pane.scrollTop;
-  });
-  assert.ok(savedScroll > 0);
-  await sidebar.getByRole('button', { name: 'Karte', exact: true }).click();
-  let releaseResume;
-  const resumeGate = new Promise((resolve) => { releaseResume = resolve; });
-  const matchesResume = (url) => url.pathname === '/api/images' &&
-    url.searchParams.get('offset') === '0' && Number(url.searchParams.get('limit')) > 1;
-  await page.route(matchesResume, async (route) => {
-    await resumeGate;
-    await route.continue();
-  }, { times: 1 });
-  try {
-    const pendingResume = page.waitForRequest((request) => matchesResume(new URL(request.url())));
-    await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
-    await pendingResume;
-    assert.ok(await sameCard.isDisabled());
-    await photosPane.evaluate((pane) => { pane.scrollTop = 0; });
-    await nav.getByRole('button', { name: 'Vorwärts', exact: true }).click();
-    await page.waitForURL(/#\/weltkarte$/);
-  } finally {
-    releaseResume();
+  for (const holdRetry of [true, false]) {
+    const photosPane = page.locator('[data-workspace-page="people"] > .page-content');
+    const savedScroll = await photosPane.evaluate((pane) => {
+      pane.scrollTop = 350;
+      return pane.scrollTop;
+    });
+    assert.ok(savedScroll > 0);
+    const waitForSavedScroll = () => page.waitForFunction((scroll) => Math.abs(
+      document.querySelector('[data-workspace-page="people"] > .page-content').scrollTop - scroll,
+    ) < 3, savedScroll);
+    await sidebar.getByRole('button', { name: 'Karte', exact: true }).click();
+    let releaseResume;
+    let releaseRetry;
+    const resumeGate = new Promise((resolve) => { releaseResume = resolve; });
+    const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
+    const matchesResume = (url) => url.pathname === '/api/images' &&
+      url.searchParams.get('offset') === '0' && Number(url.searchParams.get('limit')) > 1;
+    let attempts = 0;
+    await page.route(matchesResume, async (route) => {
+      await (attempts++ === 0 ? resumeGate : retryGate);
+      await route.continue();
+    }, { times: holdRetry ? 2 : 1 });
+    try {
+      const pendingResume = page.waitForRequest((request) => matchesResume(new URL(request.url())));
+      await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
+      await pendingResume;
+      assert.ok(await sameCard.isDisabled());
+      await waitForSavedScroll();
+      const interruptedScroll = await photosPane.evaluate(async (pane) => {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        pane.scrollTop = 0;
+        return pane.scrollTop;
+      });
+      assert.equal(interruptedScroll, 0);
+      await nav.getByRole('button', { name: 'Vorwärts', exact: true }).click();
+      await page.locator('[data-workspace-page="map"].page-pane--active').waitFor();
+      releaseResume();
+
+      const pendingRetry = page.waitForRequest((request) => matchesResume(new URL(request.url())));
+      await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
+      await pendingRetry;
+      if (holdRetry) {
+        assert.ok(await sameCard.isDisabled());
+        // The previous visual offset was zero when the interrupted view was
+        // left. The saved offset must already win while the same grid is shown.
+        await waitForSavedScroll();
+      }
+    } finally {
+      releaseResume();
+      releaseRetry();
+    }
+    await sameCard.and(page.locator('[aria-pressed="true"]')).waitFor();
+    await waitForSavedScroll();
   }
-  await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
-  await sameCard.and(page.locator('[aria-pressed="true"]')).waitFor();
-  await page.waitForFunction((scroll) => Math.abs(document.querySelector('[data-workspace-page="people"] > .page-content').scrollTop - scroll) < 3, savedScroll);
 }
 
 async function checkPeopleHistory(page, webBase) {

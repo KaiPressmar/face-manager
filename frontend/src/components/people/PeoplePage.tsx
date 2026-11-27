@@ -152,6 +152,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const handledRetry = useRef(0);
 
   const { checkpoint } = useWorkspaceNavigation<PhotoWorkspace>("people", {
+    captureScrollTop: () => pendingResume.current?.queryKey === requestedQueryKey
+      ? pendingResume.current.scrollTop : undefined,
     capture: () => {
       const resume = pendingResume.current?.queryKey === requestedQueryKey ? pendingResume.current : undefined;
       return {

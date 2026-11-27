@@ -115,7 +115,7 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
     const binding = bindings.current.get(origin.entry.page);
     snapshots.current.set(origin.id, {
       state: binding ? binding.capture() : previous?.state,
-      top: pane?.scrollTop ?? previous?.top ?? 0,
+      top: binding?.captureScrollTop?.() ?? pane?.scrollTop ?? previous?.top ?? 0,
       left: pane?.scrollLeft ?? previous?.left ?? 0,
       focus: focusAddress(pane) ?? lastFocused.current.get(origin.id) ?? previous?.focus,
     });
