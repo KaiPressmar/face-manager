@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { boundsForDrag, boundsForView, countryLabels, gridForSize, groupJourneyStops, journeyConnectionSegments, layoutMapLabels, markerPixelPosition, normalizedView } =
+const { boundsForDrag, boundsForView, countryLabels, gridForSize, groupJourneyStops, journeyConnectionSegments, layoutMapLabels, mapScale, markerPixelPosition, normalizedView } =
   require('./load-typescript.cjs')('src/components/map/WorldMap.tsx');
 
 function assertValidBounds(bounds) {
@@ -43,6 +43,16 @@ test('zoom transitions preserve a valid, shrinking viewport', () => {
     assert.ok(bounds.east - bounds.west <= previousWidth + 1e-8);
     previousWidth = bounds.east - bounds.west;
   }
+});
+
+test('street zoom has a sub-kilometer viewport and a meaningful scale bar', () => {
+  const berlin = normalizedView({ longitude: 13.4, latitude: 52.5, zoom: 131072 });
+  const bounds = boundsForView(berlin);
+  assertValidBounds(bounds);
+  const scale = mapScale(bounds, 800);
+  assert.equal(scale.meters, 10);
+  assert.ok(scale.pixels > 40 && scale.pixels < 82);
+  assert.ok(mapScale(boundsForView({ ...berlin, latitude: 0 }), 800).meters > scale.meters);
 });
 
 test('drag bounds use the map viewport and work in either direction', () => {

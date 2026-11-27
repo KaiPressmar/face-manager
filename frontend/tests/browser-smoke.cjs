@@ -10,6 +10,7 @@ const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
 const mapFaceliftFlow = require('./map-facelift-flow.cjs');
+const { streetTileFixture } = require('./street-tile-fixture.cjs');
 const personDirectoryFlow = require('./person-directory-flow.cjs');
 const faceliftWorkspacesFlow = require('./facelift-workspaces-flow.cjs');
 let chromium;
@@ -638,6 +639,73 @@ async function mapWithoutStorageFlow(browser, errors) {
   console.log('PASS map: defaults and display controls with missing or blocked localStorage');
 }
 
+async function onlineMapDetailsFlow(browser, errors) {
+  const page = await newPage(browser, 1280, 920, errors);
+  const requested = [];
+  const image = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1uoAAAAASUVORK5CYII=', 'base64');
+  let satelliteAvailable = false;
+  try {
+    await page.route('**/api/map/detail-tiles/**', (route) => {
+      const url = new URL(route.request().url());
+      const [, source, z, x, y] = url.pathname.match(/\/detail-tiles\/(street|landscape|satellite)\/(\d+)\/(\d+)\/(\d+)$/) ?? [];
+      assert.ok(source && !url.search, 'Tile requests must contain only a source and grid coordinates');
+      requested.push({ source, z: Number(z), x: Number(x), y: Number(y) });
+      if (source === 'satellite' && !satelliteAvailable) return route.fulfill({ status: 503 });
+      return route.fulfill({ status: 200, contentType: source === 'street' ? 'application/vnd.mapbox-vector-tile' : 'image/png',
+        body: source === 'street' ? streetTileFixture() : image });
+    });
+    await page.goto(`${webBase}/#/weltkarte`);
+    const maps = page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' });
+    const online = page.getByRole('checkbox', { name: 'Kartendetails online', exact: true });
+    assert.equal(await online.isChecked(), false);
+    await page.getByText('Kartendarstellung', { exact: true }).click();
+    const style = page.getByLabel('Kartenstil', { exact: true });
+    await style.selectOption('landscape');
+    await online.check();
+    await page.getByText('Orte aus meinen Fotos', { exact: true }).click();
+    await page.getByRole('searchbox', { name: 'Fotoorte suchen' }).fill('Berlin');
+    const berlin = page.getByRole('button', { name: /^Berlin \d+ Fotos/ });
+    await berlin.waitFor();
+    assert.equal(requested.length, 0, 'The world overview contacted a map provider');
+    await online.uncheck();
+    await berlin.click();
+    await page.getByText(/Offline-Übersicht · Straßen/).waitFor();
+    assert.equal(requested.length, 0, 'Zooming contacted a map provider before opt-in');
+    await page.getByRole('img', { name: /^Maßstab .* (m|km)$/ }).waitFor();
+    await online.check();
+    const landscape = maps.locator('[data-map-raster-detail="landscape"] image').first();
+    const roads = maps.locator('.gps-map__street-detail path').first();
+    await landscape.waitFor();
+    await roads.waitFor();
+    await page.getByRole('link', { name: 'OpenFreeMap' }).waitFor();
+    assert.ok(requested.some((tile) => tile.source === 'street' && tile.z >= 11));
+
+    await style.selectOption('satellite');
+    const retry = page.getByRole('button', { name: 'Kartendetails erneut laden' });
+    await retry.waitFor();
+    await roads.waitFor();
+    await maps.locator('.gps-map__satellite[visibility="visible"]').waitFor({ state: 'attached' });
+    satelliteAvailable = true;
+    await retry.click();
+    await maps.locator('[data-map-raster-detail="satellite"] image').first().waitFor();
+    await page.getByRole('link', { name: /Copernicus/ }).waitFor();
+    const satelliteRequests = requested.filter((tile) => tile.source === 'satellite');
+    assert.ok(satelliteRequests.length > 0 && satelliteRequests.every((tile) => tile.z <= 13));
+
+    await online.uncheck();
+    await roads.waitFor({ state: 'detached' });
+    await page.getByText(/Offline-Übersicht · Straßen/).waitFor();
+    const count = requested.length;
+    const before = await maps.getAttribute('viewBox');
+    await maps.dblclick({ position: { x: 30, y: 30 } });
+    assert.notEqual(await maps.getAttribute('viewBox'), before, 'Double click did not zoom in');
+    assert.equal(requested.length, count);
+    console.log('PASS online map details: opt-in, street geometry, both raster styles, offline fallback and retry');
+  } finally {
+    await page.close();
+  }
+}
+
 async function durablePreferencesFlow(browser, errors) {
   const options = { persistentPreferences: true };
   const first = await newPage(browser, 1440, 1000, errors, options);
@@ -878,16 +946,17 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
 
 async function pagedLibraryFacesFlow(browser, errors) {
   const page = await newPage(browser, 1024, 650, errors);
+  const targetIndex = 44;
   const face = {
     id: 1, bbox_x: 60, bbox_y: 20, bbox_w: 10, bbox_h: 10,
     cluster_id: null, person_name: 'Name aus Liste', review_status: 'unknown_person',
   };
   const photos = Array.from({ length: 240 }, (_, index) => ({
     id: index + 1001, filename: `Foto ${index + 1}`, directory: '/fixture', image_path: `/fixture/${index + 1}.jpg`,
-    content_hash: null, created_at: null, image_width: index === 44 ? null : 100, image_height: index === 44 ? null : 100,
-    location_count: 1, locations: [], faces: index === 44 ? [face] : [],
+    content_hash: null, created_at: null, image_width: index === targetIndex ? null : 100, image_height: index === targetIndex ? null : 100,
+    location_count: 1, locations: [], faces: index === targetIndex ? [face] : [],
   }));
-  const target = photos[44];
+  const target = photos[targetIndex];
   const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
   let detailRequests = 0;
   let refreshing = false;
@@ -931,8 +1000,16 @@ async function pagedLibraryFacesFlow(browser, errors) {
     await page.goto(`${webBase}/#/bilder`);
     const cards = page.locator('[data-image-id]');
     await cards.first().waitFor();
-    const scrollToEnd = () => page.locator('.page-content').evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await scrollToEnd();
+    // The first card can appear before the masonry layout and scroll listener settle.
+    const scrollUntil = (count) => page.waitForFunction((expected) => {
+      const pane = document.querySelector('[data-workspace-page="people"] > .page-content');
+      if (!pane) return false;
+      if (pane.querySelectorAll('[data-image-id]').length >= expected) return true;
+      pane.scrollTop = pane.scrollHeight;
+      pane.dispatchEvent(new Event('scroll'));
+      return false;
+    }, count, { polling: 150 });
+    await scrollUntil(targetIndex + 1);
     const card = page.locator(`[data-image-id="${target.id}"]`);
     await card.scrollIntoViewIfNeeded();
     const box = card.locator('.hologram-box');
@@ -948,11 +1025,7 @@ async function pagedLibraryFacesFlow(browser, errors) {
     assert.ok(detailRequests >= 2, 'Geometry was not retried after the transient failure');
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
-    while (await cards.count() < photos.length) {
-      const before = await cards.count();
-      await scrollToEnd();
-      await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
-    }
+    await scrollUntil(photos.length);
     const pendingRefresh = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === '/api/images' && url.searchParams.get('limit') === '200';
@@ -1855,6 +1928,7 @@ async function suggestionRefreshFlow(browser, errors) {
       workspaceNavigation: (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
       durablePreferencesFlow,
       mapWithoutStorageFlow,
+      onlineMapDetailsFlow,
       previewFlow,
       firstAssignmentFlow,
       collectSourcesFlow,

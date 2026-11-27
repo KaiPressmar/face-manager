@@ -1,0 +1,12 @@
+{
+  "landscape": {
+    "maxLevel": 14,
+    "credit": "Gelände von EOX · © OpenStreetMap contributors und weitere",
+    "creditUrl": "https://maps.eox.at/#data"
+  },
+  "satellite": {
+    "maxLevel": 13,
+    "credit": "EOxCloudless von EOX IT Services GmbH · modifizierte Copernicus-Sentinel-Daten 2016 & 2017 · CC BY 4.0",
+    "creditUrl": "https://cloudless.eox.at/documentation/faq"
+  }
+}

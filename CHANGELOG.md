@@ -11,6 +11,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Mit „Kartendetails online“ siehst du beim Zoomen Straßen und Gebäude sowie feinere Gelände- und Satellitenbilder. Ein Maßstab zeigt die Entfernung im aktuellen Ausschnitt.
+
 ### Behoben
 
 ## [0.21.0] - 2026-11-27

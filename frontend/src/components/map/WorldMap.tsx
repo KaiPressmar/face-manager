@@ -5,6 +5,8 @@ import countries from "./world-countries.json";
 import land from "./world-land.json";
 import overviewWater from "./world-water-overview.json";
 import satelliteSource from "./world-satellite.json";
+import type { MapRasterDetailStatus } from "./MapRasterDetail";
+import rasterSources from "./raster-detail-sources.json";
 
 export { satelliteSource };
 
@@ -61,7 +63,9 @@ const MARKER_CELL_PADDING = MARKER_HIT_RADIUS + 1;
 const MIN_CELL_SIZE = MARKER_CELL_PADDING * 2;
 const MAX_GRID_SIZE = 32;
 const DETAIL_ZOOM = 2.25;
-const MAX_ZOOM = 16384;
+const ONLINE_RASTER_ZOOM = 8;
+const ONLINE_STREET_ZOOM = 32;
+const MAX_ZOOM = 131072;
 const JOURNEY_STOP_RADIUS = 14;
 const JOURNEY_GROUP_DISTANCE = 37;
 const projectX = (longitude: number) => ((longitude + 180) / 360) * WIDTH;
@@ -69,6 +73,16 @@ const projectY = (latitude: number) => ((90 - latitude) / 180) * HEIGHT;
 const unprojectX = (x: number) => (x / WIDTH) * 360 - 180;
 const unprojectY = (y: number) => 90 - (y / HEIGHT) * 180;
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+const scaleDistance = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+
+export function mapScale(bounds: MapBounds, width: number) {
+  const latitude = (bounds.north + bounds.south) / 2;
+  const metersPerPixel = 40075017 * ((bounds.east - bounds.west) / 360) * Math.cos(latitude * Math.PI / 180) / width;
+  const target = metersPerPixel * 82;
+  const unit = 10 ** Math.floor(Math.log10(target));
+  const meters = (target >= 5 * unit ? 5 : target >= 2 * unit ? 2 : 1) * unit;
+  return { meters, pixels: meters / metersPerPixel };
+}
 
 export function boundsForView(view: MapView): MapBounds {
   const width = WIDTH / view.zoom;
@@ -289,6 +303,7 @@ interface Props {
   selectionMode: boolean;
   onCancelSelection: () => void;
   compactControls?: boolean;
+  onlineDetails?: boolean;
   style?: MapStyle;
   showCountryNames?: boolean;
   journeyStops?: readonly JourneyStop[];
@@ -311,10 +326,12 @@ const coordinates = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 4 })
 const countryCandidates: LabelCandidate[] = countryLabels.map((label) => ({ ...label, name: label.label, id: label.code, kind: "country" }));
 const noJourneyStops: readonly JourneyStop[] = [];
 const noJourneyConnections: readonly JourneyConnection[] = [];
+const MapRasterDetail = React.lazy(() => import("./MapRasterDetail"));
+const MapStreetDetail = React.lazy(() => import("./MapStreetDetail"));
 
 const WorldMap: React.FC<Props> = ({
   view, onViewChange, points, grid, onGridChange, selection, onSelectionChange, onMarkerClick,
-  selectionMode, onCancelSelection, compactControls = false, style = "standard", showCountryNames = false,
+  selectionMode, onCancelSelection, compactControls = false, onlineDetails = false, style = "standard", showCountryNames = false,
   journeyStops = noJourneyStops, journeyConnections = noJourneyConnections, activeJourneyStop, onJourneyStopClick, onJourneyGroupClick,
 }) => {
   const landClipId = `gps-map-land-${useId()}`;
@@ -322,7 +339,15 @@ const WorldMap: React.FC<Props> = ({
   const satellite = style === "satellite";
   const [satelliteState, setSatelliteState] = useState<"loading" | "ready" | "failed">("loading");
   const satelliteVisible = satellite && satelliteState === "ready";
+  const [rasterDetailStatus, setRasterDetailStatus] = useState<MapRasterDetailStatus>("offline");
+  const [streetDetailStatus, setStreetDetailStatus] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [detailRetry, setDetailRetry] = useState(0);
   useEffect(() => { if (!satellite) setSatelliteState("loading"); }, [satellite]);
+  useEffect(() => {
+    if (onlineDetails) return;
+    setRasterDetailStatus("offline");
+    setStreetDetailStatus("loading");
+  }, [onlineDetails]);
   const detailed = view.zoom >= DETAIL_ZOOM;
   const requiresDetailedMap = landscape || detailed;
   const [detail, setDetail] = useState<DetailedCartography | null>(null);
@@ -374,6 +399,22 @@ const WorldMap: React.FC<Props> = ({
     return { marker, x: markerViewBox.x + position.x * scaleX, y: markerViewBox.y + position.y * scaleY };
   }) : [];
   const zoom = view.zoom;
+  const showRasterDetail = onlineDetails && (landscape || satellite) && zoom >= ONLINE_RASTER_ZOOM;
+  const showStreetDetail = onlineDetails && zoom >= ONLINE_STREET_ZOOM;
+  const detailScale = zoom >= (landscape || satellite ? ONLINE_RASTER_ZOOM : ONLINE_STREET_ZOOM);
+  const rasterCredit = style === "standard" ? undefined : rasterSources[style];
+  const rasterReady = showRasterDetail && (rasterDetailStatus === "ready" || rasterDetailStatus === "partial");
+  const streetReady = showStreetDetail && streetDetailStatus === "ready";
+  const detailLoading = (showStreetDetail && streetDetailStatus === "loading") ||
+    (showRasterDetail && rasterDetailStatus === "loading");
+  const detailUnavailable = (showStreetDetail && streetDetailStatus === "unavailable") ||
+    (showRasterDetail && (rasterDetailStatus === "unavailable" || rasterDetailStatus === "partial"));
+  const overviewPixels = (satellite ? 5400 : 4096) / (zoom * viewportSize.width);
+  const reliefOpacity = clamp(overviewPixels * 1.5, 0, .68);
+  const satelliteOpacity = clamp(overviewPixels * 2, .28, 1);
+  const scale = mapScale(displayBounds, viewportSize.width);
+  const scaleLabel = scale.meters >= 1000 ? `${scaleDistance.format(scale.meters / 1000)} km`
+    : scale.meters < 1 ? `${scaleDistance.format(scale.meters * 100)} cm` : `${scaleDistance.format(scale.meters)} m`;
   const coastPath = requiresDetailedMap && detail ? detail.land : landPaths;
   const rivers = [...overviewWater.rivers, ...(detail?.rivers ?? [])];
   const lakes = [...overviewWater.lakes, ...(detail?.lakes ?? [])];
@@ -508,7 +549,7 @@ const WorldMap: React.FC<Props> = ({
         </details> : panControls}
       </div>
       <div className="gps-map__canvas">
-      <svg ref={svgRef} className={`gps-map__svg${selectionMode ? " gps-map__svg--select" : ""}${landscape ? " gps-map__svg--landscape" : ""}${satelliteVisible ? " gps-map__svg--satellite" : ""}`}
+      <svg ref={svgRef} className={`gps-map__svg${selectionMode ? " gps-map__svg--select" : ""}${landscape ? " gps-map__svg--landscape" : ""}${satellite && (satelliteVisible || rasterReady) ? " gps-map__svg--satellite" : ""}`}
         viewBox={`${vb.x} ${vb.y} ${vb.width} ${vb.height}`} preserveAspectRatio="none"
         role="group" aria-label="Weltkarte mit Fotostandorten" tabIndex={0}
         aria-describedby="gps-map-keyboard-hint"
@@ -536,6 +577,16 @@ const WorldMap: React.FC<Props> = ({
         }}
         onPointerDown={handlePointerDown} onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp} onPointerCancel={cancelGesture}
+        onDoubleClick={(event) => {
+          if (selectionMode || (event.target as Element).closest(".gps-map__marker")) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          const x = (event.clientX - rect.left) / rect.width - .5;
+          const y = (event.clientY - rect.top) / rect.height - .5;
+          const nextZoom = Math.min(zoom * 2, MAX_ZOOM);
+          const factor = 1 / zoom - 1 / nextZoom;
+          onViewChange(normalizedView({ longitude: view.longitude + x * 360 * factor,
+            latitude: view.latitude - y * 180 * factor, zoom: nextZoom }));
+        }}
         onLostPointerCapture={(event) => {
           if (event.target === gestureRef.current?.captureTarget) cancelGesture(event);
         }}>
@@ -548,11 +599,13 @@ const WorldMap: React.FC<Props> = ({
         <path d={coastPath} className="gps-map__land" fillRule="evenodd" />
         {landscape && <g aria-hidden="true" className="gps-map__relief">
           <defs><clipPath id={landClipId}><path d={coastPath} clipRule="evenodd" /></clipPath></defs>
-          <image href="./map/world-relief.webp" width={WIDTH} height={HEIGHT} preserveAspectRatio="none" clipPath={`url(#${landClipId})`} />
+          <image href="./map/world-relief.webp" width={WIDTH} height={HEIGHT} preserveAspectRatio="none"
+            clipPath={`url(#${landClipId})`} style={{ opacity: reliefOpacity }} />
         </g>}
         {satellite && satelliteState !== "failed" && <image aria-hidden="true" className="gps-map__satellite"
           href={`./${satelliteSource.path}`} width={WIDTH} height={HEIGHT} preserveAspectRatio="none"
           visibility={satelliteVisible ? "visible" : "hidden"}
+          opacity={satelliteOpacity}
           onLoad={() => setSatelliteState("ready")} onError={() => setSatelliteState("failed")} />}
         {!satelliteVisible && <g aria-hidden="true" className="gps-map__water">
           {rivers.filter((layer) => layer.minZoom <= zoom).map((layer) =>
@@ -564,14 +617,20 @@ const WorldMap: React.FC<Props> = ({
           <path d={detailed && detail ? detail.borders.international : countryBorders} className="gps-map__border" />
           <path d={detailed && detail ? detail.borders.other : otherBorders} className="gps-map__border gps-map__border--other" />
         </g>
-        <g aria-hidden="true" className="gps-map__labels">
+        {(showRasterDetail || showStreetDetail) && <React.Suspense fallback={null}>
+          {showRasterDetail && <MapRasterDetail style={style} bounds={bounds} size={viewportSize}
+            retry={detailRetry} onStatusChange={setRasterDetailStatus} />}
+          {showStreetDetail && <MapStreetDetail bounds={bounds} size={viewportSize} style={style} lightBasemap={landscape && rasterReady}
+            retry={detailRetry} onStatus={setStreetDetailStatus} />}
+        </React.Suspense>}
+        {!streetReady && <g aria-hidden="true" className="gps-map__labels">
           {labels.map(({ id, name, kind, x, y }) => <g key={id}
             className={`gps-map__place-label gps-map__place-label--${kind}`}
             transform={`translate(${vb.x + x * scaleX} ${vb.y + y * scaleY}) scale(${scaleX} ${scaleY})`}>
             {kind === "city" && <circle r={2} />}
             <text x={kind === "city" ? 6 : 0} textAnchor={kind === "city" ? "start" : "middle"} dominantBaseline="central">{name}</text>
           </g>)}
-        </g>
+        </g>}
         {journeySegments.length > 0 && <g aria-hidden="true" className="gps-map__journey-route">
           {journeySegments.map(({ from, to }, index) => {
             const x1 = projectX(from.longitude), x2 = projectX(to.longitude);
@@ -624,8 +683,21 @@ const WorldMap: React.FC<Props> = ({
           </g>;
         })}
       </svg>
+      <div className="gps-map__scale" role="img" aria-label={`Maßstab ${scaleLabel}`}>
+        <span>{scaleLabel}</span><span aria-hidden="true" style={{ width: scale.pixels }} />
       </div>
-      {satellite && satelliteState === "failed" && <p role="status" className="gps-map__raster-status">
+      </div>
+      {detailScale && <div className="gps-map__details-info">
+        {!onlineDetails && <span>Offline-Übersicht · Straßen und feinere Kartenbilder sind online verfügbar.</span>}
+        {detailLoading && <span role="status">Kartendetails werden geladen …</span>}
+        {detailUnavailable && <><span role="status">Kartendetails sind gerade nur teilweise oder offline verfügbar.</span>
+          <button type="button" onClick={() => { setStreetDetailStatus("loading"); setRasterDetailStatus("loading"); setDetailRetry((value) => value + 1); }}>Kartendetails erneut laden</button></>}
+        {showRasterDetail && rasterCredit && <a href={rasterCredit.creditUrl} target="_blank" rel="noreferrer">{rasterCredit.credit}</a>}
+        {showStreetDetail && <span><a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap-Mitwirkende</a>
+          {" · "}<a href="https://openfreemap.org/" target="_blank" rel="noreferrer">OpenFreeMap</a>
+          {" · "}<a href="https://openmaptiles.org/" target="_blank" rel="noreferrer">OpenMapTiles</a></span>}
+      </div>}
+      {satellite && satelliteState === "failed" && !rasterReady && <p role="status" className="gps-map__raster-status">
         Satellitenbild nicht verfügbar. Die Standardkarte wird angezeigt.
       </p>}
     </div>

@@ -168,7 +168,9 @@ Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgese
 <details>
 <summary>Fotokarte, Reiseverlauf und Alben</summary>
 
-Wähle in **Karte** unter **Zeitraum** ein Aufnahmejahr oder gib eigene Daten ein. Unter **Orte aus meinen Fotos** kannst du einen wiederkehrenden Aufnahmeort suchen und direkt die Fotos eines Jahres anzeigen. Mit **Bereich wählen** grenzt du die Karte räumlich ein. Die Stile **Standard**, **Landschaft** und **Satellit** findest du unter **Kartendarstellung**. Sie funktionieren offline.
+Wähle in **Karte** unter **Zeitraum** ein Aufnahmejahr oder gib eigene Daten ein. Unter **Orte aus meinen Fotos** kannst du einen wiederkehrenden Aufnahmeort suchen und direkt die Fotos eines Jahres anzeigen. Mit **Bereich wählen** grenzt du die Karte räumlich ein. Die Offline-Übersicht gibt es unter **Kartendarstellung** in den Stilen **Standard**, **Landschaft** und **Satellit**.
+
+Aktiviere **Kartendetails online**, um beim Zoomen Straßen, Gebäude und feinere Gelände- oder Satellitenbilder zu laden. Nutze **+** oder einen Doppelklick in der Karte. **Fotoorte auf Karte zeigen** bringt dich aus der Fotoauswahl direkt in die Umgebung. Die Satellitendetails haben eine Auflösung von etwa zehn Metern pro Pixel. Straßen und Gebäudekonturen stammen aus der Straßenkarte.
 
 **Verlauf** zeigt die Stopps in Aufnahmefolge und passt die Karte an die Route an. Markierungen mit × zeigen mehrere Stopps an. Öffne die Markierung und wähle einen Stopp für seine Fotos. Für kurze Wege gibt es unter **Stoppabstand** die Option **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
 
@@ -189,7 +191,7 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 <details>
 <summary>Fotobuchbild gestalten</summary>
 
-Öffne in **Karte** die gewünschte Auswahl und wähle **Fotobuchbild gestalten**. Wähle das Format passend zu deiner Fotobuchseite. Für eigene Maße stehen Pixel und Millimeter zur Wahl. Mit **Sichtbarer Kartenausschnitt** übernimmst du den Bildausschnitt der Karte. Bei einem Reiseverlauf kannst du zwischen **Karte auf einer Seite** und **Karte mit Stoppliste** wählen. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen.
+Öffne in **Karte** die gewünschte Auswahl und wähle **Fotobuchbild gestalten**. Wähle das Format passend zu deiner Fotobuchseite. Für eigene Maße stehen Pixel und Millimeter zur Wahl. Mit **Sichtbarer Kartenausschnitt** übernimmst du den Bildausschnitt. Das Fotobuchbild verwendet dafür die Offline-Karte. Bei einem Reiseverlauf kannst du zwischen **Karte auf einer Seite** und **Karte mit Stoppliste** wählen. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen.
 
 Speichere die Seite als PNG und füge sie in deinem Fotobuchprogramm als Bild ein. Wenn die Stoppliste mehrere Seiten umfasst, kannst du alle PNGs als ZIP speichern. Mit **Entwurf im Album speichern** sicherst du die Gestaltung für später.
 
@@ -241,7 +243,7 @@ Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek sichern o
 
 Unter **Aussortierte Gesichter prüfen** findest du Hinweise aus früheren Sicherungen, falls ein eigentlich aussortiertes Gesicht wieder bei einer benannten Person erschienen ist. Du kannst auch eine eigene Sicherung derselben Bibliothek zum Vergleich hinzufügen. Übernimm nur Vorschläge, bei denen du das Gesicht wiedererkennst.
 
-Karte und Reiseverlauf verwenden lokal mitgelieferte Karten- und Satellitendaten. Die optionale Update-Suche fragt GitHub nach neuen Versionen. [Kartendaten und Quellen](frontend/src/components/map/world-land.LICENSE.md) · [Datenaustausch in der Vorschau für gemeinsame Ordner](docs/shared-library-design.md)
+Karte, Reiseverlauf und Fotobuch-Export verwenden lokal mitgelieferte Karten- und Satellitendaten. Wenn du **Kartendetails online** einschaltest, fragt Face Manager beim Zoomen die benötigten Kartenkacheln bei EOX und OpenFreeMap ab. Die Anbieter erhalten den sichtbaren Kartenbereich und die IP-Adresse der Verbindung. Fotos, Foto-IDs und Aufnahmezeiten bleiben auf dem Gerät. Die Einstellung gilt für die laufende Sitzung. Die optionale Update-Suche fragt GitHub nach neuen Versionen. [Kartendaten und Quellen](frontend/src/components/map/world-land.LICENSE.md) · [Datenaustausch in der Vorschau für gemeinsame Ordner](docs/shared-library-design.md)
 
 <a id="run-from-source"></a>
 

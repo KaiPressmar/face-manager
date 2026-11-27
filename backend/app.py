@@ -117,6 +117,7 @@ from .services.background_activities import background_activities
 from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_map_years, list_selected_map_images
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
 from .services.journey import JourneyDetail, get_journey
+from .services.map_detail_tiles import MapDetailBusy, MapDetailSource, MapDetailUnavailable, fetch_map_detail_tile
 from .services.observed_places import list_observed_places
 from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
 from .services.update_manager import (
@@ -3508,6 +3509,27 @@ def get_map_points(
     result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows, album_id=album_id)
     _get_media_library_generation(generation)
     return result
+
+
+@app.get("/api/map/detail-tiles/{source}/{z}/{x}/{y}")
+def get_map_detail_tile(
+    source: MapDetailSource,
+    z: Annotated[int, ApiPath(ge=0, le=14)],
+    x: Annotated[int, ApiPath(ge=0, le=32767)],
+    y: Annotated[int, ApiPath(ge=0, le=16383)],
+):
+    """Relay one requested detail tile without sending library data."""
+    try:
+        tile = fetch_map_detail_tile(source, z, x, y)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MapDetailBusy as exc:
+        raise HTTPException(status_code=503, detail="Kartendetails sind vorübergehend ausgelastet.") from exc
+    except MapDetailUnavailable as exc:
+        raise HTTPException(status_code=502, detail="Diese Kartenkachel ist gerade nicht verfügbar.") from exc
+    return Response(content=tile.data, media_type=tile.media_type, headers={
+        "Cache-Control": tile.cache_control, "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.get("/api/map/images")
