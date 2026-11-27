@@ -34,6 +34,30 @@ def marker_at(path: Path) -> str:
 
 
 class DatabaseRestoreTest(unittest.TestCase):
+    def test_waiting_actions_cannot_change_the_restored_library(self):
+        class LibraryChangesBeforeLock:
+            def __enter__(self):
+                app._media_library_generation += 1
+
+            def __exit__(self, *_):
+                pass
+
+        with (
+            patch.object(app, "_media_library_generation", 0),
+            patch.object(app, "_cluster_operation_lock", LibraryChangesBeforeLock()),
+            patch.object(app.auto_cluster_queue, "request_cancel"),
+            patch.object(app, "delete_image") as delete_image,
+            patch.object(app.import_queue, "clear_history") as clear_history,
+        ):
+            with self.assertRaises(HTTPException) as deletion:
+                app.remove_image(1)
+            self.assertEqual(deletion.exception.status_code, 409)
+            with self.assertRaises(HTTPException) as history:
+                app.api_delete_import_history()
+            self.assertEqual(history.exception.status_code, 409)
+            delete_image.assert_not_called()
+            clear_history.assert_not_called()
+
     def test_database_restore_keeps_device_preview_policy(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
             root = Path(folder)

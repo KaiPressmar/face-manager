@@ -1416,7 +1416,7 @@ export async function deleteImage(imageId: number) {
     method: "DELETE",
   });
   if (!res.ok) {
-    throw new Error("Das Bild konnte nicht aus Face Manager entfernt werden.");
+    throw new Error(await readApiError(res, "Das Bild konnte nicht aus Face Manager entfernt werden."));
   }
 }
 

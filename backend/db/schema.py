@@ -987,10 +987,13 @@ def _initialize_schema(conn, *, scan_sources: bool):
             target_path TEXT NOT NULL,
             staging_path TEXT NOT NULL,
             file_identity TEXT NOT NULL,
+            source_hash TEXT,
             proof BLOB NOT NULL
         )
         """
     )
+    if "source_hash" not in {row["name"] for row in cur.execute("PRAGMA table_info(image_rename_intent)")}:
+        cur.execute("ALTER TABLE image_rename_intent ADD COLUMN source_hash TEXT")
     _create_import_job_table(cur)
     _create_app_settings_table(cur)
     _create_recluster_dirty_person_table(cur)

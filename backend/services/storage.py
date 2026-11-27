@@ -28,6 +28,7 @@ from ..db.schema import (
     FACE_REVIEW_STATUS_NOT_FACE,
     FACE_REVIEW_STATUS_UNKNOWN_PERSON,
     VALID_FACE_REVIEW_STATUSES,
+    calculate_file_hash,
     get_conn,
     normalize_person_name_key,
     person_name_sort_key,
@@ -2399,6 +2400,10 @@ def get_available_image_path(image_id: int, preferred_path=None, *, require_pref
     return path
 
 
+class PendingImageRenameError(ValueError):
+    """Deleting the image would detach an unfinished filesystem operation."""
+
+
 def delete_image(image_id: int):
     """Delete an image and clean up empty clusters.
 
@@ -2408,21 +2413,22 @@ def delete_image(image_id: int):
     Returns:
         Whether an image row was deleted.
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
-    deleted = cur.rowcount > 0
-    if deleted:
-        cur.execute(
-            """
-            DELETE FROM cluster
-            WHERE NOT EXISTS (
-                SELECT 1 FROM face WHERE face.cluster_id = cluster.id
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if cur.execute("SELECT 1 FROM image_rename_intent WHERE image_id = ? LIMIT 1", (image_id,)).fetchone():
+            raise PendingImageRenameError("Für dieses Foto ist eine Umbenennung offen. Prüfe zuerst die Speicherorte unter „Dateinamen“.")
+        cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
+        deleted = cur.rowcount > 0
+        if deleted:
+            cur.execute(
+                """
+                DELETE FROM cluster
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM face WHERE face.cluster_id = cluster.id
+                )
+                """
             )
-            """
-        )
-        conn.commit()
-    conn.close()
     if deleted:
         invalidate_image_query_cache()
     return deleted
@@ -4985,7 +4991,10 @@ _RENAME_INTENT_FIELDS = ("location_id", "image_id", "source_path", "target_path"
 
 
 def _rename_intent_proof(intent, key: bytes) -> bytes:
-    return hmac.digest(key, json.dumps([intent[name] for name in _RENAME_INTENT_FIELDS]).encode(), "sha256")
+    fields = [intent[name] for name in _RENAME_INTENT_FIELDS]
+    if intent["source_hash"]:
+        fields.append(intent["source_hash"])
+    return hmac.digest(key, json.dumps(fields).encode(), "sha256")
 
 
 def _move_rename_location(source: str, target: str, source_stat, staging: str):
@@ -5030,14 +5039,28 @@ def _publish_registered_rename(intent, destination: str, file_info) -> None:
         cur.execute("DELETE FROM image_rename_intent WHERE location_id = ?", (intent["location_id"],))
 
 
+def _verified_rename_info(path, identity, source_hash):
+    """Verify candidate bytes before blessing a new filesystem identity."""
+    try:
+        info = os.lstat(filesystem_path(path))
+        if _rename_file_identity(info) != identity:
+            return None
+        source, verified = open_registered_photo(path, source_hash, None)
+        with source:
+            return verified if _rename_file_identity(verified) == identity else None
+    except (FileNotFoundError, RegisteredPhotoChanged):
+        return None
+
+
 def _rename_registered_file(candidate, source: str, target: str, source_stat) -> None:
     source_fs, target_fs = filesystem_path(source), filesystem_path(target)
     stage_directory = os.path.join(os.path.realpath(os.path.dirname(source_fs)), f".face-manager-rename-{uuid4().hex}")
     stage_fs = os.path.join(stage_directory, os.path.basename(source_fs))
+    source_identity = _rename_file_identity(source_stat)
     intent = {
         "location_id": candidate["location_id"], "image_id": candidate["image_id"],
         "source_path": source, "target_path": target, "staging_path": stored_path(stage_fs),
-        "file_identity": json.dumps(_rename_file_identity(source_stat)),
+        "file_identity": json.dumps(source_identity),
     }
     with _rename_operation_lock() as key:
         with closing(get_conn()) as conn, conn:
@@ -5065,15 +5088,20 @@ def _rename_registered_file(candidate, source: str, target: str, source_stat) ->
                 except RegisteredPhotoChanged as exc:
                     raise _RenameSourceChanged() from exc
                 with verified:
-                    if _rename_file_identity(verified_info) != _rename_file_identity(source_stat):
+                    if _rename_file_identity(verified_info) != source_identity:
                         raise _RenameSourceChanged()
+            if not content_hash:
+                content_hash = calculate_file_hash(source_fs)
+                if _rename_source_token(os.lstat(source_fs)) != _rename_source_token(source_stat):
+                    raise _RenameSourceChanged()
+            intent["source_hash"] = content_hash
             cursor = conn.execute(
                 """INSERT INTO image_rename_intent
-                   (location_id, image_id, source_path, target_path, staging_path, file_identity, proof)
-                   SELECT id, image_id, ?, ?, ?, ?, ? FROM image_location
+                   (location_id, image_id, source_path, target_path, staging_path, file_identity, source_hash, proof)
+                   SELECT id, image_id, ?, ?, ?, ?, ?, ? FROM image_location
                    WHERE id = ? AND image_id = ? AND path = ?""",
                 (source, target, intent["staging_path"], intent["file_identity"],
-                 _rename_intent_proof(intent, key), intent["location_id"], intent["image_id"], source),
+                 content_hash, _rename_intent_proof(intent, key), intent["location_id"], intent["image_id"], source),
             )
             if cursor.rowcount == 0:
                 raise _RenameSourceChanged()
@@ -5087,8 +5115,8 @@ def _rename_registered_file(candidate, source: str, target: str, source_stat) ->
                 conn.execute("DELETE FROM image_rename_intent WHERE location_id = ?", (intent["location_id"],))
             raise
         try:
-            file_info = os.lstat(target_fs)
-            if _rename_file_identity(file_info) != _rename_file_identity(source_stat):
+            file_info = _verified_rename_info(target, source_identity, content_hash)
+            if file_info is None:
                 raise OSError("Die Datei wurde beim Umbenennen ausgetauscht.")
             _publish_registered_rename(intent, target, file_info)
         except (sqlite3.DatabaseError, OSError) as exc:
@@ -5118,29 +5146,27 @@ def _recover_registered_rename(intent, key: bytes) -> bool:
             or os.path.normcase(os.path.realpath(os.path.dirname(source))) != os.path.normcase(os.path.dirname(stage_directory))):
         return False
 
-    def verified_file(path):
-        try:
-            file_info = os.lstat(path)
-        except FileNotFoundError:
-            return None
-        return file_info if _rename_file_identity(file_info) == identity else None
-
     with closing(get_conn()) as conn:
         source_row = conn.execute(
-            "SELECT 1 FROM image_location WHERE id = ? AND image_id = ? AND path = ?",
+            """SELECT COALESCE(location.content_hash, image.content_hash)
+               FROM image_location AS location JOIN image ON image.id = location.image_id
+               WHERE location.id = ? AND location.image_id = ? AND location.path = ?""",
             (intent["location_id"], intent["image_id"], intent["source_path"]),
         ).fetchone()
     if source_row is None:
         return False
+    source_hash = intent["source_hash"] or source_row[0]
+    if not source_hash:
+        return False
 
-    original_info = verified_file(source)
-    new_info = verified_file(target)
+    original_info = _verified_rename_info(intent["source_path"], identity, source_hash)
+    new_info = _verified_rename_info(intent["target_path"], identity, source_hash)
     if os.path.lexists(staging):
-        with_stage = verified_file(staging)
+        with_stage = _verified_rename_info(intent["staging_path"], identity, source_hash)
         if with_stage is None or os.path.lexists(source) or new_info is not None:
             return False
         _rename_noreplace(staging, source)
-        original_info = verified_file(source)
+        original_info = _verified_rename_info(intent["source_path"], identity, source_hash)
     if original_info is not None and not (new_info is not None and _case_only_existing_target(target, source)):
         _publish_registered_rename(intent, intent["source_path"], original_info)
     elif new_info is not None:

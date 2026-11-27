@@ -347,6 +347,27 @@ class RenameCandidateQueryTest(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM face WHERE image_id = ?", (image_id,)).fetchone()[0], 1)
         self.assertEqual(storage.recover_interrupted_image_renames()["resolved_count"], 0)
 
+    def test_interrupted_move_cannot_register_edited_bytes_with_the_same_mtime(self):
+        image_id, source, target, _ = self._interrupt_rename(after_move=2)
+        original_stat = target.stat()
+        target.write_bytes(b"changed  bytes")
+        os.utime(target, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        self.assertEqual(storage._rename_file_identity(target.stat()), storage._rename_file_identity(original_stat))
+
+        result = storage.recover_interrupted_image_renames()
+        self.assertEqual((result["resolved_count"], result["pending_count"]), (0, 1))
+        self.assertEqual(target.read_bytes(), b"changed  bytes")
+        with closing(schema.get_conn()) as conn:
+            self.assertEqual(conn.execute("SELECT path FROM image_location WHERE image_id = ?", (image_id,)).fetchone()[0], str(source))
+
+    def test_deleting_an_image_cannot_orphan_an_interrupted_rename(self):
+        image_id, source, _, staging = self._interrupt_rename(after_move=1)
+        with self.assertRaises(storage.PendingImageRenameError):
+            storage.delete_image(image_id)
+        self.assertEqual(storage.recover_interrupted_image_renames()["resolved_count"], 1)
+        self.assertFalse(staging.exists())
+        self.assertEqual(source.read_bytes(), b"original bytes")
+
     def test_interrupted_move_does_not_clobber_replacement_or_trust_tampered_intent(self):
         _, source, _, staging = self._interrupt_rename(after_move=1)
         source.write_bytes(b"independent replacement")

@@ -178,6 +178,7 @@ from .services.storage import (
     list_available_image_persons,
     list_filename_rename_candidates,
     MAX_PERSON_DIRECTORY_PAGE_SIZE,
+    PendingImageRenameError,
     StalePersonRenameTargetError,
     get_person_directory_entry,
     get_person_faces,
@@ -293,19 +294,10 @@ def safe_cluster_mutation(function):
     """
     @wraps(function)
     def guarded(*args, **kwargs):
+        generation = _get_media_library_generation()
         auto_cluster_queue.request_cancel(timeout=CLUSTER_YIELD_TIMEOUT_SECONDS)
         with _cluster_operation_lock:
-            return function(*args, **kwargs)
-
-    return guarded
-
-
-def safe_import_enqueue(function):
-    """Queue an import without waiting for background clustering to finish."""
-    @wraps(function)
-    def guarded(*args, **kwargs):
-        auto_cluster_queue.request_cancel(timeout=CLUSTER_YIELD_TIMEOUT_SECONDS)
-        with _cluster_operation_lock:
+            _get_media_library_generation(generation)
             return function(*args, **kwargs)
 
     return guarded
@@ -315,8 +307,9 @@ def guard_import_library_change(function):
     """Keep import controls out of the database replacement transaction."""
     @wraps(function)
     def guarded(*args, **kwargs):
+        generation = _get_media_library_generation()
         with _cluster_operation_lock:
-            _get_media_library_generation()
+            _get_media_library_generation(generation)
             return function(*args, **kwargs)
 
     return guarded
@@ -1858,7 +1851,7 @@ def api_create_import(request: Request, data: dict = Body(...)):
     return payload
 
 
-@safe_import_enqueue
+@safe_cluster_mutation
 def _enqueue_import(folder_path: str):
     return import_queue.enqueue(folder_path)
 
@@ -2029,7 +2022,7 @@ def api_resume_import(job_id: str):
 
 
 @app.post("/api/imports/{job_id}/retry", status_code=202)
-@safe_import_enqueue
+@safe_cluster_mutation
 def api_retry_import_issues(request: Request, job_id: str):
     """Queue the recorded skipped paths from a finished import."""
     try:
@@ -2942,7 +2935,11 @@ def remove_image(image_id: int):
     Raises:
         HTTPException: If the image does not exist.
     """
-    if not delete_image(image_id):
+    try:
+        deleted = delete_image(image_id)
+    except PendingImageRenameError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     reset_import_resources()
     mark_cluster_assignments_dirty("delete_image")
@@ -4073,6 +4070,12 @@ async def api_face_crop(face_id: int, request: Request):
     """
     return await _serve_thumbnail(face_id, request, face=True)
 
+
+if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+    from android_exports import router as android_export_router
+
+    # Register API routes before the catch-all static frontend mount.
+    app.include_router(android_export_router)
 
 frontend_dist_dir = get_frontend_dist_dir()
 if frontend_dist_dir.is_dir():

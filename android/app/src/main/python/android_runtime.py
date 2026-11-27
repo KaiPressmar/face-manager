@@ -103,12 +103,8 @@ def start(context, bridge, data_root=None):
             from java import jclass
             jclass("de.face_manager.app.FaceEngine").initialize(context)
             from backend.app import app
-            from android_exports import router as export_router
             import uvicorn
 
-            if not getattr(app.state, "android_export_routes_ready", False):
-                app.include_router(export_router)
-                app.state.android_export_routes_ready = True
             config = uvicorn.Config(app, host="127.0.0.1", port=0, loop="asyncio",
                                     http="h11", lifespan="on", log_level="warning",
                                     timeout_graceful_shutdown=10)
