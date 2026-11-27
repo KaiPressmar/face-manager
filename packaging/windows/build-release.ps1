@@ -1,7 +1,6 @@
 param(
     [switch]$RequireSigned,
-    [Alias('FastValidationInstaller')]
-    [switch]$FastCompression
+    [switch]$FastValidationInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,7 +91,7 @@ if (-not (Test-Path $iscc)) {
 }
 
 $compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$distDir")
-if ($FastCompression) {
+if ($FastValidationInstaller) {
     $compileArguments += "/DInstallerCompression=lzma/fast"
 }
 & $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
