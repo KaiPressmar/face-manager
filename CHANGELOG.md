@@ -12,8 +12,11 @@ Requests, nicht in diese Versionshinweise.
 ### Verbessert
 
 - Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
+- Ansichten öffnen sich direkt. Beim Wiederöffnen bleiben die Ergebnisse auf der Karte und die Auswahl in der Bilderansicht sichtbar.
 
 ### Behoben
+
+- Beim Bestätigen einer Zuordnung bleiben die übrigen Vorschläge und die Scrollposition erhalten.
 
 ## [0.18.0] - 2026-11-26
 

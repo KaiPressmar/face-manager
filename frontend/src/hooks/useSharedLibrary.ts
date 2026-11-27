@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchSharedLibrary, sharedLibraryFolders, type SharedLibraryState } from "../utils/api";
 
 export function useSharedLibrary() {
@@ -54,7 +54,7 @@ export function useSharedLibrary() {
     };
   }, [refresh]);
 
-  const folders = sharedLibraryFolders(resource);
+  const folders = useMemo(() => sharedLibraryFolders(resource), [resource]);
   const configured = folders.length > 0;
   useEffect(() => {
     if (!configured) return;
@@ -67,7 +67,8 @@ export function useSharedLibrary() {
     };
   }, [configured, refresh]);
 
-  return { resource, readError, working, configured, folders, refresh, mutate };
+  return useMemo(() => ({ resource, readError, working, configured, folders, refresh, mutate }),
+    [resource, readError, working, configured, folders, refresh, mutate]);
 }
 
 export type SharedLibraryController = ReturnType<typeof useSharedLibrary>;

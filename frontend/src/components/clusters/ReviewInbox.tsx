@@ -321,8 +321,8 @@ const ReviewInbox: React.FC<Props> = ({
     if (restoreFocus) {
       window.requestAnimationFrame(() => {
         if (document.activeElement !== document.body) return;
-        if (openerRef.current?.isConnected && !openerRef.current.disabled) openerRef.current.focus();
-        else headingRef.current?.focus();
+        if (openerRef.current?.isConnected && !openerRef.current.disabled) openerRef.current.focus({ preventScroll: true });
+        else headingRef.current?.focus({ preventScroll: true });
       });
     }
   };
@@ -377,7 +377,8 @@ const ReviewInbox: React.FC<Props> = ({
               const marked = markedKeys.has(key);
               const openFace: OpenFace | undefined = onOpenFace && ((id, opener) => onOpenFace(id, item.proposal_token, opener));
               return (
-                <article className="review-inbox-card review-person-card" aria-label={"Personenvorschlag für " + item.person_name} key={key} data-marked={marked || undefined}>
+                <article className="review-inbox-card review-person-card" aria-label={"Personenvorschlag für " + item.person_name} key={key}
+                  data-suggestion-anchor={`person:${item.cluster_id}:${item.person_id}`} data-marked={marked || undefined}>
                   <div className="review-inbox-card__identity">
                     <div><span>Automatischer Vorschlag</span><strong>{item.person_name}</strong></div>
                     <b className={item.recommended && !conflicting ? "review-confidence review-confidence--high" : "review-confidence"}>
@@ -446,7 +447,8 @@ const ReviewInbox: React.FC<Props> = ({
               const complete = item.face_count === item.preview_face_ids.length && item.face_count > 0;
               const conflicting = conflictingIds.has(item.cluster_id);
               return (
-                <article className="review-inbox-card" key={key} data-marked={archiveMarks.has(key) || undefined}>
+                <article className="review-inbox-card" key={key} data-suggestion-anchor={`archive:${item.cluster_id}`}
+                  data-marked={archiveMarks.has(key) || undefined}>
                   <div className="review-inbox-card__preview">
                     <FaceSelection ids={item.preview_face_ids} loads={loads} excluded={EMPTY_EXCLUSIONS} blocked={busy} onLoad={(id, status) => faceLoaded(key, id, status)} />
                   </div>

@@ -83,51 +83,24 @@ button:disabled {
   overflow: hidden;
 }
 
-/* Keep each workspace mounted, with a restrained transition when it opens. */
+/* Keep each workspace and its scroll state mounted between visits. */
 .page-pane {
   position: absolute;
   inset: 0;
-  opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 120ms ease, visibility 0s linear 120ms;
 }
 
 .page-pane--active {
-  opacity: 1;
   visibility: visible;
   pointer-events: auto;
   z-index: 1;
-  transition: visibility 0s;
-  animation: page-enter 140ms ease;
-}
-
-@keyframes page-enter {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 .page-content {
   padding: clamp(14px, 2vw, 24px);
   overflow-y: auto;
   height: 100%;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .page-pane {
-    transition:
-      opacity 1ms linear,
-      visibility 0s;
-    transform: none;
-  }
-
-  .page-pane--active {
-    animation: none;
-  }
 }
 
 /* Outcome-oriented home and review workflow */

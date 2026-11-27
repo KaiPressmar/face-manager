@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import Masonry from "react-masonry-css";
 import FaceOverlay, { type NavigateToFaceGroup } from "./FaceOverlay";
 import { assignLabelLanes } from "../../utils/faceLabels";
@@ -25,6 +25,7 @@ function needsImageGeometry(image: FaceImage) {
 }
 
 interface ImageGridProps {
+  active: boolean;
   images: FaceImage[];
   isLoading: boolean;
   interactionsDisabled: boolean;
@@ -78,7 +79,193 @@ const BREAKPOINT_COLUMNS: Record<ImageGridSize, Record<string, number>> = {
 const COLUMN_PRELOAD_VIEWPORTS = 1.5;
 const GRID_PRELOAD_VIEWPORTS = 2.5;
 
+type CachedPreview = { preview?: PreviewState; retry?: number };
+
+const ImageCard = React.memo(function ImageCard({
+  img,
+  previewUrl,
+  active,
+  interactionsDisabled,
+  faceOverlayMode,
+  onNavigateToCluster,
+  onImageGeometryNeeded,
+  onOpen,
+  onTogglePhoto,
+  selected,
+  copyImagePath,
+  revealImage,
+  previews,
+}: {
+  img: FaceImage;
+  previewUrl: string;
+  active: boolean;
+  interactionsDisabled: boolean;
+  faceOverlayMode: FaceOverlayMode;
+  onNavigateToCluster: NavigateToFaceGroup;
+  onImageGeometryNeeded: (image: FaceImage) => void;
+  onOpen: (imageId: number) => void;
+  onTogglePhoto?: (imageId: number) => void;
+  selected: boolean;
+  copyImagePath: (event: React.MouseEvent<HTMLButtonElement>, image: FaceImage) => Promise<void>;
+  revealImage: (event: React.MouseEvent<HTMLButtonElement>, image: FaceImage) => Promise<void>;
+  previews: Map<string, CachedPreview>;
+}) {
+  // Masonry moves cards between columns on resize. Retain their preview state
+  // across those remounts, but render thumbnail load/retry updates in each card.
+  const [{ preview, retry }, setCachedPreview] = useState<CachedPreview>(() => previews.get(previewUrl) ?? {});
+  const previewSrc = imageThumbnailUrl(img.id, retry);
+  const updatePreview = (next: CachedPreview) => {
+    previews.set(previewUrl, next);
+    setCachedPreview(next);
+  };
+
+  useEffect(() => {
+    if (active && faceOverlayMode !== "none" && preview && preview !== "error" && needsImageGeometry(img)) {
+      onImageGeometryNeeded(img);
+    }
+  }, [active, faceOverlayMode, img, onImageGeometryNeeded, preview]);
+
+  const previewSize = preview === "error" ? null : preview;
+  const imageSize = img.image_width && img.image_height
+    ? { w: img.image_width, h: img.image_height }
+    : null;
+  const sourceSize = imageSize && (!previewSize || img.content_hash ||
+    imageAspectRatiosMatch(imageSize.w, imageSize.h, previewSize.w, previewSize.h))
+    ? imageSize
+    : null;
+  const size = sourceSize ?? previewSize;
+  const aspectRatio = size ? `${size.w} / ${size.h}` : "1/1";
+
+  return (
+    <div
+      data-image-id={img.id}
+      className={selected ? "image-gallery-card image-gallery-card--selected" : "image-gallery-card"}
+      style={{
+        position: "relative",
+        width: "100%",
+        overflow: "hidden",
+        borderRadius: 6,
+        background: "var(--surface-1)",
+        border: "1px solid var(--border)",
+        aspectRatio,
+        marginBottom: "16px",
+        transition: "aspect-ratio 0.2s ease",
+      }}
+    >
+      {preview === "error" ? (
+        <span className="image-gallery-card__error">Vorschau nicht verfügbar</span>
+      ) : (
+        <img
+          key={previewSrc}
+          src={previewSrc}
+          loading="lazy"
+          decoding="async"
+          onLoad={(event) => {
+            const { naturalWidth, naturalHeight } = event.currentTarget;
+            if (preview?.w === naturalWidth && preview.h === naturalHeight) return;
+            updatePreview({ retry, preview: { w: naturalWidth, h: naturalHeight } });
+          }}
+          onError={() => {
+            updatePreview({ retry, preview: "error" });
+          }}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "cover",
+            display: "block",
+          }}
+          alt={interactionsDisabled ? img.filename || "Foto" : ""}
+        />
+      )}
+
+      <button
+        type="button"
+        className="image-gallery-card__open"
+        aria-label={onTogglePhoto ? `${img.filename || "Bild"} auswählen` : `${img.filename || "Bild"} in Galerie öffnen`}
+        aria-pressed={onTogglePhoto ? selected : undefined}
+        disabled={interactionsDisabled}
+        onClick={() => onTogglePhoto ? onTogglePhoto(img.id) : onOpen(img.id)}
+      >{onTogglePhoto && <span className="image-gallery-card__selection" aria-hidden="true">
+        {selected ? "✓" : "+"}
+      </span>}</button>
+      {preview === "error" && !onTogglePhoto && (
+        <button
+          type="button"
+          className="secondary-button image-gallery-card__retry"
+          disabled={interactionsDisabled}
+          aria-label={`Vorschau von ${img.filename || "Bild"} erneut laden`}
+          onClick={(event) => {
+            event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".image-gallery-card__open")?.focus();
+            updatePreview({ retry: Math.max(Date.now(), (retry ?? 0) + 1) });
+          }}
+        >
+          Vorschau erneut laden
+        </button>
+      )}
+
+      {!onTogglePhoto && <div className="image-file-actions">
+        <button
+          type="button"
+          disabled={interactionsDisabled}
+          title="Vollständigen Dateipfad kopieren"
+          aria-label={`Dateipfad von ${img.filename || "Bild"} kopieren`}
+          onClick={(event) => void copyImagePath(event, img)}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          Pfad
+        </button>
+        <button
+          type="button"
+          disabled={interactionsDisabled}
+          title="Datei im Explorer oder Dateimanager anzeigen"
+          aria-label={`Speicherort von ${img.filename || "Bild"} öffnen`}
+          onClick={(event) => void revealImage(event, img)}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          Ordner
+        </button>
+      </div>}
+
+      {img.location_count > 1 && (
+        <span
+          className="image-location-count"
+          title={img.locations.map((location) => location.path).join("\n")}
+        >
+          {img.location_count} Speicherorte
+        </span>
+      )}
+
+      {preview !== "error" && !onTogglePhoto && <span className="image-open-cue" aria-hidden="true">
+        <span className="image-open-cue__icon">↗</span>
+        <span>Vollbild öffnen</span>
+      </span>}
+
+      {!onTogglePhoto && faceOverlayMode !== "none" &&
+        sourceSize && previewSize &&
+        (() => {
+          const visibleFaces = img.faces.filter(
+            (face) =>
+              faceOverlayMode === "all" || Boolean(face.person_name),
+          );
+          const lanes = assignLabelLanes(visibleFaces, sourceSize.w);
+          return visibleFaces.map((face) => (
+            <FaceOverlay
+              key={face.id}
+              face={face}
+              naturalWidth={sourceSize.w}
+              naturalHeight={sourceSize.h}
+              stackIndex={lanes.get(face.id) ?? 0}
+              disabled={interactionsDisabled}
+              onNavigateToCluster={onNavigateToCluster}
+            />
+          ));
+        })()}
+    </div>
+  );
+});
+
 const ImageGrid: React.FC<ImageGridProps> = ({
+  active,
   images,
   isLoading,
   interactionsDisabled,
@@ -101,9 +288,8 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   const currentImagesRef = useRef(images);
   const [fileActionMessage, setFileActionMessage] = useState<string | null>(null);
   const fileActionTimerRef = useRef<number | null>(null);
-  const [previewStates, setPreviewStates] = useState<Record<string, PreviewState>>({});
-  const loadedPreviewsRef = useRef(new Set<string>());
-  const [previewRetries, setPreviewRetries] = useState<Record<string, number>>({});
+  const previews = useRef(new Map<string, CachedPreview>());
+  const onLoadMoreRef = useRef(onLoadMore);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
   const breakpointCols = BREAKPOINT_COLUMNS[gridSize];
@@ -118,6 +304,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
   );
 
   useEffect(() => {
+    if (!active) return;
     const scrollContainer = gridRef.current?.closest(".page-content");
     if (!(scrollContainer instanceof HTMLElement)) return;
 
@@ -154,7 +341,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
           shortestColumnRemaining <= columnThreshold ||
           gridRemaining <= gridThreshold
         ) {
-          onLoadMore();
+          onLoadMoreRef.current();
         }
       });
     };
@@ -182,21 +369,18 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         rafIdRef.current = null;
       }
     };
-  }, [gridSize, hasMore, images.length, isLoading, isLoadingMore, onLoadMore]);
+  }, [active, gridSize, hasMore, images.length, isLoading, isLoadingMore]);
 
   useLayoutEffect(() => {
     currentImagesRef.current = images;
+    onLoadMoreRef.current = onLoadMore;
     if (galleryImageId !== null && (galleryIndex < 0 || interactionsDisabled)) setGalleryImageId(null);
-  }, [images, galleryIndex, galleryImageId, interactionsDisabled]);
+  }, [images, galleryIndex, galleryImageId, interactionsDisabled, onLoadMore]);
 
   useEffect(() => {
-    images.forEach((image) => {
-      if (needsImageGeometry(image) && (image.id === galleryImageId ||
-          (faceOverlayMode !== "none" && loadedPreviewsRef.current.has(imageThumbnailUrl(image.id))))) {
-        onImageGeometryNeeded(image);
-      }
-    });
-  }, [faceOverlayMode, galleryImageId, images, onImageGeometryNeeded]);
+    const image = images[galleryIndex];
+    if (active && image && needsImageGeometry(image)) onImageGeometryNeeded(image);
+  }, [active, galleryIndex, images, onImageGeometryNeeded]);
 
   const removeImage = async (image: FaceImage) => {
     const filename = image.filename || pathBasename(image.image_path) || "Bild";
@@ -223,7 +407,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
     }
   };
 
-  const showFileActionMessage = (message: string) => {
+  const showFileActionMessage = useCallback((message: string) => {
     setFileActionMessage(message);
     if (fileActionTimerRef.current !== null) {
       window.clearTimeout(fileActionTimerRef.current);
@@ -232,9 +416,9 @@ const ImageGrid: React.FC<ImageGridProps> = ({
       () => setFileActionMessage(null),
       2400,
     );
-  };
+  }, []);
 
-  const copyImagePath = async (
+  const copyImagePath = useCallback(async (
     event: React.MouseEvent<HTMLButtonElement>,
     image: FaceImage,
   ) => {
@@ -248,9 +432,9 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         error instanceof Error ? error.message : "Dateipfad konnte nicht kopiert werden",
       );
     }
-  };
+  }, [showFileActionMessage]);
 
-  const revealImage = async (
+  const revealImage = useCallback(async (
     event: React.MouseEvent<HTMLButtonElement>,
     image: FaceImage,
   ) => {
@@ -264,7 +448,7 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         error instanceof Error ? error.message : "Dateispeicherort konnte nicht geöffnet werden",
       );
     }
-  };
+  }, [showFileActionMessage]);
 
   if (isLoading) {
     const dummyHeights = ["350px", "200px", "400px", "250px", "300px", "220px"];
@@ -314,159 +498,22 @@ const ImageGrid: React.FC<ImageGridProps> = ({
         >
           {images.map((img) => {
             const previewUrl = imageThumbnailUrl(img.id);
-            const previewSrc = imageThumbnailUrl(img.id, previewRetries[previewUrl]);
-            const preview = previewStates[previewUrl];
-            const previewSize = preview === "error" ? null : preview;
-            const imageSize = img.image_width && img.image_height
-              ? { w: img.image_width, h: img.image_height }
-              : null;
-            const sourceSize = imageSize && (!previewSize || img.content_hash ||
-              imageAspectRatiosMatch(imageSize.w, imageSize.h, previewSize.w, previewSize.h))
-              ? imageSize
-              : null;
-            const size = sourceSize ?? previewSize;
-            const aspectRatio = size ? `${size.w} / ${size.h}` : "1/1";
-
-            return (
-              <div
-                key={img.id}
-                data-image-id={img.id}
-                className={photoSelection?.ids.has(img.id) ? "image-gallery-card image-gallery-card--selected" : "image-gallery-card"}
-                style={{
-                  position: "relative",
-                  width: "100%",
-                  overflow: "hidden",
-                  borderRadius: 6,
-                  background: "var(--surface-1)",
-                  border: "1px solid var(--border)",
-                  aspectRatio,
-                  marginBottom: "16px",
-                  transition: "aspect-ratio 0.2s ease",
-                }}
-              >
-                {preview === "error" ? (
-                  <span className="image-gallery-card__error">Vorschau nicht verfügbar</span>
-                ) : (
-                  <img
-                    key={previewSrc}
-                    src={previewSrc}
-                    loading="lazy"
-                    decoding="async"
-                    onLoad={(event) => {
-                      const { naturalWidth, naturalHeight } = event.currentTarget;
-                      loadedPreviewsRef.current.add(previewUrl);
-                      setPreviewStates((current) => ({
-                        ...current,
-                        [previewUrl]: { w: naturalWidth, h: naturalHeight },
-                      }));
-                      if (faceOverlayMode !== "none" && needsImageGeometry(img)) onImageGeometryNeeded(img);
-                    }}
-                    onError={() => {
-                      loadedPreviewsRef.current.delete(previewUrl);
-                      setPreviewStates((current) => ({ ...current, [previewUrl]: "error" }));
-                    }}
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "cover",
-                      display: "block",
-                    }}
-                    alt={interactionsDisabled ? img.filename || "Foto" : ""}
-                  />
-                )}
-
-                <button
-                  type="button"
-                  className="image-gallery-card__open"
-                  aria-label={photoSelection ? `${img.filename || "Bild"} auswählen` : `${img.filename || "Bild"} in Galerie öffnen`}
-                  aria-pressed={photoSelection?.ids.has(img.id)}
-                  disabled={interactionsDisabled}
-                  onClick={() => photoSelection ? photoSelection.onToggle(img.id) : setGalleryImageId(img.id)}
-                >{photoSelection && <span className="image-gallery-card__selection" aria-hidden="true">
-                  {photoSelection.ids.has(img.id) ? "✓" : "+"}
-                </span>}</button>
-                {preview === "error" && !photoSelection && (
-                  <button
-                    type="button"
-                    className="secondary-button image-gallery-card__retry"
-                    disabled={interactionsDisabled}
-                    aria-label={`Vorschau von ${img.filename || "Bild"} erneut laden`}
-                    onClick={(event) => {
-                      event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(".image-gallery-card__open")?.focus();
-                      setPreviewRetries((current) => ({
-                        ...current,
-                        [previewUrl]: Math.max(Date.now(), (current[previewUrl] ?? 0) + 1),
-                      }));
-                      setPreviewStates((current) => {
-                        const next = { ...current };
-                        delete next[previewUrl];
-                        return next;
-                      });
-                    }}
-                  >
-                    Vorschau erneut laden
-                  </button>
-                )}
-
-                {!photoSelection && <div className="image-file-actions">
-                  <button
-                    type="button"
-                    disabled={interactionsDisabled}
-                    title="Vollständigen Dateipfad kopieren"
-                    aria-label={`Dateipfad von ${img.filename || "Bild"} kopieren`}
-                    onClick={(event) => void copyImagePath(event, img)}
-                    onKeyDown={(event) => event.stopPropagation()}
-                  >
-                    Pfad
-                  </button>
-                  <button
-                    type="button"
-                    disabled={interactionsDisabled}
-                    title="Datei im Explorer oder Dateimanager anzeigen"
-                    aria-label={`Speicherort von ${img.filename || "Bild"} öffnen`}
-                    onClick={(event) => void revealImage(event, img)}
-                    onKeyDown={(event) => event.stopPropagation()}
-                  >
-                    Ordner
-                  </button>
-                </div>}
-
-                {img.location_count > 1 && (
-                  <span
-                    className="image-location-count"
-                    title={img.locations.map((location) => location.path).join("\n")}
-                  >
-                    {img.location_count} Speicherorte
-                  </span>
-                )}
-
-                {preview !== "error" && !photoSelection && <span className="image-open-cue" aria-hidden="true">
-                  <span className="image-open-cue__icon">↗</span>
-                  <span>Vollbild öffnen</span>
-                </span>}
-
-                {!photoSelection && faceOverlayMode !== "none" &&
-                  sourceSize && previewSize &&
-                  (() => {
-                    const visibleFaces = img.faces.filter(
-                      (face) =>
-                        faceOverlayMode === "all" || Boolean(face.person_name),
-                    );
-                    const lanes = assignLabelLanes(visibleFaces, sourceSize.w);
-                    return visibleFaces.map((face) => (
-                      <FaceOverlay
-                        key={face.id}
-                        face={face}
-                        naturalWidth={sourceSize.w}
-                        naturalHeight={sourceSize.h}
-                        stackIndex={lanes.get(face.id) ?? 0}
-                        disabled={interactionsDisabled}
-                        onNavigateToCluster={onNavigateToCluster}
-                      />
-                    ));
-                  })()}
-              </div>
-            );
+            return <ImageCard
+              key={previewUrl}
+              img={img}
+              previewUrl={previewUrl}
+              active={active}
+              interactionsDisabled={interactionsDisabled}
+              faceOverlayMode={faceOverlayMode}
+              onNavigateToCluster={onNavigateToCluster}
+              onImageGeometryNeeded={onImageGeometryNeeded}
+              onOpen={setGalleryImageId}
+              onTogglePhoto={photoSelection?.onToggle}
+              selected={photoSelection?.ids.has(img.id) ?? false}
+              copyImagePath={copyImagePath}
+              revealImage={revealImage}
+              previews={previews.current}
+            />;
           })}
         </Masonry>
       </div>

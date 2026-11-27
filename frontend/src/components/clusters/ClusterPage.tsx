@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { ClusterNavigationTarget } from "../../App";
 import {
@@ -99,6 +99,7 @@ const SECTION_BATCH_SIZE = 25;
 const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
+const SUGGESTION_RETRY_DELAY_MS = 5000;
 
 const DEFAULT_REVIEW_GROUPS: FaceReviewGroupSummary[] = [
   { group_key: "unknown_person", label: "Unbekannte Personen", face_count: 0, cluster_count: 0 },
@@ -174,6 +175,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const [personSuggestions, setPersonSuggestions] = useState<PersonSuggestion[]>([]);
   const [reviewSuggestions, setReviewSuggestions] = useState<ReviewSuggestion[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
+  const [suggestionsPending, setSuggestionsPending] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
   const [workflowFeedback, setWorkflowFeedback] = useState<{ kind: "error" | "success"; message: string } | null>(null);
   // Opening the page through a jump must not flash the suggestions inbox first:
@@ -213,7 +215,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const [clusterDetailsMap, setClusterDetailsMap] = useState<Record<number, ClusterDetails>>({});
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
   const listRequestIdRef = useRef(0);
-  const suggestionRequestIdRef = useRef(0);
+  const suggestionRequest = useRef<AbortController | null>(null);
+  const suggestionLibrary = useRef<string | null>(null);
+  const suggestionMutation = useRef(false);
+  const suggestionPane = useRef<HTMLDivElement>(null);
+  const suggestionAnchor = useRef<{ scroller: HTMLElement; cards: { key: string; top: number }[] }>();
   const detailsRequestIdRef = useRef(0);
   const appliedNavigationTokenRef = useRef<number | null>(null);
   const pendingNavigationClusterIdRef = useRef<number | null>(null);
@@ -624,23 +630,61 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     if (active && (workspaceView !== "suggestions" || detailModal)) ensurePersonsLoaded();
   }, [active, workspaceView, detailModal, ensurePersonsLoaded]);
 
+  const captureSuggestionAnchor = React.useCallback(() => {
+    const pane = suggestionPane.current;
+    const scroller = pane?.closest<HTMLElement>(".page-content");
+    if (!pane || pane.hidden || !scroller?.scrollTop || suggestionAnchor.current) return;
+    const viewport = scroller.getBoundingClientRect();
+    const cards = Array.from(pane.querySelectorAll<HTMLElement>("[data-suggestion-anchor]"))
+      .flatMap((card) => {
+        const { top, bottom } = card.getBoundingClientRect();
+        return bottom > viewport.top && top < viewport.bottom
+          ? [{ key: card.dataset.suggestionAnchor!, top }]
+          : [];
+      });
+    suggestionAnchor.current = { scroller, cards };
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = suggestionAnchor.current;
+    suggestionAnchor.current = undefined;
+    if (!anchor || !active || suggestionPane.current?.hidden) return;
+    const cards = new Map(Array.from(suggestionPane.current?.querySelectorAll<HTMLElement>("[data-suggestion-anchor]") ?? [])
+      .map((card) => [card.dataset.suggestionAnchor, card]));
+    for (const { key, top } of anchor.cards) {
+      const card = cards.get(key);
+      if (!card) continue;
+      anchor.scroller.scrollTop += card.getBoundingClientRect().top - top;
+      break;
+    }
+  });
+
   const loadSuggestions = React.useCallback(async () => {
-    const requestId = ++suggestionRequestIdRef.current;
-    setSuggestionsLoading(true);
-    setSuggestionsError(null);
+    if (suggestionMutation.current) return;
+    suggestionRequest.current?.abort();
+    const request = new AbortController();
+    suggestionRequest.current = request;
     try {
-      const [people, reviews] = await Promise.all([fetchPersonSuggestions(), fetchReviewSuggestions()]);
-      if (suggestionRequestIdRef.current !== requestId) return;
-      setPersonSuggestions(people);
-      setReviewSuggestions(reviews);
+      const [people, reviews] = await Promise.all([
+        fetchPersonSuggestions(request.signal), fetchReviewSuggestions(request.signal),
+      ]);
+      if (request.signal.aborted) return;
+      captureSuggestionAnchor();
+      const sameLibrary = people.libraryId === suggestionLibrary.current;
+      suggestionLibrary.current = people.libraryId;
+      if (!people.pending || !sameLibrary) setPersonSuggestions(people.items);
+      setReviewSuggestions(people.libraryId ? reviews.filter((item) => item.library_id === people.libraryId) : reviews);
+      setSuggestionsPending(people.pending);
+      setSuggestionsError(null);
     } catch {
-      if (suggestionRequestIdRef.current === requestId) {
+      if (!request.signal.aborted) {
+        captureSuggestionAnchor();
         setSuggestionsError("Die Vorschläge konnten nicht geladen werden.");
       }
     } finally {
-      if (suggestionRequestIdRef.current === requestId) setSuggestionsLoading(false);
+      if (!request.signal.aborted) setSuggestionsLoading(false);
     }
-  }, []);
+  }, [captureSuggestionAnchor]);
 
   const cancelPendingNavigation = React.useCallback(() => {
     pendingNavigationClusterIdRef.current = null;
@@ -672,7 +716,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       const [clusterData, reviewGroupData] = await Promise.all([
         fetchClusters(),
         fetchFaceReviewGroups(),
-        loadSuggestions(),
       ]);
       if (listRequestIdRef.current !== requestId) {
         return;
@@ -701,7 +744,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         setIsListLoading(false);
       }
     }
-  }, [resolvePendingNavigation, loadSuggestions]);
+  }, [resolvePendingNavigation]);
 
   const loadTargetDetails = React.useCallback((target: SelectionTarget | null) => {
     if (!target) {
@@ -815,9 +858,19 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     [mergeClusterDetails, normalizeClusterDetails],
   );
 
-  // One-time bootstrap: fetch the summaries, review-group counts and the first
-  // cluster's faces in a single round trip so the initial view paints without a
-  // second request. Falls back to the split loaders if the overview fails.
+  useEffect(() => subscribeToTopic<{ reason?: string }>("clusters", (event) => {
+    if (event?.reason !== "database_import") return;
+    suggestionRequest.current?.abort();
+    suggestionLibrary.current = null;
+    setPersonSuggestions([]);
+    setReviewSuggestions([]);
+    setSuggestionsPending(false);
+    setSuggestionsError(null);
+    setSuggestionsLoading(true);
+  }), []);
+
+  // One-time bootstrap: fetch summaries, counts and the first cluster's faces
+  // together. Fall back to the split loaders if the overview fails.
   useEffect(() => {
     let cancelled = false;
     const requestId = listRequestIdRef.current + 1;
@@ -859,11 +912,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           setIsListLoading(false);
         }
       });
-    void loadSuggestions();
     return () => {
       cancelled = true;
     };
-  }, [loadSidebarData, loadSuggestions, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
+  }, [loadSidebarData, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
 
   useEffect(() => {
     // Pause background polling while the cluster page is not the visible one so
@@ -1000,10 +1052,38 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
   useEffect(() => {
     if (!active) return;
-    return subscribeToTopic("person-suggestions", () => {
-      if (document.visibilityState === "visible") void loadSuggestions();
+    let timer: number | undefined;
+    const schedule = () => {
+      if (document.hidden || timer !== undefined) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        if (!document.hidden) void loadSuggestions();
+      }, FINAL_REFRESH_DELAY_MS);
+    };
+    const unsubscribe = subscribeToTopic("person-suggestions", schedule);
+    const unsubscribeClusters = subscribeToTopic<{ reason?: string }>("clusters", (event) => {
+      if (event?.reason !== "background_progress") schedule();
     });
+    document.addEventListener("visibilitychange", schedule);
+    window.addEventListener("focus", schedule);
+    if (!document.hidden) void loadSuggestions();
+    return () => {
+      window.clearTimeout(timer);
+      unsubscribe();
+      unsubscribeClusters();
+      document.removeEventListener("visibilitychange", schedule);
+      window.removeEventListener("focus", schedule);
+      suggestionRequest.current?.abort();
+    };
   }, [active, loadSuggestions]);
+
+  useEffect(() => {
+    if (!active || !suggestionsPending) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void loadSuggestions();
+    }, SUGGESTION_RETRY_DELAY_MS);
+    return () => window.clearInterval(timer);
+  }, [active, loadSuggestions, suggestionsPending]);
 
   useEffect(() => {
     return () => suggestionPhotoRequest.current?.abort();
@@ -1341,33 +1421,42 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   }, [loadSidebarData, loadTargetDetails, selectedTarget]);
 
   const runSuggestionAction = async (save: () => Promise<string>) => {
-    if (isMutating || suggestionsLoading || suggestionsError) return false;
+    if (suggestionMutation.current || isMutating || suggestionsLoading || suggestionsPending || suggestionsError) return false;
+    suggestionMutation.current = true;
+    suggestionRequest.current?.abort();
     setIsMutating(true);
-    setWorkflowFeedback(null);
     try {
       const message = await save();
+      captureSuggestionAnchor();
       setWorkflowFeedback({ kind: "success", message });
-      await loadSidebarData(true);
+      setSuggestionsPending(true);
+      void loadSidebarData(true);
       return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : "";
       const message = /stale|no longer|not found/i.test(detail)
         ? "Mindestens ein Vorschlag hat sich geändert. Prüfe die aktualisierte Liste."
         : detail || "Die Änderung konnte nicht gespeichert werden.";
+      captureSuggestionAnchor();
       setWorkflowFeedback({ kind: "error", message });
-      await loadSuggestions();
+      setSuggestionsPending(true);
       return false;
     } finally {
+      suggestionMutation.current = false;
       setIsMutating(false);
+      void loadSuggestions();
     }
   };
 
   const removeAcceptedSuggestions = (clusterIds: number[]) => {
+    captureSuggestionAnchor();
     const ids = new Set(clusterIds);
     setPersonSuggestions((current) => current.filter((item) => !ids.has(item.cluster_id)));
     setReviewSuggestions((current) => current.filter((item) => !ids.has(item.cluster_id)));
-    clusterDetailsMapRef.current = {};
-    setClusterDetailsMap({});
+    const details = { ...clusterDetailsMapRef.current };
+    ids.forEach((id) => delete details[id]);
+    clusterDetailsMapRef.current = details;
+    setClusterDetailsMap(details);
   };
 
   const handleAcceptSelectedPeople = (assignments: PersonSuggestionDecision[]) => {
@@ -1382,6 +1471,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const handleDismissSuggestion = (item: PersonSuggestion) => {
     void runSuggestionAction(async () => {
       await dismissPersonSuggestion(item);
+      captureSuggestionAnchor();
       setPersonSuggestions((items) => items.filter((current) => current.proposal_token !== item.proposal_token));
       return "Vorschlag verworfen. Die Gruppe bleibt unter „Ohne Namen“.";
     });
@@ -1400,6 +1490,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const handleDismissReviewSuggestion = (item: ReviewSuggestion) => {
     void runSuggestionAction(async () => {
       await dismissReviewSuggestion(item);
+      captureSuggestionAnchor();
       setReviewSuggestions((items) => items.filter((current) => current.cluster_id !== item.cluster_id));
       return "Vorschlag verworfen. Die Gruppe bleibt unter „Ohne Namen“.";
     });
@@ -1805,8 +1896,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             onClick={() => selectWorkspaceView(view)}
             type="button"
           >
-            <span><strong>{label}</strong><small>{description}</small></span>
-            <b>{count.toLocaleString()}</b>
+            <span><strong>{label}</strong><small>{view === "suggestions" && suggestionsPending ? "Vorschläge werden aktualisiert …" : description}</small></span>
+            <b>{view === "suggestions" && count === 0 && (suggestionsLoading || suggestionsPending || suggestionsError) ? "…" : count.toLocaleString()}</b>
           </button>
         ))}
         {sharedLibrary.configured && (
@@ -1839,12 +1930,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           await refreshAllData();
         }} />}
 
-      <div hidden={workspaceView !== "suggestions" || sharedReviewActive}>
+      <div ref={suggestionPane} hidden={workspaceView !== "suggestions" || sharedReviewActive}>
         <ReviewInbox
           personSuggestions={personSuggestions}
           reviewSuggestions={reviewSuggestions}
           busy={isMutating}
-          loading={suggestionsLoading}
+          loading={suggestionsLoading || suggestionsPending}
           error={suggestionsError}
           onRetry={() => void loadSuggestions()}
           onOpenCluster={(clusterId) => {
