@@ -741,6 +741,7 @@ async def lifespan(_app: FastAPI):
         try:
             event_hub.bind_loop(asyncio.get_running_loop())
             schedule_preview_cache_cleanup()
+            update_manager.cleanup_cache(get_data_root() / "updates", APP_VERSION)
             auto_cluster_queue.resume_after_shutdown()
             idle_recluster_scheduler.start()
             import_queue.start()
@@ -1012,7 +1013,7 @@ def api_open_update_release(data: dict = Body(...)):
 
 @app.post("/api/updates/install")
 def api_install_update(data: dict = Body(...)):
-    """Launch a verified Windows installer, then close the current app."""
+    """Hand off a verified installer and close the desktop app when required."""
     activity = _describe_background_activity()
     if activity is not None:
         raise HTTPException(

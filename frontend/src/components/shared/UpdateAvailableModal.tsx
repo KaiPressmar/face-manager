@@ -23,30 +23,51 @@ function formatBytes(value?: number | null): string {
 }
 
 const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
-  const [download, setDownload] = useState<UpdateDownloadState>({ status: "idle" });
+  const [downloadState, setDownload] = useState<UpdateDownloadState>({ status: "idle" });
   const [confirmInstall, setConfirmInstall] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const downloadRequest = useRef(0);
   const version = update.latest_version ?? "";
+  const download = downloadState.version === version ? downloadState : { status: "idle" as const };
   const isAndroid = update.build_variant === "android";
   const isLinux = update.build_variant === "linux";
+  const canDownload = update.can_install && update.download_available;
+  const isDownloading = download.status === "downloading";
 
   useEffect(() => {
-    if (!update.can_install) return;
-    void fetchUpdateDownloadState().then((state) => {
-      if (!state.version || state.version === version) setDownload(state);
-    }).catch(() => undefined);
-  }, [update.can_install, version]);
+    if (!canDownload) return;
+    let active = true;
+    const request = downloadRequest.current;
+    void fetchUpdateDownloadState()
+      .then((state) => {
+        if (active && request === downloadRequest.current) setDownload(state);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [canDownload, version]);
 
   useEffect(() => {
-    if (download.status !== "downloading") return;
-    const timer = window.setInterval(() => {
-      void fetchUpdateDownloadState()
-        .then(setDownload)
-        .catch(() => undefined);
-    }, 750);
-    return () => window.clearInterval(timer);
-  }, [download.status]);
+    if (!isDownloading) return;
+    let active = true;
+    let timer: number;
+    const poll = async () => {
+      try {
+        const state = await fetchUpdateDownloadState();
+        if (!active) return;
+        setDownload(state);
+        if (state.status !== "downloading" || state.version !== version) return;
+      } catch {
+        // Keep polling after transient connection errors.
+      }
+      if (active) timer = window.setTimeout(poll, 750);
+    };
+    timer = window.setTimeout(poll, 750);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [isDownloading, version]);
 
   const dialogRef = useRef<HTMLElement>(null);
   useModalFocus(dialogRef, onClose, !busy);
@@ -57,6 +78,7 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
   }, [download.downloaded_bytes, download.total_bytes]);
 
   const handleDownload = async () => {
+    downloadRequest.current += 1;
     setBusy(true);
     setError(null);
     try {
@@ -79,6 +101,8 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
         onClose();
       }
     } catch (installError) {
+      // Revalidation can invalidate a cached installer and make it downloadable again.
+      await fetchUpdateDownloadState().then(setDownload).catch(() => undefined);
       setBusy(false);
       setConfirmInstall(false);
       setError(installError instanceof Error ? installError.message : "Update fehlgeschlagen.");
@@ -140,15 +164,18 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
               <span>{download.installer_name} · {formatBytes(download.total_bytes)}</span>
             </div>
           )}
-          {download.status === "error" && <div className="update-modal__error" role="alert">{download.error}</div>}
-          {error && <div className="update-modal__error" role="alert">{error}</div>}
+          {(error || (download.status === "error" && download.error)) && (
+            <div className="update-modal__error" role="alert">{error || download.error}</div>
+          )}
 
           {confirmInstall && (
             <div className="update-confirm">
               <strong>Update jetzt starten?</strong>
               <p>{isAndroid
                 ? "Android öffnet den Paketinstaller. Dort kannst du das Update bestätigen oder abbrechen."
-                : "Face Manager wird geschlossen und die Installation geöffnet. Da die Installationsdatei noch nicht digital signiert ist, kann Windows weiterhin eine Sicherheitswarnung anzeigen."}</p>
+                : isLinux
+                  ? "Face Manager wird geschlossen. Folge anschließend den Anweisungen im Ubuntu-Terminal. Ubuntu kann dich nach deinem Administratorkennwort fragen."
+                  : "Face Manager wird geschlossen und die Installation geöffnet. Da die Installationsdatei noch nicht digital signiert ist, kann Windows weiterhin eine Sicherheitswarnung anzeigen."}</p>
               <div className="update-confirm__actions">
                 <button type="button" className="settings-text-button" onClick={() => setConfirmInstall(false)} disabled={busy}>Abbrechen</button>
                 <button type="button" className="primary-button" onClick={handleInstall} disabled={busy}>
@@ -166,11 +193,13 @@ const UpdateAvailableModal: React.FC<Props> = ({ update, onClose, onSkip }) => {
               <button type="button" className="settings-text-button" onClick={onClose}>Später</button>
               <button type="button" className="settings-text-button" onClick={handleOpenRelease}>GitHub öffnen</button>
             </div>
-            {update.can_install && update.download_available ? (
+            {canDownload ? (
               download.status === "ready" ? (
                 <button type="button" className="primary-button" onClick={() => setConfirmInstall(true)}>Update installieren</button>
               ) : (
-                <button type="button" className="primary-button" onClick={handleDownload} disabled={busy || download.status === "downloading"}>{download.status === "downloading" ? "Download läuft…" : "Update herunterladen"}</button>
+                <button type="button" className="primary-button" onClick={handleDownload} disabled={busy || isDownloading}>
+                  {isDownloading ? "Download läuft…" : download.status === "error" ? "Erneut herunterladen" : "Update herunterladen"}
+                </button>
               )
             ) : (
               <span className="update-modal__availability">

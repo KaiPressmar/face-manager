@@ -9,8 +9,11 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Unter Ubuntu kannst du Updates direkt in Face Manager herunterladen und die Installation aus der App starten.
+
 ### Verbessert
 
+- Face Manager räumt nicht mehr benötigte Update-Dateien automatisch auf.
 - Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
 - Face Manager merkt sich Kartenstil, Ländernamen, Rastergröße und den Status der Einführung über Neustarts hinweg.
 - Ansichten öffnen sich direkt. Kartenfotos, Bildauswahl und der aktuelle Bildausschnitt bleiben bei Hintergrundaktualisierungen und beim Wiederöffnen erhalten.

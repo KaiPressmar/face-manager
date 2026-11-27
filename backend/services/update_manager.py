@@ -7,8 +7,10 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -18,7 +20,9 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from ..config import get_build_variant, get_project_root
 from .events import event_hub
+from .ubuntu_update import launch_ubuntu_installer, terminal_command
 
 
 logger = logging.getLogger("face_manager.updates")
@@ -28,12 +32,23 @@ GITHUB_LATEST_RELEASE_URL = (
     f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
 )
 UPDATE_CHECK_INTERVAL_SECONDS = 60 * 60
-SEMVER_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-SHA256_PATTERN = re.compile(r"\b([a-fA-F0-9]{64})\b")
+SEMVER_PATTERN = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$", re.ASCII)
+SHA256_PATTERN = re.compile(r"([a-fA-F0-9]{64}) [ *](\S+)")
+CACHE_PACKAGE_PATTERNS = (
+    re.compile(r"FaceManager-Setup-(\d+\.\d+\.\d+)\.exe", re.ASCII),
+    re.compile(r"FaceManager-Setup-GPU-(\d+\.\d+\.\d+)\.exe", re.ASCII),
+    re.compile(r"FaceManager-Android-(\d+\.\d+\.\d+)\.apk", re.ASCII),
+    re.compile(r"face-manager_(\d+\.\d+\.\d+)_amd64\.deb", re.ASCII),
+)
+PARTIAL_SUFFIX = re.compile(r"(?:\.[a-z0-9_]{8})?\.part$")
+PARTIAL_MAX_AGE_SECONDS = 24 * 60 * 60
+INSTALLER_GRACE_SECONDS = 60 * 60
 ALLOWED_DOWNLOAD_HOSTS = {
+    "api.github.com",
     "github.com",
     "objects.githubusercontent.com",
     "github-releases.githubusercontent.com",
+    "release-assets.githubusercontent.com",
 }
 
 
@@ -82,16 +97,17 @@ def parse_latest_release(
     version = ".".join(str(part) for part in version_tuple)
     current_tuple = parse_semver(current_version)
     release_url = str(payload.get("html_url") or "").strip()
-    if not release_url.startswith(
-        f"https://github.com/{GITHUB_REPOSITORY}/releases/"
-    ):
+    if release_url != f"https://github.com/{GITHUB_REPOSITORY}/releases/tag/{tag}":
         raise UpdateError("GitHub lieferte keine vertrauenswürdige Release-Adresse.")
 
     installer_name = _asset_name(version, variant)
     checksum_name = f"{installer_name}.sha256"
+    raw_assets = payload.get("assets", [])
+    if not isinstance(raw_assets, list):
+        raise UpdateError("GitHub lieferte eine ungültige Paketliste.")
     assets = {
         str(asset.get("name")): asset
-        for asset in payload.get("assets", [])
+        for asset in raw_assets
         if isinstance(asset, dict) and asset.get("name")
     }
     installer = assets.get(installer_name)
@@ -105,8 +121,8 @@ def parse_latest_release(
             "installer_digest": str(installer.get("digest") or ""),
             "checksum_url": str(checksum.get("browser_download_url") or ""),
         }
-        _validate_asset_url(candidate["installer_url"], installer_name)
-        _validate_asset_url(candidate["checksum_url"], checksum_name)
+        _validate_asset_url(candidate["installer_url"], tag, installer_name)
+        _validate_asset_url(candidate["checksum_url"], tag, checksum_name)
 
     result: dict[str, object] = {
         "current_version": current_version,
@@ -122,28 +138,61 @@ def parse_latest_release(
     return result, candidate
 
 
-def _validate_asset_url(url: str, expected_name: str) -> None:
-    parsed = urlparse(url)
-    expected_path = (
-        f"/{GITHUB_REPOSITORY}/releases/download/"
-    )
-    if (
-        parsed.scheme != "https"
-        or parsed.hostname != "github.com"
-        or expected_path not in parsed.path
-        or not parsed.path.endswith(f"/{expected_name}")
-    ):
+def _validate_asset_url(url: str, tag: str, expected_name: str) -> None:
+    expected = f"https://github.com/{GITHUB_REPOSITORY}/releases/download/{tag}/{expected_name}"
+    if url != expected:
         raise UpdateError(f"Unsichere Download-Adresse für {expected_name}.")
 
 
 def _validate_final_download_url(url: str) -> None:
     parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not (
-        hostname in ALLOWED_DOWNLOAD_HOSTS
-        or hostname.endswith(".githubusercontent.com")
-    ):
+    if parsed.scheme != "https" or parsed.netloc.lower() not in ALLOWED_DOWNLOAD_HOSTS:
         raise UpdateError("Der Download wurde auf einen unbekannten Server umgeleitet.")
+
+
+class _UpdateRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_final_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _is_redirected(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def _is_cache_file(info: os.stat_result) -> bool:
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not _is_redirected(info)
+
+
+def _check_cache_directory(directory: Path) -> None:
+    info = directory.lstat()
+    if _is_redirected(info) or not stat.S_ISDIR(info.st_mode):
+        raise UpdateError("Der Update-Ordner ist kein reguläres Verzeichnis.")
+
+
+def _same_cache_file(current: os.stat_result, observed: os.stat_result) -> bool:
+    return _is_cache_file(current) and (
+        current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+    ) == (observed.st_dev, observed.st_ino, observed.st_size, observed.st_mtime_ns)
+
+
+def _inspect_cache_file(path: Path) -> tuple[str, os.stat_result]:
+    _check_cache_directory(path.parent)
+    observed = path.lstat()
+    if not _is_cache_file(observed):
+        raise UpdateError("Die Installationsdatei ist keine reguläre Datei.")
+    with path.open("rb") as installer:
+        if not _same_cache_file(os.fstat(installer.fileno()), observed):
+            raise UpdateError("Die Installationsdatei wurde verändert.")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: installer.read(1024 * 1024), b""):
+            digest.update(chunk)
+    current = path.lstat()
+    if not _same_cache_file(current, observed):
+        raise UpdateError("Die Installationsdatei wurde verändert.")
+    return digest.hexdigest(), current
 
 
 class UpdateManager:
@@ -156,6 +205,7 @@ class UpdateManager:
         self._candidate: dict[str, str] | None = None
         self._download_lock = threading.RLock()
         self._download_state: dict[str, object] = {"status": "idle"}
+        self._desktop_install_started = False
         self._on_download_change = on_download_change
         self._last_download_notice = 0.0
 
@@ -169,7 +219,7 @@ class UpdateManager:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        return urllib.request.urlopen(request, timeout=timeout)
+        return urllib.request.build_opener(_UpdateRedirectHandler()).open(request, timeout=timeout)
 
     def check(
         self, current_version: str, variant: str, *, force: bool = False
@@ -179,12 +229,16 @@ class UpdateManager:
             if (
                 not force
                 and self._cached_result is not None
+                and self._cached_result.get("current_version") == current_version
+                and self._cached_result.get("build_variant") == variant
                 and now - self._last_checked < UPDATE_CHECK_INTERVAL_SECONDS
             ):
                 return dict(self._cached_result)
             try:
                 with self._request(GITHUB_LATEST_RELEASE_URL) as response:
                     payload = json.loads(response.read().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise UpdateError("GitHub lieferte ungültige Release-Informationen.")
                 result, candidate = parse_latest_release(
                     payload, current_version, variant
                 )
@@ -204,23 +258,73 @@ class UpdateManager:
                 raise UpdateError("Die Release-Information ist nicht mehr aktuell.")
             return dict(result)
 
+    def cleanup_cache(self, target_directory: Path, current_version: str) -> None:
+        """Retain each build's newest pending installer and recently used files."""
+        try:
+            installed_version = parse_semver(current_version)
+            _check_cache_directory(target_directory)
+            entries = list(target_directory.iterdir())
+        except FileNotFoundError:
+            return
+        except (OSError, UpdateError):
+            logger.warning("Could not inspect Face Manager update cache", exc_info=True)
+            return
+
+        now = time.time()
+        packages = {}
+        newest_pending = {}
+        for path in entries:
+            partial = PARTIAL_SUFFIX.search(path.name)
+            name = path.name[:partial.start()] if partial else path.name
+            for variant, pattern in enumerate(CACHE_PACKAGE_PATTERNS):
+                match = pattern.fullmatch(name)
+                if match:
+                    break
+            else:
+                continue
+            try:
+                info = path.lstat()
+                if not _is_cache_file(info):
+                    continue
+                version = parse_semver(match[1])
+                if partial:
+                    if now - info.st_mtime > PARTIAL_MAX_AGE_SECONDS:
+                        self._remove_cache_file(path, info)
+                    continue
+                packages[path] = variant, version, info
+                if version > installed_version:
+                    previous = newest_pending.get(variant)
+                    if previous is None or version > previous:
+                        newest_pending[variant] = version
+            except (OSError, UpdateError, ValueError):
+                logger.debug("Could not inspect cached update %s", path.name, exc_info=True)
+
+        for path, (variant, version, info) in packages.items():
+            if version != newest_pending.get(variant) and now - info.st_mtime > INSTALLER_GRACE_SECONDS:
+                self._remove_cache_file(path, info)
+
+    @staticmethod
+    def _remove_cache_file(path: Path, observed: os.stat_result) -> None:
+        try:
+            _check_cache_directory(path.parent)
+            if _same_cache_file(path.lstat(), observed):
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except (OSError, UpdateError):
+            logger.debug("Could not remove cached update %s", path.name, exc_info=True)
+
     def start_download(self, version: str, target_directory: Path) -> dict[str, object]:
         with self._check_lock:
             candidate = dict(self._candidate) if self._candidate else None
-            update_available = bool(
-                self._cached_result and self._cached_result.get("update_available")
-            )
-        if not update_available or candidate is None or candidate["version"] != version:
+            release = self._cached_result or {}
+        if not release.get("update_available") or candidate is None or candidate["version"] != version:
             raise UpdateError("Für diese Version ist noch kein Installer verfügbar.")
 
         with self._download_lock:
             if self._download_state.get("status") == "downloading":
-                return self._public_download_state()
-            if (
-                self._download_state.get("status") == "ready"
-                and self._download_state.get("version") == version
-                and Path(str(self._download_state.get("path"))).is_file()
-            ):
+                if self._download_state.get("version") != version:
+                    raise UpdateError("Eine andere Update-Version wird bereits heruntergeladen.")
                 return self._public_download_state()
             self._download_state = {
                 "status": "downloading",
@@ -234,7 +338,7 @@ class UpdateManager:
             try:
                 threading.Thread(
                     target=self._download,
-                    args=(candidate, target_directory),
+                    args=(candidate, target_directory, str(release["current_version"])),
                     daemon=True,
                     name="face-manager-update-download",
                 ).start()
@@ -268,13 +372,38 @@ class UpdateManager:
         except Exception:
             logger.exception("Could not publish update download activity")
 
-    def _download(self, candidate: dict[str, str], target_directory: Path) -> None:
+    def _download(
+        self, candidate: dict[str, str], target_directory: Path, current_version: str
+    ) -> None:
         final_path = target_directory / candidate["installer_name"]
-        partial_path = final_path.with_suffix(final_path.suffix + ".part")
         try:
             target_directory.mkdir(parents=True, exist_ok=True)
+            _check_cache_directory(target_directory)
             expected_checksum = self._fetch_checksum(candidate)
-            digest = hashlib.sha256()
+            try:
+                cached_checksum, info = _inspect_cache_file(final_path)
+            except FileNotFoundError:
+                pass
+            else:
+                if cached_checksum == expected_checksum:
+                    os.utime(final_path, None, follow_symlinks=False)
+                    self._set_download_ready(candidate, final_path, info.st_size, expected_checksum)
+                    self.cleanup_cache(target_directory, current_version)
+                    return
+
+            size = self._download_file(candidate, final_path, expected_checksum)
+            self._set_download_ready(candidate, final_path, size, expected_checksum)
+            self.cleanup_cache(target_directory, current_version)
+        except Exception as exc:
+            logger.exception("Face Manager update download failed")
+            self._set_download_error(candidate, exc)
+
+    def _download_file(
+        self, candidate: dict[str, str], final_path: Path, expected_checksum: str
+    ) -> int:
+        partial_path = None
+        digest = hashlib.sha256()
+        try:
             with self._request(candidate["installer_url"], timeout=60.0) as response:
                 _validate_final_download_url(response.geturl())
                 total_header = response.headers.get("Content-Length")
@@ -283,7 +412,11 @@ class UpdateManager:
                     self._download_state["total_bytes"] = total
                     self._notify_download_change()
                 downloaded = 0
-                with partial_path.open("wb") as output:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb", prefix=f"{final_path.name}.", suffix=".part",
+                    dir=final_path.parent, delete=False,
+                ) as output:
+                    partial_path = Path(output.name)
                     while True:
                         chunk = response.read(1024 * 1024)
                         if not chunk:
@@ -294,36 +427,42 @@ class UpdateManager:
                         with self._download_lock:
                             self._download_state["downloaded_bytes"] = downloaded
                             self._notify_download_change(progress=True)
-            actual_checksum = digest.hexdigest()
-            if actual_checksum != expected_checksum:
+            if digest.hexdigest() != expected_checksum:
                 raise UpdateError("Die SHA-256-Prüfung des Installers ist fehlgeschlagen.")
+            _check_cache_directory(final_path.parent)
+            if not _is_cache_file(partial_path.lstat()):
+                raise UpdateError("Die temporäre Installationsdatei wurde verändert.")
             partial_path.replace(final_path)
-            with self._download_lock:
-                self._download_state = {
-                    "status": "ready",
-                    "version": candidate["version"],
-                    "installer_name": candidate["installer_name"],
-                    "downloaded_bytes": final_path.stat().st_size,
-                    "total_bytes": final_path.stat().st_size,
-                    "path": str(final_path),
-                    "sha256": actual_checksum,
-                }
-                self._notify_download_change()
-        except Exception as exc:
-            logger.exception("Face Manager update download failed")
-            try:
-                partial_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Could not remove partial update download", exc_info=True)
-            finally:
-                self._set_download_error(candidate, exc)
+            return downloaded
+        finally:
+            if partial_path is not None:
+                try:
+                    _check_cache_directory(partial_path.parent)
+                    partial_path.unlink(missing_ok=True)
+                except (OSError, UpdateError):
+                    logger.warning("Could not remove partial update download", exc_info=True)
+
+    def _set_download_ready(
+        self, candidate: dict[str, str], path: Path, size: int, checksum: str
+    ) -> None:
+        with self._download_lock:
+            self._download_state = {
+                "status": "ready",
+                "version": candidate["version"],
+                "installer_name": candidate["installer_name"],
+                "downloaded_bytes": size,
+                "total_bytes": size,
+                "path": str(path.absolute()),
+                "sha256": checksum,
+            }
+            self._notify_download_change()
 
     def _fetch_checksum(self, candidate: dict[str, str]) -> str:
         with self._request(candidate["checksum_url"]) as response:
             _validate_final_download_url(response.geturl())
-            checksum_text = response.read(4096).decode("ascii", errors="strict")
-        match = SHA256_PATTERN.search(checksum_text)
-        if not match or candidate["installer_name"] not in checksum_text:
+            checksum_text = response.read(4097).decode("ascii", errors="strict")
+        match = SHA256_PATTERN.fullmatch(checksum_text.rstrip("\r\n"))
+        if len(checksum_text) > 4096 or not match or match[2] != candidate["installer_name"]:
             raise UpdateError("Die veröffentlichte SHA-256-Prüfsumme ist ungültig.")
         checksum = match.group(1).lower()
         digest = candidate.get("installer_digest", "")
@@ -345,33 +484,65 @@ class UpdateManager:
 
     @staticmethod
     def can_install() -> bool:
-        return os.environ.get("FACE_MANAGER_PLATFORM") == "android" or (sys.platform == "win32" and bool(getattr(sys, "frozen", False)))
+        if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+            return True
+        if sys.platform == "win32":
+            return bool(getattr(sys, "frozen", False))
+        return _ubuntu_terminal() is not None
 
     def launch_downloaded_installer(self, version: str) -> None:
         if not self.can_install():
             raise UpdateError(
                 "Öffne die Release-Seite, um das Paket für dein System zu installieren."
             )
-        with self._download_lock:
-            state = dict(self._download_state)
-        if state.get("status") != "ready" or state.get("version") != version:
-            raise UpdateError("Der verifizierte Installer ist noch nicht bereit.")
-        installer_path = Path(str(state.get("path")))
-        if not installer_path.is_file():
-            raise UpdateError("Der heruntergeladene Installer wurde nicht gefunden.")
-        digest = hashlib.sha256()
-        with installer_path.open("rb") as installer_file:
-            for chunk in iter(lambda: installer_file.read(1024 * 1024), b""):
-                digest.update(chunk)
-        actual_checksum = digest.hexdigest()
-        if actual_checksum != state.get("sha256"):
-            raise UpdateError("Der Installer wurde nach dem Download verändert.")
-        if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
-            from android_runtime import get_bridge
-            if not get_bridge().installApk(str(installer_path)):
-                raise UpdateError("Der Android-Installer konnte nicht geöffnet werden.")
-        else:
-            subprocess.Popen([str(installer_path), "/CLOSEAPPLICATIONS"])
+        with self._check_lock, self._download_lock:
+            if self._desktop_install_started:
+                raise UpdateError("Die Installation wurde bereits gestartet.")
+            candidate = self._candidate
+            state = self._download_state
+            if (
+                not self._cached_result
+                or not self._cached_result.get("update_available")
+                or not candidate
+                or candidate["version"] != version
+                or state.get("status") != "ready"
+                or state.get("version") != version
+                or state.get("installer_name") != candidate["installer_name"]
+            ):
+                raise UpdateError("Der verifizierte Installer ist noch nicht bereit.")
+            installer_path = Path(str(state["path"]))
+            try:
+                checksum, observed = _inspect_cache_file(installer_path)
+                digest = candidate["installer_digest"]
+                if checksum != state.get("sha256") or (
+                    digest and digest.lower() != f"sha256:{checksum}"
+                ):
+                    raise UpdateError("Der Installer wurde nach dem Download verändert.")
+                if not _same_cache_file(installer_path.lstat(), observed):
+                    raise UpdateError("Der Installer wurde nach dem Download verändert.")
+                # Other app instances respect this grace period while the
+                # system installer opens and consumes the file.
+                os.utime(installer_path, None, follow_symlinks=False)
+            except FileNotFoundError as exc:
+                error = UpdateError("Der heruntergeladene Installer wurde nicht gefunden.")
+                self._set_download_error(candidate, error)
+                raise error from exc
+            except (OSError, UpdateError) as exc:
+                self._set_download_error(candidate, exc)
+                raise
+            if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
+                from android_runtime import get_bridge
+                if not get_bridge().installApk(str(installer_path)):
+                    raise UpdateError("Der Android-Installer konnte nicht geöffnet werden.")
+                return
+            if sys.platform == "win32":
+                subprocess.Popen([str(installer_path), "/CLOSEAPPLICATIONS"])
+            else:
+                terminal = _ubuntu_terminal()
+                if terminal is None:
+                    raise UpdateError("Für die Ubuntu-Installation ist kein unterstütztes Terminal verfügbar.")
+                launch_ubuntu_installer(terminal, installer_path, checksum)
+            self._desktop_install_started = True
 
     def open_release_page(self, version: str) -> None:
         release = self.get_cached_release(version)
@@ -387,6 +558,17 @@ class UpdateManager:
 update_manager = UpdateManager(lambda snapshot: event_hub.publish("update-download", snapshot))
 
 _shutdown_callback = None
+
+
+def _ubuntu_terminal() -> tuple[str, ...] | None:
+    if (
+        sys.platform == "linux"
+        and _shutdown_callback is not None
+        and get_project_root() == Path("/opt/face-manager")
+        and get_build_variant() == "linux"
+    ):
+        return terminal_command()
+    return None
 
 
 def register_shutdown_callback(callback) -> None:

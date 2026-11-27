@@ -445,6 +445,7 @@ const App: React.FC = () => {
       )}
       {!helpTopic && !importDialogOpen && showUpdate && availableUpdate && !showReleaseNotes && !showChangelog && (
         <UpdateAvailableModal
+          key={availableUpdate.latest_version}
           update={availableUpdate}
           onClose={() => setShowUpdate(false)}
           onSkip={() => {

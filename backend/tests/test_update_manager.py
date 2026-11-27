@@ -1,14 +1,18 @@
 import hashlib
 import io
 import json
+import os
 import tempfile
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
 from backend.services.update_manager import (
     UpdateError,
     UpdateManager,
+    _UpdateRedirectHandler,
     parse_latest_release,
     parse_semver,
 )
@@ -104,6 +108,21 @@ class UpdateMetadataTest(unittest.TestCase):
         with self.assertRaises(UpdateError):
             parse_latest_release(payload, "1.1.0", "cpu")
 
+    def test_release_asset_is_bound_to_the_release_tag(self):
+        payload = release_payload()
+        asset = payload["assets"][0]
+        asset["browser_download_url"] = asset["browser_download_url"].replace("/v1.2.0/", "/v1.3.0/")
+        with self.assertRaises(UpdateError):
+            parse_latest_release(payload, "1.1.0", "cpu")
+
+    def test_untrusted_redirect_is_rejected_before_the_request(self):
+        request = urllib.request.Request("https://github.com/")
+        handler = _UpdateRedirectHandler()
+        with self.assertRaises(UpdateError):
+            handler.redirect_request(request, None, 302, "", {}, "https://example.invalid/")
+        cdn = "https://release-assets.githubusercontent.com/update"
+        self.assertEqual(handler.redirect_request(request, None, 302, "", {}, cdn).full_url, cdn)
+
     def test_release_request_is_cached_for_one_hour(self):
         manager = UpdateManager()
         response = FakeResponse(
@@ -168,19 +187,23 @@ class UpdateDownloadTest(unittest.TestCase):
             blocked = Path(temporary_directory) / "updates"
             blocked.write_text("not a directory", encoding="utf-8")
             manager._download_state = {"status": "downloading"}
-            manager._download(candidate, blocked)
+            manager._download(candidate, blocked, "1.1.0")
 
         self.assertEqual(manager.download_state()["status"], "error")
 
     def test_cleanup_failure_preserves_the_download_error(self):
         manager = UpdateManager()
         _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")
+        response = FakeResponse(b"installer", "https://objects.githubusercontent.com/installer")
+        response.read = unittest.mock.Mock(side_effect=OSError("Connection interrupted"))
 
         with tempfile.TemporaryDirectory() as temporary_directory, patch.object(
-            manager, "_fetch_checksum", side_effect=OSError("Connection interrupted")
+            manager, "_fetch_checksum", return_value="unused"
+        ), patch.object(
+            manager, "_request", return_value=response
         ), patch.object(Path, "unlink", side_effect=PermissionError("Partial file locked")):
             manager._download_state = {"status": "downloading"}
-            manager._download(candidate, Path(temporary_directory))
+            manager._download(candidate, Path(temporary_directory), "1.1.0")
 
         self.assertEqual(manager.download_state()["status"], "error")
         self.assertEqual(manager.download_state()["error"], "Connection interrupted")
@@ -227,7 +250,7 @@ class UpdateDownloadTest(unittest.TestCase):
             manager, "_request", side_effect=responses
         ):
             manager._download_state = {"status": "downloading"}
-            manager._download(candidate, Path(temporary_directory))
+            manager._download(candidate, Path(temporary_directory), "1.1.0")
             state = manager.download_state()
 
             self.assertEqual(state["status"], "ready")
@@ -257,12 +280,120 @@ class UpdateDownloadTest(unittest.TestCase):
             manager, "_request", side_effect=responses
         ):
             manager._download_state = {"status": "downloading"}
-            manager._download(candidate, Path(temporary_directory))
+            manager._download(candidate, Path(temporary_directory), "1.1.0")
 
             self.assertEqual(manager.download_state()["status"], "error")
             self.assertFalse(
                 (Path(temporary_directory) / candidate["installer_name"]).exists()
             )
+
+    def test_cached_installer_is_reused_only_if_it_matches_the_published_hash(self):
+        manager = UpdateManager()
+        content = b"installer"
+        _, candidate = parse_latest_release(release_payload(content=content), "1.1.0", "cpu")
+        expected = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary_directory, patch.object(
+            manager, "_fetch_checksum", return_value=expected,
+        ), patch.object(manager, "_request") as request:
+            directory = Path(temporary_directory)
+            installer = directory / candidate["installer_name"]
+            installer.write_bytes(content)
+            manager._download(candidate, directory, "1.1.0")
+            request.assert_not_called()
+            self.assertEqual(manager.download_state()["status"], "ready")
+            installer.write_bytes(b"corrupt")
+            request.return_value = FakeResponse(content, "https://release-assets.githubusercontent.com/installer")
+            manager._download(candidate, directory, "1.1.0")
+            request.assert_called_once()
+            self.assertEqual(installer.read_bytes(), content)
+            self.assertEqual(manager.download_state()["status"], "ready")
+
+    def test_checksum_must_apply_to_exactly_the_expected_installer(self):
+        manager = UpdateManager()
+        _, candidate = parse_latest_release(release_payload(), "1.1.0", "cpu")
+        digest = candidate["installer_digest"].removeprefix("sha256:")
+        contents = f"{digest}  another.exe\n{digest}  {candidate['installer_name']}\n"
+        response = FakeResponse(contents.encode("ascii"), "https://objects.githubusercontent.com/checksum")
+        with patch.object(manager, "_request", return_value=response), self.assertRaises(UpdateError):
+            manager._fetch_checksum(candidate)
+
+    def test_installing_changed_file_clears_ready_state_and_allows_retry(self):
+        manager = UpdateManager()
+        content = b"installer"
+        manager._cached_result, candidate = parse_latest_release(
+            release_payload(content=content), "1.1.0", "cpu",
+        )
+        manager._candidate = candidate
+        expected = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary_directory, patch.object(
+            manager, "can_install", return_value=True,
+        ), patch("backend.services.update_manager.subprocess.Popen") as launch:
+            installer = Path(temporary_directory) / candidate["installer_name"]
+            installer.write_bytes(b"tampered!")
+            manager._set_download_ready(candidate, installer, len(content), expected)
+            with self.assertRaisesRegex(UpdateError, "verändert"):
+                manager.launch_downloaded_installer(candidate["version"])
+            launch.assert_not_called()
+            self.assertEqual(manager.download_state()["status"], "error")
+
+
+class UpdateCacheTest(unittest.TestCase):
+    def test_cleanup_keeps_latest_pending_per_build_and_protects_recent_files(self):
+        manager = UpdateManager()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            names_to_remove = {
+                "FaceManager-Setup-1.0.0.exe",
+                "FaceManager-Setup-1.2.0.exe",
+                "FaceManager-Android-1.1.0.apk",
+                "face-manager_1.1.0_amd64.deb",
+                "FaceManager-Setup-1.0.0.exe.part",
+                "FaceManager-Setup-1.3.0.exe.abc_1234.part",
+            }
+            names_to_keep = {
+                "FaceManager-Setup-1.3.0.exe",
+                "FaceManager-Setup-GPU-1.2.0.exe",
+                "FaceManager-Android-1.3.0.apk",
+                "face-manager_1.2.0_amd64.deb",
+                "OtherApp-Setup-1.0.0.exe",
+                "FaceManager-Setup-1.0.0.exe.bak",
+            }
+            recent_files = {"FaceManager-Setup-1.1.0.exe", "FaceManager-Setup-1.4.0.exe.abc_1234.part"}
+            old = time.time() - 48 * 60 * 60
+            for name in names_to_keep | names_to_remove | recent_files:
+                path = directory / name
+                path.write_bytes(b"file")
+                if name not in recent_files:
+                    os.utime(path, (old, old))
+            unrelated_directory = directory / "FaceManager-Setup-GPU-1.0.0.exe"
+            unrelated_directory.mkdir()
+            manager.cleanup_cache(directory, "1.1.0")
+            self.assertEqual(
+                {path.name for path in directory.iterdir()},
+                names_to_keep | recent_files | {unrelated_directory.name},
+            )
+
+    def test_cleanup_ignores_linked_cache_directory_and_linked_installers(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            directory = root / "regular"
+            directory.mkdir()
+            installer = directory / "FaceManager-Setup-1.0.0.exe"
+            installer.write_bytes(b"outside")
+            old = time.time() - 48 * 60 * 60
+            os.utime(installer, (old, old))
+            linked_cache = root / "updates"
+            try:
+                linked_cache.symlink_to(directory, target_is_directory=True)
+                linked_file = directory / "FaceManager-Setup-0.5.0.exe"
+                linked_file.symlink_to(installer)
+            except OSError as exc:
+                self.skipTest(f"Symbolic links unavailable: {exc}")
+            manager = UpdateManager()
+            manager.cleanup_cache(linked_cache, "1.1.0")
+            self.assertTrue(installer.is_file())
+            manager.cleanup_cache(directory, "1.1.0")
+            self.assertTrue(linked_file.is_symlink())
 
 
 if __name__ == "__main__":
