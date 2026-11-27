@@ -34,14 +34,15 @@ class FacePreview:
 def render_face_preview(paths, content_hash: str | None) -> FacePreview | None:
     """Render original bytes whose digest matches the registered photo, if any."""
     deadline = monotonic() + _SOURCE_DEADLINE
-    for path in paths:
+    for candidate in paths:
+        path, expected_hash = candidate if isinstance(candidate, tuple) else (candidate, content_hash)
         if monotonic() >= deadline:
             return None
         try:
             with snapshot_preview_source(
-                path, maximum_bytes=FACE_PREVIEW_MAX_SOURCE_BYTES, require_stable_path=not content_hash,
+                path, maximum_bytes=FACE_PREVIEW_MAX_SOURCE_BYTES, require_stable_path=not expected_hash,
             ) as (source, digest):
-                if content_hash and digest != content_hash:
+                if expected_hash and digest != expected_hash:
                     continue
                 with bounded_upright_face_preview(source) as (upright, geometry), BytesIO() as buffer:
                     upright.save(buffer, format="JPEG", quality=89)

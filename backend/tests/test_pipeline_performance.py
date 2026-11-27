@@ -30,6 +30,60 @@ from backend.services.pipeline import (
 )
 
 
+class ImportDiscoveryTest(unittest.TestCase):
+    def test_discovery_reports_unreadable_directory_and_skips_private_staging(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            unreadable = root / "permission denied"
+            staging = root / ".face-manager-rename-work"
+            unreadable.mkdir()
+            staging.mkdir()
+            available = root / "available.jpg"
+            available.touch()
+            (unreadable / "inaccessible.jpg").touch()
+            (staging / "staged.jpg").touch()
+            real_scandir = os.scandir
+            updates = []
+
+            def scandir(path):
+                if Path(_stored_filesystem_path(path)) == unreadable:
+                    raise PermissionError(13, "Permission denied", path)
+                return real_scandir(path)
+
+            with patch("backend.services.pipeline.os.scandir", side_effect=scandir):
+                found = ImportProcessor._find_images(root, updates.append, threading.Event())
+
+            self.assertEqual(found, [available])
+            self.assertEqual([event["issue"] for event in updates if "issue" in event], [
+                {"path": str(unreadable), "kind": "directory_unavailable"},
+            ])
+
+    def test_retry_only_discovers_recorded_files_and_directories_within_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "photos"
+            root.mkdir()
+            restored = root / "reconnected"
+            restored.mkdir()
+            restored_photo = restored / "returned.jpg"
+            retry_photo = root / "retry.jpg"
+            other_photo = root / "already.jpg"
+            external_photo = root.parent / "external.jpg"
+            for photo in [restored_photo, retry_photo, other_photo, external_photo]:
+                photo.touch()
+            issues = [
+                {"path": str(path), "kind": kind} for path, kind in [
+                    (restored, "directory_unavailable"), (retry_photo, "image_unreadable"),
+                    (external_photo, "image_unavailable"),
+                ]
+            ]
+            updates = []
+
+            found = ImportProcessor._retry_images(root, issues, updates.append, threading.Event())
+
+            self.assertEqual(found, [restored_photo, retry_photo])
+            self.assertEqual([event["issue"] for event in updates if "issue" in event], [issues[-1]])
+
+
 class ImportWorkerCountTest(unittest.TestCase):
     def test_gpu_uses_up_to_eight_workers(self):
         self.assertEqual(get_import_worker_count("gpu", cpu_count=12), 6)
@@ -369,9 +423,13 @@ class ParallelImportIntegrationTest(unittest.TestCase):
     def test_source_change_after_shared_analysis_preserves_previous_library_entry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            photo = root / "photo.png"
+            photos = root / "photos"
+            photos.mkdir()
+            photo = photos / "photo.png"
             Image.new("RGB", (24, 24), "red").save(photo)
             original_hash = ImagePreparer.hash_image(photo).content_hash
+            alternate = root / "alternate.png"
+            alternate.write_bytes(photo.read_bytes())
             embedding = np.zeros(512, dtype=np.float32)
             embedding[0] = 1
             resources = Mock()
@@ -398,11 +456,11 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                         """INSERT INTO image(id, path, directory, filename, content_hash, processed_at,
                                              raw_width, raw_height, exif_orientation)
                            VALUES (1, ?, ?, ?, ?, 'processed', 24, 24, 1)""",
-                        (str(photo), str(root), photo.name, original_hash),
+                        (str(photo), str(photos), photo.name, original_hash),
                     )
-                    conn.execute(
+                    conn.executemany(
                         "INSERT INTO image_location(image_id, path, directory, filename) VALUES (1, ?, ?, ?)",
-                        (str(photo), str(root), photo.name),
+                        [(str(photo), str(photos), photo.name), (str(alternate), str(root), alternate.name)],
                     )
                     conn.execute(
                         "INSERT INTO face(id, image_id, cluster_id, embedding) VALUES (1, 1, 1, ?)",
@@ -412,7 +470,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 Image.new("RGB", (32, 32), "blue").save(photo)
                 analyzed_hash = ImagePreparer.hash_image(photo).content_hash
                 with self.assertRaisesRegex(ImportFailed, "während des Imports geändert"):
-                    ImportProcessor(resources, shared_analysis=shared).process(str(root), lambda _: None, threading.Event())
+                    ImportProcessor(resources, shared_analysis=shared).process(str(photos), lambda _: None, threading.Event())
 
                 with closing(schema.get_conn()) as conn:
                     images = conn.execute("SELECT id, content_hash, raw_width FROM image").fetchall()
@@ -422,7 +480,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                            JOIN cluster c ON c.id = f.cluster_id JOIN person p ON p.id = c.person_id"""
                     ).fetchall()
                     self.assertEqual([tuple(row) for row in images], [(1, original_hash, 24)])
-                    self.assertEqual([tuple(row) for row in locations], [(1, str(photo))])
+                    self.assertEqual({tuple(row) for row in locations}, {(1, str(photo)), (1, str(alternate))})
                     self.assertEqual([tuple(row) for row in faces], [(1, 1, "Anna", embedding.tobytes())])
                     self.assertIsNone(conn.execute("SELECT id FROM cluster WHERE id = 99").fetchone())
                 self.assertNotEqual(ImagePreparer.hash_image(photo).content_hash, analyzed_hash)
@@ -1111,7 +1169,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             self.assertEqual(model.detect_and_embed.call_count, 1)
             self.assertEqual(locations, [str(copy)])
 
-    def test_changed_file_at_existing_path_is_reprocessed_safely(self):
+    def test_changed_file_at_only_location_preserves_registered_photo(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             photo_dir = root / "photos"
@@ -1120,6 +1178,7 @@ class ParallelImportIntegrationTest(unittest.TestCase):
             Image.new("RGB", (32, 32), color=(10, 20, 30)).save(photo)
             photo.write_bytes(photo.read_bytes().ljust(1024, b"\0"))
             original = photo.stat()
+            original_hash = ImagePreparer.hash_image(photo).content_hash
 
             model = Mock(compute_mode="gpu")
             model.detect_and_embed.return_value = []
@@ -1149,20 +1208,17 @@ class ParallelImportIntegrationTest(unittest.TestCase):
                 replacement.replace(photo)
                 self.assertEqual(photo.stat().st_size, original.st_size)
                 self.assertEqual(photo.stat().st_mtime_ns, original.st_mtime_ns)
-                processor.process(
-                    str(photo_dir),
-                    lambda changes: None,
-                    threading.Event(),
-                )
+                with self.assertRaisesRegex(ImportFailed, "alte Bibliothekseintrag bleibt erhalten"):
+                    processor.process(str(photo_dir), lambda _: None, threading.Event())
                 conn = schema.get_conn()
-                image_count = conn.execute("SELECT COUNT(*) FROM image").fetchone()[0]
+                hashes = [row[0] for row in conn.execute("SELECT content_hash FROM image")]
                 location_count = conn.execute(
                     "SELECT COUNT(*) FROM image_location"
                 ).fetchone()[0]
                 conn.close()
 
-            self.assertEqual(model.detect_and_embed.call_count, 2)
-            self.assertEqual(image_count, 1)
+            self.assertEqual(model.detect_and_embed.call_count, 1)
+            self.assertEqual(hashes, [original_hash])
             self.assertEqual(location_count, 1)
 
     def test_changed_duplicate_path_preserves_other_location(self):

@@ -9,11 +9,23 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- Zoome die Fotokarte mit zwei Fingern und speichere Fotobuchbilder und ZIP-Dateien unter Android am gewählten Speicherort.
+
 ### Verbessert
+
+- In den Aktivitäten siehst du übersprungene Fotos und Ordner mit Grund und kannst betroffene Pfade erneut prüfen.
+- Große Fotolisten bleiben beim Scrollen übersichtlich und behalten deine Auswahl und Position bei Aktualisierungen.
+- Wechsle direkt zwischen Hell, Dunkel und System und öffne Einstellungsbereiche auch in schmalen Fenstern schnell.
+- Prüfe fehlende Originale, bevor du Bibliothekseinträge entfernst. Die Dateinamenansicht zeigt deine Auswahl direkt neben der Vorschau.
 
 ### Behoben
 
 - Face Manager hat ein neues App-Symbol und zeigt es unter Ubuntu auch bei geöffnetem Fenster im Dock an.
+- Beim erneuten Import bleiben Zuordnungen und Alben bei nachweislich unveränderten Fotos erhalten. Geänderte Originale werden gemeldet.
+- Nach einer Wiederherstellung zeigt Face Manager die Aktivitäten und Gesichtsgruppen der gewählten Sicherung. Offene Importe kannst du bewusst fortsetzen.
+- Unterbrochene Umbenennungen lassen sich beim erneuten Start prüfen und wiederherstellen. Bestätigte Importabbrüche bleiben nach einem Neustart wirksam.
+- Wenn Gesichtsgruppen vorübergehend nicht geladen werden können, zeigt die Prüfung einen Fehler und bietet einen erneuten Versuch.
+- Eine Android-Sicherung zeigt den Speicherfortschritt und bestätigt den Export erst nach erfolgreichem Schreiben.
 
 ## [0.22.0] - 2026-11-27
 

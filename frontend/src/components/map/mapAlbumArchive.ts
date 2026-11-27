@@ -8,9 +8,14 @@ const crcTable = Uint32Array.from({ length: 256 }, (_, index) => {
   return crc;
 });
 
-function crc32(bytes: Uint8Array) {
+const CHECKSUM_CHUNK_SIZE = 256 * 1024;
+
+async function crc32(png: Blob) {
   let crc = 0xFFFFFFFF;
-  for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 255];
+  for (let start = 0; start < png.size; start += CHECKSUM_CHUNK_SIZE) {
+    const bytes = new Uint8Array(await png.slice(start, start + CHECKSUM_CHUNK_SIZE).arrayBuffer());
+    for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 255];
+  }
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
@@ -23,7 +28,7 @@ export async function archiveMapAlbumPages(pages: readonly Blob[]): Promise<Blob
   const encoder = new TextEncoder();
   for (const [index, png] of pages.entries()) {
     const name = encoder.encode(`Seite-${String(index + 1).padStart(2, "0")}.png`);
-    const crc = crc32(new Uint8Array(await png.arrayBuffer()));
+    const crc = await crc32(png);
 
     const local = new ArrayBuffer(30);
     const localHeader = new DataView(local);

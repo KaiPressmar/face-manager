@@ -1,4 +1,5 @@
 import errno
+import hashlib
 import os
 import stat
 import tempfile
@@ -32,9 +33,8 @@ class RenamePerformanceTest(unittest.TestCase):
             "current_suffix_person_names": [],
         }
 
-    @patch("backend.services.storage._refresh_canonical_image_location")
     @patch("backend.services.storage.get_conn")
-    @patch("backend.services.storage._move_rename_location")
+    @patch("backend.services.storage._rename_registered_file")
     @patch("backend.services.storage.os.path.lexists", return_value=False)
     @patch("backend.services.storage.os.lstat", return_value=RENAME_FILE_INFO)
     @patch("backend.services.storage.list_all_filename_rename_candidates")
@@ -47,7 +47,6 @@ class RenamePerformanceTest(unittest.TestCase):
         __,
         rename_file,
         get_conn,
-        refresh_canonical_location,
     ):
         candidate = self._candidate()
         list_for_paths.return_value = [candidate]
@@ -71,16 +70,13 @@ class RenamePerformanceTest(unittest.TestCase):
             persons=["Kai"],
         )
         rename_file.assert_called_once_with(
-            storage.filesystem_path(candidate["path"]),
-            storage.filesystem_path(candidate["proposed_path"]),
+            candidate, candidate["path"], candidate["proposed_path"],
             RENAME_FILE_INFO,
         )
-        refresh_canonical_location.assert_called_once()
         self.assertEqual(result["renamed_count"], 1)
 
-    @patch("backend.services.storage._refresh_canonical_image_location")
     @patch("backend.services.storage.get_conn")
-    @patch("backend.services.storage._move_rename_location")
+    @patch("backend.services.storage._rename_registered_file")
     @patch("backend.services.storage.os.path.lexists", return_value=False)
     @patch("backend.services.storage.os.lstat", return_value=RENAME_FILE_INFO)
     @patch("backend.services.storage.list_all_filename_rename_candidates")
@@ -93,7 +89,6 @@ class RenamePerformanceTest(unittest.TestCase):
         __,
         rename_file,
         get_conn,
-        refresh_canonical_location,
     ):
         candidate = self._candidate()
         list_all_candidates.return_value = [candidate]
@@ -118,11 +113,9 @@ class RenamePerformanceTest(unittest.TestCase):
             sort_direction="desc",
         )
         rename_file.assert_called_once_with(
-            storage.filesystem_path(candidate["path"]),
-            storage.filesystem_path(candidate["proposed_path"]),
+            candidate, candidate["path"], candidate["proposed_path"],
             RENAME_FILE_INFO,
         )
-        refresh_canonical_location.assert_called_once()
         self.assertEqual(result["renamed_count"], 1)
 
 
@@ -300,6 +293,73 @@ class RenameCandidateQueryTest(unittest.TestCase):
         with closing(schema.get_conn()) as conn:
             self.assertEqual(conn.execute("SELECT path FROM image_location WHERE image_id = ?", (image_id,)).fetchone()["path"], source)
 
+    def _interrupt_rename(self, after_move):
+        with closing(schema.get_conn()) as conn:
+            anna = self._cluster(conn, "Anna")
+            image_id, source = self._photo(conn, "interrupted.jpg", [anna])
+            conn.commit()
+        Path(source).write_bytes(b"original bytes")
+        target = storage.preview_image_location_renames(selected_paths=[source])["items"][0]["target_path"]
+        exclusive_rename = storage._rename_noreplace
+        moves = 0
+
+        def interrupt(from_path, to_path):
+            nonlocal moves
+            exclusive_rename(from_path, to_path)
+            moves += 1
+            if moves == after_move:
+                raise SystemExit("interrupted")
+
+        with patch.object(storage, "_rename_noreplace", side_effect=interrupt), self.assertRaises(SystemExit):
+            storage.rename_image_locations_to_match_people(selected_paths=[source])
+        report = storage.list_interrupted_image_renames()
+        self.assertEqual(report["pending_count"], 1)
+        staging = Path(report["pending"][0]["staging_path"])
+        return image_id, Path(source), Path(target), staging
+
+    def test_interrupted_staging_move_restores_original_and_keeps_faces(self):
+        from backend.services.image_path_cleanup import ImagePathCleanup
+
+        image_id, source, target, staging = self._interrupt_rename(after_move=1)
+        self.assertEqual(ImagePathCleanup._remove_missing([str(source)]), (0, 0, []))
+        self.assertFalse(source.exists())
+        self.assertEqual(staging.read_bytes(), b"original bytes")
+
+        self.assertEqual(storage.recover_interrupted_image_renames(), {
+            "pending_count": 0, "pending": [], "resolved_count": 1,
+        })
+        self.assertEqual(source.read_bytes(), b"original bytes")
+        self.assertFalse(target.exists())
+        self.assertFalse(staging.parent.exists())
+        with closing(schema.get_conn()) as conn:
+            self.assertEqual(conn.execute("SELECT path FROM image_location WHERE image_id = ?", (image_id,)).fetchone()[0], str(source))
+            self.assertEqual(conn.execute("SELECT count(*) FROM face WHERE image_id = ?", (image_id,)).fetchone()[0], 1)
+
+    def test_interrupted_final_move_registers_verified_target(self):
+        image_id, source, target, staging = self._interrupt_rename(after_move=2)
+        self.assertFalse(source.exists())
+        self.assertFalse(staging.exists())
+        self.assertEqual(storage.recover_interrupted_image_renames()["resolved_count"], 1)
+        self.assertEqual(target.read_bytes(), b"original bytes")
+        with closing(schema.get_conn()) as conn:
+            for table in ("image", "image_location"):
+                self.assertEqual(conn.execute(f"SELECT path FROM {table} WHERE path = ?", (str(target),)).fetchone()[0], str(target))
+            self.assertEqual(conn.execute("SELECT count(*) FROM face WHERE image_id = ?", (image_id,)).fetchone()[0], 1)
+        self.assertEqual(storage.recover_interrupted_image_renames()["resolved_count"], 0)
+
+    def test_interrupted_move_does_not_clobber_replacement_or_trust_tampered_intent(self):
+        _, source, _, staging = self._interrupt_rename(after_move=1)
+        source.write_bytes(b"independent replacement")
+        self.assertEqual(storage.recover_interrupted_image_renames()["pending_count"], 1)
+        self.assertEqual(source.read_bytes(), b"independent replacement")
+        self.assertEqual(staging.read_bytes(), b"original bytes")
+        source.unlink()
+        with closing(schema.get_conn()) as conn, conn:
+            conn.execute("UPDATE image_rename_intent SET proof = zeroblob(32)")
+        self.assertEqual(storage.recover_interrupted_image_renames()["pending_count"], 1)
+        self.assertFalse(source.exists())
+        self.assertEqual(staging.read_bytes(), b"original bytes")
+
     def test_target_changes_after_preview_require_another_confirmation(self):
         with closing(schema.get_conn()) as conn:
             anna = self._cluster(conn, "Anna")
@@ -331,6 +391,22 @@ class RenameCandidateQueryTest(unittest.TestCase):
         self.assertEqual(result["skipped"], [{"path": source, "reason": "source_changed"}])
         self.assertEqual(source_path.read_bytes(), b"replacement photo")
         self.assertEqual(old_source.read_bytes(), b"first photo")
+        self.assertFalse(Path(item["target_path"]).exists())
+
+    def test_replaced_source_before_preview_does_not_get_another_photos_name(self):
+        with closing(schema.get_conn()) as conn:
+            anna = self._cluster(conn, "Anna")
+            image_id, source = self._photo(conn, "photo.jpg", [anna])
+            conn.execute("UPDATE image SET content_hash = ? WHERE id = ?", (hashlib.sha256(b"original photo").hexdigest(), image_id))
+            conn.commit()
+        Path(source).write_bytes(b"unrelated photo")
+        item = storage.preview_image_location_renames(selected_paths=[source])["items"][0]
+        outcome = storage.rename_image_locations_to_match_people(
+            selected_paths=[source], confirmed_targets={source: item["target_path"]},
+            confirmed_source_tokens={source: item["source_token"]},
+        )
+        self.assertEqual(outcome["skipped"], [{"path": source, "reason": "source_changed"}])
+        self.assertEqual(Path(source).read_bytes(), b"unrelated photo")
         self.assertFalse(Path(item["target_path"]).exists())
 
     def test_replacement_at_first_move_preserves_all_bytes_and_database(self):

@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { albumOutputSize, albumPhotoQueryBounds, buildMapAlbumArtwork, fitAlbumJourney, normalizeAlbumColor, setMapAlbumPngDensity } =
   require('./load-typescript.cjs')('src/components/map/MapAlbumArtwork.ts');
+const { archiveMapAlbumPages } = require('./load-typescript.cjs')('src/components/map/mapAlbumArchive.ts');
 
 const world = { west: -180, east: 180, south: -90, north: 90 };
 const artwork = { format: 'a4', title: 'Berlin & Paris <2026>', bounds: world, style: 'standard' };
@@ -280,4 +281,22 @@ test('PNG print density replaces rather than duplicates an existing physical-siz
   assert.equal(result.readUInt32BE(41), 9449);
   assert.equal(result.readUInt32BE(45), 9449);
   assert.equal(result[49], 1);
+});
+
+test('ZIP keeps checksums and stored entries intact across a checksum chunk boundary', async () => {
+  const pages = [Buffer.alloc(262145, 'Z'), Buffer.from('PNG two')];
+  const blob = await archiveMapAlbumPages(pages.map((page) => new Blob([page])));
+  const zip = Buffer.from(await blob.arrayBuffer());
+  let offset = 0;
+  for (const [index, crc] of [0x4b8ae248, 0x2f8125c6].entries()) {
+    assert.equal(zip.readUInt32LE(offset), 0x04034b50);
+    assert.equal(zip.readUInt32LE(offset + 14), crc);
+    assert.equal(zip.readUInt32LE(offset + 18), pages[index].length);
+    const headerEnd = offset + 30 + zip.readUInt16LE(offset + 26);
+    assert.equal(zip.toString('ascii', offset + 30, headerEnd), `Seite-0${index + 1}.png`);
+    offset = headerEnd + pages[index].length;
+    assert.deepEqual(zip.subarray(headerEnd, offset), pages[index]);
+  }
+  assert.equal(zip.readUInt32LE(offset), 0x02014b50);
+  assert.equal(zip.readUInt16LE(zip.length - 12), pages.length);
 });

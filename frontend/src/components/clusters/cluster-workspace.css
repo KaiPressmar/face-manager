@@ -1,3 +1,20 @@
+.review-load-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 12px;
+  margin: 0 0 10px;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--neon-red, #ef6a76);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.review-load-error p { margin: 0; }
+.review-load-status { padding: 12px; color: var(--text-muted); }
+
 .review-page[data-compact-review] {
   height: auto;
   min-height: 100%;

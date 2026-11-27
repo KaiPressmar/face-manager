@@ -11,6 +11,7 @@ import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
 import { useAppNavigation } from "./hooks/useAppNavigation";
 import { useUiPreferences } from "./hooks/useUiPreferences";
+import { useTheme } from "./theme/ThemeContext";
 import { WorkspaceNavigationContext } from "./hooks/useWorkspaceNavigation";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { hasGeoPhotoSelection, type GeoPhotoSelection } from "./utils/geoPhotoSelection";
@@ -114,6 +115,7 @@ const PagePane: React.FC<{ active: boolean; page: AppPage; children: React.React
 
 const App: React.FC = () => {
   const sharedLibrary = useSharedLibrary();
+  const { saveFailed: themeSaveFailed, retrySave: retryThemeSave } = useTheme();
   const [initialEntry] = useState(readNavigationEntry);
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
@@ -412,11 +414,17 @@ const App: React.FC = () => {
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
-        preferenceNotice={preferenceFailure && <div className="workspace-history__notice" role="alert">
-          {preferenceFailure === "load" ? "Die Ansichts- und Hilfeeinstellungen konnten nicht geladen werden."
-            : "Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden."}{" "}
-          <button type="button" className="secondary-button" onClick={retryPreferences}>Erneut versuchen</button>
-        </div>}
+        preferenceNotice={<>
+          {preferenceFailure && <div className="workspace-history__notice" role="alert">
+            {preferenceFailure === "load" ? "Die Ansichts- und Hilfeeinstellungen konnten nicht geladen werden."
+              : "Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden."}{" "}
+            <button type="button" className="secondary-button" onClick={retryPreferences}>Erneut versuchen</button>
+          </div>}
+          {themeSaveFailed && <div className="workspace-history__notice" role="alert">
+            Die Darstellung wurde geändert. Die Auswahl konnte nicht gespeichert werden.{" "}
+            <button type="button" className="secondary-button" onClick={retryThemeSave}>Darstellung erneut speichern</button>
+          </div>}
+        </>}
       >
         {!navigation.ready && <p className="workspace-history__notice" role="status">Bibliothek wird geprüft …</p>}
         {navigation.ready && PAGE_ORDER.filter((target) => visitedRef.current.has(target)).map(

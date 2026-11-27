@@ -50,20 +50,25 @@ class AvailableImagePathTest(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         connection.execute(
-            "CREATE TABLE image_location (image_id INTEGER NOT NULL, path TEXT NOT NULL)"
+            """CREATE TABLE image_location (
+                image_id INTEGER NOT NULL, path TEXT NOT NULL, content_hash TEXT,
+                file_device INTEGER, file_inode INTEGER, file_size INTEGER,
+                modified_at_ns INTEGER, file_changed_at_ns INTEGER
+            )"""
+        )
+        connection.execute("CREATE TABLE image (id INTEGER PRIMARY KEY, content_hash TEXT)")
+        connection.execute(
+            "INSERT INTO image(id, content_hash) VALUES (?, ?)",
+            (42, "registered"),
         )
         connection.executemany(
             "INSERT INTO image_location(image_id, path) VALUES(?, ?)",
             [(42, "/missing/selected.jpg"), (42, "/available/other.jpg")],
         )
 
-        with (
-            patch("backend.services.storage.get_conn", return_value=connection),
-            patch(
-                "backend.services.storage.os.path.isfile",
-                side_effect=lambda path: path == "/available/other.jpg",
-            ),
-        ):
+        with patch("backend.services.storage.get_conn", return_value=connection), patch(
+            "backend.services.storage.open_registered_photo", side_effect=FileNotFoundError,
+        ) as open_source:
             result = storage.get_available_image_path(
                 42,
                 "/missing/selected.jpg",
@@ -71,6 +76,7 @@ class AvailableImagePathTest(unittest.TestCase):
             )
 
         self.assertIsNone(result)
+        open_source.assert_called_once_with("/missing/selected.jpg", "registered", (None,) * 5)
 
 
 if __name__ == "__main__":

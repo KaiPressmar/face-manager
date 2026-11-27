@@ -4,7 +4,13 @@ import type { GeoPhotoSelection } from "./geoPhotoSelection";
 declare global {
   interface Window {
     FACE_MANAGER_API_BASE?: string;
-    AndroidExport?: { requestDatabaseExport(): void };
+    AndroidExport?: {
+      requestDatabaseExport(): void;
+      requestPreviousDatabaseExport?(): void;
+      getDatabaseExportStatus?(): string;
+      requestStagedFileExport?(token: string, filename: string): void;
+      getStagedFileExportStatus?(token: string): string;
+    };
   }
 }
 
@@ -385,6 +391,18 @@ export type ImportJobStage =
   | "finalizing"
   | "completed";
 
+export type ImportIssueKind =
+  | "directory_unavailable"
+  | "image_unavailable"
+  | "image_unreadable"
+  | "image_changed"
+  | "image_failed";
+
+export interface ImportIssue {
+  path: string;
+  kind: ImportIssueKind;
+}
+
 export interface ImportJob {
   id: string;
   folder_path: string;
@@ -396,6 +414,9 @@ export interface ImportJob {
   processed_images: number;
   unavailable_images?: number;
   unreadable_images?: number;
+  issue_counts?: Partial<Record<ImportIssueKind, number>>;
+  issues?: ImportIssue[];
+  can_retry_issues?: boolean;
   total_faces: number;
   processed_faces: number;
   stage: ImportJobStage | null;
@@ -722,8 +743,8 @@ export async function fetchImagePathCleanup(): Promise<ImagePathCleanupStatus> {
   return await res.json();
 }
 
-export async function startImagePathCleanup(): Promise<ImagePathCleanupStatus> {
-  const res = await apiFetch(`${API_BASE}/maintenance/image-paths`, {
+export async function startImagePathCleanup(removeMissing: boolean): Promise<ImagePathCleanupStatus> {
+  const res = await apiFetch(`${API_BASE}/maintenance/image-paths?remove_missing=${removeMissing}`, {
     method: "POST",
   });
   if (!res.ok) {
@@ -890,8 +911,8 @@ export function invalidatePersonsCache() {
   personsRequest = null;
 }
 
-export async function fetchClusters(): Promise<ClusterSummary[]> {
-  const res = await apiFetch(`${API_BASE}/clusters`);
+export async function fetchClusters(signal?: AbortSignal): Promise<ClusterSummary[]> {
+  const res = await apiFetch(`${API_BASE}/clusters`, { signal });
   if (!res.ok) throw new Error("Die Gesichtsgruppen konnten nicht geladen werden.");
   const payload = await res.json();
   if (!Array.isArray(payload)) {
@@ -956,8 +977,8 @@ export interface ClusterOverview {
   first_cluster: ClusterDetails | null;
 }
 
-export async function fetchClusterOverview(): Promise<ClusterOverview> {
-  const res = await apiFetch(`${API_BASE}/clusters-overview`);
+export async function fetchClusterOverview(signal?: AbortSignal): Promise<ClusterOverview> {
+  const res = await apiFetch(`${API_BASE}/clusters-overview`, { signal });
   if (!res.ok) {
     throw new Error("Die Übersicht der Gesichtsgruppen ist nicht verfügbar.");
   }
@@ -982,13 +1003,13 @@ export async function fetchClusterOverview(): Promise<ClusterOverview> {
   return { clusters, review_groups: reviewGroups, first_cluster: firstCluster };
 }
 
-export async function fetchClusterFaces(id: number): Promise<ClusterDetails | null> {
-  const res = await apiFetch(`${API_BASE}/clusters/${id}/faces`);
+export async function fetchClusterFaces(id: number, signal?: AbortSignal): Promise<ClusterDetails | null> {
+  const res = await apiFetch(`${API_BASE}/clusters/${id}/faces`, { signal });
   if (res.status === 404) return null;
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error("Die Gesichter dieser Gruppe konnten nicht geladen werden.");
   const payload = await res.json();
-  if (!payload || typeof payload !== "object") {
-    return null;
+  if (!Array.isArray(payload?.faces)) {
+    throw new Error("Die Gesichtsgruppe konnte nicht gelesen werden.");
   }
   return {
     cluster_id: Number((payload as { cluster_id?: number }).cluster_id ?? id),
@@ -1012,34 +1033,26 @@ export async function fetchClusterFaces(id: number): Promise<ClusterDetails | nu
   };
 }
 
-export async function fetchFaceReviewGroups(): Promise<FaceReviewGroupSummary[]> {
-  const res = await apiFetch(`${API_BASE}/face-review-groups`);
-  if (!res.ok) return [];
+export async function fetchFaceReviewGroups(signal?: AbortSignal): Promise<FaceReviewGroupSummary[]> {
+  const res = await apiFetch(`${API_BASE}/face-review-groups`, { signal });
+  if (!res.ok) throw new Error("Die Archivübersicht konnte nicht geladen werden.");
   const payload = await res.json();
   if (!Array.isArray(payload)) {
-    return [];
+    throw new Error("Die Archivübersicht konnte nicht gelesen werden.");
   }
-  return payload
-    .map((item) => ({
-      group_key:
-        item?.group_key === "unknown_person" || item?.group_key === "not_face"
-          ? item.group_key
-          : "unassigned",
-      label: typeof item?.label === "string" ? item.label : "Noch zu prüfen",
-      face_count: Number(item?.face_count ?? 0),
-      cluster_count: Number(item?.cluster_count ?? item?.face_count ?? 0),
-    }))
-    .filter((item) => item.face_count >= 0);
+  return payload.map(normalizeReviewGroupItem).filter((item) => item.face_count >= 0);
 }
 
 export async function fetchFaceReviewGroupFaces(
   groupKey: FaceReviewGroupKey,
+  signal?: AbortSignal,
 ): Promise<FaceReviewGroupDetails | null> {
-  const res = await apiFetch(`${API_BASE}/face-review-groups/${groupKey}/faces`);
-  if (!res.ok) return null;
+  const res = await apiFetch(`${API_BASE}/face-review-groups/${groupKey}/faces`, { signal });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("Die Gesichter im Archiv konnten nicht geladen werden.");
   const payload = await res.json();
-  if (!payload || typeof payload !== "object") {
-    return null;
+  if (!Array.isArray(payload?.faces)) {
+    throw new Error("Die Gesichter im Archiv konnten nicht gelesen werden.");
   }
   return {
     group_key:
@@ -1360,6 +1373,8 @@ export const resumeImportJob = (jobId: string) =>
   runBackgroundTaskAction(`/imports/${jobId}/resume`);
 export const cancelImportJob = (jobId: string) =>
   runBackgroundTaskAction(`/imports/${jobId}/cancel`);
+export const retryImportIssues = (jobId: string) =>
+  runBackgroundTaskAction(`/imports/${encodeURIComponent(jobId)}/retry`);
 export const deleteImportHistoryEntry = (jobId: string) =>
   runBackgroundTaskAction(`/imports/${jobId}/history`, "DELETE");
 export const clearImportHistory = () =>
@@ -1437,6 +1452,7 @@ export interface ApplyImageRenamePayload {
   sort_by?: "date" | "folder";
   sort_direction?: "desc" | "asc";
   confirmed_targets?: Record<string, { target_path: string; source_token: string }>;
+  expected_library_id?: string;
 }
 
 export interface ImageRenamePreviewItem {
@@ -1450,6 +1466,7 @@ export interface ImageRenamePreview {
   items: ImageRenamePreviewItem[];
   ready_count: number;
   skipped_count: number;
+  library_id?: string;
 }
 
 export interface ApplyImageRenameResult {

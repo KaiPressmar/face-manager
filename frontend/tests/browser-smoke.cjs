@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const albumLibraryFlow = require('./album-library-flow.cjs');
+const androidDatabaseExportFlow = require('./android-database-export-flow.cjs');
 const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
 const compactReviewFlow = require('./compact-review-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
@@ -259,7 +260,35 @@ async function localRecoveryFlow(browser, errors) {
     assert.deepEqual(retryPaths, ['/fixtures/cancelled', '/fixtures/cancelled']);
     await historyJob.getByText('Abgebrochen', { exact: true }).waitFor();
     await retry.waitFor({ state: 'hidden' });
-    console.log('PASS recovery feedback: backup pending/error/retry, cancelled job retry with double-click protection');
+
+    let targetedRetries = 0;
+    await page.route('**/api/imports/partial-job/retry', (route) => {
+      targetedRetries += 1;
+      assert.equal(route.request().method(), 'POST');
+      assert.equal(route.request().postData(), null);
+      return route.fulfill({ status: 202, json: { id: 'partial-retry', status: 'queued' } });
+    });
+    await page.evaluate(() => {
+      window.recoveryTestEvents.dispatchEvent(new MessageEvent('imports', { data: JSON.stringify({
+        jobs: [{ id: 'partial-job', folder_path: '/fixtures/partial', status: 'completed', processed_images: 8,
+          total_images: 8, finished_at: '2026-01-21T12:10:00Z', can_retry_issues: true,
+          issue_counts: { directory_unavailable: 1, image_unreadable: 1 },
+          issues: [{ path: '/fixtures/partial/Unterordner', kind: 'directory_unavailable' },
+            { path: '/fixtures/partial/kaputt.jpg', kind: 'image_unreadable' }] }],
+        running_count: 0, active_job_ids: [],
+      }) }));
+    });
+    const issuesJob = page.locator('article.activity-task').filter({ hasText: 'Abgeschlossen mit Hinweisen' });
+    await issuesJob.getByText('Betroffene Pfade ansehen', { exact: true }).click();
+    await issuesJob.getByText('Ordner nicht erreichbar', { exact: true }).waitFor();
+    await issuesJob.getByText('Datei kann nicht als Bild gelesen werden', { exact: true }).waitFor();
+    await issuesJob.getByRole('button', { name: 'Ausgelassene Pfade erneut prüfen' }).click();
+    await page.getByRole('status').filter({ hasText: 'Ausgelassene Pfade erneut zur Prüfung eingereiht.' }).waitFor();
+    assert.equal(targetedRetries, 1);
+    assert.deepEqual(retryPaths, ['/fixtures/cancelled', '/fixtures/cancelled']);
+    await page.getByRole('button', { name: 'Aktivitäten schließen' }).click();
+    assert.ok(await page.locator('.activity-center__trigger').evaluate((button) => button === document.activeElement));
+    console.log('PASS recovery feedback: backup, whole folder retry, recorded skipped paths and focus return');
   } finally {
     firstBackup.release();
     firstEnqueue.release();
@@ -1273,13 +1302,34 @@ async function settingsFlow(browser, errors) {
     await page.getByRole('button', { name: 'Erneut versuchen' }).click();
     const themes = page.getByRole('radiogroup', { name: 'Darstellung' });
     await themes.waitFor();
-    const theme = (label) => themes.getByRole('radio').filter({ has: page.getByText(label, { exact: true }) });
+    const theme = (label) => themes.getByRole('radio', { name: label, exact: true });
     await theme('Hell').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
-    await theme('Dunkel').click();
+    await theme('Hell').press('ArrowRight');
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+    assert.ok(await theme('Dunkel').isChecked());
     await theme('System').click();
-    assert.equal(await theme('System').getAttribute('aria-checked'), 'true');
+    assert.ok(await theme('System').isChecked());
+
+    const themeSelect = page.getByRole('combobox', { name: 'Farbschema der Anwendung' });
+    const failedSave = async (route) => {
+      if (route.request().postDataJSON()?.ui_theme === 'dark') {
+        await route.fulfill({ status: 503, json: { detail: 'Einstellung vorübergehend nicht verfügbar.' } });
+      } else {
+        await route.continue();
+      }
+    };
+    await page.route('**/api/settings', failedSave);
+    await themeSelect.selectOption('dark');
+    assert.ok(await theme('Dunkel').isChecked());
+    const retryTheme = page.getByRole('button', { name: 'Darstellung erneut speichern' });
+    await retryTheme.waitFor();
+    await page.unroute('**/api/settings', failedSave);
+    const savedTheme = page.waitForResponse((response) => response.url().endsWith('/api/settings')
+      && response.request().postDataJSON()?.ui_theme === 'dark');
+    await retryTheme.click();
+    assert.equal((await savedTheme).status(), 200);
+    await themeSelect.selectOption('system');
 
     await page.goto(`${webBase}/#/einstellungen/dateinamen`);
     const start = page.locator('.settings-format-presets[aria-label="Beginn des Personen-Anhangs"]');
@@ -1295,6 +1345,8 @@ async function settingsFlow(browser, errors) {
     const saved = await response.json();
     assert.equal(saved.filename_person_block_separator, '_');
     assert.equal(saved.filename_person_joiner, ' und ');
+    const ruleHeading = await page.locator('#filename-rule-start').boundingBox();
+    assert.ok(ruleHeading && ruleHeading.width > 180, 'Filename rule heading is squeezed into the former number column');
     await screenshot(page, 'settings');
     console.log('PASS settings: light/dark/system selection and filename preview/save');
   } finally {
@@ -1487,6 +1539,16 @@ async function responsiveFlow(browser, errors) {
       assert.ok(width.page <= width.viewport + 1, `${route}: ${width.page}px document overflows ${width.viewport}px viewport`);
       await screenshot(page, `mobile-${route}`);
     }
+    const section = page.getByRole('combobox', { name: 'Einstellungsbereich' });
+    await section.selectOption('daten');
+    await page.waitForURL('**/#/einstellungen/daten');
+    await page.waitForFunction(() => {
+      const switcher = document.querySelector('.settings-compact-navigation')?.getBoundingClientRect();
+      const data = document.getElementById('settings-daten')?.getBoundingClientRect();
+      return switcher && data && data.top >= switcher.bottom && data.top < innerHeight * 0.6;
+    });
+    await section.selectOption('erkennung');
+    await page.waitForURL('**/#/einstellungen/erkennung');
     console.log('PASS responsive: five pages fit 390px viewport');
   } finally {
     await page.close();
@@ -1935,6 +1997,7 @@ async function suggestionRefreshFlow(browser, errors) {
       firstAssignmentFlow,
       collectSourcesFlow,
       localRecoveryFlow,
+      androidDatabaseExport: (browser, errors) => androidDatabaseExportFlow(browser, errors, newPage, webBase),
       mapFlow,
       mapSelectionAndJourneyFlow,
       archiveAssignment: (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),

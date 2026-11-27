@@ -47,7 +47,7 @@ const steps: HelpStep[] = [
       <>Wähle unter <strong>Zeitraum</strong> ein Aufnahmejahr oder gib eigene Daten ein. Unter <strong>Orte aus meinen Fotos</strong> kannst du direkt ein Ziel und ein Aufnahmejahr wählen.</>,
       <>Wähle <strong>Bereich wählen</strong> und ziehe ein Rechteck auf der Karte. Mit <strong>Sichtbaren Bereich wählen</strong> übernimmst du stattdessen den gesamten sichtbaren Ausschnitt.</>,
     ],
-    note: <>Aktiviere <strong>Kartendetails online</strong>, um beim Zoomen Straßen und feinere Kartenbilder für den sichtbaren Bereich zu laden. Die Kartenübersicht und der Fotobuch-Export sind offline verfügbar.</>,
+    note: <>Zoome auf dem Touchscreen mit zwei Fingern. Unter der Karte lädt <strong>Kartendetails online</strong> Straßen und feinere Kartenbilder für den sichtbaren Bereich. Kartenübersicht und Fotobuch-Export funktionieren offline.</>,
     destination: "map",
     actionLabel: "Karte öffnen",
   },
@@ -103,7 +103,7 @@ const steps: HelpStep[] = [
     title: "Fortschritt und Hilfe finden",
     actions: [
       <>Öffne oben <strong>Aktivitäten</strong>. Unter <strong>Aktuell</strong> siehst du laufende und wartende Aufgaben.</>,
-      <>Unter <strong>Zuletzt beendet</strong> findest du Meldungen über abgeschlossene oder unterbrochene Aufgaben.</>,
+      <>Unter <strong>Zuletzt beendet</strong> siehst du, wie ein Import ausgegangen ist. Wähle bei Hinweisen <strong>Betroffene Pfade ansehen</strong>. Wenn alle Pfade erfasst wurden, kannst du sie mit <strong>Ausgelassene Pfade erneut prüfen</strong> einreihen.</>,
       <>Öffne oben <strong>Hardware</strong>. Dort steht zum Beispiel <strong>CPU</strong> für den Prozessor oder <strong>GPU</strong> für die Grafikkarte. Dort kannst du auch <strong>Hardware prüfen</strong> wählen.</>,
     ],
     note: <>Unter <strong>Hilfe</strong> findest du diese Schritte jederzeit.</>,

@@ -1,0 +1,119 @@
+.activity-center .activity-center__history {
+  max-height: none;
+  overflow: visible;
+}
+
+.activity-center .activity-center__header {
+  position: sticky;
+  top: -14px;
+  z-index: 1;
+  margin: -14px -14px 0;
+  padding: 10px 16px;
+  background: var(--panel-solid);
+}
+
+.activity-center__header h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.activity-center__close {
+  min-height: 36px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.activity-center .activity-task__topline {
+  flex-wrap: wrap;
+  align-items: start;
+  gap: 4px 10px;
+}
+
+.activity-center .activity-task__topline strong {
+  flex: 1 1 180px;
+  font-size: 13px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.activity-center .activity-task__topline span {
+  font-size: 11px;
+}
+
+.activity-task--attention .activity-task__topline span {
+  color: var(--warning);
+}
+
+.activity-center .activity-task p,
+.activity-center .activity-center__connection {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.activity-center [role="alert"].activity-center__connection {
+  color: var(--danger-soft-text);
+}
+
+.activity-center .activity-task__actions {
+  flex-wrap: wrap;
+}
+
+.activity-center .activity-task__actions button:not(.task-icon-button) {
+  min-height: 36px;
+  font-size: 13px;
+}
+
+.activity-task__issues {
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: 12px;
+}
+
+.activity-task__issues summary {
+  padding: 7px 0;
+  color: var(--text-strong);
+  cursor: pointer;
+}
+
+.activity-task__issues ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 0 8px;
+  list-style: none;
+}
+
+.activity-task__issues li {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.activity-task__issues li strong {
+  color: var(--text-strong);
+}
+
+.activity-task__issues li small {
+  color: var(--text-muted);
+}
+
+.activity-center .activity-task__issues p {
+  padding-bottom: 8px;
+}
+
+@media (max-width: 650px) {
+  .activity-center__close,
+  .activity-center .activity-task__actions button:not(.task-icon-button) {
+    min-height: 44px;
+  }
+}

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
 import { fetchMapPoints, fetchSelectedMapPoints, type MapPoint } from "../../utils/api";
+import { isAndroidExportAvailable, saveAndroidExport } from "../../utils/androidExport";
 import { countWithLabel } from "../../utils/germanFormatting";
 import type { Journey, JourneyDetail } from "./mapData";
 import { describeJourneyPlaces, findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
@@ -365,20 +366,20 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
       const png = await mapAlbumPageToPng(page);
       if (!active.current) return;
       const filename = `${exportName}${page.total > 1 ? `-${String(page.number).padStart(2, "0")}` : ""}.png`;
+      let result: NativeSaveResult | undefined;
       if (desktop?.save_album_png) {
         const data = await pngBase64(png);
         if (!active.current) return;
-        const result = await desktop.save_album_png(filename, data);
-        if (result.status === "error") throw new Error(result.message || "Das PNG konnte nicht gespeichert werden.");
-        if (active.current && result.status === "saved") {
-          if (!onSaveDraft && pages.length === 1) markDesignSaved();
-          setConfirmation("PNG gespeichert.");
-        }
+        result = await desktop.save_album_png(filename, data);
+      } else if (isAndroidExportAvailable()) {
+        result = await saveAndroidExport(filename, png);
       } else {
         downloadAlbumFile(png, filename);
-        if (!onSaveDraft && pages.length === 1) markDesignSaved();
-        setConfirmation("PNG erstellt.");
       }
+      if (!active.current || result?.status === "cancelled") return;
+      if (result?.status === "error") throw new Error(result.message || "Das PNG konnte nicht gespeichert werden.");
+      if (!onSaveDraft && pages.length === 1) markDesignSaved();
+      setConfirmation(result ? "PNG gespeichert." : "PNG erstellt.");
     } catch (failure) {
       if (active.current) setSaveError(failure instanceof Error ? failure.message : "Das PNG konnte nicht gespeichert werden.");
     } finally {
@@ -408,20 +409,19 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
       }
       if (!active.current) return;
       const filename = `${exportName}.zip`;
+      let result: NativeSaveResult | undefined;
       if (desktop?.save_album_zip) {
-        const result = await desktop.save_album_zip(filename, nativePages);
-        if (result.status === "error") throw new Error(result.message || "Das ZIP konnte nicht gespeichert werden.");
-        if (active.current && result.status === "saved") {
-          if (!onSaveDraft) markDesignSaved();
-          setConfirmation("ZIP gespeichert.");
-        }
+        result = await desktop.save_album_zip(filename, nativePages);
       } else {
         const archive = await archiveMapAlbumPages(pngFiles);
         if (!active.current) return;
-        downloadAlbumFile(archive, filename);
-        if (!onSaveDraft) markDesignSaved();
-        setConfirmation("ZIP erstellt.");
+        if (isAndroidExportAvailable()) result = await saveAndroidExport(filename, archive);
+        else downloadAlbumFile(archive, filename);
       }
+      if (!active.current || result?.status === "cancelled") return;
+      if (result?.status === "error") throw new Error(result.message || "Das ZIP konnte nicht gespeichert werden.");
+      if (!onSaveDraft) markDesignSaved();
+      setConfirmation(result ? "ZIP gespeichert." : "ZIP erstellt.");
     } catch (failure) {
       if (active.current) setSaveError(failure instanceof Error ? failure.message : "Das ZIP konnte nicht gespeichert werden.");
     } finally {
@@ -544,6 +544,17 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         {page?.satelliteFallback && <p className="gps-album-dialog__feedback" role="status">Satellitenbild nicht verfügbar. Die Standardkarte wird verwendet.</p>}
         {style === "satellite" && page?.number === 1 && !page.satelliteFallback &&
           <a className="gps-map__credit" href={satelliteSource.url} target="_blank" rel="noreferrer">{satelliteSource.name}</a>}
+        <div className="gps-album-dialog__exports" role="group" aria-label="Fotobuchbild exportieren">
+          <button type="button" className={previewCount < 2 ? "gps-album-dialog__save" : undefined} disabled={!page || busy} onClick={() => void save()}>
+            {saving === "page" ? "PNG wird erstellt …" : previewCount > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
+          </button>
+          {previewCount > 1 && previewCount <= MAX_ALBUM_ARCHIVE_PAGES && <button type="button" className="gps-album-dialog__save"
+            disabled={!page || busy} onClick={() => void saveArchive()}>{saving === "archive" ? "ZIP wird erstellt …" : "Alle Seiten als ZIP speichern"}</button>}
+          {saveError && <p className="gps-album-dialog__feedback" role="alert">{saveError}</p>}
+          {confirmation && <p className="gps-album-dialog__feedback" role="status">{confirmation}</p>}
+          {saving === "archive" && <p className="gps-album-dialog__feedback" role="status">Seite {archivePage} von {pages.length} wird für das ZIP vorbereitet.</p>}
+          {previewCount > MAX_ALBUM_ARCHIVE_PAGES && <p className="gps-album-dialog__feedback">Mehr als {MAX_ALBUM_ARCHIVE_PAGES} Seiten lassen sich einzeln als PNG speichern.</p>}
+        </div>
       </div>
       <div className="gps-album-dialog__editor">
         <fieldset className="gps-album-dialog__options" disabled={busy}>
@@ -761,19 +772,10 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
       </div>
       <footer className="gps-album-dialog__footer">
         <p className="gps-album-dialog__usage">Füge das PNG in deinem Fotobuchprogramm als Foto ein.</p>
-        {saveError && <span role="alert">{saveError}</span>}
-        {confirmation && <span role="status">{confirmation}</span>}
-        {saving === "archive" && <span role="status">Seite {archivePage} von {pages.length} wird für das ZIP vorbereitet.</span>}
-        {previewCount > MAX_ALBUM_ARCHIVE_PAGES && <span>Mehr als {MAX_ALBUM_ARCHIVE_PAGES} Seiten lassen sich einzeln als PNG speichern.</span>}
         <button type="button" disabled={!dirty || busy} onClick={() => setLeaveDesign("reset")}>Gestaltung zurücksetzen</button>
         {onSaveDraft && <button type="button" disabled={!canRender || busy} onClick={() => void saveDraft()}>
           {savingDraft ? "Entwurf wird gespeichert …" : "Entwurf im Album speichern"}
         </button>}
-        <button type="button" className={previewCount < 2 ? "gps-album-dialog__save" : undefined} disabled={!page || busy} onClick={() => void save()}>
-          {saving === "page" ? "PNG wird erstellt …" : previewCount > 1 ? "Diese Seite als PNG speichern" : "PNG speichern"}
-        </button>
-        {previewCount > 1 && previewCount <= MAX_ALBUM_ARCHIVE_PAGES && <button type="button" className="gps-album-dialog__save"
-          disabled={!page || busy} onClick={() => void saveArchive()}>{saving === "archive" ? "ZIP wird erstellt …" : "Alle Seiten als ZIP speichern"}</button>}
       </footer>
     </section>
     {leaveDesign && <div className="gps-album-overlay gps-album-confirm-overlay">

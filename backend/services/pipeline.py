@@ -25,6 +25,12 @@ from ..models.face_model import FaceModel, get_compute_mode
 from .face_geometry import face_boxes_overlap
 from .face_thumbnails import delete_face_thumbnail, write_face_thumbnails
 from .image_thumbnails import write_image_thumbnail
+from .photo_identity import (
+    file_identity as _file_identity,
+    matches_file_identity as _matches_imported_identity,
+    open_registered_photo,
+    visual_photo_hash,
+)
 from .preview_cache import get_image_geometry
 from .shared_sync_transport import TransportError
 from .geo import CaptureMetadata, extract_image_metadata, record_image_metadata
@@ -59,6 +65,25 @@ _PROCESSING_SLOT_SEMAPHORE: threading.BoundedSemaphore = threading.BoundedSemaph
 _MAX_DEFERRED_SHARED_IMAGES = 16
 _SHARED_RESULT_WAIT_SECONDS = 70
 _SHARED_ANNOUNCEMENT_LOOKAHEAD = 8
+IMPORT_ISSUE_MESSAGES = {
+    "directory_unavailable": "Der Ordner konnte nicht gelesen werden.",
+    "image_unavailable": "Auf die Datei konnte nicht zugegriffen werden.",
+    "image_unreadable": "Die Datei konnte nicht als Bild gelesen werden.",
+    "image_changed": "Der Inhalt der Datei hat sich geändert.",
+    "image_failed": "Die Verarbeitung der Datei konnte nicht abgeschlossen werden.",
+}
+
+
+def _report_import_issue(progress: ProgressCallback, path, kind: str, **counts) -> str:
+    path = _stored_filesystem_path(path)
+    message = f"{path}: {IMPORT_ISSUE_MESSAGES[kind]}"
+    progress({"issue": {"path": path, "kind": kind}, "last_error": message, **counts})
+    return message
+
+
+def _is_private_import_directory(name: str) -> bool:
+    name = name.casefold()
+    return name == ".fm" or name.startswith(".face-manager-rename-")
 
 
 class ImportCancelled(Exception):
@@ -89,25 +114,6 @@ def _source_access():
         raise
     except OSError as exc:
         raise SourceUnavailableError(str(exc)) from exc
-
-
-def _file_identity(source_stat: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (
-        source_stat.st_dev,
-        source_stat.st_ino,
-        source_stat.st_size,
-        source_stat.st_mtime_ns,
-        source_stat.st_ctime_ns,
-    )
-
-
-def _matches_imported_identity(path: str, identity: tuple[int, int, int, int, int]) -> bool:
-    if os.name == "nt":
-        # Use the same identity as hashing. On Windows the path-based stat
-        # can report creation time rather than the handle's change time.
-        with open(path, "rb") as source:
-            return _file_identity(os.fstat(source.fileno())) == identity
-    return _file_identity(os.stat(path)) == identity
 
 
 def _control_cancelled(control) -> bool:
@@ -167,6 +173,7 @@ class HashedImage:
     identity: tuple[int, int, int, int, int]
     metadata: CaptureMetadata | tuple[float | None, float | None, str | None]
     geometry: tuple[int, int, int] | None = None
+    visual_hash: str | None = None
 
     def verify_current(self) -> None:
         source = _filesystem_path(self.normalized_path)
@@ -246,6 +253,10 @@ class ImagePreparer:
                     if expected is not None:
                         expected.geometry = get_image_geometry(image)
                     pixels = np.asarray(image.convert("RGB"))
+                    if expected is not None:
+                        # An empty fingerprint denotes a format we decoded but
+                        # cannot compare safely after its bytes have changed.
+                        expected.visual_hash = visual_photo_hash(image, expected.geometry, pixels) or ""
             except (UnidentifiedImageError, Image.DecompressionBombError, ValueError) as exc:
                 raise ImageDecodeError(str(exc)) from exc
             except OSError as exc:
@@ -428,6 +439,8 @@ class ImportProcessor:
         folder_path: str,
         progress_callback: ProgressCallback,
         cancel_event: threading.Event,
+        *,
+        retry_paths: list[dict[str, str]] | None = None,
     ) -> None:
         """Import all supported images below a folder.
 
@@ -442,7 +455,7 @@ class ImportProcessor:
         """
         folder = Path(folder_path)
         if not os.path.isdir(_filesystem_path(folder)):
-            raise FileNotFoundError(f"Import folder no longer exists: {folder_path}")
+            raise FileNotFoundError(f"Der Bilderordner ist nicht erreichbar: {folder_path}")
 
         progress_callback(
             {
@@ -452,7 +465,19 @@ class ImportProcessor:
                 "current_file": str(folder),
             }
         )
-        image_paths = self._find_images(folder, progress_callback, cancel_event)
+        scan_failed = False
+
+        def scan_progress(changes):
+            nonlocal scan_failed
+            scan_failed = scan_failed or "issue" in changes
+            progress_callback(changes)
+
+        if retry_paths:
+            image_paths = self._retry_images(folder, retry_paths, scan_progress, cancel_event)
+        else:
+            image_paths = self._find_images(folder, scan_progress, cancel_event)
+        if not image_paths and scan_failed:
+            raise ImportFailed("Es konnten keine Bilder aus den nicht erreichbaren Pfaden gelesen werden.")
         progress_callback(
             {
                 "stage": "hashing",
@@ -613,24 +638,26 @@ class ImportProcessor:
                     conn.rollback()
                     unreadable_images += 1
                     logger.warning("Skipping undecodable image %s: %s", image_path, exc)
-                    last_error = f"{image_path}: Die Datei konnte nicht als Bild gelesen werden. {exc}"
-                    progress_callback({"last_error": last_error, "unreadable_images": unreadable_images})
+                    last_error = _report_import_issue(
+                        progress_callback, image_path, "image_unreadable", unreadable_images=unreadable_images,
+                    )
                 except SourceUnavailableError as exc:
                     conn.rollback()
                     unavailable_images += 1
                     logger.warning("Skipping unavailable image %s: %s", image_path, exc)
-                    last_error = f"{image_path}: Auf die Datei konnte nicht zugegriffen werden. {exc}"
-                    progress_callback({"last_error": last_error, "unavailable_images": unavailable_images})
+                    last_error = _report_import_issue(
+                        progress_callback, image_path, "image_unavailable", unavailable_images=unavailable_images,
+                    )
                 except SourceChangedError as exc:
                     conn.rollback()
                     logger.warning("Skipping changed image %s: %s", image_path, exc)
+                    _report_import_issue(progress_callback, image_path, "image_changed")
                     last_error = f"{image_path}: {exc}"
-                    progress_callback({"last_error": last_error})
                 except Exception as exc:
                     conn.rollback()
                     logger.exception("Import processing failed for %s", image_path)
+                    _report_import_issue(progress_callback, image_path, "image_failed")
                     last_error = f"{image_path}: {exc}"
-                    progress_callback({"last_error": last_error})
                 finally:
                     completed_images += not postponed
                     hashed_images += future is not None
@@ -652,7 +679,7 @@ class ImportProcessor:
                 matching_content = self._find_content(cursor, content_hash)
                 if matching_content and matching_content["processed_at"]:
                     self._prune_stale_locations(
-                        cursor, conn, matching_content["id"], content_hash, discovered_paths
+                        cursor, conn, matching_content["id"], discovered_paths
                     )
 
             progress_callback(
@@ -733,9 +760,15 @@ class ImportProcessor:
         Returns:
             Sorted image paths for deterministic queue processing.
         """
+        def on_error(error: OSError) -> None:
+            path = error.filename or folder
+            logger.warning("Skipping inaccessible import directory %s: %s", path, error)
+            if progress_callback is not None:
+                _report_import_issue(progress_callback, path, "directory_unavailable")
+
         image_paths = []
-        for root, directories, filenames in os.walk(_filesystem_path(folder)):
-            directories[:] = [name for name in directories if name.casefold() != ".fm"]
+        for root, directories, filenames in os.walk(_filesystem_path(folder), onerror=on_error):
+            directories[:] = [name for name in directories if not _is_private_import_directory(name)]
             directories.sort()
             filenames.sort()
             if cancel_event is not None:
@@ -752,6 +785,33 @@ class ImportProcessor:
                     }
                 )
         return image_paths
+
+    @classmethod
+    def _retry_images(cls, folder: Path, retry_paths, progress, cancel_event) -> list[Path]:
+        """Rescan recorded subdirectories and reconsider recorded files within the source."""
+        source_root = os.path.realpath(_filesystem_path(folder))
+        image_paths = {}
+        for entry in retry_paths:
+            cls._raise_if_cancelled(cancel_event)
+            path = Path(entry["path"])
+            kind = entry["kind"]
+            try:
+                relative = path.relative_to(folder)
+                resolved = os.path.normcase(os.path.realpath(_filesystem_path(path)))
+                root = os.path.normcase(source_root)
+                if os.path.commonpath((root, resolved)) != root or any(
+                    part == ".." or _is_private_import_directory(part) for part in relative.parts
+                ):
+                    raise ValueError("Pfad liegt außerhalb des Bilderordners.")
+            except (OSError, ValueError):
+                unavailable = "directory_unavailable" if kind == "directory_unavailable" else "image_unavailable"
+                _report_import_issue(progress, path, unavailable)
+                continue
+            if kind == "directory_unavailable":
+                image_paths.update(dict.fromkeys(cls._find_images(path, progress, cancel_event)))
+            elif path.suffix.lower() in cls.IMAGE_SUFFIXES:
+                image_paths[path] = None
+        return list(image_paths)
 
     @staticmethod
     def _raise_if_cancelled(cancel_event: threading.Event) -> None:
@@ -787,7 +847,9 @@ class ImportProcessor:
                 f"""
                 SELECT location.path, location.file_size,
                        location.modified_at_ns, location.file_device, location.file_inode,
-                       location.file_changed_at_ns, image.processed_at, image.content_hash
+                       location.file_changed_at_ns, image.processed_at,
+                       COALESCE(location.content_hash, image.content_hash) AS content_hash,
+                       image.visual_hash
                 FROM image_location location
                 JOIN image ON image.id = location.image_id
                 WHERE location.path IN ({placeholders})
@@ -805,6 +867,7 @@ class ImportProcessor:
                 known is None
                 or not known["processed_at"]
                 or not known["content_hash"]
+                or known["visual_hash"] is None
                 or known["file_size"] is None
                 or known["modified_at_ns"] is None
                 or known["file_device"] is None
@@ -971,6 +1034,11 @@ class ImportProcessor:
                     "UPDATE image SET raw_width = ?, raw_height = ?, exif_orientation = ? WHERE id = ?",
                     (width, height, orientation, image_id),
                 )
+            if pending_source is not None and pending_source.visual_hash is not None:
+                cursor.execute(
+                    "UPDATE image SET visual_hash = ? WHERE id = ?",
+                    (pending_source.visual_hash, image_id),
+                )
             cursor.execute(
                 "UPDATE image SET processed_at = CURRENT_TIMESTAMP WHERE id = ?", (image_id,)
             )
@@ -1063,17 +1131,123 @@ class ImportProcessor:
 
     @staticmethod
     def _find_content(cursor, content_hash: str):
-        return cursor.execute(
-            "SELECT id, processed_at FROM image WHERE content_hash = ?", (content_hash,)
+        canonical = cursor.execute(
+            "SELECT id, processed_at, visual_hash FROM image WHERE content_hash = ?", (content_hash,)
         ).fetchone()
+        if canonical is not None:
+            return canonical
+        return cursor.execute(
+            """SELECT image.id, image.processed_at, image.visual_hash
+               FROM image_location location JOIN image ON image.id = location.image_id
+               WHERE location.content_hash = ? LIMIT 1""",
+            (content_hash,),
+        ).fetchone()
+
+    @staticmethod
+    def _registered_location(cursor, path):
+        return cursor.execute(
+            """SELECT location.id AS location_id, image.id AS image_id, image.processed_at,
+                      image.visual_hash, COALESCE(location.content_hash, image.content_hash) AS source_hash
+               FROM image_location location JOIN image ON image.id = location.image_id
+               WHERE location.path = ?""",
+            (path,),
+        ).fetchone()
+
+    @staticmethod
+    def _check_rename_intent(cursor, path):
+        if cursor.execute(
+            "SELECT 1 FROM image_rename_intent WHERE source_path = ? OR target_path = ?",
+            (path, path),
+        ).fetchone():
+            raise SourceChangedError("Dieser Speicherort ist für eine laufende Umbenennung vorgemerkt.")
+
+    @staticmethod
+    def _previous_photo_copy(cursor, image_id, path, *, read_visual):
+        """Find a verified alternate, and recover missing visual evidence when possible."""
+        alternates = cursor.execute(
+            """SELECT location.path, COALESCE(location.content_hash, image.content_hash) AS source_hash,
+                      location.file_device, location.file_inode, location.file_size,
+                      location.modified_at_ns, location.file_changed_at_ns
+               FROM image_location location JOIN image ON image.id = location.image_id
+               WHERE location.image_id = ? AND location.path != ?
+                 AND NOT EXISTS (SELECT 1 FROM image_rename_intent WHERE location_id = location.id)
+               ORDER BY location.id""",
+            (image_id, path),
+        ).fetchall()
+        found = False
+        for alternate in alternates:
+            try:
+                source, before = open_registered_photo(alternate["path"], alternate["source_hash"], tuple(alternate)[2:])
+                with source:
+                    if not read_visual:
+                        return True, None
+                    try:
+                        with Image.open(source) as image:
+                            digest = visual_photo_hash(image, get_image_geometry(image))
+                    except (OSError, ValueError, Image.DecompressionBombError):
+                        digest = None
+                    if _file_identity(os.fstat(source.fileno())) == _file_identity(before):
+                        found = True
+                        if digest:
+                            return True, digest
+            except (OSError, ValueError, Image.DecompressionBombError):
+                continue
+        return found, None
+
+    @classmethod
+    def _retain_registered_photo(cls, cursor, connection, hashed, registered, matching) -> bool:
+        """Attach a proven metadata revision or require a verified copy before replacing a path."""
+        path = hashed.normalized_path
+        image_id = registered["image_id"]
+        old_visual_hash = registered["visual_hash"]
+        has_alternate = None
+        if old_visual_hash is None and matching is None:
+            has_alternate, old_visual_hash = cls._previous_photo_copy(cursor, image_id, path, read_visual=True)
+        if old_visual_hash and matching is None:
+            ImagePreparer.decode(hashed.path, hashed)
+            if old_visual_hash == hashed.visual_hash:
+                cursor.execute("BEGIN IMMEDIATE")
+                current = cls._registered_location(cursor, path)
+                matching = cls._find_content(cursor, hashed.content_hash)
+                if current is None or tuple(current) != tuple(registered) or (matching and matching["id"] != image_id):
+                    raise SourceChangedError("Der Bibliothekseintrag wurde während des Imports geändert.")
+                cursor.execute(
+                    "UPDATE image SET visual_hash = COALESCE(visual_hash, ?) WHERE id = ?",
+                    (old_visual_hash, image_id),
+                )
+                cls._attach_location(cursor, image_id, hashed)
+                hashed.verify_current()
+                connection.commit()
+                invalidate_image_query_cache()
+                return True
+        if has_alternate is None:
+            has_alternate, _ = cls._previous_photo_copy(cursor, image_id, path, read_visual=False)
+        if not has_alternate:
+            raise SourceChangedError(
+                "Die Datei wurde seit dem Import geändert. Der alte Bibliothekseintrag bleibt erhalten. "
+                "Stelle das Original wieder her oder importiere die neue Datei unter einem anderen Namen."
+            )
+        return False
 
     @classmethod
     def _attach_processed_content(cls, cursor, connection, hashed: HashedImage) -> bool:
         """Attach a duplicate only when its canonical image still exists."""
+        cls._check_rename_intent(cursor, hashed.normalized_path)
         matching = cls._find_content(cursor, hashed.content_hash)
         legacy_location = cls._legacy_processed_location(cursor, hashed.normalized_path)
+        registered = cls._registered_location(cursor, hashed.normalized_path)
+        if (registered and registered["processed_at"] and registered["source_hash"]
+                and (matching is None or registered["image_id"] != matching["id"])
+                and cls._retain_registered_photo(cursor, connection, hashed, registered, matching)):
+            return True
         if (not matching or not matching["processed_at"]) and legacy_location is None:
             return False
+        if legacy_location or matching["visual_hash"] is None:
+            try:
+                ImagePreparer.decode(hashed.path, hashed)
+            except ImageDecodeError:
+                # The byte identity suffices for an already imported photo.
+                hashed.visual_hash = ""
         cursor.execute("BEGIN IMMEDIATE")
         matching = cls._find_content(cursor, hashed.content_hash)
         legacy_location = cls._legacy_processed_location(cursor, hashed.normalized_path)
@@ -1091,6 +1265,11 @@ class ImportProcessor:
             connection.rollback()
             return False
         hashed.verify_current()
+        if hashed.visual_hash is not None and matching["visual_hash"] is None:
+            cursor.execute(
+                "UPDATE image SET visual_hash = ? WHERE id = ?",
+                (hashed.visual_hash, matching["id"]),
+            )
         cls._attach_location(cursor, matching["id"], hashed)
         hashed.verify_current()
         connection.commit()
@@ -1124,7 +1303,10 @@ class ImportProcessor:
             image_id: Canonical image identifier.
             hashed: Hashed path metadata to attach.
         """
+        cls._check_rename_intent(cursor, hashed.normalized_path)
         record_image_metadata(cursor, image_id, hashed.normalized_path, metadata=hashed.metadata)
+        canonical_hash = cursor.execute("SELECT content_hash FROM image WHERE id = ?", (image_id,)).fetchone()[0]
+        source_hash = hashed.content_hash if hashed.content_hash != canonical_hash else None
         device, inode, _, _, changed_at = hashed.identity
         # A platform can expose unsigned or 128-bit file IDs. SQLite INTEGER
         # parameters are signed 64-bit, so unsupported IDs are rehashed on import.
@@ -1140,12 +1322,13 @@ class ImportProcessor:
                 """
                 UPDATE image_location
                 SET created_at = ?, file_size = ?, modified_at_ns = ?, file_device = ?,
-                    file_inode = ?, file_changed_at_ns = ?
+                    file_inode = ?, file_changed_at_ns = ?, content_hash = ?
                 WHERE path = ?
                 """,
                 (
                     hashed.created_at,
                     *identity_values,
+                    source_hash,
                     hashed.normalized_path,
                 ),
             )
@@ -1159,9 +1342,9 @@ class ImportProcessor:
             """
             INSERT INTO image_location(
                 image_id, path, directory, filename, created_at,
-                file_size, modified_at_ns, file_device, file_inode, file_changed_at_ns
+                file_size, modified_at_ns, file_device, file_inode, file_changed_at_ns, content_hash
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_id,
@@ -1170,17 +1353,19 @@ class ImportProcessor:
                 os.path.basename(hashed.normalized_path),
                 hashed.created_at,
                 *identity_values,
+                source_hash,
             ),
         )
 
-    @staticmethod
-    def _detach_path(cursor, normalized_path: str) -> None:
+    @classmethod
+    def _detach_path(cls, cursor, normalized_path: str) -> None:
         """Detach a path safely from content it no longer represents.
 
         Args:
             cursor: SQLite cursor used for canonical path maintenance.
             normalized_path: Existing location path to detach.
         """
+        cls._check_rename_intent(cursor, normalized_path)
         existing = cursor.execute(
             """
             SELECT location.image_id, i.path AS canonical_path
@@ -1203,37 +1388,22 @@ class ImportProcessor:
             """,
             (existing["image_id"], normalized_path),
         ).fetchone()
+        if not remaining:
+            raise SourceChangedError(
+                "Der einzige Speicherort des bisherigen Fotos bleibt für die Wiederherstellung erhalten."
+            )
         cursor.execute(
             "DELETE FROM image_location WHERE path = ?",
             (normalized_path,),
         )
-        if remaining:
-            if existing["canonical_path"] == normalized_path:
-                cursor.execute(
-                    """
-                    UPDATE image
-                    SET path = ?, directory = ?, filename = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        remaining["path"],
-                        remaining["directory"],
-                        remaining["filename"],
-                        existing["image_id"],
-                    ),
-                )
-        else:
-            cursor.execute(
-                "DELETE FROM image WHERE id = ?",
-                (existing["image_id"],),
-            )
+        if existing["canonical_path"] == normalized_path:
             cursor.execute(
                 """
-                DELETE FROM cluster
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM face WHERE face.cluster_id = cluster.id
-                )
-                """
+                UPDATE image
+                SET path = ?, directory = ?, filename = ?
+                WHERE id = ?
+                """,
+                (remaining["path"], remaining["directory"], remaining["filename"], existing["image_id"]),
             )
 
     @classmethod
@@ -1242,7 +1412,6 @@ class ImportProcessor:
         cursor,
         connection,
         image_id: int,
-        expected_hash: str,
         verified_paths: Set[str],
     ) -> None:
         """Remove missing or changed locations for known content.
@@ -1255,15 +1424,17 @@ class ImportProcessor:
             cursor: SQLite cursor used for location maintenance.
             connection: SQLite connection controlling the transaction.
             image_id: Canonical image whose locations should be validated.
-            expected_hash: Content hash assigned to the canonical image.
             verified_paths: Paths already hashed during the current import.
         """
         rows = cursor.execute(
             """
-            SELECT id, path, file_size, modified_at_ns, file_device, file_inode, file_changed_at_ns
-            FROM image_location
-            WHERE image_id = ?
-            ORDER BY path
+            SELECT location.id, location.path, location.file_size, location.modified_at_ns,
+                   location.file_device, location.file_inode, location.file_changed_at_ns,
+                   COALESCE(location.content_hash, image.content_hash) AS source_hash
+            FROM image_location location JOIN image ON image.id = location.image_id
+            WHERE location.image_id = ?
+              AND NOT EXISTS (SELECT 1 FROM image_rename_intent WHERE location_id = location.id)
+            ORDER BY location.path
             """,
             (image_id,),
         ).fetchall()
@@ -1277,7 +1448,7 @@ class ImportProcessor:
                 before = os.stat(source)
                 if not stat.S_ISREG(before.st_mode):
                     continue
-                changed = calculate_file_hash(source) != expected_hash
+                changed = row["source_hash"] and calculate_file_hash(source) != row["source_hash"]
                 if changed and _file_identity(os.stat(source)) == _file_identity(before):
                     stale_locations.append(row)
             except FileNotFoundError:
@@ -1294,16 +1465,18 @@ class ImportProcessor:
                 current = cursor.execute(
                     """
                     SELECT location.id, location.path, location.file_size, location.modified_at_ns,
-                           location.file_device, location.file_inode, location.file_changed_at_ns
+                           location.file_device, location.file_inode, location.file_changed_at_ns,
+                           COALESCE(location.content_hash, image.content_hash)
                     FROM image_location location
                     JOIN image ON image.id = location.image_id
-                    WHERE location.id = ? AND image.id = ? AND image.content_hash = ?
+                    WHERE location.id = ? AND image.id = ?
+                      AND NOT EXISTS (SELECT 1 FROM image_rename_intent WHERE location_id = location.id)
                       AND EXISTS (
                           SELECT 1 FROM image_location alternate
                           WHERE alternate.image_id = image.id AND alternate.id != location.id
                       )
                     """,
-                    (row["id"], image_id, expected_hash),
+                    (row["id"], image_id),
                 ).fetchone()
                 if current is not None and tuple(current) == tuple(row):
                     cls._detach_path(cursor, row["path"])

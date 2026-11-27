@@ -5,6 +5,10 @@ on:
     branches:
       - develop
     paths:
+      - 'backend/db/schema.py'
+      - 'backend/services/photo_identity.py'
+      - 'backend/services/pipeline.py'
+      - 'backend/services/storage.py'
       - 'backend/services/shared_sync_*.py'
       - 'backend/tests/test_shared_sync_smb.py'
       - '.github/workflows/samba-transport-validation.yml'

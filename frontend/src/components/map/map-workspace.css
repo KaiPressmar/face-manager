@@ -117,6 +117,10 @@
 .gps-page__online-details input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
 .gps-page__online-details input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .gps-page__map-foot { flex-wrap: wrap; gap: 5px 10px; padding: 7px 12px; font-size: .75rem; }
+.gps-page__touch-hint { display: none; }
+@media (any-pointer: coarse) {
+  .gps-page__touch-hint { display: inline; }
+}
 .gps-page__map-settings { display: grid; justify-items: start; padding: 0 10px 10px; }
 .gps-page__map-settings > details { margin: 0; }
 .gps-page__map-settings > details[open] { grid-column: 1 / -1; }
@@ -170,6 +174,15 @@
 .gps-journey-inference p { margin: 4px 0; line-height: 1.45; }
 .gps-page__photo { display: grid; align-content: start; aspect-ratio: auto; gap: 0; }
 .gps-page__photo-image { display: block; position: relative; width: 100%; aspect-ratio: 1.25; overflow: hidden; }
+.gps-page__photo-preview-error {
+  display: grid;
+  min-height: 100%;
+  align-content: center;
+  justify-items: center;
+  padding: 8px 8px 28px;
+  color: var(--text-muted);
+  font-size: .75rem;
+}
 .gps-page__photo-name { font-size: .75rem; }
 .gps-page__photo-source { display: block; padding: 5px 7px; color: var(--text-strong); font-size: .75rem; text-align: start; overflow-wrap: anywhere; }
 .gps-page .gps-page__photo:focus-visible, .gps-selection-gallery .gps-page__photo:focus-visible { outline-offset: -3px; }
@@ -256,6 +269,13 @@
   background: var(--surface-1);
 }
 .gps-album-dialog__pages { font-size: .8125rem; }
+.gps-album-dialog__exports {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 9px;
+}
+.gps-album-dialog__exports .gps-album-dialog__feedback { flex-basis: 100%; }
 .gps-album-dialog__usage { flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: .8125rem; }
 .gps-album-dialog .gps-album-dialog__save { border-color: var(--accent-border); background: var(--accent-soft); font-weight: 700; }
 .gps-album-dialog button:disabled { opacity: .55; cursor: default; }
@@ -345,6 +365,8 @@
   .gps-album-dialog__footer { position: static; }
 }
 @media (max-width: 540px) {
+  .gps-album-dialog__header { flex-wrap: nowrap; }
+  .gps-album-dialog__header button { flex-shrink: 0; }
   .gps-album-dialog__options { grid-template-columns: 1fr; }
   .gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]):not([type="range"]), .gps-album-dialog select { min-height: 44px; max-width: 100%; }
   .gps-album-dialog__slider { min-height: 44px; }

@@ -23,6 +23,10 @@ photos. A backup restored on a different device still needs its referenced photo
 at accessible paths. File renaming acts on the selected original files, just as on
 PC. Android cloud/device-transfer backup of private app data is disabled.
 
+Android's file picker lets you choose where to save a current library backup, its
+previous version after restore, or a photobook PNG or ZIP. Face Manager reports
+completion after the chosen destination has finished writing.
+
 Allow notifications when asked to see background status and the **Beenden** action.
 Photo management also works when notifications are denied. Android can interrupt
 background processing; persisted imports recover on the next start. Android 15 and newer
@@ -69,7 +73,8 @@ WebView navigation. Gradle stores the reports under `android/app/build/reports/`
 
 For physical S22 acceptance, additionally verify One UI storage permission and
 original-photo GPS access, long background imports, representative personal photo
-quality, touch map selection in portrait/landscape and update installation.
+quality, touch map selection in portrait/landscape and update installation. Test
+the save picker with rotation, cancellation, and a failing storage provider.
 
 ## Signing local packages
 

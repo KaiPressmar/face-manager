@@ -29,6 +29,7 @@ import android.webkit.RenderProcessGoneDetail;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -43,43 +44,36 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
-import com.chaquo.python.Python;
-
 import java.io.ByteArrayInputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /** Trusted WebView host for the same React application served by the on-device Python API. */
 public final class MainActivity extends ComponentActivity {
     private static final int INK = Color.rgb(30, 48, 42);
-    private static final int GREEN = Color.rgb(36, 106, 86);
     private static final int PAPER = Color.rgb(248, 248, 244);
     private static final int REQUEST_READ_FILES = 301;
     private static final int REQUEST_MEDIA_LOCATION = 302;
     private static final int REQUEST_NOTIFICATIONS = 303;
-    private static final String KEY_EXPORT = "pendingExport";
     private static final String KEY_PERMISSION_IN_FLIGHT = "optionalPermissionInFlight";
+    private static final DocumentExport DOCUMENT_EXPORT = new DocumentExport();
     // Instrumentation cannot revoke MANAGE_EXTERNAL_STORAGE in its own UID: Android kills it.
     static volatile Boolean fileAccessOverrideForTest;
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
     private AndroidBridge bridge;
     private final BackendService.Listener backendListener = this::showCurrentState;
+    private final Runnable exportListener = this::showExportState;
     private LinearLayout root;
     private WebView web;
     private String origin;
-    private String pendingExport;
     private boolean pageErrorShown;
     private boolean optionalPermissionInFlight;
+    private boolean resumed;
     private CompletableFuture<String> folderChoice;
     private WebChromeClient.FileChooserParams chooserParams;
     private android.webkit.ValueCallback<Uri[]> fileCallback;
@@ -95,9 +89,9 @@ public final class MainActivity extends ComponentActivity {
         getOnBackPressedDispatcher().addCallback(this, workspaceBack);
         bridge = new AndroidBridge(this);
         if (state != null) {
-            pendingExport = state.getString(KEY_EXPORT);
             optionalPermissionInFlight = state.getBoolean(KEY_PERMISSION_IN_FLIGHT);
         }
+        DOCUMENT_EXPORT.restore(this, state);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         getWindow().setNavigationBarColor(Color.TRANSPARENT);
@@ -121,17 +115,11 @@ public final class MainActivity extends ComponentActivity {
             }
         });
         exportPicker = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
-            String snapshot = pendingExport;
-            pendingExport = null;
-            if (snapshot == null) return;
-            if (result.getResultCode() != RESULT_OK || result.getData() == null
-                    || result.getData().getData() == null) {
-                new File(snapshot).delete();
-                return;
-            }
-            Uri destination = result.getData().getData();
-            io.execute(() -> writeSnapshot(snapshot, destination));
+            Uri destination = result.getResultCode() == RESULT_OK && result.getData() != null
+                    ? result.getData().getData() : null;
+            DOCUMENT_EXPORT.onPickerResult(this, destination);
         });
+        DOCUMENT_EXPORT.attach(exportListener);
         AndroidBridge.attach(this);
         BackendService.addListener(backendListener);
     }
@@ -143,8 +131,19 @@ public final class MainActivity extends ComponentActivity {
         checkAccessAndStart();
     }
 
+    @Override protected void onPostResume() {
+        super.onPostResume();
+        resumed = true;
+        showExportState();
+    }
+
+    @Override protected void onPause() {
+        resumed = false;
+        super.onPause();
+    }
+
     @Override protected void onSaveInstanceState(Bundle out) {
-        out.putString(KEY_EXPORT, pendingExport);
+        DOCUMENT_EXPORT.save(out);
         out.putBoolean(KEY_PERMISSION_IN_FLIGHT, optionalPermissionInFlight);
         super.onSaveInstanceState(out);
     }
@@ -152,6 +151,7 @@ public final class MainActivity extends ComponentActivity {
     @Override protected void onDestroy() {
         BackendService.removeListener(backendListener);
         AndroidBridge.detach(this);
+        DOCUMENT_EXPORT.detach(exportListener, isFinishing());
         if (folderChoice != null) folderChoice.complete(null);
         if (fileCallback != null) fileCallback.onReceiveValue(null);
         if (web != null) {
@@ -160,7 +160,6 @@ public final class MainActivity extends ComponentActivity {
             web.destroy();
             web = null;
         }
-        io.shutdown();
         super.onDestroy();
     }
 
@@ -297,29 +296,40 @@ public final class MainActivity extends ComponentActivity {
 
     private void showIntro() {
         if (isFinishing() || isDestroyed()) return;
+        LinearLayout page = nativePage();
+        TextView title = label("Face Manager für dein Telefon", 27, INK, true);
+        title.setAccessibilityHeading(true);
+        page.addView(title);
+        TextView detail = label("Deine Fotobibliothek funktioniert offline und ist unabhängig von Face Manager auf deinem PC. Deine Originalfotos bleiben am Speicherort.", 16, INK, false);
+        detail.setLineSpacing(dp(5), 1f);
+        LinearLayout.LayoutParams copy = new LinearLayout.LayoutParams(-1, -2);
+        copy.topMargin = dp(16);
+        page.addView(detail, copy);
+        TextView access = label("Erlaube in den Android-Einstellungen den Zugriff auf alle Dateien. Damit kann Face Manager gewählte Ordner durchsuchen und auf Wunsch Dateinamen ändern.", 16, INK, false);
+        LinearLayout.LayoutParams accessLp = new LinearLayout.LayoutParams(-1, -2);
+        accessLp.topMargin = dp(12);
+        page.addView(access, accessLp);
+        Button grant = action("Dateizugriff erlauben", this::requestFileAccess);
+        LinearLayout.LayoutParams grantLp = new LinearLayout.LayoutParams(-1, -2);
+        grantLp.topMargin = dp(20);
+        page.addView(grant, grantLp);
+    }
+
+    private LinearLayout nativePage() {
         root.removeAllViews();
         root.setBackgroundColor(PAPER);
         WindowInsetsControllerCompat bars = new WindowInsetsControllerCompat(getWindow(), root);
         bars.setAppearanceLightStatusBars(true);
         bars.setAppearanceLightNavigationBars(true);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
         page.setGravity(Gravity.CENTER);
-        page.setPadding(dp(28), dp(24), dp(28), dp(24));
-        root.addView(page, new LinearLayout.LayoutParams(-1, -1));
-        TextView mark = label("◎", 55, GREEN, true);
-        page.addView(mark);
-        TextView title = label("Face Manager für dein Telefon", 27, INK, true);
-        page.addView(title);
-        TextView detail = label("Deine Fotobibliothek wird nur auf diesem Gerät verwaltet und funktioniert offline. Sie ist unabhängig von Face Manager auf deinem PC. Originalfotos bleiben am Speicherort; um Ordner zu durchsuchen und Dateinamen zu ändern, benötigt die App Zugriff auf alle Dateien.", 16, INK, false);
-        detail.setLineSpacing(dp(5), 1f);
-        LinearLayout.LayoutParams copy = new LinearLayout.LayoutParams(-1, -2);
-        copy.topMargin = dp(16);
-        page.addView(detail, copy);
-        Button grant = action("Dateizugriff erlauben", this::requestFileAccess);
-        LinearLayout.LayoutParams grantLp = new LinearLayout.LayoutParams(-1, dp(56));
-        grantLp.topMargin = dp(26);
-        page.addView(grant, grantLp);
+        page.setPadding(dp(24), dp(24), dp(24), dp(24));
+        scroll.addView(page, new ScrollView.LayoutParams(-1, -2));
+        root.addView(scroll, new LinearLayout.LayoutParams(-1, -1));
+        return page;
     }
 
     private void showCurrentState() {
@@ -329,16 +339,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (web != null) closeWeb();
-        root.removeAllViews();
-        root.setBackgroundColor(PAPER);
-        WindowInsetsControllerCompat bars = new WindowInsetsControllerCompat(getWindow(), root);
-        bars.setAppearanceLightStatusBars(true);
-        bars.setAppearanceLightNavigationBars(true);
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setGravity(Gravity.CENTER);
-        page.setPadding(dp(24), dp(24), dp(24), dp(24));
-        root.addView(page, new LinearLayout.LayoutParams(-1, -1));
+        LinearLayout page = nativePage();
         String error = BackendService.error();
         boolean stopped = error == null && !BackendService.starting();
         if (error == null && !stopped) {
@@ -347,16 +348,24 @@ public final class MainActivity extends ComponentActivity {
         }
         TextView title = label(error != null ? "Start fehlgeschlagen"
                 : stopped ? "Bibliothek angehalten" : "Deine Bibliothek startet …", 22, INK, true);
+        title.setAccessibilityHeading(true);
+        title.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-1, -2);
         titleLp.topMargin = dp(20);
         page.addView(title, titleLp);
         if (error != null || stopped) {
-            TextView detail = label(error == null ? "Du kannst den lokalen Dienst erneut starten."
-                    : error, 14, INK, false);
+            TextView detail = label(error == null ? "Du kannst Face Manager hier wieder starten."
+                    : "Die Fotobibliothek konnte auf diesem Gerät nicht geöffnet werden.", 16, INK, false);
             detail.setPadding(0, dp(10), 0, dp(12));
             page.addView(detail);
             page.addView(action("Erneut versuchen", this::checkAccessAndStart),
-                    new LinearLayout.LayoutParams(-1, dp(52)));
+                    new LinearLayout.LayoutParams(-1, -2));
+            if (error != null) {
+                page.addView(action("Fehlerdetails anzeigen", () -> new AlertDialog.Builder(this)
+                                .setTitle("Fehlerdetails").setMessage(error)
+                                .setPositiveButton("Schließen", null).show()),
+                        new LinearLayout.LayoutParams(-1, -2));
+            }
         }
     }
 
@@ -479,56 +488,65 @@ public final class MainActivity extends ComponentActivity {
                     pageErrorShown = false;
                     if (web != null && origin != null) web.loadUrl(origin + "/");
                 })
-                .setNegativeButton("Schließen", null)
+                .setNegativeButton("Schließen", (dialog, which) -> pageErrorShown = false)
+                .setOnCancelListener(dialog -> pageErrorShown = false)
                 .show();
+    }
+
+    private void showExportState() {
+        if (isFinishing() || isDestroyed()) return;
+        String notice = DOCUMENT_EXPORT.takeStagedFileNotice();
+        if (trustedWeb()) {
+            web.evaluateJavascript("window.dispatchEvent(new Event('face-manager:android-export', {cancelable: true}))",
+                    notice == null ? null : handled -> {
+                        if (!"false".equals(handled)) showExportNotice(notice);
+                    });
+        } else if (notice != null) {
+            showExportNotice(notice);
+        }
+        if (resumed && hasFileAccess()) DOCUMENT_EXPORT.openPicker(exportPicker);
+    }
+
+    private void showExportNotice(String notice) {
+        Toast.makeText(getApplicationContext(), notice, Toast.LENGTH_LONG).show();
+    }
+
+    private boolean trustedWeb() {
+        return web != null && web.getUrl() != null && isTrusted(Uri.parse(web.getUrl()));
     }
 
     /** JS is injected only into the trusted local page; remote frames and requests are blocked. */
     private final class WebExports {
         @JavascriptInterface public void requestDatabaseExport() {
+            requestExport(false);
+        }
+
+        @JavascriptInterface public void requestPreviousDatabaseExport() {
+            requestExport(true);
+        }
+
+        @JavascriptInterface public String getDatabaseExportStatus() {
+            return DOCUMENT_EXPORT.status();
+        }
+
+        @JavascriptInterface public void requestStagedFileExport(String token, String filename) {
             main.post(() -> {
-                if (web == null || web.getUrl() == null
-                        || !isTrusted(Uri.parse(web.getUrl())) || pendingExport != null) return;
-                io.execute(() -> {
-                    try {
-                        String path = Python.getInstance().getModule("android_runtime")
-                                .callAttr("export_database").toString();
-                        if (!new File(path).isFile()) throw new IOException("Sicherung wurde nicht erstellt");
-                        main.post(() -> {
-                            if (isFinishing() || isDestroyed()) {
-                                new File(path).delete();
-                                return;
-                            }
-                            pendingExport = path;
-                            Intent save = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-                            save.setType("application/octet-stream");
-                            save.addCategory(Intent.CATEGORY_OPENABLE);
-                            save.putExtra(Intent.EXTRA_TITLE, "face-manager-database.sqlite");
-                            exportPicker.launch(save);
-                        });
-                    } catch (Exception ex) {
-                        main.post(() -> Toast.makeText(MainActivity.this,
-                                "Sicherung fehlgeschlagen: " + ex.getMessage(),
-                                Toast.LENGTH_LONG).show());
-                    }
-                });
+                if (!isFinishing() && !isDestroyed() && trustedWeb()) {
+                    DOCUMENT_EXPORT.startStagedFile(MainActivity.this, token, filename);
+                }
             });
         }
-    }
 
-    private void writeSnapshot(String path, Uri destination) {
-        try (FileInputStream source = new FileInputStream(path);
-             OutputStream target = getContentResolver().openOutputStream(destination, "w")) {
-            if (target == null) throw new IOException("Zieldatei nicht verfügbar");
-            byte[] chunk = new byte[64 * 1024];
-            int count;
-            while ((count = source.read(chunk)) != -1) target.write(chunk, 0, count);
-            main.post(() -> Toast.makeText(this, "Sicherung gespeichert", Toast.LENGTH_SHORT).show());
-        } catch (Exception ex) {
-            main.post(() -> Toast.makeText(this, "Sicherung fehlgeschlagen: " + ex.getMessage(),
-                    Toast.LENGTH_LONG).show());
-        } finally {
-            new File(path).delete();
+        @JavascriptInterface public String getStagedFileExportStatus(String token) {
+            return DOCUMENT_EXPORT.stagedStatus(token);
+        }
+
+        private void requestExport(boolean previousLibrary) {
+            main.post(() -> {
+                if (isFinishing() || isDestroyed() || !trustedWeb()) return;
+                DOCUMENT_EXPORT.start(previousLibrary);
+                showExportState();
+            });
         }
     }
 

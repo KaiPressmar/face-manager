@@ -95,6 +95,7 @@ from .services.preview_cache_budget import (
     validate_preview_cache_limit_mib,
 )
 from .services.filesystem_paths import filesystem_path
+from .services.photo_identity import RegisteredPhotoChanged, file_identity
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
 from .services.face_action_history import FaceActionConflict, face_action_history, replay_face_action
 from .services.cache import app_cache
@@ -153,6 +154,7 @@ from .services.storage import (
     get_image_preview_source,
     get_recorded_face_boxes,
     get_available_image_path,
+    open_available_image_file,
     invalidate_image_query_cache,
     invalidate_person_suggestion_epoch,
     get_person_suggestion_epoch,
@@ -192,6 +194,8 @@ from .services.storage import (
     normalize_face_review_group,
     normalize_face_status_filters,
     preview_image_location_renames,
+    list_interrupted_image_renames,
+    recover_interrupted_image_renames,
     rename_cluster,
     rename_person,
     delete_person,
@@ -307,7 +311,18 @@ def safe_import_enqueue(function):
     return guarded
 
 
-def _publish_imports() -> None:
+def guard_import_library_change(function):
+    """Keep import controls out of the database replacement transaction."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        with _cluster_operation_lock:
+            _get_media_library_generation()
+            return function(*args, **kwargs)
+
+    return guarded
+
+
+def _publish_imports(*, library_replaced: bool = False) -> None:
     """Push the current import-queue snapshot to subscribed clients."""
     global _import_was_busy, _last_import_progress
     snapshot = import_queue.snapshot()
@@ -326,8 +341,8 @@ def _publish_imports() -> None:
         if isinstance(job, dict) and job.get("id") is not None
     }
     with _import_activity_lock:
-        became_idle = _import_was_busy and not busy
-        library_grew = any(
+        became_idle = not library_replaced and _import_was_busy and not busy
+        library_grew = not library_replaced and any(
             progress > _last_import_progress.get(job_id, (0, 0))
             for job_id, progress in current_progress.items()
         )
@@ -507,10 +522,20 @@ def _publish_image_path_cleanup(snapshot: dict) -> None:
         reset_import_resources()
         notify_clusters_changed("image_path_cleanup")
 
+def _recover_renames_before_path_cleanup() -> None:
+    try:
+        result = recover_interrupted_image_renames()
+    except (OSError, sqlite3.DatabaseError):
+        logger.warning("Could not recover interrupted file renames", exc_info=True)
+        return
+    if result["resolved_count"]:
+        notify_clusters_changed("image_rename_recovery")
+
 
 image_path_cleanup = ImagePathCleanup(
     is_idle=is_backend_idle_for_path_cleanup,
     on_change=_publish_image_path_cleanup,
+    before_scan=_recover_renames_before_path_cleanup,
 )
 
 
@@ -750,6 +775,7 @@ async def lifespan(_app: FastAPI):
             update_manager.cleanup_cache(get_data_root() / "updates", APP_VERSION)
             auto_cluster_queue.resume_after_shutdown()
             idle_recluster_scheduler.start()
+            _publish_imports(library_replaced=True)
             import_queue.start()
             if not schedule_version_clustering_upgrade():
                 run_startup_repairs()
@@ -763,7 +789,8 @@ async def lifespan(_app: FastAPI):
                 assist_thread.start()
             geo_backfill.start()
             image_path_cleanup.resume()
-            image_path_cleanup.schedule("startup", delay_seconds=60.0)
+            pending_renames = list_interrupted_image_renames()["pending_count"]
+            image_path_cleanup.schedule("startup", delay_seconds=0.0 if pending_renames else 60.0)
         except Exception:
             logger.exception("Could not start import queue during application startup")
             raise
@@ -1125,6 +1152,9 @@ def serialize_import_snapshot(snapshot, display_platform: str):
         if job.get("current_file"):
             if display_platform == "windows":
                 job["current_file"] = to_display_path(job["current_file"])
+        if display_platform == "windows":
+            for issue in job.get("issues", []):
+                issue["path"] = to_display_path(issue["path"])
         for station in job.get("stations", []):
             if station.get("current_file"):
                 if display_platform == "windows":
@@ -1623,6 +1653,7 @@ def api_undo_archive_repair(selection: _ArchiveRepairUndo):
 
 def _initialize_restored_library() -> None:
     init_db(recover=False, scan_sources=False)
+    import_queue.reload_from_library()
     reset_import_resources()
     invalidate_image_query_cache()
     app_cache.clear()
@@ -1748,6 +1779,8 @@ def api_import_database(
                 person_suggestion_worker.start()
             if drain_started:
                 image_path_cleanup.resume()
+                if library_ready and list_interrupted_image_renames()["pending_count"]:
+                    image_path_cleanup.schedule("database_restore", delay_seconds=0.0)
             if geo_stopped:
                 try:
                     geo_backfill.start()
@@ -1756,6 +1789,7 @@ def api_import_database(
             if restore_gate:
                 auto_cluster_queue.notify_ready()
         if library_ready:
+            _publish_imports(library_replaced=True)
             notify_clusters_changed("database_import")
             person_suggestion_worker.wake()
             try:
@@ -1836,10 +1870,10 @@ def api_imports(request: Request):
     Returns:
         Queue summary with active, queued, and recent terminal jobs.
     """
-    return serialize_import_snapshot(
-        import_queue.snapshot(),
-        get_display_platform(request),
-    )
+    generation = _get_media_library_generation()
+    snapshot = import_queue.snapshot()
+    _get_media_library_generation(generation)
+    return serialize_import_snapshot(snapshot, get_display_platform(request))
 
 
 @app.get("/api/shared-library")
@@ -1971,11 +2005,13 @@ def api_library_identity(response: Response):
 
 
 @app.delete("/api/imports/history")
+@guard_import_library_change
 def api_delete_import_history():
     return {"removed_count": import_queue.clear_history()}
 
 
 @app.post("/api/imports/{job_id}/pause")
+@guard_import_library_change
 def api_pause_import(job_id: str):
     result = import_queue.pause(job_id)
     if result is None:
@@ -1984,6 +2020,7 @@ def api_pause_import(job_id: str):
 
 
 @app.post("/api/imports/{job_id}/resume")
+@guard_import_library_change
 def api_resume_import(job_id: str):
     result = import_queue.resume(job_id)
     if result is None:
@@ -1991,7 +2028,19 @@ def api_resume_import(job_id: str):
     return result
 
 
+@app.post("/api/imports/{job_id}/retry", status_code=202)
+@safe_import_enqueue
+def api_retry_import_issues(request: Request, job_id: str):
+    """Queue the recorded skipped paths from a finished import."""
+    try:
+        job = import_queue.retry_issues(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return serialize_import_snapshot({"jobs": [job]}, get_display_platform(request))["jobs"][0]
+
+
 @app.post("/api/imports/{job_id}/cancel")
+@guard_import_library_change
 def api_cancel_import(job_id: str):
     result = import_queue.cancel(job_id)
     if result is None:
@@ -2000,6 +2049,7 @@ def api_cancel_import(job_id: str):
 
 
 @app.delete("/api/imports/{job_id}/history")
+@guard_import_library_change
 def api_delete_import_history_entry(job_id: str):
     result = import_queue.delete_terminal(job_id)
     if result is None:
@@ -2008,6 +2058,7 @@ def api_delete_import_history_entry(job_id: str):
 
 
 @app.delete("/api/imports/{job_id}")
+@guard_import_library_change
 def api_cancel_or_remove_import(job_id: str):
     """Cancel a running import or remove another queue entry.
 
@@ -2354,19 +2405,19 @@ def api_batch_update_faces(data: dict = Body(...)):
     action = str(data.get("action") or "").strip()
     face_ids = data.get("face_ids") or data.get("faceIds") or []
     try:
+        _get_media_library_generation()
+        expected_library_id = data.get("expected_library_id")
+        if expected_library_id is not None and expected_library_id != get_person_suggestion_epoch():
+            raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade die Gesichtsauswahl neu.")
+        expected_faces = _expected_face_assignments(data.get("expected_faces"))
         if action == "remove_from_cluster":
             cluster_id = int(data.get("cluster_id") or data.get("clusterId"))
-            updated = remove_faces_from_cluster(cluster_id, face_ids)
+            updated = remove_faces_from_cluster(cluster_id, face_ids, expected_faces=expected_faces)
             response = {"status": "ok", "updated_count": updated}
         elif action == "create_cluster":
-            cluster_id = create_cluster_from_faces(face_ids)
+            cluster_id = create_cluster_from_faces(face_ids, expected_faces=expected_faces)
             response = {"status": "ok", "cluster_id": cluster_id}
         elif action in {"assign_person", "mark_unknown_person", "mark_not_face"}:
-            _get_media_library_generation()
-            expected_library_id = data.get("expected_library_id")
-            if expected_library_id is not None and expected_library_id != get_person_suggestion_epoch():
-                raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade die Gesichtsauswahl neu.")
-            expected_faces = _expected_face_assignments(data.get("expected_faces"))
             with shared_library_preview.local_face_history_allowed() as record_history:
                 if action == "assign_person":
                     person_name = data.get("person_name") or data.get("personName")
@@ -2388,7 +2439,7 @@ def api_batch_update_faces(data: dict = Body(...)):
             else:
                 response = {"status": "ok", response_field: result}
         elif action == "restore_to_manual_review":
-            updated = restore_faces_to_manual_review(face_ids)
+            updated = restore_faces_to_manual_review(face_ids, expected_faces=expected_faces)
             response = {"status": "ok", "updated_count": updated}
         else:
             raise HTTPException(status_code=400, detail="Diese Aktion ist nicht verfügbar.")
@@ -2559,7 +2610,7 @@ def _source_worker() -> None:
             future.set_exception(exc)
 
 
-async def _run_source_work(operation):
+async def _run_source_work(operation, *, discard=None):
     global _source_workers_started
     with _source_work_lock:
         if not _source_workers_started:
@@ -2586,6 +2637,11 @@ async def _run_source_work(operation):
         # retain their worker; queued requests are skipped when dequeued.
         future.cancel()
         pending.add_done_callback(lambda result: None if result.cancelled() else result.exception())
+        if discard is not None:
+            def discard_abandoned(result):
+                if not result.cancelled() and result.exception() is None:
+                    discard(result.result())
+            future.add_done_callback(discard_abandoned)
         if isinstance(exc, asyncio.CancelledError):
             raise
         raise HTTPException(
@@ -2607,25 +2663,100 @@ def _get_media_library_generation(expected: int | None = None) -> int:
         return _media_library_generation
 
 
+def _original_photo_range(value: str, size: int) -> tuple[int, int] | None:
+    # A single range covers progressive image reads and resumed downloads.
+    # For multiple ranges, the HTTP server can send the complete resource.
+    if "," in value:
+        return None
+    match = re.fullmatch(r"bytes\s*=\s*([0-9]*)\s*-\s*([0-9]*)", value.strip())
+    if match is None or not any(match.groups()):
+        raise HTTPException(status_code=400, detail="Der angeforderte Dateibereich ist ungültig.")
+    first, last = match.groups()
+    try:
+        start = int(first) if first else max(0, size - int(last))
+        stop = min(size, int(last) + 1) if first and last else size
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Der angeforderte Dateibereich ist ungültig.") from exc
+    if start >= size:
+        raise HTTPException(
+            status_code=416,
+            detail="Der angeforderte Dateibereich liegt außerhalb des Fotos.",
+            headers={"Content-Range": f"bytes */{size}"},
+        )
+    if stop <= start:
+        raise HTTPException(status_code=400, detail="Der angeforderte Dateibereich ist ungültig.")
+    return start, stop
+
+
+class _OriginalPhotoResponse(StreamingResponse):
+    def __init__(self, path, source, info, request):
+        self._source = source
+        self._identity = file_identity(info)
+        headers = dict(FileResponse(path, stat_result=info).headers)
+        headers["cache-control"] = "private, no-store"
+        headers["accept-ranges"] = "bytes"
+        start, stop = 0, info.st_size
+        status_code = 200
+        if request is not None and (range_header := request.headers.get("range")):
+            if_range = request.headers.get("if-range")
+            if if_range is None or if_range in (headers["etag"], headers["last-modified"]):
+                requested = _original_photo_range(range_header, info.st_size)
+                if requested is not None:
+                    start, stop = requested
+                    status_code = 206
+                    headers["content-range"] = f"bytes {start}-{stop - 1}/{info.st_size}"
+                    headers["content-length"] = str(stop - start)
+        super().__init__(
+            self._chunks(start, stop), status_code=status_code, headers=headers,
+        )
+
+    def _chunks(self, start: int, stop: int):
+        if start:
+            self._source.seek(start)
+        while start < stop:
+            chunk = self._source.read(min(256 * 1024, stop - start))
+            if not chunk or not self._unchanged():
+                raise OSError("Die Originaldatei wurde während der Übertragung geändert.")
+            start += len(chunk)
+            yield chunk
+
+    def _unchanged(self) -> bool:
+        return file_identity(os.fstat(self._source.fileno())) == self._identity
+
+    async def __call__(self, scope, receive, send):
+        try:
+            if await run_in_threadpool(self._unchanged):
+                await super().__call__(scope, receive, send)
+            else:
+                await JSONResponse(
+                    {"detail": "Die Originaldatei wurde während der Prüfung geändert."}, status_code=409,
+                )(scope, receive, send)
+        finally:
+            self._source.close()
+
+
+def _close_open_photo(available):
+    if available is not None:
+        available[1].close()
+
+
 @app.get("/api/images/{image_id}/file")
-async def get_image(image_id: int):
-    """Serve an image from an available filesystem location.
-
-    Args:
-        image_id: Canonical image identifier.
-
-    Returns:
-        Streaming file response.
-
-    Raises:
-        HTTPException: If no image location exists.
-    """
+async def get_image(image_id: int, request: Request = None):
+    """Stream the same open file that was verified against the library."""
     generation = _get_media_library_generation()
-    path = await _run_source_work(partial(get_available_image_path, image_id))
-    _get_media_library_generation(generation)
-    if not path:
-        raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    return FileResponse(filesystem_path(path))
+    try:
+        available = await _run_source_work(partial(open_available_image_file, image_id), discard=_close_open_photo)
+    except RegisteredPhotoChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if available is None:
+        _get_media_library_generation(generation)
+        raise HTTPException(status_code=404, detail="Das Originalfoto ist nicht erreichbar.")
+    try:
+        _get_media_library_generation(generation)
+        return _OriginalPhotoResponse(*available, request)
+    except BaseException:
+        _close_open_photo(available)
+        raise
 
 
 def _thumbnail_response(thumbnail_path: str | Path, request: Request) -> Response:
@@ -2720,7 +2851,7 @@ def _render_registered_preview(
         cached = _cached_registered_preview(preview_id, content_hash, bbox)
         if cached is not None:
             return cached
-    locations = list_image_locations([image_id]).get(image_id, ())
+    locations = list_image_locations([image_id], include_source_hash=True).get(image_id, ())
     failed = False
     for location in locations:
         _get_media_library_generation(generation)
@@ -2732,7 +2863,7 @@ def _render_registered_preview(
                     ensure_face_thumbnail(preview_id, source, bbox)
                     if bbox is not None else Path(ensure_image_thumbnail(preview_id, source))
                 )
-            image, geometry = decode_verified_preview(source, content_hash)
+            image, geometry = decode_verified_preview(source, location.get("source_hash", content_hash))
         except FileNotFoundError:
             continue
         except (OSError, ValueError, Image.DecompressionBombError):
@@ -2836,11 +2967,14 @@ def open_image_location(image_id: int, data: dict = Body(default=None)):
     preferred_path = data.get("image_path") if data else None
     if preferred_path:
         preferred_path = normalize_import_folder_path(preferred_path)
-    path = get_available_image_path(
-        image_id,
-        preferred_path,
-        require_preferred=bool(preferred_path),
-    )
+    try:
+        path = get_available_image_path(
+            image_id,
+            preferred_path,
+            require_preferred=bool(preferred_path),
+        )
+    except RegisteredPhotoChanged as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not path:
         raise HTTPException(
             status_code=404,
@@ -2879,10 +3013,10 @@ def api_get_image_path_cleanup():
 
 
 @app.post("/api/maintenance/image-paths")
-def api_start_image_path_cleanup():
+def api_start_image_path_cleanup(remove_missing: bool = True):
     """Queue a low-priority validation of every stored image location."""
     with _cluster_operation_lock:
-        return image_path_cleanup.start("manual")
+        return image_path_cleanup.start("manual" if remove_missing else "manual_check")
 
 
 def _stored_image_geometry(row) -> tuple[int, int, int] | None:
@@ -2987,7 +3121,7 @@ def api_image_detail(request: Request, image_id: int):
 
 def _resolve_image_geometry(image_id: int, content_hash: str | None, generation: int):
     _get_media_library_generation(generation)
-    for location in list_image_locations([image_id]).get(image_id, ()):
+    for location in list_image_locations([image_id], include_source_hash=True).get(image_id, ()):
         _get_media_library_generation(generation)
         path = location["path"]
         try:
@@ -2995,7 +3129,7 @@ def _resolve_image_geometry(image_id: int, content_hash: str | None, generation:
                 # With no hash, use the same source and version checks as the
                 # thumbnail. Keep the result ephemeral for this response.
                 return read_legacy_preview_geometry(image_id, path), path
-            geometry = read_verified_preview_geometry(path, content_hash)
+            geometry = read_verified_preview_geometry(path, location.get("source_hash", content_hash))
         except (OSError, ValueError, Image.DecompressionBombError):
             continue
         _remember_image_geometry(image_id, content_hash, geometry, generation)
@@ -3063,9 +3197,12 @@ def _registered_face_preview(image_id: int, source) -> FacePreview | None:
     return FacePreview(body, geometry, content_hash)
 
 
-async def _face_preview_paths(image_id: int) -> list[str]:
-    locations = await run_in_threadpool(list_image_locations, [image_id])
-    return [location["path"] for location in locations.get(image_id, ())]
+async def _face_preview_paths(image_id: int, *, include_source_hash: bool = False):
+    locations = await run_in_threadpool(list_image_locations, [image_id], include_source_hash=include_source_hash)
+    return [
+        (location["path"], location["source_hash"]) if "source_hash" in location else location["path"]
+        for location in locations.get(image_id, ())
+    ]
 
 
 @app.get("/api/images/{image_id}/manual-face-preview")
@@ -3075,7 +3212,7 @@ async def api_manual_face_preview(image_id: int):
     if source is None:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
     content_hash = source["content_hash"]
-    paths = await _face_preview_paths(image_id)
+    paths = await _face_preview_paths(image_id, include_source_hash=True)
 
     try:
         preview = await _run_source_work(partial(render_face_preview, paths, content_hash))
@@ -3197,7 +3334,7 @@ async def api_face_box_suggestions(
     source = await run_in_threadpool(get_image_preview_source, image_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
-    paths = await _face_preview_paths(image_id)
+    paths = await _face_preview_paths(image_id, include_source_hash=True)
     content_hash = source["content_hash"]
     source_hash = content_hash
     if preview_token is not None:
@@ -3844,6 +3981,7 @@ def _image_rename_selection(data):
 @app.post("/api/image-renames/preview")
 def api_preview_image_rename_candidates(request: Request, data: dict = Body(...)):
     generation = _get_media_library_generation()
+    library_id = get_person_suggestion_epoch()
     preview = preview_image_location_renames(**_image_rename_selection(data))
     _get_media_library_generation(generation)
     if get_display_platform(request) == "windows":
@@ -3851,13 +3989,46 @@ def api_preview_image_rename_candidates(request: Request, data: dict = Body(...)
             item["path"] = to_display_path(item["path"])
             if item["target_path"]:
                 item["target_path"] = to_display_path(item["target_path"])
-    return preview
+    return {**preview, "library_id": library_id}
+
+
+def _display_rename_recovery(request: Request, result: dict) -> dict:
+    if get_display_platform(request) == "windows":
+        result["pending"] = [
+            {key: to_display_path(value) for key, value in item.items()}
+            for item in result["pending"]
+        ]
+    return result
+
+
+@app.get("/api/image-renames/recovery")
+def api_list_interrupted_image_renames(request: Request):
+    generation = _get_media_library_generation()
+    report = list_interrupted_image_renames()
+    _get_media_library_generation(generation)
+    return _display_rename_recovery(request, report)
+
+
+@app.post("/api/image-renames/recovery")
+@safe_cluster_mutation
+def api_recover_interrupted_image_renames(request: Request):
+    _get_media_library_generation()
+    try:
+        report = recover_interrupted_image_renames()
+    except OSError as exc:
+        raise HTTPException(status_code=409, detail="Umbenennungen werden bereits geprüft. Versuche es erneut.") from exc
+    if report["resolved_count"]:
+        notify_clusters_changed("image_rename_recovery")
+    return _display_rename_recovery(request, report)
 
 
 @app.post("/api/image-renames/apply")
 @safe_cluster_mutation
 def api_apply_image_rename_candidates(data: dict = Body(...)):
     """Rename selected image paths and update the database."""
+    _get_media_library_generation()
+    if "expected_library_id" in data and data["expected_library_id"] != get_person_suggestion_epoch():
+        raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Prüfe die Dateinamenvorschläge erneut.")
     selection = _image_rename_selection(data)
     targets = data.get("confirmed_targets")
     if targets is not None:

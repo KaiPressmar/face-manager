@@ -24,7 +24,7 @@ export default function RestoreConfirmation({ file, preview, onClose, onConfirm 
       })}</p>}
       <p>{countWithLabel(preview.photos, "Foto", "Fotos")} · {countWithLabel(preview.people, "Person", "Personen")} · {countWithLabel(preview.albums, "Album", "Alben")}</p>
       <p>Die Sicherung ersetzt deine aktuellen Zuordnungen, Alben und Einstellungen. Deine Fotodateien bleiben an ihren Speicherorten.</p>
-      <p>Face Manager sichert den bisherigen Stand. Du findest ihn anschließend unter „Vorherige Bibliothek herunterladen“.</p>
+      <p>Face Manager sichert den bisherigen Stand. Du kannst ihn anschließend über „Vorherige Bibliothek“ speichern. Offene Importe aus der Sicherung bleiben pausiert.</p>
       <div className="settings-actions">
         <button type="button" className="secondary-button" data-initial-focus onClick={onClose}>Abbrechen</button>
         <button type="button" className="primary-button" onClick={onConfirm}>Bibliothek wiederherstellen</button>

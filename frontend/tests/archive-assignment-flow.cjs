@@ -68,11 +68,20 @@ module.exports = async function archiveAssignmentFlow(browser, errors, newPage, 
       expected_library_id: libraryId,
     });
     assert.deepEqual(faces.map((face) => face.id), [41101, 41102]);
-    console.log('PASS archive assignment: no default person, explicit group scope, exact guarded selection');
+    await page.getByRole('button', { name: /^Gruppe 4101\b/ }).click();
+    const groupRestored = page.waitForResponse('**/api/faces/batch');
+    await page.getByRole('button', { name: 'Erneut prüfen', exact: true }).click();
+    await groupRestored;
+    assert.deepEqual(postBodies[2], {
+      action: 'restore_to_manual_review', face_ids: [41101, 41102], expected_library_id: libraryId,
+      expected_faces: [41101, 41102].map((id) => ({ id, cluster_id: 4101, review_status: 'unknown_person', person_name: null })),
+    });
+    console.log('PASS archive assignment and restore: explicit group scope and exact guarded selections');
   } finally {
     await page.close();
   }
   await mixedLibraryAssignment(browser, errors, newPage, webBase);
+  await reviewRecoveryFlow(browser, errors, newPage, webBase);
 };
 
 async function mixedLibraryAssignment(browser, errors, newPage, webBase) {
@@ -114,6 +123,99 @@ async function mixedLibraryAssignment(browser, errors, newPage, webBase) {
     await page.getByRole('alert').filter({ hasText: 'unterschiedlichen Bibliotheksständen' }).waitFor();
     assert.equal(writes, 0, 'A mixed-library selection reached the mutation endpoint');
     console.log('PASS assignment epochs: a mixed-library selection cannot be submitted');
+  } finally {
+    await page.close();
+  }
+}
+
+async function reviewRecoveryFlow(browser, errors, newPage, webBase) {
+  const page = await newPage(browser, 1280, 800, errors);
+  const cluster = { cluster_id: 4301, cluster_label: 'Beständige Gruppen-ID', person_name: null, face_count: 1 };
+  const archive = { group_key: 'not_face', label: 'Keine Gesichter', face_count: 1, cluster_count: 1 };
+  const makeFace = (id, clusterId, status) => ({
+    id, image_id: 1, cluster_id: clusterId, person_name: null, review_status: status,
+    bbox_x: 5, bbox_y: 5, bbox_w: 25, bbox_h: 25,
+  });
+  let library = 'review-before-restore';
+  let groupFaceId = 4302;
+  const retryAllowed = (scope) => page.evaluate((key) => Boolean(window.reviewTestRetries[key]), scope);
+  const retry = async (button, scope) => {
+    await button.evaluate((element, key) => element.addEventListener('click', () => {
+      window.reviewTestRetries[key] = true;
+    }, { once: true }), scope);
+    await button.click();
+  };
+  try {
+    await page.addInitScript(() => {
+      window.reviewTestRetries = {};
+      window.EventSource = class ReviewTestEvents extends EventTarget {
+        static CONNECTING = 0;
+        readyState = 1;
+        constructor() {
+          super();
+          window.reviewTestEvents = this;
+          setTimeout(() => this.onopen?.(), 0);
+        }
+        close() { this.readyState = 2; }
+      };
+    });
+    await page.route('**/api/library-identity', (route) => route.fulfill({ json: { library_id: library } }));
+    await page.route('**/api/clusters-overview', async (route) => !await retryAllowed('sidebar')
+      ? route.fulfill({ status: 503, json: {} })
+      : route.fulfill({ json: { clusters: [cluster], review_groups: [archive], first_cluster: null } }));
+    await page.route('**/api/clusters', async (route) => !await retryAllowed('sidebar')
+      ? route.fulfill({ status: 503, json: {} }) : route.fulfill({ json: [cluster] }));
+    await page.route('**/api/face-review-groups', (route) => route.fulfill({ json: [archive] }));
+    await page.route('**/api/clusters/4301/faces', async (route) => !await retryAllowed('group')
+      ? route.fulfill({ status: 503, json: {} })
+      : route.fulfill({ json: { ...cluster, faces: [makeFace(groupFaceId, cluster.cluster_id, 'active')], assignment_library_id: library } }));
+    await page.route('**/api/face-review-groups/not_face/faces', async (route) => !await retryAllowed('archive')
+      ? route.fulfill({ status: 503, json: {} })
+      : route.fulfill({ json: { ...archive, faces: [makeFace(4309, null, 'not_face')], assignment_library_id: library } }));
+    let actualWrite;
+    await page.route('**/api/faces/batch', (route) => {
+      actualWrite = route.request().postDataJSON();
+      return route.fulfill({ json: { status: 'ok', updated_count: 1 } });
+    });
+
+    await page.goto(`${webBase}/#/gesichter-pruefen/ohne-namen`);
+    await page.getByRole('alert').filter({ hasText: 'Die Gesichtsgruppen konnten nicht geladen werden' }).waitFor();
+    assert.equal(await page.getByText('Keine offenen Gesichtsgruppen.', { exact: true }).count(), 0);
+    await retry(page.getByRole('button', { name: 'Gesichtsgruppen erneut laden', exact: true }), 'sidebar');
+    const retryGroup = page.getByRole('button', { name: 'Gesichter erneut laden', exact: true });
+    await retryGroup.waitFor();
+    await retry(retryGroup, 'group');
+    await page.getByRole('checkbox', { name: 'Gesicht 4302 auswählen' }).waitFor();
+
+    await page.evaluate(() => { location.hash = '#/gesichter-pruefen/kategorie/not_face'; });
+    const retryArchive = page.getByRole('button', { name: 'Archivgesichter erneut laden', exact: true });
+    await retryArchive.waitFor();
+    assert.equal(await page.getByText('Keine Gesichtsgruppen in diesem Bereich.', { exact: true }).count(), 0);
+    await retry(retryArchive, 'archive');
+    await page.getByRole('checkbox', { name: 'Gesicht 4309 auswählen' }).waitFor();
+
+    await page.evaluate(() => { location.hash = '#/einstellungen/daten'; });
+    await page.locator('[data-workspace-page="settings"].page-pane--active').waitFor();
+    library = 'review-after-restore';
+    groupFaceId = 4303;
+    await page.evaluate((libraryId) => {
+      window.reviewTestEvents.dispatchEvent(new MessageEvent('clusters', {
+        data: JSON.stringify({ reason: 'database_import', library_id: libraryId }),
+      }));
+    }, library);
+    await page.waitForFunction((libraryId) => history.state?.faceManagerWorkspace?.libraryId === libraryId, library);
+    await page.evaluate(() => { location.hash = '#/gesichter-pruefen/ohne-namen'; });
+    await page.getByRole('checkbox', { name: 'Gesicht 4303 auswählen' }).press('Space');
+    assert.equal(await page.getByRole('checkbox', { name: 'Gesicht 4302 auswählen' }).count(), 0);
+    await page.getByText('Aussortieren oder lösen', { exact: true }).click();
+    const removed = page.waitForResponse('**/api/faces/batch');
+    await page.getByRole('button', { name: 'Aus Gesichtsgruppe lösen', exact: true }).click();
+    await removed;
+    assert.deepEqual(actualWrite, {
+      action: 'remove_from_cluster', cluster_id: 4301, face_ids: [4303], expected_library_id: library,
+      expected_faces: [{ id: 4303, cluster_id: 4301, review_status: 'active', person_name: null }],
+    });
+    console.log('PASS review recovery: list and detail errors are retriable, hidden review cache clears on restore');
   } finally {
     await page.close();
   }

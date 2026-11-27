@@ -309,21 +309,21 @@ def _create_thumbnails_in_parallel(
 
 
 def _warm_registered_groups(
-    groups: dict[tuple[str, tuple[str, ...]], list[tuple[int, FaceBox]]],
+    groups: dict[tuple[str, tuple[tuple[str, str | None], ...]], list[tuple[int, FaceBox]]],
     stop_event: Event | None,
 ) -> tuple[int, int, int]:
     if not groups:
         return 0, 0, 0
 
     def warm(item):
-        (content_hash, paths), faces = item
+        (content_hash, locations), faces = item
         if stop_event is not None and stop_event.is_set():
             return 0, 0, 0
-        for path in paths:
+        for path, source_hash in locations:
             if stop_event is not None and stop_event.is_set():
                 return 0, 0, 0
             try:
-                raw, (orientation, _, _) = decode_verified_preview(path, content_hash)
+                raw, (orientation, _, _) = decode_verified_preview(path, source_hash or content_hash)
             except (OSError, ValueError, Image.DecompressionBombError):
                 continue
             with raw:
@@ -388,7 +388,7 @@ def warm_missing_face_thumbnails(
         locations = defaultdict(list)
         for row in conn.execute(
             """
-            SELECT image_id, path
+            SELECT image_id, path, content_hash
             FROM image_location
             WHERE image_id IN (
                 SELECT image_id FROM face WHERE id > ? ORDER BY id LIMIT ?
@@ -397,7 +397,7 @@ def warm_missing_face_thumbnails(
             """,
             (int(after_face_id), int(scan_limit)),
         ):
-            locations[row["image_id"]].append(row["path"])
+            locations[row["image_id"]].append((row["path"], row["content_hash"]))
     finally:
         conn.close()
 
@@ -425,16 +425,16 @@ def warm_missing_face_thumbnails(
             int(float(row["bbox_w"] or 0)),
             int(float(row["bbox_h"] or 0)),
         )
-        image_paths = locations[row["image_id"]]
+        image_locations = locations[row["image_id"]]
         if row["content_hash"]:
             content_hash = row["content_hash"]
             if get_cached_face_thumbnail(face_id, content_hash, bbox, touch=False) is not None:
                 skipped_existing += 1
                 continue
-            registered_groups[(content_hash, tuple(image_paths))].append((face_id, bbox))
+            registered_groups[(content_hash, tuple(image_locations))].append((face_id, bbox))
         else:
             image_path = next(
-                (path for path in image_paths if os.path.isfile(filesystem_path(path))),
+                (path for path, _ in image_locations if os.path.isfile(filesystem_path(path))),
                 None,
             )
             if image_path is None:

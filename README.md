@@ -54,7 +54,7 @@ Die Porträts und Reisefotos im älteren Bedienvideo wurden mit OpenAI erzeugt. 
 
 Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder** kannst du die Auswahl eingrenzen. In kleinen Fenstern öffnest du dazu **Filter und Sortierung**. Öffne ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
 
-![Fotobibliothek mit Nationalparkfotos, Alben und Personenfiltern](docs/screenshots/photo-library.webp)
+![Fotobibliothek mit Nationalparkfotos, Personenfiltern und einem für ein Album ausgewählten Foto](docs/screenshots/photo-library.webp)
 
 ![Importdialog mit ausgewählten Bilderordnern](docs/screenshots/import-sources.webp)
 
@@ -160,6 +160,7 @@ Die Beispielporträts stammen von der NASA und der U.S. Navy. [NASA-Porträt in 
 <summary>Dateinamen</summary>
 
 Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgesehenen Namen.
+Nach einem Abbruch prüft Face Manager offene Umbenennungen. Unter **Unterbrochene Umbenennungen** kannst du die betroffenen Pfade kopieren und die Prüfung erneut starten.
 
 ![Vorschau der aktuellen und vorgeschlagenen Dateinamen](docs/screenshots/filenames.webp)
 
@@ -200,7 +201,7 @@ In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps*
 
 ![Fotoansicht der Kompaktkarte mit Aufnahmen aus dem Kartenausschnitt](docs/screenshots/photo-map-compact-photos.webp)
 
-Die Offline-Übersicht gibt es unter **Kartendarstellung** in den Stilen **Standard**, **Landschaft** und **Satellit**. Aktiviere **Kartendetails online**, um beim Zoomen Straßen, Gebäude und feinere Gelände- oder Satellitenbilder zu laden. Nutze **+** oder einen Doppelklick in der Karte. Die Satellitendetails haben eine Auflösung von etwa zehn Metern pro Pixel. Straßen und Gebäudekonturen stammen aus der Straßenkarte.
+Die Offline-Übersicht gibt es unter **Kartendarstellung** in den Stilen **Standard**, **Landschaft** und **Satellit**. Aktiviere **Kartendetails online** unter der Karte, um beim Zoomen Straßen, Gebäude und feinere Gelände- oder Satellitenbilder zu laden. Zoome mit **+**, per Doppelklick oder auf dem Touchscreen mit zwei Fingern. Die Satellitendetails haben eine Auflösung von etwa zehn Metern pro Pixel. Straßen und Gebäudekonturen stammen aus der Straßenkarte.
 
 ![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite.webp)
 
@@ -229,6 +230,8 @@ Unter **Darstellung** kannst du Kartenstil, Markierungen, Ortsnamen und Verbindu
 
 Wähle **PNG speichern** und füge die Datei in deinem Fotobuchprogramm als Bild ein, etwa in CEWE. Wenn die Stoppliste mehrere Seiten umfasst, blättere in der Vorschau und speichere die aktuelle Seite über **Diese Seite als PNG speichern**. **Alle Seiten als ZIP speichern** bündelt die einzelnen PNG-Dateien. Über **Entwurf im Album speichern** kannst du die Gestaltung eines Reisealbums später wieder öffnen.
 
+![Druckvorschau im schmalen Fenster mit PNG-Schaltfläche direkt unter der Vorschau](docs/screenshots/photobook-compact.webp)
+
 ![A4-Fotobuchvorschau mit Stoppliste, Seitenwahl und Bestätigung für den ZIP-Export](docs/screenshots/photobook-zip.webp)
 
 </details>
@@ -236,11 +239,13 @@ Wähle **PNG speichern** und füge die Datei in deinem Fotobuchprogramm als Bild
 <details>
 <summary>Hilfe, Aktivitäten und Hardware</summary>
 
-Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
+Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. Wenn ein Import Hinweise meldet, öffne **Betroffene Pfade ansehen**. Wenn alle betroffenen Einträge in der Liste stehen, kannst du sie gezielt erneut prüfen.
+
+In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
 
 ![Hilfe mit Themenauswahl und direktem Einstieg in die Fotokarte](docs/screenshots/help.webp)
 
-![Aktivitäten mit Fortschritt und abgeschlossenen Aufgaben](docs/screenshots/activities.webp)
+![Aktivitäten mit den ausgelassenen Dateien und Ordnern eines Imports](docs/screenshots/activities.webp)
 
 ![Hardwarestatus der Gesichtserkennung mit CPU-Ersatzbetrieb und gemessenen Zeiten](docs/screenshots/hardware.webp)
 
@@ -249,11 +254,15 @@ Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlos
 <details>
 <summary>Einstellungen und gemeinsame Ordner</summary>
 
-Unter **Einstellungen → Darstellung** kannst du **Hell** oder **Dunkel** wählen. **System** übernimmt die Einstellung deines Betriebssystems. Unter **Daten und Wartung** erstellst du eine Sicherung und stellst die Größe des lokalen Vorschau-Speichers ein.
+Wähle **Hell**, **Dunkel** oder **System** direkt in der Kopfleiste oder unter **Einstellungen → Darstellung**. **System** übernimmt die Einstellung deines Betriebssystems. In schmalen Fenstern wechselst du über **Einstellungsbereich** zu den gewünschten Optionen.
+
+Unter **Daten und Wartung** erstellst du eine Sicherung und stellst die Größe des lokalen Vorschau-Speichers ein. **Speicherorte prüfen** zählt vorübergehend nicht erreichbare Originale. Wenn Einträge fehlen, kannst du über **Fehlende Einträge bereinigen** eine eigene Bereinigung bestätigen.
 
 **Gemeinsame Ordner** lassen sich in einer Entwicklervorschau für den Abgleich von Zuordnungen über eine eingerichtete Freigabe nutzen. [Stand und Einrichtung der Vorschau](docs/shared-library-design.md)
 
 ![Darstellungseinstellungen mit ausgewähltem Modus Dunkel](docs/screenshots/appearance.webp)
+
+![Schmale Einstellungen mit der Auswahl des Einstellungsbereichs und der Dateinamenvorschau](docs/screenshots/settings-compact.webp)
 
 ![Einstellungen für den lokalen Vorschau-Speicher](docs/screenshots/settings.webp)
 
@@ -271,7 +280,7 @@ Unter **Einstellungen → Darstellung** kannst du **Hell** oder **Dunkel** wähl
 
 Die Fotoanalyse läuft auf deinem Gerät. Namen, Zuordnungen und Merkmale erkannter Gesichter speichert Face Manager in einer lokalen Bibliothek. Die Bibliothek verweist auf deine Fotoordner. Wenn du einen Ordner verschiebst, füge ihn am neuen Speicherort erneut hinzu.
 
-Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek sichern oder eine frühere Sicherung wiederherstellen. Die Vorschau zeigt, wie viele Fotos, Personen und Alben in der gewählten Datei stehen. Nach der Bestätigung kannst du den vorherigen Stand herunterladen. Sichere deine Originalfotos separat.
+Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek sichern oder eine frühere Sicherung wiederherstellen. Die Vorschau zeigt, wie viele Fotos, Personen und Alben in der gewählten Datei stehen. Nach der Bestätigung kannst du den vorherigen Stand speichern. Offene Importe aus der Sicherung lassen sich unter **Aktivitäten** fortsetzen. Sichere deine Originalfotos separat.
 
 Unter **Aussortierte Gesichter prüfen** findest du Hinweise aus früheren Sicherungen, falls ein eigentlich aussortiertes Gesicht wieder bei einer benannten Person erschienen ist. Du kannst auch eine eigene Sicherung derselben Bibliothek zum Vergleich hinzufügen. Übernimm nur Vorschläge, bei denen du das Gesicht wiedererkennst.
 
@@ -289,7 +298,7 @@ cd face-manager
 ./scripts/setup-dev.sh
 ```
 
-Starte im Projektordner `./scripts/dev-backend.sh` und in einem zweiten Terminal `npm --prefix frontend run dev`. Die Entwicklungs-API auf Port 8000 ist für vertrauenswürdige Netze vorgesehen. [Anwendung öffnen](http://localhost:5173) · [API-Dokumentation](http://localhost:8000/docs) · [Entwicklung und Beiträge](CONTRIBUTING.md)
+Starte im Projektordner `./scripts/dev-backend.sh` und in einem zweiten Terminal `npm --prefix frontend run dev`. Beide Entwicklungsserver sind standardmäßig auf diesem Rechner erreichbar. Setze `FACE_MANAGER_DEV_HOST` für Zugriffe aus einem vertrauenswürdigen Testnetz ausdrücklich auf eine passende Netzwerkadresse. [Anwendung öffnen](http://127.0.0.1:5173) · [API-Dokumentation](http://127.0.0.1:8000/docs) · [Entwicklung und Beiträge](CONTRIBUTING.md)
 
 <a id="build-desktop-installers"></a>
 

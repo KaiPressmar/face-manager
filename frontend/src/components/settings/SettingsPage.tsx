@@ -18,6 +18,7 @@ import type { SettingsSection } from "../../utils/navigation";
 import PreviewCacheSettings from "./PreviewCacheSettings";
 import SharedLibrarySettings from "./SharedLibrarySettings";
 import type { SharedLibraryController } from "../../hooks/useSharedLibrary";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import { countWithLabel } from "../../utils/germanFormatting";
 import { downloadRestoreBackup, hasRestoreBackup, previewDatabaseRestore, type RestorePreview } from "../../utils/libraryMaintenance";
 import RestoreConfirmation from "./RestoreConfirmation";
@@ -79,6 +80,30 @@ const LOG_LEVEL_OPTIONS = [
   },
 ] as const;
 
+const ANDROID_EXPORT_STATUS: Record<string, { text: string; busy?: boolean; error?: boolean }> = {
+  PREPARING: { text: "Die Sicherung wird vorbereitet …", busy: true },
+  READY: { text: "Die Sicherung wird vorbereitet …", busy: true },
+  CHOOSING: { text: "Wähle auf deinem Gerät den Speicherort für die Sicherung.", busy: true },
+  WRITING: { text: "Die Sicherung wird am gewählten Ort gespeichert …", busy: true },
+  FILE_BUSY: { text: "Eine Datei wird gespeichert …", busy: true },
+  SAVED: { text: "Die Sicherung wurde gespeichert." },
+  CANCELLED: { text: "Sicherung abgebrochen." },
+  SNAPSHOT_ERROR: { text: "Die Sicherung konnte nicht vorbereitet werden. Versuche es erneut.", error: true },
+  PICKER_ERROR: { text: "Die Dateiauswahl konnte nicht geöffnet werden. Versuche es erneut.", error: true },
+  WRITE_ERROR: { text: "Die Sicherung konnte nicht gespeichert werden. Wähle einen anderen Speicherort.", error: true },
+  PARTIAL_FILE: { text: "Die Sicherung ist unvollständig. Lösche die Datei am gewählten Speicherort und versuche es erneut.", error: true },
+  INTERRUPTED: { text: "Die Sicherung wurde unterbrochen. Versuche es erneut.", error: true },
+  INTERRUPTED_WRITE: { text: "Das Speichern wurde unterbrochen. Prüfe die Zieldatei oder erstelle eine neue Sicherung.", error: true },
+};
+
+function readAndroidExportStatus(): string {
+  try {
+    return window.AndroidExport?.getDatabaseExportStatus?.() ?? "IDLE";
+  } catch {
+    return "IDLE";
+  }
+}
+
 function saveDatabaseBlob(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -126,6 +151,11 @@ const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }
   const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [statusUnavailable, setStatusUnavailable] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
+  const confirmation = useRef<HTMLElement>(null);
+  useModalFocus(confirmation, () => setConfirmRemoval(false), true, active && confirmRemoval);
 
   useEffect(() => {
     if (!active) return;
@@ -136,11 +166,15 @@ const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }
         const next = await fetchImagePathCleanup();
         if (cancelled) return;
         setPathCleanup(next);
+        setStatusUnavailable(false);
         if (next.status === "queued" || next.status === "running") {
           timer = window.setTimeout(refresh, 1000);
         }
       } catch {
-        if (!cancelled) timer = window.setTimeout(refresh, 5000);
+        if (!cancelled) {
+          setStatusUnavailable(true);
+          timer = window.setTimeout(refresh, 5000);
+        }
       }
     };
     void refresh();
@@ -150,17 +184,19 @@ const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }
     };
   }, [active, revision]);
 
-  const running = pathCleanup?.status === "queued" || pathCleanup?.status === "running";
-  const start = async () => {
-    if (!window.confirm(
-      "Fehlende Dateien aus der Bibliothek entfernen? Wenn ein Bild keinen weiteren Speicherort hat, gehen auch seine Gesichtszuordnungen verloren. Schließe vorher alle Fotolaufwerke an.",
-    )) return;
+  const running = starting || pathCleanup?.status === "queued" || pathCleanup?.status === "running";
+  const start = async (removeMissing: boolean) => {
+    setConfirmRemoval(false);
+    setStarting(true);
     setError(null);
     try {
-      setPathCleanup(await startImagePathCleanup());
+      setPathCleanup(await startImagePathCleanup(removeMissing));
+      setStatusUnavailable(false);
       setRevision((current) => current + 1);
     } catch (cleanupError) {
       setError(cleanupError instanceof Error ? cleanupError.message : "Die Pfadprüfung konnte nicht gestartet werden.");
+    } finally {
+      setStarting(false);
     }
   };
 
@@ -173,7 +209,10 @@ const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }
       summary = `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft…`;
       break;
     case "completed":
-      summary = `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar. ${countWithLabel(pathCleanup.removed_paths, "Speicherort", "Speicherorte")} und ${countWithLabel(pathCleanup.removed_images, "Bild", "Bilder")} entfernt.`;
+      summary = `${countWithLabel(pathCleanup.scanned_paths, "Speicherort", "Speicherorte")} geprüft, ${pathCleanup.unavailable_paths.toLocaleString("de-DE")} nicht erreichbar.`;
+      if (pathCleanup.reason === "manual") {
+        summary += ` ${countWithLabel(pathCleanup.removed_paths, "Speicherort", "Speicherorte")} und ${countWithLabel(pathCleanup.removed_images, "Bild", "Bilder")} entfernt.`;
+      }
       break;
     case "failed":
       summary = "Die letzte Pfadprüfung konnte nicht abgeschlossen werden.";
@@ -186,18 +225,34 @@ const ImagePathCleanupCard = React.memo(function ImagePathCleanupCard({ active }
   return (
     <section className="settings-card">
       <h2 className="settings-card__title">Bildspeicherorte prüfen</h2>
-      <p className="settings-card__copy">
-        Die automatische Prüfung meldet fehlende Bilder. Bei einer manuellen
-        Bereinigung lassen sich Einträge für fehlende Dateien an erreichbaren
-        Speicherorten entfernen.
-      </p>
+      <p className="settings-card__copy">Prüfe, ob deine Originalfotos erreichbar sind. Verbinde dafür auch externe Laufwerke und gemeinsame Ordner.</p>
       <div className="settings-maintenance-status" aria-live="polite">{summary}</div>
       <div className="settings-actions">
-        <button className="neon-card" type="button" onClick={() => void start()} disabled={running}>
-          {running ? "Pfadprüfung läuft…" : "Fehlende Bildpfade bereinigen"}
+        <button className="neon-card" type="button" onClick={() => void start(false)} disabled={running}>
+          {running ? "Pfadprüfung läuft…" : "Speicherorte prüfen"}
         </button>
+        {pathCleanup?.status === "completed" && pathCleanup.unavailable_paths > 0 && (
+          <button className="secondary-button" type="button" onClick={() => setConfirmRemoval(true)} disabled={running}>
+            Fehlende Einträge bereinigen
+          </button>
+        )}
       </div>
       {error && <p className="settings-feedback settings-feedback--error" role="alert">{error}</p>}
+      {statusUnavailable && !error && <p className="settings-feedback settings-feedback--error" role="alert">
+        Der Stand der Pfadprüfung konnte nicht geladen werden.
+      </p>}
+      {active && confirmRemoval && <div className="modal-backdrop">
+        <section ref={confirmation} className="settings-card library-maintenance-dialog"
+          role="dialog" aria-modal="true" aria-labelledby="remove-missing-photos-title">
+          <h2 id="remove-missing-photos-title">Fehlende Einträge entfernen?</h2>
+          <p>Face Manager entfernt fehlende Dateien aus der Bibliothek, wenn ihr Ordner erreichbar ist. Fehlt der letzte Speicherort eines Fotos, gehen dessen Zuordnungen und Albumzugehörigkeiten verloren.</p>
+          <div className="settings-actions">
+            <button type="button" className="secondary-button" data-initial-focus
+              onClick={() => setConfirmRemoval(false)}>Abbrechen</button>
+            <button type="button" className="primary-button" onClick={() => void start(true)}>Fehlende Einträge entfernen</button>
+          </div>
+        </section>
+      </div>}
     </section>
   );
 });
@@ -229,7 +284,14 @@ const SettingsPage: React.FC<{
   const [pendingRestore, setPendingRestore] = useState<{ file: File; preview: RestorePreview } | null>(null);
   const [restoreBackupAvailable, setRestoreBackupAvailable] = useState(false);
   const [backupFeedback, setBackupFeedback] = useState<{ text: string; error?: boolean } | null>(null);
+  const [androidExportStatus, setAndroidExportStatus] = useState(readAndroidExportStatus);
+  const lastAndroidExportStatus = useRef(androidExportStatus);
+  const androidExportInFlight = useRef(Boolean(ANDROID_EXPORT_STATUS[androidExportStatus]?.busy));
   const backupInFlight = useRef(false);
+  const androidExportFeedback = ANDROID_EXPORT_STATUS[androidExportStatus];
+  const shownBackupFeedback = backupFeedback ?? androidExportFeedback;
+  const backupActionDisabled = isExporting || isImporting || isInspectingBackup
+    || Boolean(androidExportFeedback?.busy) || pendingRestore !== null;
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [feedback, setFeedback] = useState<Partial<Record<FeedbackArea, { text: string; error: boolean }>>>({});
   const [filenameFeedback, setFilenameFeedback] = useState<{ text: string; error: boolean } | null>(null);
@@ -254,6 +316,18 @@ const SettingsPage: React.FC<{
   const canSaveFilenameFormat = filenameFormatChanged && !invalidBlockSeparator && !invalidPersonJoiner && !isSaving;
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [settingsLoadAttempt, setSettingsLoadAttempt] = useState(0);
+  const selectedSection = activeSection ?? "erkennung";
+
+  const goToSection = (section: SettingsSection, focusHeading: boolean) => {
+    if (activeSection === section) {
+      const group = document.getElementById(`settings-${section}`);
+      group?.scrollIntoView({ block: "start" });
+      if (focusHeading) group?.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
+      return;
+    }
+    focusSection.current = focusHeading ? section : undefined;
+    onNavigateSection(section);
+  };
 
   const report = (area: FeedbackArea, text?: string, error = false) => {
     setFeedback((current) => ({ ...current, [area]: text ? { text, error } : undefined }));
@@ -264,6 +338,20 @@ const SettingsPage: React.FC<{
     return result && <p className={result.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
       role={result.error ? "alert" : "status"}>{result.text}</p>;
   };
+
+  useEffect(() => {
+    const syncAndroidExport = () => {
+      const status = readAndroidExportStatus();
+      if (status === lastAndroidExportStatus.current) return;
+      lastAndroidExportStatus.current = status;
+      androidExportInFlight.current = Boolean(ANDROID_EXPORT_STATUS[status]?.busy);
+      setAndroidExportStatus(status);
+      setBackupFeedback(null);
+    };
+    window.addEventListener("face-manager:android-export", syncAndroidExport);
+    syncAndroidExport();
+    return () => window.removeEventListener("face-manager:android-export", syncAndroidExport);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -556,25 +644,47 @@ const SettingsPage: React.FC<{
     }
   };
 
-  const handleExport = async () => {
-    if (backupInFlight.current) return;
+  const handleExport = async (previous = false) => {
+    if (backupInFlight.current || androidExportInFlight.current || pendingRestore) return;
+    const native = window.AndroidExport;
+    if (native?.getDatabaseExportStatus && (!previous || native.requestPreviousDatabaseExport)) {
+      androidExportInFlight.current = true;
+      lastAndroidExportStatus.current = "IDLE";
+      setBackupFeedback(null);
+      setAndroidExportStatus("PREPARING");
+      try {
+        if (previous) native.requestPreviousDatabaseExport?.();
+        else native.requestDatabaseExport();
+      } catch {
+        androidExportInFlight.current = false;
+        setAndroidExportStatus("PICKER_ERROR");
+      }
+      return;
+    }
     backupInFlight.current = true;
     setIsExporting(true);
-    setBackupFeedback({ text: "Die Sicherung wird vorbereitet …" });
+    setAndroidExportStatus("IDLE");
+    setBackupFeedback({ text: previous ? "Die vorherige Bibliothek wird vorbereitet …" : "Die Sicherung wird vorbereitet …" });
     try {
-      if (window.AndroidExport) {
-        window.AndroidExport.requestDatabaseExport();
+      if (native && !previous) {
+        native.requestDatabaseExport();
         setBackupFeedback({ text: "Wähle auf deinem Gerät den Speicherort für die Sicherung." });
         return;
       }
-      saveDatabaseBlob(await exportDatabase(), "face-manager-database.sqlite");
-      setBackupFeedback({ text: "Die Sicherung wurde erstellt." });
+      if (previous) {
+        saveDatabaseBlob(await downloadRestoreBackup(), "face-manager-vorherige-bibliothek.sqlite");
+        setBackupFeedback({ text: "Die Sicherung der vorherigen Bibliothek ist heruntergeladen." });
+      } else {
+        saveDatabaseBlob(await exportDatabase(), "face-manager-database.sqlite");
+        setBackupFeedback({ text: "Die Sicherung wurde erstellt." });
+      }
     } catch (exportError) {
       setBackupFeedback({
         error: true,
         text: exportError instanceof Error
           ? exportError.message
-          : "Die Sicherung konnte nicht erstellt werden.",
+          : previous ? "Die vorherige Bibliothek konnte nicht heruntergeladen werden."
+            : "Die Sicherung konnte nicht erstellt werden.",
       });
     } finally {
       backupInFlight.current = false;
@@ -583,7 +693,7 @@ const SettingsPage: React.FC<{
   };
 
   const handleImportClick = () => {
-    if (!backupInFlight.current) fileInputRef.current?.click();
+    if (!backupInFlight.current && !androidExportInFlight.current) fileInputRef.current?.click();
   };
 
   const handleImportChange = async (
@@ -591,9 +701,10 @@ const SettingsPage: React.FC<{
   ) => {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file || backupInFlight.current) return;
+    if (!file || backupInFlight.current || androidExportInFlight.current) return;
 
     backupInFlight.current = true;
+    setAndroidExportStatus("IDLE");
     setIsInspectingBackup(true);
     setBackupFeedback({ text: "Die ausgewählte Sicherung wird geprüft …" });
     try {
@@ -612,7 +723,7 @@ const SettingsPage: React.FC<{
   };
 
   const confirmRestore = async () => {
-    if (!pendingRestore || backupInFlight.current) return;
+    if (!pendingRestore || backupInFlight.current || androidExportInFlight.current) return;
     const { file, preview } = pendingRestore;
     backupInFlight.current = true;
     setPendingRestore(null);
@@ -645,25 +756,6 @@ const SettingsPage: React.FC<{
     }
   };
 
-  const handleDownloadRestoreBackup = async () => {
-    if (backupInFlight.current) return;
-    backupInFlight.current = true;
-    setIsExporting(true);
-    setBackupFeedback({ text: "Die vorherige Bibliothek wird vorbereitet …" });
-    try {
-      saveDatabaseBlob(await downloadRestoreBackup(), "face-manager-vorherige-bibliothek.sqlite");
-      setBackupFeedback({ text: "Die Sicherung der vorherigen Bibliothek ist heruntergeladen." });
-    } catch (downloadError) {
-      setBackupFeedback({
-        error: true,
-        text: downloadError instanceof Error ? downloadError.message : "Die vorherige Bibliothek konnte nicht heruntergeladen werden.",
-      });
-    } finally {
-      backupInFlight.current = false;
-      setIsExporting(false);
-    }
-  };
-
   return (
     <div className="settings-page">
       <div className="settings-page__header" id="settings-start">
@@ -683,23 +775,26 @@ const SettingsPage: React.FC<{
         </div>
       ) : (
         <div className="settings-layout">
+          <label className="settings-compact-navigation">
+            <span>Einstellungsbereich</span>
+            <select className="app-select settings-select-input" value={selectedSection}
+              onChange={(event) => {
+                const item = SETTINGS_NAV_ITEMS.find(({ section }) => section === event.target.value);
+                if (item) goToSection(item.section, false);
+              }}>
+              {SETTINGS_NAV_ITEMS.map(({ section, label }) => (
+                <option key={section} value={section}>{label}</option>
+              ))}
+            </select>
+          </label>
           <nav className="settings-nav" aria-label="Bereiche">
             {SETTINGS_NAV_ITEMS.map((item) => (
               <button
                 key={item.section}
                 type="button"
                 className="settings-nav__link"
-                aria-current={activeSection === item.section ? "location" : undefined}
-                onClick={() => {
-                  if (activeSection === item.section) {
-                    const group = document.getElementById(`settings-${item.section}`);
-                    group?.scrollIntoView({ block: "start" });
-                    group?.querySelector<HTMLElement>("h2")?.focus({ preventScroll: true });
-                    return;
-                  }
-                  focusSection.current = item.section;
-                  onNavigateSection(item.section);
-                }}
+                aria-current={selectedSection === item.section ? "location" : undefined}
+                onClick={() => goToSection(item.section, true)}
               >
                 {item.label}
               </button>
@@ -1020,7 +1115,6 @@ const SettingsPage: React.FC<{
             <section className="settings-group" id="settings-darstellung">
               <header className="settings-group__header">
                 <h2 tabIndex={-1}>Darstellung</h2>
-                <p>Erscheinungsbild der Anwendung.</p>
               </header>
               <div className="settings-group__cards">
             <section className="settings-card">
@@ -1037,33 +1131,21 @@ const SettingsPage: React.FC<{
                 aria-label="Darstellung"
               >
                 {THEME_OPTIONS.map((option) => (
-                  <button
+                  <label
                     key={option.value}
-                    type="button"
-                    role="radio"
-                    aria-checked={themeMode === option.value}
                     className={
                       themeMode === option.value
                         ? "settings-theme-option settings-theme-option--active"
                         : "settings-theme-option"
                     }
-                    onClick={() => setThemeMode(option.value)}
                   >
+                    <input type="radio" name="settings-theme" checked={themeMode === option.value}
+                      aria-label={option.label} aria-describedby={`settings-theme-${option.value}-description`}
+                      onChange={() => setThemeMode(option.value)} />
                     <strong>{option.label}</strong>
-                    <span>{option.description}</span>
-                  </button>
+                    <span id={`settings-theme-${option.value}-description`}>{option.description}</span>
+                  </label>
                 ))}
-              </div>
-
-              <div className="settings-actions">
-                <button
-                  className="settings-text-button"
-                  type="button"
-                  onClick={() => setThemeMode("system")}
-                  disabled={themeMode === "system"}
-                >
-                  Auf System-Standard zurücksetzen
-                </button>
               </div>
             </section>
               </div>
@@ -1072,7 +1154,6 @@ const SettingsPage: React.FC<{
             <section className="settings-group" id="settings-updates">
               <header className="settings-group__header">
                 <h2 tabIndex={-1}>Updates</h2>
-                <p>Neue veröffentlichte Versionen von Face Manager.</p>
               </header>
               <div className="settings-group__cards">
                 <section className="settings-card">
@@ -1126,8 +1207,8 @@ const SettingsPage: React.FC<{
                 <button
                   className="neon-card"
                   type="button"
-                  onClick={handleExport}
-                  disabled={isExporting || isImporting || isInspectingBackup}
+                  onClick={() => void handleExport()}
+                  disabled={backupActionDisabled}
                 >
                   {isExporting ? "Sicherung wird erstellt…" : "Sicherung erstellen"}
                 </button>
@@ -1135,21 +1216,22 @@ const SettingsPage: React.FC<{
                   className="neon-card"
                   type="button"
                   onClick={handleImportClick}
-                  disabled={isExporting || isImporting || isInspectingBackup}
+                  disabled={backupActionDisabled}
                 >
                   {isImporting ? "Wird wiederhergestellt…" : "Sicherung wiederherstellen"}
                 </button>
                 {restoreBackupAvailable && <button className="neon-card" type="button"
-                  onClick={handleDownloadRestoreBackup} disabled={isExporting || isImporting || isInspectingBackup}>
-                  Vorherige Bibliothek herunterladen
+                  onClick={() => void handleExport(true)} disabled={backupActionDisabled}>
+                  {window.AndroidExport?.requestPreviousDatabaseExport
+                    ? "Vorherige Bibliothek speichern" : "Vorherige Bibliothek herunterladen"}
                 </button>}
               </div>
-              {backupFeedback && (
+              {shownBackupFeedback && (
                 <p
-                  className={backupFeedback.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
-                  role={backupFeedback.error ? "alert" : "status"}
+                  className={shownBackupFeedback.error ? "settings-feedback settings-feedback--error" : "settings-feedback"}
+                  role={shownBackupFeedback.error ? "alert" : "status"}
                 >
-                  {backupFeedback.text}
+                  {shownBackupFeedback.text}
                 </p>
               )}
 

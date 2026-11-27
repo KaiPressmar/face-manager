@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  API_BASE,
+  apiFetch,
   type ApplyImageRenamePayload,
   type ApplyImageRenameResult,
   ImageRenameCandidate,
@@ -9,6 +11,7 @@ import {
   fetchImageRenameCandidates,
   openImageLocation,
   previewImageRenames,
+  readApiError,
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import { copyTextToClipboard } from "../../utils/clipboard";
@@ -41,6 +44,20 @@ interface RenameReport {
   unreported: number;
 }
 
+interface RenameRecovery {
+  pending_count: number;
+  pending: { source_path: string; target_path: string; staging_path: string }[];
+  resolved_count?: number;
+}
+
+async function requestRenameRecovery(method = "GET", signal?: AbortSignal): Promise<RenameRecovery> {
+  const response = await apiFetch(`${API_BASE}/image-renames/recovery`, { method, signal });
+  if (!response.ok) {
+    throw new Error(await readApiError(response, "Unterbrochene Umbenennungen konnten nicht geprüft werden."));
+  }
+  return response.json();
+}
+
 interface RenameWorkspace {
   folders: string[];
   persons: string[];
@@ -57,7 +74,7 @@ function skipLabel(reason: string) {
     case "target_exists": return "Zielname bereits belegt";
     case "batch_target_conflict": return "Mehrere ausgewählte Dateien haben denselben Zielnamen";
     case "source_alias": return "Datei ist über eine Verknüpfung oder mehrere Pfade ausgewählt";
-    case "source_changed": return "Datei wurde seit der Prüfung geändert oder ersetzt";
+    case "source_changed": return "Datei wurde geändert oder ersetzt";
     case "exclusive_rename_unavailable": return "Sicheres Umbenennen ist an diesem Speicherort nicht verfügbar";
     case "preview_changed": return "Vorschlag hat sich seit der Auswahl geändert";
     case "missing_source": return "Datei nicht erreichbar";
@@ -111,8 +128,12 @@ const ImageRenamePage: React.FC<{
   const [renameReview, setRenameReview] = useState<RenameReview | null>(null);
   const [reviewPreview, setReviewPreview] = useState<ImageRenamePreview | null>(null);
   const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewAttempt, setReviewAttempt] = useState(0);
   const [reviewPage, setReviewPage] = useState(0);
   const [renameReport, setRenameReport] = useState<RenameReport | null>(null);
+  const [renameRecovery, setRenameRecovery] = useState<RenameRecovery | null>(null);
+  const [isCheckingRecovery, setIsCheckingRecovery] = useState(false);
+  const [recoveryRevision, setRecoveryRevision] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -131,6 +152,7 @@ const ImageRenamePage: React.FC<{
   const reviewDialogRef = useRef<HTMLElement>(null);
   const reportRef = useRef<HTMLElement>(null);
   const submittingRef = useRef(false);
+  const checkingRecoveryRef = useRef(false);
   const reviewOpenRef = useRef(false);
   const hasFilters = selectedFolders.length > 0 || selectedPersons.length > 0;
   const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
@@ -151,6 +173,7 @@ const ImageRenamePage: React.FC<{
       setShowFolderFilter(false);
       setRenameReview(null);
       setRenameReport(null);
+      setRenameRecovery(null);
       handleClearSelection();
       setNavigationRevision((value) => value + 1);
     },
@@ -182,7 +205,16 @@ const ImageRenamePage: React.FC<{
       },
     );
     return () => controller.abort();
-  }, [active, reviewPayload]);
+  }, [active, reviewPayload, reviewAttempt]);
+
+  useEffect(() => {
+    if (!active) return;
+    const controller = new AbortController();
+    void requestRenameRecovery("GET", controller.signal).then((report) => {
+      if (!controller.signal.aborted && !checkingRecoveryRef.current) setRenameRecovery(report);
+    }, () => {});
+    return () => controller.abort();
+  }, [active, mutationRefresh, navigationRevision, recoveryRevision]);
 
   useEffect(() => {
     if (active && renameReport) reportRef.current?.focus();
@@ -461,6 +493,7 @@ const ImageRenamePage: React.FC<{
     const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
       (update) => {
+        if (update?.reason === "image_rename_recovery") setRecoveryRevision((value) => value + 1);
         const isBackgroundCheckpoint = update?.reason === "background_progress";
         scheduleRefresh(
           isBackgroundCheckpoint ? LIVE_REFRESH_BATCH_MS : FINAL_REFRESH_DELAY_MS,
@@ -526,7 +559,9 @@ const ImageRenamePage: React.FC<{
       const alreadySkipped = reviewPreview.items.flatMap((item) => (
         item.reason ? [{ path: item.path, reason: item.reason }] : []
       ));
-      const result = await applyImageRenames({ ...renameReview.payload, confirmed_targets: confirmedTargets });
+      const result = await applyImageRenames({
+        ...renameReview.payload, confirmed_targets: confirmedTargets, expected_library_id: reviewPreview.library_id,
+      });
       const reported = result.renamed_count + result.skipped_count + result.error_count;
       setRenameReport({
         result: {
@@ -547,6 +582,29 @@ const ImageRenamePage: React.FC<{
       setIsSubmitting(false);
       setRenameReview(null);
       setMutationRefresh((value) => value + 1);
+    }
+  };
+
+  const checkRenameRecovery = async () => {
+    if (checkingRecoveryRef.current) return;
+    checkingRecoveryRef.current = true;
+    setIsCheckingRecovery(true);
+    setActionError(null);
+    setMessage(null);
+    try {
+      const report = await requestRenameRecovery("POST");
+      setRenameRecovery(report);
+      if (report.resolved_count) {
+        setMessage(`${countWithLabel(report.resolved_count, "Umbenennung", "Umbenennungen")} wiederhergestellt.`);
+        setMutationRefresh((value) => value + 1);
+      } else {
+        setMessage("Die gezeigten Dateien benötigen weiterhin eine manuelle Prüfung.");
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Die Prüfung konnte nicht abgeschlossen werden.");
+    } finally {
+      checkingRecoveryRef.current = false;
+      setIsCheckingRecovery(false);
     }
   };
 
@@ -770,7 +828,7 @@ const ImageRenamePage: React.FC<{
           {unreported > 0 && <li><strong>{unreported}</strong> ohne Rückmeldung</li>}
         </ul>
         {recoveryErrors.map((item) => <div className="rename-outcome__recovery" key={item.path}>
-          <strong>Datei zur Wiederherstellung</strong>
+          <strong>Pfad zur Wiederherstellung</strong>
           <code>{item.recovery_path}</code>
           <button type="button" className="secondary-button" onClick={(event) => void copyCandidatePath(event, item.recovery_path!)}>Pfad kopieren</button>
         </div>)}
@@ -795,12 +853,12 @@ const ImageRenamePage: React.FC<{
   };
 
   return (
-    <div className="settings-page" ref={pageRef}>
+    <div className="settings-page rename-page" ref={pageRef}>
       <div className="settings-page__header rename-page-header">
         <div>
           <h1 className="settings-page__title">Dateinamen</h1>
           <p className="settings-page__copy">
-            Wähle Fotos und prüfe die vorgeschlagenen Dateinamen.
+            Ergänze Personennamen in deinen Fotodateien.
           </p>
         </div>
         <button
@@ -869,10 +927,40 @@ const ImageRenamePage: React.FC<{
         </div>
       )}
 
+      {Boolean(renameRecovery?.pending_count) && renameRecovery && (
+        <section className="settings-card rename-recovery" aria-labelledby="rename-recovery-title">
+          <h2 id="rename-recovery-title">Unterbrochene Umbenennungen</h2>
+          <p>{countWithLabel(renameRecovery.pending_count, "Datei", "Dateien")} zur Prüfung. Verbinde bei Bedarf den Speicherort erneut.</p>
+          <button type="button" className="secondary-button" disabled={isCheckingRecovery} onClick={() => void checkRenameRecovery()}>
+            {isCheckingRecovery ? "Speicherorte werden geprüft …" : "Speicherorte erneut prüfen"}
+          </button>
+          <details className="rename-outcome__details">
+            <summary>Betroffene Dateipfade anzeigen</summary>
+            {renameRecovery.pending_count > renameRecovery.pending.length && (
+              <p>Die Liste zeigt die ersten {number.format(renameRecovery.pending.length)} betroffenen Dateien.</p>
+            )}
+            <ul>
+              {renameRecovery.pending.map((item) => (
+                <li key={item.source_path}>
+                  <span>Ursprünglicher Pfad</span><code>{item.source_path}</code>
+                  <span>Zielpfad</span><code>{item.target_path}</code>
+                  <span>Möglicher Pfad im Zwischenordner</span><code>{item.staging_path}</code>
+                  <button type="button" className="secondary-button" onClick={(event) => void copyCandidatePath(event, item.staging_path)}>
+                    Pfad im Zwischenordner kopieren
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </details>
+        </section>
+      )}
+
       <section className="settings-card rename-toolbar" aria-label="Dateiauswahl">
         <div className="rename-toolbar__heading">
-          <strong>Dateien zur Prüfung auswählen</strong>
+          <strong>Dateiauswahl</strong>
+          <span aria-hidden="true">{countWithLabel(selectedCount, "Datei", "Dateien")} ausgewählt</span>
         </div>
+        <span className="rename-sr-status" role="status">{countWithLabel(selectedCount, "Datei", "Dateien")} ausgewählt</span>
         <div className="rename-toolbar__controls">
           <button type="button" className="secondary-button rename-toolbar__toggle" aria-expanded={bulkActionsOpen}
             aria-controls={bulkActionsId} onClick={() => setBulkActionsOpen((open) => !open)}>
@@ -911,19 +999,14 @@ const ImageRenamePage: React.FC<{
       )}
 
       <section className={`settings-card rename-list-card${!isLoading && items.length === 0 ? " rename-list-card--empty" : ""}`}>
-        <div className="rename-list-status">
-          <div className="rename-list-status__pill">
-            <strong>{selectionMode === "all" && total === null ? "…" : countWithLabel(selectedCount, "Datei", "Dateien")}</strong> ausgewählt
-          </div>
-          {showLoadingOverlay && (
-            <div className="rename-list-status__loading">
+        {showLoadingOverlay && (
+            <div className="rename-list-status__loading" role="status">
               <span className="rename-spinner" aria-hidden="true" />
               Liste wird aktualisiert…
             </div>
-          )}
-        </div>
+        )}
 
-        {renderPaginationControls("top")}
+        {total !== 0 && renderPaginationControls("top")}
 
         {showSkeletonRows ? (
           renderSkeletonRows()
@@ -940,21 +1023,23 @@ const ImageRenamePage: React.FC<{
             {showLoadingOverlay && <div className="rename-list-overlay" aria-hidden="true" />}
             <div className="rename-list">
               {items.map((item) => (
-                <div className="rename-row" key={item.path}>
-                  <input
-                    type="checkbox"
-                    checked={isSelectable(item) && isSelected(item.path)}
-                    onChange={() => toggleItem(item.path)}
-                    disabled={!isSelectable(item) || isLoading || isSubmitting}
-                    aria-label={`${item.current_filename} auswählen`}
-                  />
+                <div className="rename-row" key={item.path} data-selected={isSelectable(item) && isSelected(item.path)}>
+                  <label className="rename-row__select" title={`${item.current_filename} auswählen`}>
+                    <input
+                      type="checkbox"
+                      checked={isSelectable(item) && isSelected(item.path)}
+                      onChange={() => toggleItem(item.path)}
+                      disabled={!isSelectable(item) || isLoading || isSubmitting}
+                      aria-label={`${item.current_filename} auswählen`}
+                    />
+                  </label>
                   <div className="rename-row__content">
                     <div className="rename-row__meta rename-file-names">
                       <div><small>Aktueller Name</small><code>{item.current_filename}</code></div>
                       <span className="rename-file-names__arrow" aria-hidden="true">→</span>
                       <div><small>Vorgeschlagener Name</small><strong>{item.proposed_filename}</strong></div>
                     </div>
-                    <div className="rename-row__path">{item.directory ?? item.path}</div>
+                    <div className="rename-row__path" title={item.directory ?? item.path}>{item.directory ?? item.path}</div>
                     {filenameWarning(item) && <span className="rename-row__unavailable">
                       {filenameWarning(item)}
                     </span>}
@@ -986,7 +1071,7 @@ const ImageRenamePage: React.FC<{
           </div>
         )}
 
-        {renderPaginationControls("bottom")}
+        {pageCount !== 1 && total !== 0 && renderPaginationControls("bottom")}
       </section>
 
       {renameReview && active && (
@@ -1010,7 +1095,16 @@ const ImageRenamePage: React.FC<{
                 <p>Die Auswahl umfasst alle Treffer des aktuellen Filters, auch auf anderen Seiten.</p>
               )}
               {!reviewPreview && !reviewError && <p role="status">Dateinamen werden geprüft…</p>}
-              {reviewError && <p role="alert">{reviewError}</p>}
+              {reviewError && (
+                <div className="rename-review__error">
+                  <p role="alert">{reviewError}</p>
+                  <button className="secondary-button" type="button" onClick={() => {
+                    reviewDialogRef.current?.querySelector<HTMLElement>("[data-initial-focus]")?.focus();
+                    setReviewError(null);
+                    setReviewAttempt((attempt) => attempt + 1);
+                  }}>Prüfung wiederholen</button>
+                </div>
+              )}
               {reviewPreview && (
                 <>
                   <p role="status">

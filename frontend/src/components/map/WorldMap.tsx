@@ -10,8 +10,6 @@ import rasterSources from "./raster-detail-sources.json";
 
 export { satelliteSource };
 
-type DetailedCartography = typeof import("./world-detail.json");
-
 export interface MapBounds {
   west: number;
   east: number;
@@ -267,12 +265,29 @@ function projectBounds(bounds: MapBounds) {
 
 interface Gesture {
   pointerId: number;
+  pointerType: string;
   captureTarget: Element;
   start: Point;
+  current: Point;
   bounds: MapBounds;
   view: MapView;
   selecting: boolean;
   dragging: boolean;
+}
+
+interface PinchContact {
+  id: number;
+  target: Element;
+  position: Point;
+}
+
+interface PinchGesture {
+  contacts: [PinchContact, PinchContact];
+  midpoint: Point;
+  distance: number;
+  view: MapView;
+  initialView: MapView;
+  selecting: boolean;
 }
 
 function pointerPosition(event: React.PointerEvent<SVGSVGElement>) {
@@ -281,6 +296,28 @@ function pointerPosition(event: React.PointerEvent<SVGSVGElement>) {
     position: { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height },
     rect,
   };
+}
+
+function pinchGeometry([first, second]: [PinchContact, PinchContact], rect: MapSize) {
+  const a = first.position;
+  const b = second.position;
+  return {
+    midpoint: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+    distance: Math.hypot((a.x - b.x) * rect.width, (a.y - b.y) * rect.height),
+  };
+}
+
+function zoomBetweenPoints(view: MapView, factor: number, start: Point, end = start) {
+  const zoom = clamp(view.zoom * factor, 1, MAX_ZOOM);
+  return normalizedView({
+    zoom,
+    longitude: view.longitude + 360 * ((start.x - .5) / view.zoom - (end.x - .5) / zoom),
+    latitude: view.latitude - 180 * ((start.y - .5) / view.zoom - (end.y - .5) / zoom),
+  });
+}
+
+function releaseCapture(target: Element, id: number) {
+  if (target.hasPointerCapture(id)) target.releasePointerCapture(id);
 }
 
 function viewAfterPan(gesture: Gesture, position: Point) {
@@ -328,6 +365,26 @@ const noJourneyStops: readonly JourneyStop[] = [];
 const noJourneyConnections: readonly JourneyConnection[] = [];
 const MapRasterDetail = React.lazy(() => import("./MapRasterDetail"));
 const MapStreetDetail = React.lazy(() => import("./MapStreetDetail"));
+const loadDetailLand = () => import("./world-detail-land.json");
+const loadDetailBorders = () => import("./world-detail-borders.json");
+const loadDetailLakes = () => import("./world-detail-lakes.json");
+const loadDetailRivers = () => import("./world-detail-rivers.json");
+const loadDetailCities = () => import("./world-detail-cities.json");
+
+function useDetailedLayer<T>(enabled: boolean, load: () => Promise<{ default: T }>) {
+  const [layer, setLayer] = useState<T | null>(null);
+  useEffect(() => {
+    if (!enabled || layer !== null) return;
+    let cancelled = false;
+    void load().then(({ default: data }) => {
+      if (!cancelled) setLayer(data);
+    }).catch(() => {
+      // Keep the bundled overview visible if a detail layer cannot load.
+    });
+    return () => { cancelled = true; };
+  }, [enabled, layer, load]);
+  return layer;
+}
 
 const WorldMap: React.FC<Props> = ({
   view, onViewChange, points, grid, onGridChange, selection, onSelectionChange, onMarkerClick,
@@ -349,21 +406,15 @@ const WorldMap: React.FC<Props> = ({
     setStreetDetailStatus("loading");
   }, [onlineDetails]);
   const detailed = view.zoom >= DETAIL_ZOOM;
-  const requiresDetailedMap = landscape || detailed;
-  const [detail, setDetail] = useState<DetailedCartography | null>(null);
-  useEffect(() => {
-    if (!requiresDetailedMap || detail) return;
-    let cancelled = false;
-    void import("./world-detail.json").then(({ default: data }) => {
-      if (!cancelled) setDetail(data);
-    }).catch(() => {
-      // The overview remains usable if the detailed cartography cannot load.
-    });
-    return () => { cancelled = true; };
-  }, [detail, requiresDetailedMap]);
-  const cityCandidates = useMemo<LabelCandidate[]>(() => detail?.cities.map((label) => ({
+  const requiresDetailedLand = landscape || (detailed && !satelliteVisible);
+  const detailLand = useDetailedLayer(requiresDetailedLand, loadDetailLand);
+  const detailBorders = useDetailedLayer(detailed, loadDetailBorders);
+  const detailLakes = useDetailedLayer(!satelliteVisible && view.zoom >= 3, loadDetailLakes);
+  const detailRivers = useDetailedLayer(!satelliteVisible && view.zoom >= 4, loadDetailRivers);
+  const detailCities = useDetailedLayer(view.zoom >= 4, loadDetailCities);
+  const cityCandidates = useMemo<LabelCandidate[]>(() => detailCities?.map((label) => ({
     ...label, id: `city-${label.id}`, kind: "city",
-  })) ?? [], [detail]);
+  })) ?? [], [detailCities]);
   const svgRef = useRef<SVGSVGElement>(null);
   const focusedMarkerRef = useRef<Element | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: WIDTH, height: HEIGHT });
@@ -384,6 +435,7 @@ const WorldMap: React.FC<Props> = ({
     return () => observer.disconnect();
   }, [onGridChange]);
   const gestureRef = useRef<Gesture | null>(null);
+  const pinchRef = useRef<PinchGesture | null>(null);
   const suppressMarkerClick = useRef(false);
   const [dragBounds, setDragBounds] = useState<MapBounds | null>(null);
   const [previewView, setPreviewView] = useState<MapView | null>(null);
@@ -392,11 +444,15 @@ const WorldMap: React.FC<Props> = ({
   const markerViewBox = projectBounds(bounds);
   const vb = previewView ? projectBounds(displayBounds) : markerViewBox;
   // Marker geometry is in CSS pixels, independent of zoom and screen size.
-  const scaleX = markerViewBox.width / viewportSize.width;
-  const scaleY = markerViewBox.height / viewportSize.height;
+  const scaleX = vb.width / viewportSize.width;
+  const scaleY = vb.height / viewportSize.height;
   const markers = grid ? points.map((marker) => {
     const position = markerPixelPosition(marker, bounds, viewportSize, grid);
-    return { marker, x: markerViewBox.x + position.x * scaleX, y: markerViewBox.y + position.y * scaleY };
+    return {
+      marker,
+      x: markerViewBox.x + position.x / viewportSize.width * markerViewBox.width,
+      y: markerViewBox.y + position.y / viewportSize.height * markerViewBox.height,
+    };
   }) : [];
   const zoom = view.zoom;
   const showRasterDetail = onlineDetails && (landscape || satellite) && zoom >= ONLINE_RASTER_ZOOM;
@@ -415,9 +471,9 @@ const WorldMap: React.FC<Props> = ({
   const scale = mapScale(displayBounds, viewportSize.width);
   const scaleLabel = scale.meters >= 1000 ? `${scaleDistance.format(scale.meters / 1000)} km`
     : scale.meters < 1 ? `${scaleDistance.format(scale.meters * 100)} cm` : `${scaleDistance.format(scale.meters)} m`;
-  const coastPath = requiresDetailedMap && detail ? detail.land : landPaths;
-  const rivers = [...overviewWater.rivers, ...(detail?.rivers ?? [])];
-  const lakes = [...overviewWater.lakes, ...(detail?.lakes ?? [])];
+  const coastPath = requiresDetailedLand && detailLand ? detailLand : landPaths;
+  const rivers = [...overviewWater.rivers, ...(detailRivers ?? [])];
+  const lakes = [...overviewWater.lakes, ...(detailLakes ?? [])];
   const stopGroups = useMemo(() => groupJourneyStops(journeyStops, bounds, viewportSize), [journeyStops, bounds, viewportSize]);
   const stopPositions = stopGroups.map(({ stops }) => ({ stops, x: projectX(stops[0].longitude), y: projectY(stops[0].latitude) }));
   const journeySegments = useMemo(() => journeyConnections.flatMap(journeyConnectionSegments), [journeyConnections]);
@@ -438,34 +494,70 @@ const WorldMap: React.FC<Props> = ({
 
   useLayoutEffect(() => {
     const gesture = gestureRef.current;
-    if (!gesture || (gesture.selecting === selectionMode && gesture.view === view && gesture.captureTarget.isConnected)) return;
-    gestureRef.current = null;
-    if (gesture.captureTarget.hasPointerCapture(gesture.pointerId)) {
-      gesture.captureTarget.releasePointerCapture(gesture.pointerId);
+    if (gesture && (gesture.selecting !== selectionMode || gesture.view !== view || !gesture.captureTarget.isConnected)) {
+      gestureRef.current = null;
+      releaseCapture(gesture.captureTarget, gesture.pointerId);
+      setDragBounds(null);
+      setPreviewView(null);
     }
-    setDragBounds(null);
-    setPreviewView(null);
+    const pinch = pinchRef.current;
+    if (pinch && (pinch.selecting !== selectionMode || pinch.initialView !== view || pinch.contacts.some(({ target }) => !target.isConnected))) {
+      pinchRef.current = null;
+      pinch.contacts.forEach(({ target, id }) => releaseCapture(target, id));
+      setPreviewView(null);
+    }
   }, [selectionMode, view, points, journeyStops]);
 
   const handlePointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
-    if (event.button !== 0 || gestureRef.current) return;
+    if (event.button !== 0 || pinchRef.current) return;
+    const { position, rect } = pointerPosition(event);
+    const gesture = gestureRef.current;
+    if (gesture) {
+      if (gesture.pointerType !== "touch" || event.pointerType !== "touch") return;
+      const contacts: PinchGesture["contacts"] = [
+        { id: gesture.pointerId, target: gesture.captureTarget, position: gesture.current },
+        { id: event.pointerId, target: event.currentTarget, position },
+      ];
+      pinchRef.current = {
+        contacts, ...pinchGeometry(contacts, rect), initialView: view, selecting: selectionMode,
+        view: gesture.dragging ? viewAfterPan(gesture, gesture.current) : view,
+      };
+      gestureRef.current = null;
+      suppressMarkerClick.current = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setDragBounds(null);
+      return;
+    }
     const target = event.target as Element;
     // Keep marker taps on the element the pointer originally hit.
     const captureTarget = !selectionMode && target.closest(".gps-map__marker") ? target : event.currentTarget;
-    const { position } = pointerPosition(event);
     suppressMarkerClick.current = false;
     gestureRef.current = {
-      pointerId: event.pointerId, captureTarget, start: position, bounds, view,
+      pointerId: event.pointerId, pointerType: event.pointerType, captureTarget, start: position, current: position, bounds, view,
       selecting: selectionMode, dragging: false,
     };
     captureTarget.setPointerCapture(event.pointerId);
     if (selectionMode) setDragBounds(boundsForDrag(bounds, position, position));
   };
 
+  const pinchView = (pinch: PinchGesture, contact: PinchContact, event: React.PointerEvent<SVGSVGElement>) => {
+    const { position, rect } = pointerPosition(event);
+    contact.position = position;
+    const { midpoint, distance } = pinchGeometry(pinch.contacts, rect);
+    return zoomBetweenPoints(pinch.view, distance / Math.max(1, pinch.distance), pinch.midpoint, midpoint);
+  };
+
   const handlePointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const pinch = pinchRef.current;
+    if (pinch) {
+      const contact = pinch.contacts.find(({ id }) => id === event.pointerId);
+      if (contact) setPreviewView(pinchView(pinch, contact, event));
+      return;
+    }
     const gesture = gestureRef.current;
     if (gesture?.pointerId !== event.pointerId) return;
     const { position, rect } = pointerPosition(event);
+    gesture.current = position;
     if (gesture.selecting) {
       setDragBounds(boundsForDrag(gesture.bounds, gesture.start, position));
       return;
@@ -481,13 +573,25 @@ const WorldMap: React.FC<Props> = ({
     const gesture = gestureRef.current;
     if (gesture?.pointerId !== pointerId) return;
     gestureRef.current = null;
-    if (gesture.captureTarget.hasPointerCapture(pointerId)) gesture.captureTarget.releasePointerCapture(pointerId);
+    releaseCapture(gesture.captureTarget, pointerId);
     setDragBounds(null);
     setPreviewView(null);
     return gesture;
   };
 
+  const finishPinch = (event: React.PointerEvent<SVGSVGElement>, commit: boolean) => {
+    const pinch = pinchRef.current;
+    const contact = pinch?.contacts.find(({ id }) => id === event.pointerId);
+    if (!pinch || !contact) return false;
+    pinchRef.current = null;
+    pinch.contacts.forEach(({ target, id }) => releaseCapture(target, id));
+    setPreviewView(null);
+    if (commit) onViewChange(pinchView(pinch, contact, event));
+    return true;
+  };
+
   const handlePointerUp = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (finishPinch(event, true)) return;
     const gesture = finishGesture(event.pointerId);
     if (!gesture || gesture.selecting !== selectionMode) return;
     const { position, rect } = pointerPosition(event);
@@ -502,7 +606,7 @@ const WorldMap: React.FC<Props> = ({
   };
 
   const cancelGesture = (event: React.PointerEvent<SVGSVGElement>) => {
-    finishGesture(event.pointerId);
+    if (!finishPinch(event, false)) finishGesture(event.pointerId);
   };
 
   const pan = (dx: number, dy: number) => onViewChange(normalizedView({
@@ -580,15 +684,11 @@ const WorldMap: React.FC<Props> = ({
         onDoubleClick={(event) => {
           if (selectionMode || (event.target as Element).closest(".gps-map__marker")) return;
           const rect = event.currentTarget.getBoundingClientRect();
-          const x = (event.clientX - rect.left) / rect.width - .5;
-          const y = (event.clientY - rect.top) / rect.height - .5;
-          const nextZoom = Math.min(zoom * 2, MAX_ZOOM);
-          const factor = 1 / zoom - 1 / nextZoom;
-          onViewChange(normalizedView({ longitude: view.longitude + x * 360 * factor,
-            latitude: view.latitude - y * 180 * factor, zoom: nextZoom }));
+          onViewChange(zoomBetweenPoints(view, 2, { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height }));
         }}
         onLostPointerCapture={(event) => {
-          if (event.target === gestureRef.current?.captureTarget) cancelGesture(event);
+          if (event.target === gestureRef.current?.captureTarget ||
+              pinchRef.current?.contacts.some(({ target, id }) => target === event.target && id === event.pointerId)) cancelGesture(event);
         }}>
         <desc id="gps-map-keyboard-hint">{selectionMode
           ? "Mit den Pfeiltasten verschieben, mit Plus und Minus zoomen. Enter übernimmt den sichtbaren Bereich, Escape beendet die Auswahl."
@@ -614,8 +714,8 @@ const WorldMap: React.FC<Props> = ({
             <path key={layer.minZoom} d={layer.path} className="gps-map__lake" fillRule="evenodd" />)}
         </g>}
         <g aria-hidden="true" className="gps-map__borders">
-          <path d={detailed && detail ? detail.borders.international : countryBorders} className="gps-map__border" />
-          <path d={detailed && detail ? detail.borders.other : otherBorders} className="gps-map__border gps-map__border--other" />
+          <path d={detailed && detailBorders ? detailBorders.international : countryBorders} className="gps-map__border" />
+          <path d={detailed && detailBorders ? detailBorders.other : otherBorders} className="gps-map__border gps-map__border--other" />
         </g>
         {(showRasterDetail || showStreetDetail) && <React.Suspense fallback={null}>
           {showRasterDetail && <MapRasterDetail style={style} bounds={bounds} size={viewportSize}

@@ -44,6 +44,43 @@
 .topbar-import-button__short-label { display: none; }
 .activity-center__trigger-copy .activity-center__compact-label { display: none; }
 
+.topbar-theme {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding-inline: 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.topbar-theme:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.topbar-theme__icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.topbar-theme__select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: .75rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.topbar-theme__select option {
+  background: var(--surface-1);
+  color: var(--text);
+}
+
 @media (min-width: 1080px), (min-width: 740px) and (max-width: 900px) {
   .workspace-header { flex-direction: row; align-items: center; }
   .workspace-history { flex-shrink: 0; padding-inline-end: 0; }
@@ -62,6 +99,23 @@
   .topbar-import-button__short-label { display: inline; }
 }
 
+@media (max-width: 820px) {
+  .topbar-theme {
+    position: relative;
+    justify-content: center;
+    flex: 0 0 36px;
+    padding-inline: 0;
+  }
+
+  .topbar-theme__select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+  }
+}
+
 @media (max-width: 699px) {
   .workspace-header > .topbar { min-height: 46px; padding: 3px 8px; }
   .workspace-header .topbar__actions {
@@ -77,11 +131,18 @@
   .workspace-header .activity-center__trigger { min-height: 38px; padding-inline: 6px; gap: 4px; }
   .workspace-header .activity-center__trigger-copy .activity-center__status-label { display: none; }
   .workspace-header .activity-center__trigger-copy .activity-center__compact-label { display: block; }
-  .workspace-header .theme-toggle { width: 34px; height: 38px; }
+  .workspace-header .theme-toggle {
+    width: auto;
+    min-width: 40px;
+    min-height: 44px;
+    justify-content: center;
+    padding-inline: 6px;
+  }
+  .workspace-header .topbar-theme { flex-basis: 40px; min-height: 44px; }
   .workspace-header .runtime-status .compute-mode-badge {
     position: relative;
-    width: 34px;
-    height: 38px;
+    width: 40px;
+    height: 44px;
     justify-content: center;
     padding: 0;
   }

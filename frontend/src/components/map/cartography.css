@@ -78,20 +78,24 @@
   flex-wrap: wrap;
   gap: 5px 12px;
   padding: 7px 12px;
-  background: var(--surface-2);
-  color: var(--text-muted);
+  background: #172b3b;
+  color: #d8e5ef;
   font-size: .75rem;
   line-height: 1.45;
 }
-.gps-map__details-info a { color: var(--text); text-decoration: underline; }
+.gps-map__details-info a { color: #fff; text-decoration: underline; }
 .gps-map__details-info button {
   min-height: 36px;
   padding: 4px 8px;
-  border: 1px solid var(--border-strong);
+  border: 1px solid #819eaf;
   border-radius: 7px;
-  background: var(--surface-1);
-  color: var(--text);
+  background: #274457;
+  color: #fff;
   font: inherit;
+}
+.gps-page .gps-map__viewport :is(button, summary, a):focus-visible {
+  outline: 2px solid #d9f4ff;
+  outline-offset: 2px;
 }
 
 .gps-map__relief image {
