@@ -194,7 +194,7 @@ The **CI** workflow runs for pull requests and pushes to `develop` and `main`:
 | Check | What it validates |
 | --- | --- |
 | `Metadata and scripts` | Shell syntax, version and changelog consistency, generated Windows metadata, UPX policy, and dependency inventory generation |
-| `Backend` | Python dependencies, module compilation, and backend unit tests |
+| `Backend` | Python dependencies, module compilation, backend unit tests, and separate browser workflow and journey suites with a five-minute limit each |
 | `Frontend` | Locked npm installation, TypeScript checking, and production build |
 
 Newer runs on the same branch cancel older in-progress CI runs. A pull request
@@ -296,9 +296,13 @@ boundary and records the complete `develop` history in `main`.
 
 ### 3. Automated publication after the merge
 
-A push to `main` runs **CI** first. The **Publish Release** workflow is triggered
-for the exact tested commit through `workflow_run`, but its jobs proceed only
-when that CI run succeeds.
+A push to `main` runs **CI** first. Metadata checks always run. For a merged
+`develop` release PR, CI can reuse the successful backend, frontend, and Windows
+checks from the latest linked PR CI attempt when the tree recorded by that run
+matches the actual `main` commit tree. A changed CI workflow or verifier, a
+different tree, or unavailable verification triggers the full suite on `main`.
+The **Publish Release** workflow uses `workflow_run` for the exact `main`
+commit and proceeds only after that CI run succeeds.
 
 The publication then performs these steps:
 

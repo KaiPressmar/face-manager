@@ -28,6 +28,12 @@ function Get-FileDigest {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Write-UpgradeTiming {
+    param([string]$Fixture, [string]$Phase, [Diagnostics.Stopwatch]$Timer)
+    $Timer.Stop()
+    Write-Host ("Upgrade timing [{0}] {1}: {2:F2} s" -f $Fixture, $Phase, $Timer.Elapsed.TotalSeconds)
+}
+
 $createLibrary = @'
 import sqlite3
 import sys
@@ -61,12 +67,14 @@ try {
         $installDirectory = Join-Path $fixtureRoot "Face Manager custom directory"
         New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 
+        $timer = [Diagnostics.Stopwatch]::StartNew()
         gh release download "v$legacyVersion" --repo $legacyRepository --dir $fixtureRoot `
             --pattern $legacyName --pattern "$legacyName.sha256"
         $legacyPath = Join-Path $fixtureRoot $legacyName
         $legacyDigest = Get-FileDigest $legacyPath
         $expectedChecksum = "$legacyDigest  $legacyName"
         $downloadedChecksum = Get-Content -LiteralPath "$legacyPath.sha256" -Raw
+        Write-UpgradeTiming $legacyName "Download and verify fixture" $timer
         if ($downloadedChecksum.TrimEnd() -cne $expectedChecksum) {
             throw "The published Windows fixture checksum does not match $legacyName."
         }
@@ -91,7 +99,9 @@ try {
                 New-Item -ItemType Directory -Path $dataDirectory | Out-Null
             }
             $database = Join-Path $dataDirectory "database.sqlite"
+            $timer.Restart()
             $legacyExit = Invoke-Setup $legacyPath @("/DIR=`"$installDirectory`"")
+            Write-UpgradeTiming $legacyName "Install legacy version" $timer
             if ($legacyExit -ne 0) {
                 throw "Installing $legacyName failed with exit code $legacyExit."
             }
@@ -113,7 +123,9 @@ try {
                 Set-Content -LiteralPath $lockedFile -Value "File held open until the upgrade fails."
                 $lock = [System.IO.File]::Open($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
                 try {
+                    $timer.Restart()
                     $failedExit = Invoke-Setup $candidate @("/LOG=`"$log`"")
+                    Write-UpgradeTiming $legacyName "Run rollback scenario installer" $timer
                     if ($failedExit -eq 0) {
                         throw "The candidate reported success while a new runtime DLL was locked."
                     }
@@ -130,7 +142,9 @@ try {
                 }
             }
 
+            $timer.Restart()
             $upgradeExit = Invoke-Setup $candidate @("/LOG=`"$log`"")
+            Write-UpgradeTiming $legacyName "Install candidate" $timer
             if ($upgradeExit -ne 0) {
                 throw "Upgrading from $legacyName failed with exit code $upgradeExit."
             }
@@ -159,11 +173,13 @@ try {
             & python -c $verifyLibrary $snapshot.FullName
 
             $runtimeReport = Join-Path $fixtureRoot "runtime.txt"
+            $timer.Restart()
             $process = Start-Process -FilePath $liveApp -ArgumentList "--check-runtime `"$runtimeReport`"" -PassThru
             if (-not $process.WaitForExit(120000)) {
                 $process.Kill($true)
                 throw "Installed runtime check timed out on the upgrade from $legacyName."
             }
+            Write-UpgradeTiming $legacyName "Check installed runtime" $timer
             if ($process.ExitCode -ne 0 -or (Get-Content -LiteralPath $runtimeReport -Raw) -notlike "Face Manager $Version,* CPU inference passed.*") {
                 throw "The upgraded runtime from $legacyName did not pass its CPU inference check."
             }
@@ -174,6 +190,7 @@ try {
             }
             throw
         } finally {
+            $timer.Restart()
             if ($madeMachineRecord) {
                 Remove-Item -LiteralPath $machineRegistryPath -Force
             }
@@ -185,6 +202,7 @@ try {
                 Remove-Item -LiteralPath $dataDirectory -Recurse -Force
             }
             Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+            Write-UpgradeTiming $legacyName "Clean up fixture" $timer
         }
     }
 } finally {

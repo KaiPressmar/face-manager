@@ -1837,21 +1837,40 @@ async function suggestionRefreshFlow(browser, errors) {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
-    const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
-      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
+    const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? {
+      denseJourneyReview,
+      backgroundActivitiesFlow,
+    } : {
+      workspaceNavigation: (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
       durablePreferencesFlow,
-      mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
-      (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
-      (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
-      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
-      (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
-      (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
-      (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
-      (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
+      mapWithoutStorageFlow,
+      previewFlow,
+      firstAssignmentFlow,
+      collectSourcesFlow,
+      localRecoveryFlow,
+      mapFlow,
+      mapSelectionAndJourneyFlow,
+      archiveAssignment: (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
+      compactReview: (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
+      pagedLibraryFacesFlow,
+      liveWorkflowFlow,
+      existingFlow,
+      settingsFlow,
+      previewCacheSettingsFlow,
+      responsiveFlow,
+      reviewInboxFlow,
+      suggestionRefreshFlow,
+      albumLibrary: (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
+      helpTour: (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
+      mapFacelift: (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+      faceliftWorkspaces: (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
       freshInstallFlow,
-      (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
-    ];
-    for (const flow of flows) await flow(browser, errors);
+      manualFace: (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+    };
+    for (const [name, flow] of Object.entries(flows)) {
+      console.log(`START browser smoke: ${name}`);
+      await flow(browser, errors);
+    }
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);
     console.log('PASS browser smoke: no uncaught page errors');
   } finally {
