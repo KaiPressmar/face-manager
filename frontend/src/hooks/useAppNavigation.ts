@@ -5,45 +5,22 @@ import {
   subscribeToTopic, subscribeToVerifiedLibraryIdentity,
 } from "../utils/events";
 import {
-  navigationHash, parseNavigationHash, workspaceHistoryMarker, workspaceHistoryState, workspaceSelectionLimited,
+  MAX_NATIVE_FORWARD_ENTRIES, navigationHash, parseNavigationHash, workspaceHistoryMarker, workspaceHistoryState, workspaceSelectionLimited,
   type AppPage, type NavigationEntry, type WorkspaceHistoryMarker,
 } from "../utils/navigation";
 import { closeTopNavigationDialog, topNavigationDialog } from "../utils/navigationOverlays";
 import type { WorkspaceBinding, WorkspaceNavigationContextValue } from "./useWorkspaceNavigation";
 
-const HISTORY_END_KEY = "face-manager:workspace-history-end";
-export const LIBRARY_GENERATION_KEY = "face-manager:geo-selection-epoch";
-const LIBRARY_ID_KEY = "face-manager:workspace-library-id";
 const OLD_LIBRARY_NOTICE = "Dieser Verlaufseintrag gehört zur vorherigen Bibliothek. Die Übersicht ist geöffnet.";
 const LIMITED_SELECTION_NOTICE = "Die genaue Fotoauswahl war zu groß, um sie nach dem Neuladen wiederherzustellen.";
 
-interface RecordEntry extends WorkspaceHistoryMarker { entry: NavigationEntry }
+interface RecordEntry extends WorkspaceHistoryMarker { entry: NavigationEntry; hasForward: boolean }
 interface FocusAddress { image?: string; id?: string; label?: string; name?: string; text?: string }
 interface Snapshot { state: unknown; top: number; left: number; focus?: FocusAddress }
 interface NavigateOptions { replace?: boolean; preserveWorkspace?: boolean }
 
 function entryId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function knownHistoryEnd(position: number) {
-  try { return Math.max(position, Number(sessionStorage.getItem(HISTORY_END_KEY)) || 0); }
-  catch { return position; }
-}
-
-function storeHistoryEnd(end: number) {
-  try { sessionStorage.setItem(HISTORY_END_KEY, String(end)); } catch { /* Keep it in this tab. */ }
-}
-
-function readLastLibraryId() {
-  try { return sessionStorage.getItem(LIBRARY_ID_KEY) || undefined; } catch { return undefined; }
-}
-
-function rememberLibrary(generation: number, id?: string) {
-  try {
-    sessionStorage.setItem(LIBRARY_GENERATION_KEY, String(generation));
-    if (id) sessionStorage.setItem(LIBRARY_ID_KEY, id);
-  } catch { /* Keep the identity in the current session. */ }
 }
 
 function paneContent(page: AppPage) {
@@ -56,6 +33,22 @@ function writeEntry(record: RecordEntry, replace: boolean) {
   const hash = navigationHash(entry);
   if (replace) window.history.replaceState(state, "", hash);
   else window.history.pushState(state, "", hash);
+}
+
+function markForwardEntry() {
+  const state = window.history.state;
+  const marker = workspaceHistoryMarker(state);
+  if (marker && !marker.hasForward) {
+    window.history.replaceState({ ...state, faceManagerWorkspace: { ...marker, hasForward: true } }, "");
+  }
+}
+
+function snapshotNativeForwardEntries(entries: Set<string>) {
+  for (const id of entries) {
+    if (entries.size <= MAX_NATIVE_FORWARD_ENTRIES) break;
+    entries.delete(id);
+  }
+  return [...entries];
 }
 
 function focusAddress(pane: HTMLElement | null) {
@@ -87,31 +80,24 @@ function restoreFocus(pane: HTMLElement, focus?: Snapshot["focus"]) {
   destination.focus({ preventScroll: true });
 }
 
-export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (entry: NavigationEntry) => void, initialGeneration: number,
+export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (entry: NavigationEntry) => void,
   onLibraryReplaced: () => void) {
   const [initial] = useState<RecordEntry>(() => {
     const marker = workspaceHistoryMarker(window.history.state);
+    seedWorkspaceLibraryId(marker?.libraryId);
     return { entry: initialEntry, id: marker?.id ?? entryId(), position: marker?.position ?? 0,
-      generation: initialGeneration, libraryId: marker?.libraryId };
+      generation: marker?.generation ?? 0, libraryId: marker?.libraryId, hasForward: marker?.hasForward ?? false,
+      nativeForwardEntries: marker?.nativeForwardEntries };
   });
-  const [initialLibraryId] = useState(() => {
-    const id = readLastLibraryId() ?? initial.libraryId;
-    seedWorkspaceLibraryId(id);
-    return id;
-  });
-  const libraryId = useRef(initialLibraryId);
+  const libraryId = useRef(initial.libraryId);
   const verifiedLibraryId = useRef<string>();
   const [ready, setReady] = useState(!initial.libraryId);
   const current = useRef(initial);
-  const generation = useRef(initialGeneration);
+  const generation = useRef(initial.generation);
   const [record, setRecord] = useState(initial);
-  const [notice, setNotice] = useState<string | undefined>(() => {
-    const marker = workspaceHistoryMarker(window.history.state);
-    if (marker && marker.generation !== initialGeneration) return OLD_LIBRARY_NOTICE;
-    if (workspaceSelectionLimited(window.history.state)) return LIMITED_SELECTION_NOTICE;
-    return undefined;
-  });
-  const end = useRef(workspaceHistoryMarker(window.history.state) ? knownHistoryEnd(initial.position) : 0);
+  const [notice, setNotice] = useState(() => workspaceSelectionLimited(window.history.state) ? LIMITED_SELECTION_NOTICE : undefined);
+  const furthestPosition = useRef(initial.position + Number(initial.hasForward));
+  const nativeForwardEntries = useRef(new Set(initial.nativeForwardEntries));
   const known = useRef(new Map([[initial.position, initial]]));
   const snapshots = useRef(new Map<string, Snapshot>());
   const lastFocused = useRef(new Map<string, FocusAddress>());
@@ -134,6 +120,17 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
       focus: focusAddress(pane) ?? lastFocused.current.get(origin.id) ?? previous?.focus,
     });
     latestByPage.current.set(origin.entry.page, origin);
+  }, []);
+
+  const discardForward = useCallback((position: number) => {
+    for (const [index, old] of known.current) {
+      if (index < position) continue;
+      if (latestByPage.current.get(old.entry.page)?.id !== old.id) snapshots.current.delete(old.id);
+      lastFocused.current.delete(old.id);
+      nativeForwardEntries.current.delete(old.id);
+      known.current.delete(index);
+    }
+    furthestPosition.current = position;
   }, []);
 
   const activate = useCallback((next: RecordEntry, restore: boolean, snapshot?: Snapshot, updateRoute = true) => {
@@ -170,28 +167,28 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
     if (cursorReturn.current) return;
     const previous = current.current;
     captureCurrent();
-    const next = {
+    const nextPosition = options.replace ? previous.position : previous.position + 1;
+    if (!options.replace) {
+      markForwardEntry();
+      nativeForwardEntries.current.delete(previous.id);
+      discardForward(nextPosition);
+    }
+    const next: RecordEntry = {
       entry, generation: generation.current,
       libraryId: libraryId.current,
       id: options.replace ? previous.id : entryId(),
-      position: options.replace ? previous.position : previous.position + 1,
+      position: nextPosition,
+      hasForward: options.replace ? previous.hasForward : false,
+      nativeForwardEntries: snapshotNativeForwardEntries(nativeForwardEntries.current),
     };
-    if (!options.replace) {
-      for (const [position, old] of known.current) {
-        if (position < next.position) continue;
-        if (latestByPage.current.get(old.entry.page)?.id !== old.id) snapshots.current.delete(old.id);
-        lastFocused.current.delete(old.id);
-        known.current.delete(position);
-      }
+    if (!options.replace && options.preserveWorkspace) {
       const oldFocus = lastFocused.current.get(previous.id);
-      if (options.preserveWorkspace && oldFocus) lastFocused.current.set(next.id, oldFocus);
-      end.current = next.position;
-      storeHistoryEnd(end.current);
+      if (oldFocus) lastFocused.current.set(next.id, oldFocus);
     }
     writeEntry(next, options.replace ?? false);
     setNotice(undefined);
     activate(next, !options.preserveWorkspace, snapshot, updateRoute);
-  }, [activate, captureCurrent]);
+  }, [activate, captureCurrent, discardForward]);
 
   const navigate = useCallback((entry: NavigationEntry, options?: NavigateOptions) => {
     addEntry(entry, options);
@@ -232,15 +229,14 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
 
   const step = useCallback((direction: -1 | 1) => {
     if (cursorReturn.current || closeTopNavigationDialog()) return true;
-    const destination = current.current.position + direction;
-    if (destination < 0 || destination > end.current) return false;
+    const active = current.current;
+    if (direction === -1 ? !active.position : !active.hasForward) return false;
     window.history.go(direction);
     return true;
   }, []);
 
   const replaceLibrary = useCallback(() => {
     generation.current += 1;
-    rememberLibrary(generation.current, libraryId.current);
     snapshots.current.clear();
     lastFocused.current.clear();
     latestByPage.current.clear();
@@ -311,7 +307,6 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
         }
         if (verifiedLibraryId.current !== id) {
           verifiedLibraryId.current = id;
-          rememberLibrary(generation.current, id);
           setReady(true);
         }
       });
@@ -340,8 +335,8 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
   }, [replaceLibrary]);
 
   useEffect(() => {
-    writeEntry(current.current, true);
-    storeHistoryEnd(end.current);
+    if (!workspaceHistoryMarker(window.history.state)
+      || window.location.hash !== navigationHash(current.current.entry)) writeEntry(current.current, true);
     const oldScrollRestoration = window.history.scrollRestoration;
     window.history.scrollRestoration = "manual";
     const restoreFromLocation = () => {
@@ -371,17 +366,45 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
       const knownDestination = marker ? known.current.get(marker.position) : undefined;
       const cached = knownDestination?.id === marker?.id ? knownDestination : undefined;
       const routed = cached && hash === navigationHash(cached.entry) ? cached.entry : parseNavigationHash(hash, state);
-      const wrongLibrary = marker ? marker.generation !== generation.current
-        || Boolean(marker.libraryId && libraryId.current && marker.libraryId !== libraryId.current)
-        : Boolean(routed.geoSelection && routed.geoSelectionEpoch !== generation.current);
-      const entry = wrongLibrary ? { page: routed.page } : routed;
-      const next = { ...marker, entry, id: marker?.id ?? entryId(), position: marker?.position ?? previous.position + 1,
-        generation: generation.current, libraryId: libraryId.current };
-      if (!marker) {
-        end.current = next.position;
-        storeHistoryEnd(end.current);
+      const verifiedId = verifiedLibraryId.current;
+      const boundId = marker?.libraryId;
+      if (marker && boundId && !verifiedId) {
+        setReady(false);
+        if (!libraryId.current) {
+          libraryId.current = boundId;
+          generation.current = marker.generation;
+          seedWorkspaceLibraryId(boundId);
+        }
       }
-      if (!marker || wrongLibrary || marker.libraryId !== next.libraryId || hash !== navigationHash(entry)) writeEntry(next, true);
+      const expectedId = verifiedId ?? libraryId.current;
+      const wrongGeneration = marker && marker.generation !== generation.current;
+      const wrongIdentity = boundId && expectedId && boundId !== expectedId;
+      const unverifiedSelection = routed.geoSelection && (!boundId || (!cached && routed.geoSelectionEpoch !== marker?.generation));
+      const wrongLibrary = wrongGeneration || wrongIdentity || unverifiedSelection;
+      const entry = wrongLibrary ? { page: routed.page } : routed;
+      const position = marker?.position ?? previous.position + 1;
+      const id = marker?.id ?? entryId();
+      const savedNativeEntries = marker?.nativeForwardEntries ?? [];
+      const nativeEntries = nativeForwardEntries.current;
+      for (const savedId of savedNativeEntries) nativeEntries.add(savedId);
+      const hasNativeForward = nativeEntries.delete(id);
+      if (marker) {
+        furthestPosition.current = Math.max(furthestPosition.current, previous.position,
+          position + Number(marker.hasForward === true || hasNativeForward));
+      } else {
+        // A native hash change adds an entry before we can mark its predecessor.
+        // Carry that entry's ID through history jumps until we can mark it in place.
+        if (!previous.hasForward) nativeEntries.add(previous.id);
+        discardForward(position);
+      }
+      const rememberedNativeEntries = snapshotNativeForwardEntries(nativeEntries);
+      const nativeEntriesChanged = savedNativeEntries.length !== rememberedNativeEntries.length
+        || savedNativeEntries.some((savedId, index) => savedId !== rememberedNativeEntries[index]);
+      const next: RecordEntry = { entry, id, position,
+        generation: generation.current, libraryId: expectedId,
+        hasForward: position < furthestPosition.current, nativeForwardEntries: rememberedNativeEntries };
+      if (!marker || wrongLibrary || marker.libraryId !== next.libraryId || marker.hasForward !== next.hasForward
+        || nativeEntriesChanged || hash !== navigationHash(entry)) writeEntry(next, true);
       activate(next, true, wrongLibrary ? undefined : snapshots.current.get(next.id));
       setNotice(wrongLibrary ? OLD_LIBRARY_NOTICE : !cached && workspaceSelectionLimited(state) ? LIMITED_SELECTION_NOTICE : undefined);
     };
@@ -412,12 +435,12 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
       window.removeEventListener("keydown", keyboard, true);
       document.removeEventListener("focusin", rememberFocus);
     };
-  }, [activate, captureCurrent, step]);
+  }, [activate, captureCurrent, discardForward, step]);
 
   return {
     workspace, navigate, resume, reset, step, ready, notice, id: record.id,
     canBack: record.position > 0,
-    canForward: record.position < end.current,
+    canForward: record.hasForward,
     backPage: known.current.get(record.position - 1)?.entry.page,
     forwardPage: known.current.get(record.position + 1)?.entry.page,
   };

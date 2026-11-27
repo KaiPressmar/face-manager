@@ -14,6 +14,7 @@ import { removePhotoAlbumImages, updatePhotoAlbum, usePhotoAlbums, type PhotoAlb
 import { subscribeToTopic } from "../../utils/events";
 import type { NavigateToFaceGroup } from "./FaceOverlay";
 import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
+import { useUiPreferences } from "../../hooks/useUiPreferences";
 
 export type ImageGroupingMode = "date" | "folder";
 export type SortDirection = "desc" | "asc";
@@ -24,7 +25,6 @@ const MAX_GEOMETRY_REQUESTS = 4;
 const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
-const IMAGE_GRID_SIZE_STORAGE_KEY = "face-manager:image-grid-size";
 const IMAGE_GRID_SIZE_OPTIONS: Array<{
   value: ImageGridSize;
   label: string;
@@ -34,31 +34,6 @@ const IMAGE_GRID_SIZE_OPTIONS: Array<{
   { value: "medium", label: "Mittel" },
   { value: "large", label: "Groß" },
 ];
-
-function readImageGridSize(): ImageGridSize {
-  try {
-    const stored = window.localStorage.getItem(IMAGE_GRID_SIZE_STORAGE_KEY);
-    if (
-      stored === "xsmall" ||
-      stored === "small" ||
-      stored === "medium" ||
-      stored === "large"
-    ) {
-      return stored;
-    }
-  } catch {
-    // Storage can be unavailable in restricted browser contexts.
-  }
-  return "medium";
-}
-
-function persistImageGridSize(size: ImageGridSize) {
-  try {
-    window.localStorage.setItem(IMAGE_GRID_SIZE_STORAGE_KEY, size);
-  } catch {
-    // The in-memory choice still works for the current session.
-  }
-}
 
 interface ResolvedImageGeometry {
   source: FaceImage;
@@ -129,7 +104,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   // Archived faces are hidden unless explicitly filtered for.
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
-  const [imageGridSize, setImageGridSize] = useState<ImageGridSize>(readImageGridSize);
+  const { values: { image_grid_size: imageGridSize }, setPreference } = useUiPreferences();
   const [galleryRevision, setGalleryRevision] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -936,8 +911,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
             onChange={(event) => {
               const option = IMAGE_GRID_SIZE_OPTIONS[Number(event.target.value)];
               if (!option) return;
-              setImageGridSize(option.value);
-              persistImageGridSize(option.value);
+              setPreference("image_grid_size", option.value);
             }}
           />
           <span

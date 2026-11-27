@@ -8,7 +8,8 @@ import ImageRenamePage from "./components/renaming/ImageRenamePage";
 import SettingsPage from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
-import { LIBRARY_GENERATION_KEY, useAppNavigation } from "./hooks/useAppNavigation";
+import { useAppNavigation } from "./hooks/useAppNavigation";
+import { useUiPreferences } from "./hooks/useUiPreferences";
 import { WorkspaceNavigationContext } from "./hooks/useWorkspaceNavigation";
 import ErrorBoundary from "./components/shared/ErrorBoundary";
 import { hasGeoPhotoSelection, type GeoPhotoSelection } from "./utils/geoPhotoSelection";
@@ -49,11 +50,6 @@ const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const HELP_INVITATION_KEY = "face-manager:help-introduction-v1";
-
-function helpInvitationSeen() {
-  try { return localStorage.getItem(HELP_INVITATION_KEY) === "seen"; } catch { return false; }
-}
 
 const helpTopicForPage: Record<AppPage, HelpTopic> = {
   people: "photos", map: "map", review: "people", renaming: "files", settings: "settings",
@@ -63,19 +59,11 @@ function focusHelpButton() {
   window.requestAnimationFrame(() => document.getElementById("app-help-trigger")?.focus());
 }
 
-function readGeoSelectionEpoch() {
-  try {
-    return Number(window.sessionStorage.getItem(LIBRARY_GENERATION_KEY)) || 0;
-  } catch {
-    return 0;
-  }
-}
-
-function readNavigationEntry(geoSelectionEpoch: number): NavigationEntry {
+function readNavigationEntry(): NavigationEntry {
   const entry = parseNavigationHash(window.location.hash, window.history.state);
   const marker = workspaceHistoryMarker(window.history.state);
-  if (marker && marker.generation !== geoSelectionEpoch) return { page: entry.page };
-  return entry.geoSelection && entry.geoSelectionEpoch !== geoSelectionEpoch ? { page: "people" } : entry;
+  return entry.geoSelection && (!marker?.libraryId || entry.geoSelectionEpoch !== marker.generation)
+    ? { page: "people" } : entry;
 }
 
 function reviewTarget(entry: NavigationEntry, token: number): ClusterNavigationTarget | null {
@@ -111,8 +99,7 @@ const PagePane: React.FC<{ active: boolean; page: AppPage; children: React.React
 
 const App: React.FC = () => {
   const sharedLibrary = useSharedLibrary();
-  const [initialGeoSelectionEpoch] = useState(readGeoSelectionEpoch);
-  const [initialEntry] = useState(() => readNavigationEntry(initialGeoSelectionEpoch));
+  const [initialEntry] = useState(readNavigationEntry);
   const [page, setPage] = useState<AppPage>(() => initialEntry.page);
   const [geoSelection, setGeoSelection] = useState(initialEntry.geoSelection);
   const [mapAlbumId, setMapAlbumId] = useState(initialEntry.mapAlbumId);
@@ -129,15 +116,15 @@ const App: React.FC = () => {
   const [availableUpdate, setAvailableUpdate] = useState<AvailableUpdate | null>(null);
   const [showUpdate, setShowUpdate] = useState(false);
   const [initialNotesChecked, setInitialNotesChecked] = useState(false);
-  const [introSeen, setIntroSeen] = useState(helpInvitationSeen);
+  const { values: { help_introduction_seen: introSeen }, loading: preferencesLoading,
+    failure: preferenceFailure, setPreference, retry: retryPreferences } = useUiPreferences();
   const [helpTopic, setHelpTopic] = useState<HelpTopic | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [topbarAction, setTopbarAction] = useState<TopbarAction>();
   const helpSequence = useRef(0);
 
   const dismissIntroduction = () => {
-    setIntroSeen(true);
-    try { localStorage.setItem(HELP_INVITATION_KEY, "seen"); } catch { /* Keep the choice in this session. */ }
+    if (!introSeen) setPreference("help_introduction_seen", true);
   };
   const showHelp = (topic: HelpTopic) => { dismissIntroduction(); setHelpTopic(topic); };
   const queuedDialog = showReleaseNotes || showChangelog || showUpdate;
@@ -165,7 +152,7 @@ const App: React.FC = () => {
     setMapAlbumId(undefined);
     setClusterNavigationTarget(null);
   }, []);
-  const navigation = useAppNavigation(initialEntry, applyEntry, initialGeoSelectionEpoch, clearLibraryTargets);
+  const navigation = useAppNavigation(initialEntry, applyEntry, clearLibraryTargets);
   const { navigate } = navigation;
 
   useEffect(() => {
@@ -388,7 +375,7 @@ const App: React.FC = () => {
         onShowHelp={() => showHelp(helpTopicForPage[page])}
         onImportStateChange={setImportDialogOpen}
         topbarAction={topbarAction}
-        invitation={initialNotesChecked && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
+        invitation={initialNotesChecked && !preferencesLoading && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
           <aside className="help-invitation" aria-labelledby="help-invitation-title">
             <div>
               <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
@@ -403,6 +390,11 @@ const App: React.FC = () => {
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
+        preferenceNotice={preferenceFailure && <div className="workspace-history__notice" role="alert">
+          {preferenceFailure === "load" ? "Die Ansichts- und Hilfeeinstellungen konnten nicht geladen werden."
+            : "Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden."}{" "}
+          <button type="button" className="secondary-button" onClick={retryPreferences}>Erneut versuchen</button>
+        </div>}
       >
         {!navigation.ready && <p className="workspace-history__notice" role="status">Bibliothek wird geprüft …</p>}
         {navigation.ready && PAGE_ORDER.filter((target) => visitedRef.current.has(target)).map(

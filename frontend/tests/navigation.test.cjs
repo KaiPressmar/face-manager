@@ -2,7 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const load = require('./load-typescript.cjs');
 const {
-  navigationHash, parseNavigationHash, workspaceHistoryMarker, workspaceHistoryState, workspaceSelectionLimited, MAX_HISTORY_PHOTO_IDS,
+  navigationHash, parseNavigationHash, workspaceHistoryMarker, workspaceHistoryState, workspaceSelectionLimited,
+  MAX_HISTORY_PHOTO_IDS, MAX_NATIVE_FORWARD_ENTRIES,
 } = load('src/utils/navigation.ts');
 
 test('all library pages survive reload via hash routes', () => {
@@ -31,7 +32,7 @@ test('review and settings deep links preserve their targets', () => {
 test('browser metadata identifies each workspace and bounds durable selection size', () => {
   const ordinary = { from_date: '2025-01-01', album_id: 'a'.repeat(32), bounds: { west: 0, east: 1, south: 2, north: 3 } };
   const route = { page: 'people', geoSelection: { ...ordinary, image_ids: [2, 100, 301] } };
-  const first = { id: 'a', position: 1, generation: 5 };
+  const first = { id: 'a', position: 1, generation: 5, hasForward: true, nativeForwardEntries: ['b'] };
   const second = { id: 'b', position: 2, generation: 5 };
   const firstState = workspaceHistoryState(route, first);
   const secondState = workspaceHistoryState(route, second);
@@ -45,6 +46,11 @@ test('browser metadata identifies each workspace and bounds durable selection si
   assert.equal('geoSelection' in workspaceHistoryState({ page: 'people' }, first), false);
   assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, position: -1 } }), undefined);
   assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, generation: 2.5 } }), undefined);
+  assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, hasForward: 'true' } }), undefined);
+  assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: { ...first, nativeForwardEntries: [23] } }), undefined);
+  assert.equal(workspaceHistoryMarker({ faceManagerWorkspace: {
+    ...first, nativeForwardEntries: Array(MAX_NATIVE_FORWARD_ENTRIES + 1).fill('b'),
+  } }), undefined);
 });
 
 test('image selection survives browser history without putting photo IDs in the URL', () => {

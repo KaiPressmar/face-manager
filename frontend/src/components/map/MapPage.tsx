@@ -3,7 +3,7 @@ import {
   fetchMapPoints,
   type MapImage, type MapImageCursor, type MapPoint, type MapPointsResponse,
 } from "../../utils/api";
-import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapStyle, type MapView } from "./WorldMap";
+import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
 import MapGallery, { type MapGalleryOpening } from "./MapGallery";
 import MapPhotoTile from "./MapPhotoTile";
 import MapAlbumDialog, { type MapAlbumOpening } from "./MapAlbumDialog";
@@ -20,6 +20,7 @@ import { countWithLabel } from "../../utils/germanFormatting";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
 import { subscribeToTopic } from "../../utils/events";
 import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
+import { useUiPreferences } from "../../hooks/useUiPreferences";
 import "./map.css";
 import "./cartography.css";
 import "./map-workspace.css";
@@ -85,17 +86,11 @@ const shortDate = new Intl.DateTimeFormat("de-DE", { day: "numeric", month: "sho
 const year = new Date().getFullYear();
 
 const countries = [...countryLabels].sort((a, b) => a.name.localeCompare(b.name, "de"));
-const MAP_STYLE_KEY = "face-manager:map-style";
-const MAP_NAMES_KEY = "face-manager:map-country-names";
 
 const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNavigateToCluster, onOpenImages }) => {
   const [view, setView] = useState<MapView>(INITIAL_VIEW);
   const [mode, setMode] = useState<"locations" | "journey">("locations");
-  const [mapStyle, setMapStyle] = useState<MapStyle>(() => {
-    const value = localStorage.getItem(MAP_STYLE_KEY);
-    return value === "landscape" || value === "satellite" ? value : "standard";
-  });
-  const [showNames, setShowNames] = useState(() => localStorage.getItem(MAP_NAMES_KEY) === "true");
+  const { values: { map_style: mapStyle, map_country_names: showNames }, setPreference } = useUiPreferences();
   const [journeyResult, setJourneyResult] = useState<MapResult<Journey> | null>(null);
   const [journeyStopId, setJourneyStopId] = useState<string | undefined>();
   const [journeyRetry, setJourneyRetry] = useState(0);
@@ -682,10 +677,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
             <div className="gps-map-discovery__content gps-map-options">
               <label>Kartenstil<select value={mapStyle} onChange={(event) => {
                 const style = event.target.value === "landscape" || event.target.value === "satellite" ? event.target.value : "standard";
-                setMapStyle(style); localStorage.setItem(MAP_STYLE_KEY, style);
+                setPreference("map_style", style);
               }}><option value="standard">Standard</option><option value="landscape">Landschaft</option><option value="satellite">Satellit</option></select></label>
               <label><input type="checkbox" checked={showNames} onChange={(event) => {
-                setShowNames(event.target.checked); localStorage.setItem(MAP_NAMES_KEY, String(event.target.checked));
+                setPreference("map_country_names", event.target.checked);
               }} />Ländernamen anzeigen</label>
               <label>Land finden<select value="" onChange={(event) => {
                 const country = countries.find((item) => item.code === event.target.value);

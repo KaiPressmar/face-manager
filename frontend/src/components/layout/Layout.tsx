@@ -32,9 +32,10 @@ const Layout: React.FC<{
   onImportStateChange: (open: boolean) => void;
   topbarAction?: TopbarAction;
   invitation?: React.ReactNode;
+  preferenceNotice?: React.ReactNode;
   children: React.ReactNode;
 }> = ({ page, navigation, sharedLibrary, sharedLibraryReadError, onChangePage, onShowReleaseNotes, onShowUpdate,
-  onShowHelp, onImportStateChange, topbarAction, invitation, children }) => {
+  onShowHelp, onImportStateChange, topbarAction, invitation, preferenceNotice, children }) => {
   return (
     <div className="app-shell">
       <Sidebar
@@ -60,6 +61,7 @@ const Layout: React.FC<{
           <button type="button" className="workspace-history__reset" onClick={navigation.reset}>Zur Ausgangsansicht</button>
         </nav>
         {navigation.notice && <p className="workspace-history__notice" role="status">{navigation.notice}</p>}
+        {preferenceNotice}
         {invitation}
         <div className="app-viewport">{children}</div>
       </div>
