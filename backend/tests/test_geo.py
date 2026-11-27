@@ -375,14 +375,14 @@ class GeoMetadataTest(unittest.TestCase):
 
 class GeoApiTest(unittest.IsolatedAsyncioTestCase):
     def test_cursor_rejects_conflicting_parameters(self):
-        from backend import app
+        from backend.api import map as map_api
 
         for params in (
             dict(before_id=None, before_captured_at="2024-01-01T00:00:00", offset=0),
             dict(before_id=2, before_captured_at=None, offset=1),
         ):
             with self.subTest(params=params), self.assertRaises(HTTPException) as raised:
-                app.get_map_images(-180, 180, -90, 90, limit=2, **params)
+                map_api.get_map_images(-180, 180, -90, 90, limit=2, **params)
             self.assertEqual(raised.exception.status_code, 422)
 
     @patch("backend.app.get_cached_image_thumbnail")

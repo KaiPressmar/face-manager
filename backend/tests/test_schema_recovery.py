@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,6 +56,86 @@ class SchemaRecoveryTest(unittest.TestCase):
                     schema.init_db(recover=False)
             self.assertEqual(db_path.read_bytes(), b"broken")
             self.assertFalse(db_path.with_name("recovery").exists())
+
+    def test_init_db_preserves_current_content_hash_index_on_startup(self):
+        statements = []
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            schema, "DB_PATH", str(Path(temp_dir) / "database.sqlite")
+        ):
+            schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as conn, conn:
+                conn.executescript(
+                    """
+                    DROP INDEX idx_image_content_hash;
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_image_content_hash
+                    ON image(content_hash)
+                    WHERE content_hash IS NOT NULL;
+                    INSERT INTO image(path, directory, filename, content_hash)
+                    VALUES ('/photos/a.jpg', '/photos', 'a.jpg', 'hash-a');
+                    """
+                )
+            conn = schema.get_conn()
+            conn.set_trace_callback(statements.append)
+            with patch.object(schema, "_open_connection", return_value=conn):
+                schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as conn:
+                locations = conn.execute("SELECT path FROM image_location").fetchall()
+
+        self.assertFalse(any("DROP INDEX" in statement for statement in statements))
+        self.assertFalse(any("GROUP BY content_hash" in statement for statement in statements))
+        self.assertEqual([row["path"] for row in locations], ["/photos/a.jpg"])
+
+    def test_init_db_repairs_nonunique_content_hash_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            schema, "DB_PATH", str(Path(temp_dir) / "database.sqlite")
+        ):
+            schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as conn, conn:
+                conn.executescript(
+                    """
+                    DROP INDEX idx_image_content_hash;
+                    CREATE INDEX idx_image_content_hash ON image(content_hash);
+                    INSERT INTO image(path, directory, filename, content_hash)
+                    VALUES ('/photos/a.jpg', '/photos', 'a.jpg', 'hash-a'),
+                           ('/photos/b.jpg', '/photos', 'b.jpg', 'hash-a');
+                    """
+                )
+            schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as conn:
+                locations = conn.execute(
+                    "SELECT image_id, path FROM image_location ORDER BY path"
+                ).fetchall()
+                self.assertEqual(
+                    [(row["image_id"], row["path"]) for row in locations],
+                    [(1, "/photos/a.jpg"), (1, "/photos/b.jpg")],
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        "INSERT INTO image(path, directory, filename, content_hash) "
+                        "VALUES ('/photos/c.jpg', '/photos', 'c.jpg', 'hash-a')"
+                    )
+
+    def test_init_db_can_deduplicate_newly_hashed_sources_with_current_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            schema, "DB_PATH", str(Path(temp_dir) / "database.sqlite")
+        ):
+            root = Path(temp_dir)
+            first, second = root / "a.jpg", root / "b.jpg"
+            first.write_bytes(b"identical bytes")
+            second.write_bytes(b"identical bytes")
+            schema.init_db(scan_sources=False)
+            with closing(schema.get_conn()) as conn, conn:
+                conn.executemany(
+                    "INSERT INTO image(path, directory, filename, content_hash) VALUES (?, ?, ?, ?)",
+                    [
+                        (str(first), temp_dir, first.name, schema.calculate_file_hash(str(first))),
+                        (str(second), temp_dir, second.name, None),
+                    ],
+                )
+            schema.init_db(scan_sources=True)
+            with closing(schema.get_conn()) as conn:
+                locations = conn.execute("SELECT image_id FROM image_location ORDER BY path").fetchall()
+                self.assertEqual([row["image_id"] for row in locations], [1, 1])
 
     def test_init_db_repairs_cluster_integrity_issues(self):
         with tempfile.TemporaryDirectory() as temp_dir:

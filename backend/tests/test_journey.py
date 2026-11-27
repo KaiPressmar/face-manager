@@ -161,7 +161,7 @@ class JourneyTest(unittest.TestCase):
             )
 
     def test_journey_endpoint_rejects_partial_or_invalid_bounds(self):
-        from backend.app import get_map_journey
+        from backend.api.map import get_map_journey
 
         for query in ({"west": 0}, {"west": 170, "east": -170, "south": 10, "north": 0}):
             with self.subTest(query=query), self.assertRaises(HTTPException) as raised:
@@ -169,7 +169,8 @@ class JourneyTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 422)
 
     def test_journey_detail_query_defaults_to_trip_and_respects_area_and_dates(self):
-        from backend.app import app, get_map_journey
+        from backend.api.map import get_map_journey
+        from backend.app import app
 
         parameters = app.openapi()["paths"]["/api/map/journey"]["get"]["parameters"]
         detail = next(parameter["schema"] for parameter in parameters if parameter["name"] == "detail")

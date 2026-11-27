@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.db import schema
-from backend.services.shared_sync_snapshot import MAX_SNAPSHOT_PAGE, capture_image, capture_library
+from backend.services.shared_sync_snapshot import MAX_SNAPSHOT_PAGE, capture_image, capture_images, capture_library
 
 
 DIGEST = "a9" * 32
@@ -119,6 +119,27 @@ class SharedSyncSnapshotTest(unittest.TestCase):
         self.add_photo(4, self.root / "Trailing.jpg ", digest="4" * 64)
         page = self.read_snapshot()
         self.assertEqual((page.records, page.skipped_images), ((), 4))
+
+    def test_dirty_capture_batches_reads_and_omits_ineligible_images(self):
+        self.add_photo(1, self.root / "First.jpg", digest="1" * 64)
+        self.add_photo(2, self.root / "Mixed.jpg", self.root.parent / "Private.jpg", digest="2" * 64)
+        self.add_photo(3, self.root / "Unprocessed.jpg", digest="3" * 64, processed=False)
+        self.add_photo(4, self.root / "Fourth.jpg", digest="4" * 64)
+        self.add_face(11, 1, "unknown_person")
+        self.add_face(12, 4, "not_face")
+        expected = {record.image_id: record for record in self.read_snapshot().records}
+
+        statements = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            captured = capture_images(self.conn, self.root, "device-a", (4, 2, 99, 1, 3, 4))
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertEqual(set(captured), {1, 4})
+        self.assertEqual(captured, expected)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(len(statements), 3)
 
     def test_paging_uses_caller_transaction_without_committing(self):
         self.add_photo(1, self.root / "First.jpg", digest="1" * 64)

@@ -12,12 +12,12 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from functools import partial, wraps
-from contextlib import asynccontextmanager, closing, nullcontext
+from contextlib import asynccontextmanager, closing
 from datetime import date, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from queue import Full, Queue
-from typing import Annotated, List, Literal
+from typing import Annotated, List
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi import Path as ApiPath
@@ -30,9 +30,13 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
+from .api import library
+from .api.albums import router as albums_router
+from .api.map import router as map_router
+from .api.photo_selection import _GeoSelectionBody, optional_map_bounds, validated_photo_selection
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
 from .config import (
     APP_VERSION,
@@ -51,7 +55,6 @@ from .error_logging import (
     install_global_exception_hooks,
 )
 from .models.face_model import get_runtime_provider_details
-from .services import albums
 from .services.archive_repair import (
     apply_archive_repair,
     preview_archive_repair,
@@ -94,6 +97,11 @@ from .services.preview_cache_budget import (
     set_preview_cache_limit_mib,
     validate_preview_cache_limit_mib,
 )
+from .services.filename_format import (
+    DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
+    DEFAULT_FILENAME_PERSON_JOINER,
+    build_filename_person_format_summary,
+)
 from .services.filesystem_paths import filesystem_path
 from .services.photo_identity import RegisteredPhotoChanged, file_identity
 from .services.face_thumbnail_warmup import FaceThumbnailWarmupQueue
@@ -106,7 +114,7 @@ from .services.autocluster_queue import (
     PRIORITY_STARTUP_REPAIR,
     PRIORITY_VERSION_UPGRADE,
 )
-from .services.events import TrailingThrottle, event_hub, publish_cluster_change
+from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.shared_libraries import shared_library_preview
@@ -115,11 +123,8 @@ from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.background_activities import background_activities
-from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_map_years, list_selected_map_images
-from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
-from .services.journey import JourneyDetail, get_journey
-from .services.map_detail_tiles import MapDetailBusy, MapDetailSource, MapDetailUnavailable, fetch_map_detail_tile
-from .services.observed_places import list_observed_places
+from .services.geo import PHOTO_METADATA_ACTIVITY, geo_backfill
+from .services.geo_query import GeoPhotoSelection
 from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
 from .services.update_manager import (
     UpdateError,
@@ -131,8 +136,6 @@ from .services.storage import (
     DEFAULT_AUTOMATIC_UPDATE_CHECKS,
     DEFAULT_CLUSTER_DISTANCE_THRESHOLD,
     DEFAULT_CLUSTER_STRICTNESS,
-    DEFAULT_FILENAME_PERSON_BLOCK_SEPARATOR,
-    DEFAULT_FILENAME_PERSON_JOINER,
     DEFAULT_UI_THEME,
     ManualFaceConflictError,
     StaleFaceAssignmentError,
@@ -140,7 +143,6 @@ from .services.storage import (
     _safe_float,
     assign_cluster_to_person,
     accept_person_suggestion_assignments,
-    build_filename_person_format_summary,
     build_folder_tree,
     count_filename_rename_candidates,
     delete_image,
@@ -232,11 +234,7 @@ _import_was_busy = False
 _last_import_progress: dict[str, tuple[int, int]] = {}
 _version_clustering_lock = threading.Lock()
 _version_clustering_pending = False
-_cluster_operation_lock = threading.RLock()
 _imports_finalizing = 0
-_database_restore_in_progress = False
-_media_library_lock = threading.Lock()
-_media_library_generation = 0
 _pending_image_geometry: OrderedDict[tuple[int, str], tuple[int, int, int]] = OrderedDict()
 _image_geometry_timer: threading.Timer | None = None
 _IMAGE_GEOMETRY_RETRY_SECONDS = 1.0
@@ -294,10 +292,10 @@ def safe_cluster_mutation(function):
     """
     @wraps(function)
     def guarded(*args, **kwargs):
-        generation = _get_media_library_generation()
+        generation = library.get_generation()
         auto_cluster_queue.request_cancel(timeout=CLUSTER_YIELD_TIMEOUT_SECONDS)
-        with _cluster_operation_lock:
-            _get_media_library_generation(generation)
+        with library.write_lock:
+            library.get_generation(generation)
             return function(*args, **kwargs)
 
     return guarded
@@ -307,9 +305,9 @@ def guard_import_library_change(function):
     """Keep import controls out of the database replacement transaction."""
     @wraps(function)
     def guarded(*args, **kwargs):
-        generation = _get_media_library_generation()
-        with _cluster_operation_lock:
-            _get_media_library_generation(generation)
+        generation = library.get_generation()
+        with library.write_lock:
+            library.get_generation(generation)
             return function(*args, **kwargs)
 
     return guarded
@@ -368,14 +366,14 @@ def _publish_thumbnail_warmup() -> None:
 def _begin_import_finalization() -> None:
     """Block interactive writes before an import stops reporting as active."""
     global _imports_finalizing
-    with _cluster_operation_lock:
+    with library.write_lock:
         _imports_finalizing += 1
 
 
 def _end_import_finalization() -> None:
     """Release writes only after import and cluster events were published."""
     global _imports_finalizing
-    with _cluster_operation_lock:
+    with library.write_lock:
         _imports_finalizing = max(0, _imports_finalizing - 1)
     # Finalization no longer blocks the writer; start any deferred clustering.
     auto_cluster_queue.notify_ready()
@@ -390,13 +388,7 @@ def notify_clusters_changed(reason: str) -> None:
     """
     if reason != "background_progress":
         shared_library_preview.library_changed()
-    _publish_active_cluster_change(reason)
-
-
-def _publish_active_cluster_change(reason: str) -> None:
-    with _media_library_lock:
-        if not _database_restore_in_progress:
-            publish_cluster_change(reason)
+    library.publish_active_cluster_change(reason)
 
 
 def _publish_background_cluster_progress() -> None:
@@ -455,7 +447,7 @@ def _reclustering_writer_available() -> bool:
     must wait while an import is running, queued, or finalizing. It does not
     consult the auto-cluster queue itself, which serialises its own tasks.
     """
-    if _imports_finalizing > 0 or _database_restore_in_progress:
+    if _imports_finalizing > 0 or library.restoring:
         return False
     import_snapshot = import_queue.snapshot()
     return not (
@@ -474,7 +466,7 @@ auto_cluster_queue = AutoClusterQueue(
 
 def is_backend_idle_for_thumbnail_warmup() -> bool:
     """Return whether low-priority thumbnail warming may run."""
-    if _database_restore_in_progress:
+    if library.restoring:
         return False
     import_snapshot = import_queue.snapshot()
     if import_snapshot.get("running_count", 0) > 0:
@@ -628,7 +620,7 @@ def schedule_version_clustering_upgrade() -> bool:
     was already applied.
     """
     global _version_clustering_pending
-    with _cluster_operation_lock, _version_clustering_lock:
+    with library.write_lock, _version_clustering_lock:
         if get_applied_clustering_version() == APP_VERSION:
             _version_clustering_pending = False
             return False
@@ -704,7 +696,7 @@ idle_recluster_scheduler = IdleReclusterScheduler(
 
 def _person_suggestion_work_ready() -> bool:
     return (
-        not _database_restore_in_progress
+        not library.restoring
         and not _imports_finalizing
         and is_backend_idle_for_reclustering()
     )
@@ -965,7 +957,7 @@ def api_full_changelog():
 @app.post("/api/changelog/current/acknowledge")
 def api_acknowledge_current_changelog():
     """Remember that the running version's notes were dismissed."""
-    with _cluster_operation_lock:
+    with library.write_lock:
         set_last_seen_changelog_version(APP_VERSION)
     return {"version": APP_VERSION, "seen": True}
 
@@ -1006,7 +998,7 @@ def api_skip_update(data: dict = Body(...)):
         update_manager.get_cached_release(version)
     except UpdateError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    with _cluster_operation_lock:
+    with library.write_lock:
         set_skipped_update_version(version)
     return {"version": version, "skipped": True}
 
@@ -1590,16 +1582,16 @@ class _ArchiveRepairUndo(BaseModel):
 
 @app.get("/api/database/archive-repair")
 def api_preview_archive_repair():
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     result = preview_archive_repair()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return result
 
 
 @app.post("/api/database/archive-repair/snapshots")
 @safe_cluster_mutation
 def api_register_archive_repair_snapshot(payload: bytes = Body(..., media_type="application/octet-stream")):
-    _get_media_library_generation()
+    library.get_generation()
     try:
         return register_archive_repair_snapshot(payload)
     except ValueError as exc:
@@ -1612,7 +1604,7 @@ def api_register_archive_repair_snapshot(payload: bytes = Body(..., media_type="
 
 
 def _finish_archive_repair(operation, argument):
-    _get_media_library_generation()
+    library.get_generation()
     try:
         result = operation(argument)
     except LookupError as exc:
@@ -1659,7 +1651,6 @@ def api_import_database(
     preview_checksum: Annotated[str | None, Header(alias="X-Restore-SHA256")] = None,
 ):
     """Replace the active library, keeping its snapshot until recovery is verified."""
-    global _database_restore_in_progress, _media_library_generation
     ensure_database_is_idle()
     if not payload:
         raise HTTPException(status_code=400, detail="Es wurde keine Sicherungsdatei ausgewählt.")
@@ -1680,9 +1671,9 @@ def api_import_database(
         upload.write_bytes(payload)
         validate_database_file(upload)
 
-        with _media_library_lock:
-            _database_restore_in_progress = restore_gate = True
-            _media_library_generation += 1
+        with library.state_lock:
+            library.restoring = restore_gate = True
+            library.generation += 1
             _pending_image_geometry.clear()
         if not shared_library_preview.begin_restore():
             raise HTTPException(
@@ -1755,9 +1746,9 @@ def api_import_database(
                 invalidate_person_suggestion_epoch()
                 background_activities.discard(PHOTO_METADATA_ACTIVITY)
             face_thumbnail_warmup_queue.invalidate_library()
-            with _media_library_lock:
-                _database_restore_in_progress = False
-                _media_library_generation += 1
+            with library.state_lock:
+                library.restoring = False
+                library.generation += 1
             shared_library_preview.library_changed(restoring=False)
             face_thumbnail_warmup_queue.wake()
         disposable_backup = backup if not (replaced and backup_ready and not library_ready) else None
@@ -1863,9 +1854,9 @@ def api_imports(request: Request):
     Returns:
         Queue summary with active, queued, and recent terminal jobs.
     """
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     snapshot = import_queue.snapshot()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return serialize_import_snapshot(snapshot, get_display_platform(request))
 
 
@@ -1990,9 +1981,9 @@ async def api_events():
 @app.get("/api/library-identity")
 def api_library_identity(response: Response):
     """Return the current library epoch even when the latest event was coalesced."""
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     identity = get_person_suggestion_epoch()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     response.headers["Cache-Control"] = "no-store"
     return {"library_id": identity}
 
@@ -2088,20 +2079,20 @@ def api_clusters_overview():
 
 
 def _assignment_snapshot(read):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     library_id = get_person_suggestion_epoch()
     result = read()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return {**result, "assignment_library_id": library_id}
 
 
 @app.get("/api/person-suggestions")
 def api_person_suggestions(response: Response):
     """List conservative, reviewable matches for existing people."""
-    generation = _get_media_library_generation()
-    with _cluster_operation_lock:
+    generation = library.get_generation()
+    with library.write_lock:
         suggestions, pending, library_id = get_person_suggestion_snapshot()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     response.headers[PERSON_SUGGESTIONS_PENDING_HEADER] = "1" if pending else "0"
     response.headers[ASSIGNMENT_LIBRARY_ID_HEADER] = library_id
     response.headers["Cache-Control"] = "no-store"
@@ -2154,7 +2145,7 @@ def api_dismiss_person_suggestion(cluster_id: int, data: dict | None = Body(defa
 @app.get("/api/review-suggestions")
 def api_review_suggestions():
     """List conservative proposals learned from explicit review decisions."""
-    with _cluster_operation_lock:
+    with library.write_lock:
         library_id = get_person_suggestion_epoch()
         return [dict(item, library_id=library_id) for item in list_review_suggestions()]
 
@@ -2347,11 +2338,11 @@ _SHARED_FACE_HISTORY_BLOCK = "Rückgängig und Wiederholen sind bei schreibend a
 
 @app.get("/api/faces/action-history")
 def api_face_action_history():
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     library_id = get_person_suggestion_epoch()
     with shared_library_preview.local_face_history_allowed() as allowed:
         result = face_action_history(library_id, blocked_reason=None if allowed else _SHARED_FACE_HISTORY_BLOCK)
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return result
 
 
@@ -2362,7 +2353,7 @@ class _FaceActionReplay(BaseModel):
 
 
 def _replay_face_action(selection: _FaceActionReplay, *, redo: bool):
-    _get_media_library_generation()
+    library.get_generation()
     if selection.library_id != get_person_suggestion_epoch():
         raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade den Änderungsverlauf neu.")
     with shared_library_preview.local_face_history_allowed() as allowed:
@@ -2398,7 +2389,7 @@ def api_batch_update_faces(data: dict = Body(...)):
     action = str(data.get("action") or "").strip()
     face_ids = data.get("face_ids") or data.get("faceIds") or []
     try:
-        _get_media_library_generation()
+        library.get_generation()
         expected_library_id = data.get("expected_library_id")
         if expected_library_id is not None and expected_library_id != get_person_suggestion_epoch():
             raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Lade die Gesichtsauswahl neu.")
@@ -2469,18 +2460,18 @@ def api_person_directory(
     limit: Annotated[int, Query(ge=1, le=MAX_PERSON_DIRECTORY_PAGE_SIZE)] = 24,
     offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
 ):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     result = list_person_directory(search, limit, offset)
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return result
 
 
 @app.get("/api/person-directory/{person_id}")
 def api_person_profile(person_id: Annotated[int, ApiPath(ge=1, le=2**63 - 1)]):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     library_id = get_person_suggestion_epoch()
     profile = get_person_directory_entry(person_id)
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if profile is None:
         raise HTTPException(status_code=404, detail="Diese Person wurde nicht gefunden.")
     return {**profile, "assignment_library_id": library_id}
@@ -2493,13 +2484,13 @@ def api_person_photos(
     limit: Annotated[int, Query(ge=1, le=MAX_PERSON_DIRECTORY_PAGE_SIZE)] = 24,
     offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
 ):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     if get_person_directory_entry(person_id) is None:
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         raise HTTPException(status_code=404, detail="Diese Person wurde nicht gefunden.")
     rows, total = list_images_page(limit=limit, offset=offset, person_id=person_id)
     items = _group_image_rows(rows, get_display_platform(request))
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return {
         "items": items, "total": total, "offset": offset, "limit": limit,
         "has_more": offset + len(items) < total, "available_persons": [],
@@ -2644,18 +2635,6 @@ async def _run_source_work(operation, *, discard=None):
         ) from exc
 
 
-def _get_media_library_generation(expected: int | None = None) -> int:
-    with _media_library_lock:
-        if _database_restore_in_progress or (
-            expected is not None and expected != _media_library_generation
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="Die Bibliothek wird gewechselt. Bitte versuche es erneut.",
-            )
-        return _media_library_generation
-
-
 def _original_photo_range(value: str, size: int) -> tuple[int, int] | None:
     # A single range covers progressive image reads and resumed downloads.
     # For multiple ranges, the HTTP server can send the complete resource.
@@ -2736,16 +2715,16 @@ def _close_open_photo(available):
 @app.get("/api/images/{image_id}/file")
 async def get_image(image_id: int, request: Request = None):
     """Stream the same open file that was verified against the library."""
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     try:
         available = await _run_source_work(partial(open_available_image_file, image_id), discard=_close_open_photo)
     except RegisteredPhotoChanged as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if available is None:
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         raise HTTPException(status_code=404, detail="Das Originalfoto ist nicht erreichbar.")
     try:
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         return _OriginalPhotoResponse(*available, request)
     except BaseException:
         _close_open_photo(available)
@@ -2808,9 +2787,9 @@ def _schedule_image_geometry_retry() -> None:
 
 def _retry_image_geometry() -> None:
     global _image_geometry_timer
-    with _media_library_lock:
+    with library.state_lock:
         _image_geometry_timer = None
-        if _database_restore_in_progress:
+        if library.restoring:
             return
         for key in list(_pending_image_geometry)[:_IMAGE_GEOMETRY_RETRY_BATCH]:
             if not _try_save_image_geometry(key, _pending_image_geometry[key]):
@@ -2824,8 +2803,8 @@ def _remember_image_geometry(
     image_id: int, content_hash: str, geometry: tuple[int, int, int], generation: int,
 ) -> None:
     key = (image_id, content_hash)
-    with _media_library_lock:
-        if _database_restore_in_progress or generation != _media_library_generation:
+    with library.state_lock:
+        if library.restoring or generation != library.generation:
             return
         if not _pending_image_geometry and _try_save_image_geometry(key, geometry):
             return
@@ -2839,7 +2818,7 @@ def _render_registered_preview(
     preview_id: int, image_id: int, content_hash: str | None,
     bbox: tuple[int, int, int, int] | None, generation: int, needs_geometry: bool,
 ) -> Path:
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if content_hash:
         cached = _cached_registered_preview(preview_id, content_hash, bbox)
         if cached is not None:
@@ -2847,7 +2826,7 @@ def _render_registered_preview(
     locations = list_image_locations([image_id], include_source_hash=True).get(image_id, ())
     failed = False
     for location in locations:
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         source = location["path"]
         try:
             if not content_hash:
@@ -2864,7 +2843,7 @@ def _render_registered_preview(
             continue
 
         with image:
-            _get_media_library_generation(generation)
+            library.get_generation(generation)
             try:
                 thumbnail = (
                     write_face_thumbnail(preview_id, content_hash, bbox, image, geometry[0])
@@ -2884,11 +2863,11 @@ def _render_registered_preview(
 
 
 async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = False) -> Response:
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     image_id, content_hash, bbox, thumbnail, needs_geometry = await run_in_threadpool(
         _registered_preview, preview_id, face,
     )
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if thumbnail is not None:
         try:
             response = await run_in_threadpool(_thumbnail_response, thumbnail, request)
@@ -2896,12 +2875,12 @@ async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = Fa
             # It may have been evicted between the cached lookup and read.
             pass
         else:
-            _get_media_library_generation(generation)
+            library.get_generation(generation)
             return response
     thumbnail = await _run_source_work(
         partial(_render_registered_preview, preview_id, image_id, content_hash, bbox, generation, needs_geometry),
     )
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     try:
         response = await run_in_threadpool(_thumbnail_response, thumbnail, request)
     except OSError as exc:
@@ -2911,7 +2890,7 @@ async def _serve_thumbnail(preview_id: int, request: Request, *, face: bool = Fa
             headers={"Retry-After": "2"},
         ) from exc
     else:
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         return response
 
 
@@ -3012,7 +2991,7 @@ def api_get_image_path_cleanup():
 @app.post("/api/maintenance/image-paths")
 def api_start_image_path_cleanup(remove_missing: bool = True):
     """Queue a low-priority validation of every stored image location."""
-    with _cluster_operation_lock:
+    with library.write_lock:
         return image_path_cleanup.start("manual" if remove_missing else "manual_check")
 
 
@@ -3110,16 +3089,16 @@ def _image_detail_rows(image_id: int, *, include_archived: bool = False):
 
 def api_image_detail(request: Request, image_id: int):
     """Return one image with its active faces without consulting the original."""
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     image = _group_image_rows(_image_detail_rows(image_id), get_display_platform(request))[0]
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return image
 
 
 def _resolve_image_geometry(image_id: int, content_hash: str | None, generation: int):
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     for location in list_image_locations([image_id], include_source_hash=True).get(image_id, ()):
-        _get_media_library_generation(generation)
+        library.get_generation(generation)
         path = location["path"]
         try:
             if not content_hash:
@@ -3139,13 +3118,13 @@ async def get_image_detail(request: Request, image_id: int, resolve_geometry: bo
     if not resolve_geometry:
         return await run_in_threadpool(api_image_detail, request, image_id)
 
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     load_rows = partial(_image_detail_rows, image_id, include_archived=True)
     rows = await run_in_threadpool(load_rows)
     geometry = _stored_image_geometry(rows[0])
     content_hash = rows[0]["content_hash"]
     if geometry is None:
-        with _media_library_lock:
+        with library.state_lock:
             geometry = _pending_image_geometry.get((image_id, content_hash))
     if geometry is None and any(row["face_id"] is not None for row in rows):
         geometry, path = await _run_source_work(
@@ -3162,7 +3141,7 @@ async def get_image_detail(request: Request, image_id: int, resolve_geometry: bo
     images = await run_in_threadpool(
         partial(_group_image_rows, rows, get_display_platform(request), geometry_override=geometry),
     )
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return images[0]
 
 
@@ -3172,7 +3151,7 @@ def _registered_face_preview(image_id: int, source) -> FacePreview | None:
         return None
     geometry = _stored_image_geometry(source)
     if geometry is None:
-        with _media_library_lock:
+        with library.state_lock:
             geometry = _pending_image_geometry.get((image_id, content_hash))
     if geometry is None:
         return None
@@ -3204,7 +3183,7 @@ async def _face_preview_paths(image_id: int, *, include_source_hash: bool = Fals
 
 @app.get("/api/images/{image_id}/manual-face-preview")
 async def api_manual_face_preview(image_id: int):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     source = await run_in_threadpool(get_image_preview_source, image_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
@@ -3228,7 +3207,7 @@ async def api_manual_face_preview(image_id: int):
         raise HTTPException(status_code=422, detail="Für dieses Foto ist keine passende Vorschau verfügbar. Prüfe das verknüpfte Original.")
 
     current = await run_in_threadpool(get_image_preview_source, image_id)
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if current is None or current["content_hash"] != content_hash:
         raise HTTPException(status_code=409, detail="Das Bild wurde geändert. Bitte lade es erneut.")
     registered_geometry = _stored_image_geometry(current)
@@ -3265,7 +3244,7 @@ def _raw_manual_face_box(geometry, normalized_box):
 
 @safe_cluster_mutation
 def _commit_manual_face(image_id, content_hash, geometry, box, person_name, generation, source_path):
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     try:
         face_id, cluster_id = create_manual_face(
             image_id, content_hash, geometry, box, person_name, source_path=source_path,
@@ -3300,7 +3279,7 @@ async def api_create_manual_face(image_id: int, data: dict = Body(...)):
     ):
         raise HTTPException(status_code=422, detail="Gib einen gültigen Personennamen mit höchstens 255 Zeichen ein.")
 
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     source = await run_in_threadpool(get_image_preview_source, image_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
@@ -3327,7 +3306,7 @@ async def api_create_manual_face(image_id: int, data: dict = Body(...)):
 async def api_face_box_suggestions(
     image_id: int, preview_token: Annotated[str | None, Header(alias=PREVIEW_PROOF_HEADER)] = None,
 ):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     source = await run_in_threadpool(get_image_preview_source, image_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Das Bild wurde nicht gefunden.")
@@ -3353,7 +3332,7 @@ async def api_face_box_suggestions(
         current_paths = await _face_preview_paths(image_id)
     else:
         current_paths = paths
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if current_source is None or current_source["content_hash"] != content_hash or boxes != current_boxes or paths != current_paths:
         raise HTTPException(status_code=409, detail="Das Bild oder seine Markierungen wurden geändert. Bitte lade es erneut.")
     return {"items": items}
@@ -3362,7 +3341,7 @@ async def api_face_box_suggestions(
 @app.get("/api/faces/{face_id}/image")
 def api_face_image(request: Request, face_id: int, proposal_token: str | None = None):
     """Resolve a face used in a proposal to its original photo context."""
-    with _cluster_operation_lock:
+    with library.write_lock:
         if proposal_token is not None and not is_person_suggestion_epoch_current(proposal_token):
             raise HTTPException(status_code=409, detail="Die Bibliothek hat sich geändert. Lade den Vorschlag neu.")
         conn = get_conn()
@@ -3378,413 +3357,8 @@ def api_face_image(request: Request, face_id: int, proposal_token: str | None = 
         return image
 
 
-def _validated_photo_selection(selection: GeoPhotoSelection) -> GeoPhotoSelection:
-    try:
-        validate_photo_selection(selection)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return selection
-
-
-class _GeoBoundsBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    west: float
-    east: float
-    south: float
-    north: float
-
-
-class _GeoSelectionBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    bounds: _GeoBoundsBody | None = None
-    from_date: date | None = None
-    to_date: date | None = None
-    image_ids: list[Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]] | None = None
-    album_id: str | None = None
-
-    def to_selection(self) -> GeoPhotoSelection:
-        return _validated_photo_selection(GeoPhotoSelection(
-            bounds=GeoBounds(**self.bounds.model_dump()) if self.bounds else None,
-            from_date=self.from_date,
-            to_date=self.to_date,
-            image_ids=tuple(dict.fromkeys(self.image_ids)) if self.image_ids is not None else None,
-            album_id=self.album_id,
-        ))
-
-
-class _AlbumJourneyBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    from_date: date | None = None
-    to_date: date | None = None
-    detail: JourneyDetail = "trip"
-    title: Annotated[str, Field(max_length=albums.MAX_ALBUM_NAME)] | None = None
-    arrival_included: bool | None = None
-    departure_included: bool | None = None
-
-    def metadata(self) -> dict:
-        _validated_photo_selection(GeoPhotoSelection(from_date=self.from_date, to_date=self.to_date))
-        result = self.model_dump(mode="json", exclude_none=True)
-        if self.title:
-            result["title"] = self.title.strip()
-        return result
-
-
-class _AlbumDraftOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-
-class _AlbumDraftDimensions(_AlbumDraftOptions):
-    width: Annotated[int, Field(ge=0, le=99_999)]
-    height: Annotated[int, Field(ge=0, le=99_999)]
-
-
-_AlbumColor = Annotated[str, Field(max_length=7, pattern=r"^(?:#?[0-9a-fA-F]{3}|#?[0-9a-fA-F]{6})?$")]
-
-
-class _AlbumDraftColors(_AlbumDraftOptions):
-    paper: _AlbumColor | None = None
-    accent: _AlbumColor | None = None
-    land: _AlbumColor | None = None
-    water: _AlbumColor | None = None
-
-
-class _AlbumDraftFormatting(_AlbumDraftOptions):
-    typeface: Literal["serif", "sans"] | None = None
-    alignment: Literal["left", "center"] | None = None
-    titleScale: Annotated[int, Field(ge=75, le=130)] | None = None
-    margins: Literal["narrow", "normal", "wide"] | None = None
-    listColumns: Literal[1, 2] | None = None
-
-
-class _AlbumDraftFraming(_AlbumDraftOptions):
-    zoom: Annotated[int, Field(ge=50, le=400)]
-    horizontal: Annotated[int, Field(ge=-200, le=200)]
-    vertical: Annotated[int, Field(ge=-200, le=200)]
-
-
-class _AlbumDraftViewport(_AlbumDraftOptions):
-    west: Annotated[float, Field(ge=-180, le=180)]
-    east: Annotated[float, Field(ge=-180, le=180)]
-    south: Annotated[float, Field(ge=-90, le=90)]
-    north: Annotated[float, Field(ge=-90, le=90)]
-
-
-class _AlbumLayoutDraftBody(_AlbumDraftOptions):
-    version: Literal[1]
-    title: Annotated[str, Field(max_length=72)] | None = None
-    subtitle: Annotated[str, Field(max_length=100)] | None = None
-    format: Literal["a4", "portrait", "square", "square-210", "square-300", "custom"] | None = None
-    dimensions: _AlbumDraftDimensions | None = None
-    dpi: Literal[150, 240, 300, 400] | None = None
-    palette: Literal["sand", "coast"] | None = None
-    accent: Literal["automatic", "rust", "ocean", "pine", "plum"] | None = None
-    colors: _AlbumDraftColors | None = None
-    formatting: _AlbumDraftFormatting | None = None
-    contextPercent: Annotated[int, Field(ge=0, le=100)] | None = None
-    markerScale: Annotated[int, Field(ge=70, le=140)] | None = None
-    useViewport: bool | None = None
-    viewportSnapshot: _AlbumDraftViewport | None = None
-    transports: dict[
-        Annotated[str, Field(pattern=r"^[0-9]{1,19}:[0-9]{1,19}$")],
-        Literal["car", "train", "plane", "walk", "bike", "boat"],
-    ] | None = None
-    style: Literal["standard", "landscape", "satellite"] | None = None
-    showNames: bool | None = None
-    showPeriod: bool | None = None
-    showStopsList: bool | None = None
-    fullBleed: bool | None = None
-    framing: _AlbumDraftFraming | None = None
-    markerStyle: Literal["standard", "dots", "none"] | None = None
-    showPlaceNames: bool | None = None
-    showRoute: bool | None = None
-    placeNames: dict[
-        Annotated[str, Field(pattern=r"^[0-9]{1,19}$")],
-        Annotated[str, Field(max_length=60)],
-    ] | None = None
-
-
-_AlbumImageId = Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]
-
-
-class _AlbumPhotoSelectionBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    image_ids: list[_AlbumImageId] | None = None
-    selection: _GeoSelectionBody | None = None
-
-    def photo_kwargs(self):
-        return {
-            "image_ids": self.image_ids,
-            "selection": self.selection.to_selection() if self.selection is not None else None,
-        }
-
-
-class _AlbumCreateBody(_AlbumPhotoSelectionBody):
-    name: str
-    journey: _AlbumJourneyBody | None = None
-    layout_draft: _AlbumLayoutDraftBody | None = None
-
-
-class _AlbumUpdateBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = None
-    cover_image_id: _AlbumImageId | None = None
-    journey: _AlbumJourneyBody | None = None
-    layout_draft: _AlbumLayoutDraftBody | None = None
-
-
-class _AlbumRemovePhotosBody(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    image_ids: list[_AlbumImageId]
-
-
-def _album_call(operation, *args, write=False, **kwargs):
-    generation = _get_media_library_generation()
-    # The database restore takes the same operation lock before it replaces
-    # the library. A write cannot commit into a newly imported database.
-    with (_cluster_operation_lock if write else nullcontext()):
-        _get_media_library_generation(generation)
-        try:
-            result = operation(*args, **kwargs)
-        except albums.AlbumPhotosMissingError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        _get_media_library_generation(generation)
-        if write:
-            _publish_active_cluster_change("albums_changed")
-        return result
-
-
-def _validate_album_id(album_id: str) -> None:
-    _validated_photo_selection(GeoPhotoSelection(album_id=album_id))
-
-
-@app.get("/api/albums")
-def get_albums():
-    return {"albums": _album_call(albums.list_albums)}
-
-
-@app.get("/api/albums/{album_id}")
-def get_album(album_id: str):
-    _validate_album_id(album_id)
-    return _album_call(albums.get_album, album_id)
-
-
-@app.post("/api/albums", status_code=201)
-def create_album(data: _AlbumCreateBody):
-    return _album_call(
-        albums.create_album, data.name, write=True, **data.photo_kwargs(),
-        journey=data.journey.metadata() if data.journey is not None else None,
-        layout_draft=data.layout_draft.model_dump(exclude_none=True) if data.layout_draft is not None else None,
-    )
-
-
-@app.patch("/api/albums/{album_id}")
-def update_album(album_id: str, data: _AlbumUpdateBody):
-    _validate_album_id(album_id)
-    changes = data.model_dump(exclude_unset=True)
-    if "name" in changes and data.name is None:
-        raise HTTPException(status_code=422, detail="Gib einen Albumname an.")
-    if data.journey is not None:
-        changes["journey"] = data.journey.metadata()
-    if data.layout_draft is not None:
-        changes["layout_draft"] = data.layout_draft.model_dump(exclude_none=True)
-    return _album_call(albums.update_album, album_id, changes, write=True)
-
-
-@app.delete("/api/albums/{album_id}")
-def delete_album(album_id: str):
-    _validate_album_id(album_id)
-    _album_call(albums.delete_album, album_id, write=True)
-    return {"status": "deleted"}
-
-
-@app.post("/api/albums/{album_id}/photos")
-def add_album_photos(album_id: str, data: _AlbumPhotoSelectionBody):
-    _validate_album_id(album_id)
-    return _album_call(albums.add_album_photos, album_id, write=True, **data.photo_kwargs())
-
-
-@app.delete("/api/albums/{album_id}/photos")
-def remove_album_photos(album_id: str, data: _AlbumRemovePhotosBody):
-    _validate_album_id(album_id)
-    return _album_call(albums.remove_album_photos, album_id, data.image_ids, write=True)
-
-
-def _validate_map_bounds(west, east, south, north, from_date, to_date, album_id=None):
-    _validated_photo_selection(GeoPhotoSelection(GeoBounds(west, east, south, north), from_date, to_date, album_id=album_id))
-
-
-def _optional_map_bounds(west, east, south, north) -> GeoBounds | None:
-    if all(value is None for value in (west, east, south, north)):
-        return None
-    if west is None or east is None or south is None or north is None:
-        raise HTTPException(status_code=422, detail="Der Kartenausschnitt benötigt vier Grenzen.")
-    return GeoBounds(west, east, south, north)
-
-
-def _validate_map_cursor(offset, before_id, before_captured_at):
-    if before_id is None and before_captured_at is not None:
-        raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
-    if before_id is not None and offset:
-        raise HTTPException(status_code=422, detail="offset must be zero with before_id")
-
-
-@app.get("/api/map/years")
-def get_map_years(album_id: str | None = None):
-    generation = _get_media_library_generation()
-    _validated_photo_selection(GeoPhotoSelection(album_id=album_id))
-    result = {"years": list_map_years(album_id)}
-    _get_media_library_generation(generation)
-    return result
-
-
-@app.get("/api/map/points")
-def get_map_points(
-    west: float = Query(default=-180, ge=-180, le=180),
-    east: float = Query(default=180, ge=-180, le=180),
-    south: float = Query(default=-90, ge=-90, le=90),
-    north: float = Query(default=90, ge=-90, le=90),
-    from_date: date | None = None,
-    to_date: date | None = None,
-    zoom: int = Query(default=2, ge=0, le=20),
-    grid_columns: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
-    grid_rows: int = Query(default=MAP_GRID_SIZE, ge=1, le=MAP_GRID_SIZE),
-    album_id: str | None = None,
-):
-    """Return bounded photo aggregates for a map viewport."""
-    generation = _get_media_library_generation()
-    _validate_map_bounds(west, east, south, north, from_date, to_date, album_id)
-    result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows, album_id=album_id)
-    _get_media_library_generation(generation)
-    return result
-
-
-@app.post("/api/map/points/selection")
-def get_selected_map_points(
-    selection: Annotated[_GeoSelectionBody, Body(embed=True)],
-    west: Annotated[float, Query(ge=-180, le=180)] = -180,
-    east: Annotated[float, Query(ge=-180, le=180)] = 180,
-    south: Annotated[float, Query(ge=-90, le=90)] = -90,
-    north: Annotated[float, Query(ge=-90, le=90)] = 90,
-    grid_columns: Annotated[int, Query(ge=1, le=MAP_GRID_SIZE)] = MAP_GRID_SIZE,
-    grid_rows: Annotated[int, Query(ge=1, le=MAP_GRID_SIZE)] = MAP_GRID_SIZE,
-):
-    """Aggregate selected photos on the grid of the visible viewport."""
-    generation = _get_media_library_generation()
-    _validate_map_bounds(west, east, south, north, None, None)
-    result = list_map_points(
-        west, east, south, north, grid_columns=grid_columns, grid_rows=grid_rows,
-        selection=selection.to_selection(),
-    )
-    _get_media_library_generation(generation)
-    return result
-
-
-@app.get("/api/map/detail-tiles/{source}/{z}/{x}/{y}")
-def get_map_detail_tile(
-    source: MapDetailSource,
-    z: Annotated[int, ApiPath(ge=0, le=14)],
-    x: Annotated[int, ApiPath(ge=0, le=32767)],
-    y: Annotated[int, ApiPath(ge=0, le=16383)],
-):
-    """Relay one requested detail tile without sending library data."""
-    try:
-        tile = fetch_map_detail_tile(source, z, x, y)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except MapDetailBusy as exc:
-        raise HTTPException(status_code=503, detail="Kartendetails sind vorübergehend ausgelastet.") from exc
-    except MapDetailUnavailable as exc:
-        raise HTTPException(status_code=502, detail="Diese Kartenkachel ist gerade nicht verfügbar.") from exc
-    return Response(content=tile.data, media_type=tile.media_type, headers={
-        "Cache-Control": tile.cache_control, "X-Content-Type-Options": "nosniff",
-    })
-
-
-@app.get("/api/map/images")
-def get_map_images(
-    west: float = Query(default=-180, ge=-180, le=180),
-    east: float = Query(default=180, ge=-180, le=180),
-    south: float = Query(default=-90, ge=-90, le=90),
-    north: float = Query(default=90, ge=-90, le=90),
-    from_date: date | None = None,
-    to_date: date | None = None,
-    limit: int = Query(default=40, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    before_id: int | None = Query(default=None, ge=1, le=2**63 - 1),
-    before_captured_at: str | None = Query(default=None, min_length=1, max_length=64),
-    album_id: str | None = None,
-):
-    """Return a stable page of geotagged photos in a viewport."""
-    generation = _get_media_library_generation()
-    _validate_map_bounds(west, east, south, north, from_date, to_date, album_id)
-    _validate_map_cursor(offset, before_id, before_captured_at)
-    page = list_map_images(
-        west, east, south, north, from_date, to_date, limit, offset,
-        before_id=before_id, before_captured_at=before_captured_at, album_id=album_id,
-    )
-    _get_media_library_generation(generation)
-    return page
-
-
-@app.post("/api/map/images/selection")
-def get_selected_map_images(
-    selection: Annotated[_GeoSelectionBody, Body(embed=True)],
-    limit: Annotated[int, Query(ge=1, le=200)] = 40,
-    offset: Annotated[int, Query(ge=0)] = 0,
-    before_id: Annotated[int | None, Query(ge=1, le=2**63 - 1)] = None,
-    before_captured_at: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
-):
-    """Return one map photo page for an explicit selection."""
-    generation = _get_media_library_generation()
-    _validate_map_cursor(offset, before_id, before_captured_at)
-    page = list_selected_map_images(selection.to_selection(), limit, offset, before_id, before_captured_at)
-    _get_media_library_generation(generation)
-    return page
-
-
-@app.get("/api/map/journey")
-def get_map_journey(
-    from_date: date | None = None,
-    to_date: date | None = None,
-    west: Annotated[float | None, Query(ge=-180, le=180)] = None,
-    east: Annotated[float | None, Query(ge=-180, le=180)] = None,
-    south: Annotated[float | None, Query(ge=-90, le=90)] = None,
-    north: Annotated[float | None, Query(ge=-90, le=90)] = None,
-    detail: JourneyDetail = "trip",
-    album_id: str | None = None,
-):
-    """Return observed journey groups for the specified capture period."""
-    generation = _get_media_library_generation()
-    result = get_journey(from_date, to_date, _optional_map_bounds(west, east, south, north), detail, album_id=album_id)
-    _get_media_library_generation(generation)
-    return result
-
-
-@app.get("/api/map/observed-places")
-def get_observed_places(
-    from_date: date | None = None,
-    to_date: date | None = None,
-    album_id: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=300)] = 150,
-    offset: Annotated[int, Query(ge=0)] = 0,
-):
-    generation = _get_media_library_generation()
-    selection = _validated_photo_selection(GeoPhotoSelection(
-        from_date=from_date, to_date=to_date, album_id=album_id,
-    ))
-    result = list_observed_places(selection, limit, offset)
-    _get_media_library_generation(generation)
-    return result
+app.include_router(albums_router)
+app.include_router(map_router)
 
 
 @app.get("/api/images")
@@ -3819,10 +3393,10 @@ def get_images(
     Returns:
         Paginated image dictionaries containing nested face data.
     """
-    bounds = _optional_map_bounds(west, east, south, north)
+    bounds = optional_map_bounds(west, east, south, north)
     selection = None
     if bounds or from_date or to_date or album_id is not None:
-        selection = _validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date, album_id=album_id))
+        selection = validated_photo_selection(GeoPhotoSelection(bounds, from_date, to_date, album_id=album_id))
     return _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
                             face_statuses, all_photos, selection)
 
@@ -3847,7 +3421,7 @@ def search_selected_images(
 
 def _get_images_page(request, folders, persons, sort_by, sort_direction, limit, offset,
                      face_statuses, all_photos, selection):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     display_platform = get_display_platform(request)
     normalized_folders = [normalize_import_folder_path(folder) for folder in folders]
     rows, total = list_images_page(
@@ -3863,7 +3437,7 @@ def _get_images_page(request, folders, persons, sort_by, sort_direction, limit, 
     )
     items = _group_image_rows(rows, display_platform)
     available_persons = list_available_image_persons(normalized_folders)
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return {
         "items": items,
         "total": total,
@@ -3977,10 +3551,10 @@ def _image_rename_selection(data):
 
 @app.post("/api/image-renames/preview")
 def api_preview_image_rename_candidates(request: Request, data: dict = Body(...)):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     library_id = get_person_suggestion_epoch()
     preview = preview_image_location_renames(**_image_rename_selection(data))
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     if get_display_platform(request) == "windows":
         for item in preview["items"]:
             item["path"] = to_display_path(item["path"])
@@ -4000,16 +3574,16 @@ def _display_rename_recovery(request: Request, result: dict) -> dict:
 
 @app.get("/api/image-renames/recovery")
 def api_list_interrupted_image_renames(request: Request):
-    generation = _get_media_library_generation()
+    generation = library.get_generation()
     report = list_interrupted_image_renames()
-    _get_media_library_generation(generation)
+    library.get_generation(generation)
     return _display_rename_recovery(request, report)
 
 
 @app.post("/api/image-renames/recovery")
 @safe_cluster_mutation
 def api_recover_interrupted_image_renames(request: Request):
-    _get_media_library_generation()
+    library.get_generation()
     try:
         report = recover_interrupted_image_renames()
     except OSError as exc:
@@ -4023,7 +3597,7 @@ def api_recover_interrupted_image_renames(request: Request):
 @safe_cluster_mutation
 def api_apply_image_rename_candidates(data: dict = Body(...)):
     """Rename selected image paths and update the database."""
-    _get_media_library_generation()
+    library.get_generation()
     if "expected_library_id" in data and data["expected_library_id"] != get_person_suggestion_epoch():
         raise HTTPException(status_code=409, detail="Die Bibliothek wurde gewechselt. Prüfe die Dateinamenvorschläge erneut.")
     selection = _image_rename_selection(data)

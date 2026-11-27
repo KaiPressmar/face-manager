@@ -17,6 +17,10 @@ configure_error_logging()
 logger = logging.getLogger("face_manager.db")
 
 HASH_CHUNK_SIZE = 1024 * 1024
+_IMAGE_CONTENT_HASH_INDEX_SQL = (
+    "CREATE UNIQUE INDEX idx_image_content_hash "
+    "ON image(content_hash) WHERE content_hash IS NOT NULL"
+)
 DATABASE_RECOVERY_LOCK = threading.Lock()
 FACE_REVIEW_STATUS_ACTIVE = "active"
 FACE_REVIEW_STATUS_UNKNOWN_PERSON = "unknown_person"
@@ -564,6 +568,7 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
 
     Args:
         conn: SQLite connection to migrate.
+        scan_sources: Whether to backfill metadata from original files.
     """
     cur = conn.cursor()
     _ensure_content_hash_column(cur)
@@ -582,7 +587,6 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
             cur.execute(f"ALTER TABLE image_location ADD COLUMN {name} INTEGER")
     if "content_hash" not in location_columns:
         cur.execute("ALTER TABLE image_location ADD COLUMN content_hash TEXT")
-    cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     cur.execute(
         """
         INSERT OR IGNORE INTO image_location(
@@ -592,6 +596,17 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
         """
     )
 
+    # A current unique index already rules out duplicate hashes unless we add new ones.
+    if not scan_sources:
+        index = cur.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' AND tbl_name = 'image' AND name = 'idx_image_content_hash'"
+        ).fetchone()
+        if index is not None and " ".join(index["sql"].split()) == _IMAGE_CONTENT_HASH_INDEX_SQL:
+            return
+
+    # Backfilling file hashes may reveal duplicates even when the index is current.
+    cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     if scan_sources:
         unhashed = cur.execute(
             "SELECT id, path FROM image WHERE content_hash IS NULL"
@@ -640,6 +655,8 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
                 (canonical_id, duplicate_id),
             )
             cur.execute("DELETE FROM image WHERE id = ?", (duplicate_id,))
+
+    cur.execute(_IMAGE_CONTENT_HASH_INDEX_SQL)
 
     if scan_sources:
         missing_created_at = cur.execute(
@@ -999,13 +1016,6 @@ def _initialize_schema(conn, *, scan_sources: bool):
     _create_recluster_dirty_person_table(cur)
     _create_person_suggestion_generation(cur)
 
-    cur.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_image_content_hash
-        ON image(content_hash)
-        WHERE content_hash IS NOT NULL
-        """
-    )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_image_directory ON image(directory)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_geo_date "
