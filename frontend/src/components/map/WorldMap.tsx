@@ -63,6 +63,7 @@ const MAX_GRID_SIZE = 32;
 const DETAIL_ZOOM = 2.25;
 const MAX_ZOOM = 16384;
 const JOURNEY_STOP_RADIUS = 14;
+const JOURNEY_GROUP_DISTANCE = 37;
 const projectX = (longitude: number) => ((longitude + 180) / 360) * WIDTH;
 const projectY = (latitude: number) => ((90 - latitude) / 180) * HEIGHT;
 const unprojectX = (x: number) => (x / WIDTH) * 360 - 180;
@@ -118,6 +119,36 @@ function viewportPoint(position: GeographicPosition, bounds: MapBounds, size: Ma
     x: ((position.longitude - bounds.west) / (bounds.east - bounds.west)) * size.width,
     y: ((bounds.north - position.latitude) / (bounds.north - bounds.south)) * size.height,
   };
+}
+
+export function groupJourneyStops(stops: readonly JourneyStop[], bounds: MapBounds, size: MapSize) {
+  const groups: { stops: JourneyStop[]; pixel: Point }[] = [];
+  const cells = new Map<string, typeof groups>();
+  for (const stop of stops) {
+    if (stop.longitude < bounds.west || stop.longitude > bounds.east ||
+        stop.latitude < bounds.south || stop.latitude > bounds.north) continue;
+    const pixel = viewportPoint(stop, bounds, size);
+    const column = Math.floor(pixel.x / JOURNEY_GROUP_DISTANCE);
+    const row = Math.floor(pixel.y / JOURNEY_GROUP_DISTANCE);
+    let match: (typeof groups)[number] | undefined;
+    for (let y = row - 1; y <= row + 1 && !match; y++) {
+      for (let x = column - 1; x <= column + 1 && !match; x++) {
+        match = cells.get(`${x}:${y}`)?.find((group) =>
+          Math.hypot(group.pixel.x - pixel.x, group.pixel.y - pixel.y) < JOURNEY_GROUP_DISTANCE);
+      }
+    }
+    if (match) {
+      match.stops.push(stop);
+    } else {
+      const group = { stops: [stop], pixel };
+      groups.push(group);
+      const key = `${column}:${row}`;
+      const cell = cells.get(key);
+      if (cell) cell.push(group);
+      else cells.set(key, [group]);
+    }
+  }
+  return groups;
 }
 
 export function layoutMapLabels(
@@ -264,6 +295,7 @@ interface Props {
   journeyConnections?: readonly JourneyConnection[];
   activeJourneyStop?: string;
   onJourneyStopClick?: (id: string) => void;
+  onJourneyGroupClick?: (ids: string[]) => void;
 }
 
 function projectLine(positions: number[][]) {
@@ -283,7 +315,7 @@ const noJourneyConnections: readonly JourneyConnection[] = [];
 const WorldMap: React.FC<Props> = ({
   view, onViewChange, points, grid, onGridChange, selection, onSelectionChange, onMarkerClick,
   selectionMode, onCancelSelection, compactControls = false, style = "standard", showCountryNames = false,
-  journeyStops = noJourneyStops, journeyConnections = noJourneyConnections, activeJourneyStop, onJourneyStopClick,
+  journeyStops = noJourneyStops, journeyConnections = noJourneyConnections, activeJourneyStop, onJourneyStopClick, onJourneyGroupClick,
 }) => {
   const landClipId = `gps-map-land-${useId()}`;
   const landscape = style === "landscape";
@@ -345,13 +377,8 @@ const WorldMap: React.FC<Props> = ({
   const coastPath = requiresDetailedMap && detail ? detail.land : landPaths;
   const rivers = [...overviewWater.rivers, ...(detail?.rivers ?? [])];
   const lakes = [...overviewWater.lakes, ...(detail?.lakes ?? [])];
-  // A later visit can occupy the same pixels as an earlier one. Give the
-  // selected marker visual and pointer priority at an overlapping location.
-  const chosenStop = journeyStops.find((stop) => stop.id === activeJourneyStop);
-  const orderedStops = chosenStop
-    ? [...journeyStops.filter((stop) => stop.id !== chosenStop.id), chosenStop]
-    : journeyStops;
-  const stopPositions = orderedStops.map((stop) => ({ stop, x: projectX(stop.longitude), y: projectY(stop.latitude) }));
+  const stopGroups = useMemo(() => groupJourneyStops(journeyStops, bounds, viewportSize), [journeyStops, bounds, viewportSize]);
+  const stopPositions = stopGroups.map(({ stops }) => ({ stops, x: projectX(stops[0].longitude), y: projectY(stops[0].latitude) }));
   const journeySegments = useMemo(() => journeyConnections.flatMap(journeyConnectionSegments), [journeyConnections]);
   const labels = showCountryNames || zoom >= 4 ? layoutMapLabels(
     showCountryNames ? [...countryCandidates, ...cityCandidates] : cityCandidates, zoom, displayBounds, viewportSize,
@@ -577,20 +604,25 @@ const WorldMap: React.FC<Props> = ({
             <text textAnchor="middle" dominantBaseline="central" fontSize={11}>{marker.count}</text>
           </g>;
         })}
-        {stopPositions.filter(({ stop }) => stop.longitude >= bounds.west && stop.longitude <= bounds.east &&
-          stop.latitude >= bounds.south && stop.latitude <= bounds.north).map(({ stop, x, y }) => <g key={stop.id}
-          className="gps-map__marker gps-map__journey-stop"
-          transform={`translate(${x} ${y}) scale(${scaleX} ${scaleY})`}
-          role={onJourneyStopClick ? "button" : undefined} tabIndex={selectionMode || !onJourneyStopClick ? -1 : 0}
-          aria-hidden={selectionMode || !onJourneyStopClick || undefined} aria-pressed={onJourneyStopClick ? stop.id === activeJourneyStop : undefined}
-          aria-label={`Reisestopp ${stop.number}`}
-          {...(onJourneyStopClick && markerInteractions(() => onJourneyStopClick(stop.id)))}>
-          <title>Reisestopp {stop.number}</title>
-          <circle r={MARKER_HIT_RADIUS} className="gps-map__marker-hit" fill="transparent" />
-          <circle r={JOURNEY_STOP_RADIUS + 3} className="gps-map__journey-stop-halo" />
-          <circle r={JOURNEY_STOP_RADIUS} className="gps-map__journey-stop-core" />
-          <text textAnchor="middle" dominantBaseline="central" fontSize={11}>{stop.number}</text>
-        </g>)}
+        {stopPositions.map(({ stops, x, y }) => {
+          const first = stops[0];
+          const grouped = stops.length > 1;
+          const label = grouped ? `${stops.length} Stopps an dieser Stelle` : `Reisestopp ${first.number}`;
+          const activate = grouped && onJourneyGroupClick ? () => onJourneyGroupClick(stops.map((stop) => stop.id))
+            : onJourneyStopClick && (() => onJourneyStopClick(first.id));
+          return <g key={first.id} className="gps-map__marker gps-map__journey-stop"
+            transform={`translate(${x} ${y}) scale(${scaleX} ${scaleY})`}
+            role={activate ? "button" : undefined} tabIndex={selectionMode || !activate ? -1 : 0}
+            aria-hidden={selectionMode || !activate || undefined}
+            aria-pressed={activate ? stops.some((stop) => stop.id === activeJourneyStop) : undefined}
+            aria-label={label} {...(activate && markerInteractions(activate))}>
+            <title>{label}</title>
+            <circle r={MARKER_HIT_RADIUS} className="gps-map__marker-hit" fill="transparent" />
+            <circle r={JOURNEY_STOP_RADIUS + 3} className="gps-map__journey-stop-halo" />
+            <circle r={JOURNEY_STOP_RADIUS} className="gps-map__journey-stop-core" />
+            <text textAnchor="middle" dominantBaseline="central" fontSize={11}>{grouped ? `×${stops.length}` : first.number}</text>
+          </g>;
+        })}
       </svg>
       </div>
       {satellite && satelliteState === "failed" && <p role="status" className="gps-map__raster-status">

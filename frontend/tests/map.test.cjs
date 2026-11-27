@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { boundsForDrag, boundsForView, countryLabels, gridForSize, journeyConnectionSegments, layoutMapLabels, markerPixelPosition, normalizedView } =
+const { boundsForDrag, boundsForView, countryLabels, gridForSize, groupJourneyStops, journeyConnectionSegments, layoutMapLabels, markerPixelPosition, normalizedView } =
   require('./load-typescript.cjs')('src/components/map/WorldMap.tsx');
 
 function assertValidBounds(bounds) {
@@ -131,4 +131,20 @@ test('journey segments maintain travel direction across the date line', () => {
   const from = { longitude: 17, latitude: 2 };
   const to = { longitude: -5, latitude: 10 };
   assert.deepEqual(journeyConnectionSegments({ from, to }), [{ from, to }]);
+});
+
+test('journey markers group return visits without losing their stop IDs', () => {
+  const stops = [
+    { id: '1', number: 1, longitude: 7.35, latitude: 45 },
+    { id: '2', number: 2, longitude: 16, latitude: 43 },
+    { id: '3', number: 3, longitude: 7.45, latitude: 45 },
+    { id: '4', number: 4, longitude: 7.35, latitude: 45 },
+    { id: '5', number: 5, longitude: 25, latitude: 45 },
+  ];
+  const wide = { west: 0, east: 20, south: 40, north: 50 };
+  const close = { west: 7.3, east: 7.6, south: 44.9, north: 45.1 };
+  const size = { width: 400, height: 200 };
+  const ids = ({ stops }) => stops.map(({ id }) => id);
+  assert.deepEqual(groupJourneyStops(stops, wide, size).map(ids), [['1', '3', '4'], ['2']]);
+  assert.deepEqual(groupJourneyStops(stops, close, size).map(ids), [['1', '4'], ['3']]);
 });

@@ -1,0 +1,44 @@
+.gps-observed-places input[type="search"] {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.gps-observed-places .gps-map-discovery__places {
+  gap: 6px;
+  max-height: min(19rem, 40vh);
+  scrollbar-gutter: stable;
+}
+
+.gps-observed-places .gps-map-discovery__places > .gps-observed-places__place {
+  display: grid;
+  gap: 5px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.gps-observed-places__actions, .gps-observed-places__years {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.gps-observed-places__main {
+  flex: 1 1 9rem;
+  min-width: 0;
+}
+
+.gps-observed-places__main strong {
+  overflow-wrap: anywhere;
+}
+
+.gps-observed-places__years span {
+  padding-inline: 3px;
+  color: var(--text-muted);
+}
+
+.gps-observed-places button:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}

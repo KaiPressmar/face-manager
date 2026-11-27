@@ -35,6 +35,14 @@ export interface Journey {
 
 export type JourneyDetail = "trip" | "city";
 
+export async function fetchMapYears(albumId: string, signal: AbortSignal): Promise<string[]> {
+  const query = albumId ? `?${new URLSearchParams({ album_id: albumId })}` : "";
+  const response = await apiFetch(`${API_BASE}/map/years${query}`, { signal });
+  if (!response.ok) throw new Error(await readApiError(response, "Aufnahmejahre konnten nicht geladen werden."));
+  const { years } = await response.json() as { years: string[] };
+  return years;
+}
+
 export function omitInferredPhotos(journey: Journey): Journey {
   const count = journey.inferred_location_count ?? 0;
   if (!count) return journey;

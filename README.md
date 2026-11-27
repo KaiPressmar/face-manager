@@ -168,9 +168,11 @@ Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgese
 <details>
 <summary>Fotokarte, Reiseverlauf und Alben</summary>
 
-Kombiniere in **Karte** einen **Zeitraum** mit **Bereich wählen** oder wähle einen Aufnahmeort unter **Orte aus meinen Fotos**. Die Stile **Standard**, **Landschaft** und **Satellit** funktionieren offline. **Verlauf** zeigt die Stopps in zeitlicher Reihenfolge. Für kurze Wege wähle unter **Stoppabstand** den Modus **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
+Wähle in **Karte** unter **Zeitraum** ein Aufnahmejahr oder gib eigene Daten ein. Unter **Orte aus meinen Fotos** kannst du einen wiederkehrenden Aufnahmeort suchen und direkt die Fotos eines Jahres anzeigen. Mit **Bereich wählen** grenzt du die Karte räumlich ein. Die Stile **Standard**, **Landschaft** und **Satellit** findest du unter **Kartendarstellung**. Sie funktionieren offline.
 
-In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps**. Unter **Kartenfilter** findest du den Zeitraum und weitere Filter. Öffne **Kartendarstellung und Export**, um den Kartenstil zu ändern oder ein Fotobuchbild zu erstellen.
+**Verlauf** zeigt die Stopps in Aufnahmefolge und passt die Karte an die Route an. Markierungen mit × zeigen mehrere Stopps an. Öffne die Markierung und wähle einen Stopp für seine Fotos. Für kurze Wege gibt es unter **Stoppabstand** die Option **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
+
+In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps**. Der Zeitraum steht unter **Kartenfilter**. **Fotobuchbild gestalten** ist in beiden Ansichten direkt erreichbar.
 
 Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
 
@@ -187,7 +189,9 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 <details>
 <summary>Fotobuchbild gestalten</summary>
 
-Öffne in **Karte** die gewünschte Auswahl und wähle unter **Kartendarstellung und Export** die Aktion **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
+Öffne in **Karte** die gewünschte Auswahl und wähle **Fotobuchbild gestalten**. Wähle das Format passend zu deiner Fotobuchseite. Für eigene Maße stehen Pixel und Millimeter zur Wahl. Mit **Sichtbarer Kartenausschnitt** übernimmst du den Bildausschnitt der Karte. Bei einem Reiseverlauf kannst du zwischen **Karte auf einer Seite** und **Karte mit Stoppliste** wählen. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen.
+
+Speichere die Seite als PNG und füge sie in deinem Fotobuchprogramm als Bild ein. Wenn die Stoppliste mehrere Seiten umfasst, kannst du alle PNGs als ZIP speichern. Mit **Entwurf im Album speichern** sicherst du die Gestaltung für später.
 
 ![Fotobuchvorschau mit Reiseverlauf, Druckauflösung und Abmessungen](docs/screenshots/photobook.webp)
 

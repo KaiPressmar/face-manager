@@ -114,7 +114,7 @@ from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
 from .services.background_activities import background_activities
-from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_selected_map_images
+from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_map_years, list_selected_map_images
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
 from .services.journey import JourneyDetail, get_journey
 from .services.observed_places import list_observed_places
@@ -3328,7 +3328,7 @@ class _AlbumLayoutDraftBody(_AlbumDraftOptions):
     version: Literal[1]
     title: Annotated[str, Field(max_length=72)] | None = None
     subtitle: Annotated[str, Field(max_length=100)] | None = None
-    format: Literal["a4", "portrait", "square", "custom"] | None = None
+    format: Literal["a4", "portrait", "square", "square-210", "square-300", "custom"] | None = None
     dimensions: _AlbumDraftDimensions | None = None
     dpi: Literal[150, 240, 300, 400] | None = None
     palette: Literal["sand", "coast"] | None = None
@@ -3478,6 +3478,15 @@ def _validate_map_cursor(offset, before_id, before_captured_at):
         raise HTTPException(status_code=422, detail="before_captured_at requires before_id")
     if before_id is not None and offset:
         raise HTTPException(status_code=422, detail="offset must be zero with before_id")
+
+
+@app.get("/api/map/years")
+def get_map_years(album_id: str | None = None):
+    generation = _get_media_library_generation()
+    _validated_photo_selection(GeoPhotoSelection(album_id=album_id))
+    result = {"years": list_map_years(album_id)}
+    _get_media_library_generation(generation)
+    return result
 
 
 @app.get("/api/map/points")

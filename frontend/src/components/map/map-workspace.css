@@ -31,6 +31,24 @@
   letter-spacing: -.025em;
 }
 
+.gps-page__photobook {
+  margin-left: auto;
+  padding: 7px 14px;
+  border: 1px solid var(--accent-border);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: .875rem;
+  font-weight: 750;
+}
+.gps-page__photobook:hover:not(:disabled) { border-color: var(--accent); }
+.gps-page__photobook:disabled { opacity: .5; cursor: default; }
+.gps-page__discovery { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; margin-top: 10px; }
+.gps-page__discovery > details { margin: 0; }
+.gps-page__discovery > details[open] { flex: 1 1 min(100%, 420px); }
+.gps-page__discovery summary { min-height: 36px; align-content: center; }
+
 .gps-map-options button, .gps-map-options select, .gps-map-options__modes button, .gps-results-actions button,
 .gps-selection-gallery__actions button, .gps-journey__stops button {
   min-height: 36px;
@@ -87,7 +105,7 @@
 .gps-page__map-actions { flex-wrap: wrap; justify-content: flex-end; }
 .gps-page__map-actions button { max-width: 100%; padding-inline: 8px; font-size: .75rem; }
 .gps-page__map-foot { flex-wrap: wrap; gap: 5px 10px; padding: 7px 12px; font-size: .75rem; }
-.gps-page__map-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding: 0 10px 10px; }
+.gps-page__map-settings { display: grid; justify-items: start; padding: 0 10px 10px; }
 .gps-page__map-settings > details { margin: 0; }
 .gps-page__map-settings > details[open] { grid-column: 1 / -1; }
 .gps-page__map-settings .gps-map-options { margin: 0; }
@@ -114,7 +132,19 @@
 .gps-map__pan-controls[open] summary { text-align: center; }
 .gps-results-actions, .gps-selection-gallery__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gps-results-actions { margin: 12px 0; font-size: 12px; }
-.gps-journey__stops { list-style: none; max-height: 300px; overflow: auto; padding: 3px; margin: 8px 0; }
+.gps-journey__stops { list-style: none; padding: 3px; margin: 8px 0; }
+.gps-page__results > h2 { font-size: 1rem; margin: 0 0 10px; }
+.gps-journey__group { margin: 10px 0; padding: 10px; border: 1px solid var(--accent-border); border-radius: 8px; background: var(--accent-soft); }
+.gps-journey__group p { margin: 0 0 6px; font-size: .8125rem; }
+.gps-journey__group button {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: .8125rem;
+}
 .gps-journey__stops li + li { margin-top: 6px; }
 .gps-journey__stops button { display: flex; gap: 9px; align-items: center; width: 100%; text-align: left; font-size: 12px; }
 .gps-journey__stops small { display: block; margin-top: 3px; color: var(--text-muted); }
@@ -191,9 +221,10 @@
 .gps-album-dialog__header h2 { margin: 0; font-size: clamp(1rem, 2.8vw, 1.4375rem); }
 .gps-album-dialog__editor { display: grid; min-width: 0; gap: 12px; }
 .gps-album-dialog fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
-.gps-album-dialog__options { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(170px, 260px); gap: 10px 12px; }
+.gps-album-dialog__options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
 .gps-album-dialog__options label { display: grid; min-width: 0; gap: 5px; color: var(--text-muted); font-size: 13px; }
 .gps-album-dialog__options input, .gps-album-dialog__options select { width: 100%; min-width: 0; }
+.gps-album-dialog__title-field { grid-column: 1 / -1; }
 .gps-album-dialog button, .gps-album-dialog input:not([type="checkbox"]):not([type="range"]), .gps-album-dialog select {
   min-height: 40px;
   padding: 6px 10px;
@@ -213,13 +244,14 @@
   background: var(--surface-1);
 }
 .gps-album-dialog__pages { font-size: .8125rem; }
+.gps-album-dialog__usage { flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: .8125rem; }
 .gps-album-dialog .gps-album-dialog__save { border-color: var(--accent-border); background: var(--accent-soft); font-weight: 700; }
 .gps-album-dialog button:disabled { opacity: .55; cursor: default; }
-.gps-album-dialog__details { color: var(--text-muted); font-size: 13px; }
-.gps-album-dialog__details summary { cursor: pointer; width: fit-content; }
+.gps-album-dialog__details { border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px; }
+.gps-album-dialog__details summary { padding-block: 7px; cursor: pointer; }
 .gps-album-dialog__details fieldset { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 16px; margin-top: 8px; }
 .gps-album-dialog__details label { display: inline-flex; align-items: center; max-width: 100%; min-width: 0; gap: 6px; }
-.gps-album-dialog__details label select { min-width: 0; }
+.gps-album-dialog__details label select, .gps-album-dialog__details label input { min-width: 0; }
 .gps-album-dialog__details input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
 .gps-album-dialog__swatch { width: 14px; height: 14px; flex: none; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--accent); }
 .gps-album-dialog__dimensions { font-variant-numeric: tabular-nums; }
@@ -272,7 +304,7 @@
 @media (max-width: 960px) {
   .gps-page__header button, .gps-page__pane-switch button, .gps-page__map-actions button,
   .gps-results-actions button, .gps-page__toolbar select, .gps-page__toolbar input,
-  .gps-page__filters button, .gps-page__map-settings summary {
+  .gps-page__filters button, .gps-page__map-settings summary, .gps-page__discovery summary {
     min-height: 44px;
   }
   .gps-page__toolbar .gps-page__field { min-width: 0; }
@@ -280,6 +312,9 @@
   .gps-page__map-settings { grid-template-columns: 1fr; }
   .gps-page__map-settings summary { align-content: center; }
   .gps-map__controls button { min-width: 44px; height: 44px; }
+}
+@media (max-width: 540px) {
+  .gps-page__photobook { margin-left: 0; flex: 1 1 100%; }
 }
 @media (min-width: 960px) {
   .gps-album-dialog { display: grid; grid-template-columns: minmax(370px, .9fr) minmax(0, 1fr); grid-template-areas: "header header" "editor preview" "footer footer"; align-items: start; }

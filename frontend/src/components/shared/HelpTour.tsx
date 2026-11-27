@@ -44,7 +44,7 @@ const steps: HelpStep[] = [
     title: "Fotos auf der Karte finden",
     actions: [
       <>Öffne <strong>Karte</strong> und wähle <strong>Standorte</strong>. Wähle einen Punkt auf der Karte, um die Fotos dort zu sehen.</>,
-      <>Wähle unter <strong>Zeitraum</strong> einen Vorschlag oder <strong>Eigener Zeitraum</strong>. In kleinen Fenstern findest du den Zeitraum unter <strong>Kartenfilter</strong>.</>,
+      <>Wähle unter <strong>Zeitraum</strong> ein Aufnahmejahr oder gib eigene Daten ein. Unter <strong>Orte aus meinen Fotos</strong> kannst du direkt ein Ziel und ein Aufnahmejahr wählen.</>,
       <>Wähle <strong>Bereich wählen</strong> und ziehe ein Rechteck auf der Karte. Mit <strong>Sichtbaren Bereich wählen</strong> übernimmst du stattdessen den gesamten sichtbaren Ausschnitt.</>,
     ],
     note: <>Auf der Karte erscheinen Fotos mit gespeicherten Standortdaten. Mit <strong>Auswahl löschen</strong> entfernst du den gewählten Bereich.</>,
@@ -56,7 +56,7 @@ const steps: HelpStep[] = [
     title: "Eine Reise als Album sammeln",
     actions: [
       <>Öffne <strong>Karte</strong>, wähle <strong>Verlauf</strong> und stelle den <strong>Zeitraum</strong> deiner Reise ein.</>,
-      <>Öffne <strong>Reisen entdecken</strong> und wähle einen Vorschlag. Schau dir die Stopps an. Unter <strong>Reisetag</strong> kannst du einen einzelnen Tag auswählen.</>,
+      <>Öffne <strong>Reisen entdecken</strong> und wähle einen Vorschlag. Unter <strong>Reisetag</strong> kannst du einen Tag auswählen. Eine Markierung mit × auf der Karte öffnet mehrere Stopps zur Auswahl.</>,
       <>Wenn die Auswahl passt, wähle <strong>Als Reisealbum speichern</strong> und gib dem Album einen Namen.</>,
     ],
     note: <>Über <strong>Album</strong> in <strong>Bilder</strong> oder <strong>Karte</strong> findest du das Reisealbum wieder.</>,
@@ -67,8 +67,8 @@ const steps: HelpStep[] = [
     topic: "photobook",
     title: "Ein Bild fürs Fotobuch speichern",
     actions: [
-      <>Öffne in <strong>Karte</strong> den gewünschten Bereich oder Reiseverlauf. Wähle unter <strong>Kartendarstellung und Export</strong> die Aktion <strong>Bild exportieren</strong>.</>,
-      <>Gib einen <strong>Titel</strong> ein und wähle <strong>Format</strong> und <strong>Farbwelt</strong>. Schau dir die Vorschau an.</>,
+      <>Öffne in <strong>Karte</strong> den gewünschten Bereich oder Reiseverlauf. Wähle oben <strong>Fotobuchbild gestalten</strong>.</>,
+      <>Wähle das <strong>Format</strong> deines Fotobuchs. Prüfe die Vorschau und passe Titel, Farben oder Kartenbereich an. Für eine Reise kannst du eine <strong>Karte mit Stoppliste</strong> wählen.</>,
       <>Speichere eine Seite als PNG. Bei mehreren Seiten kannst du <strong>Alle Seiten als ZIP speichern</strong> wählen. Entpacke die Datei, um die einzelnen Bilder in dein Fotobuch einzufügen.</>,
     ],
     note: <>Ein PNG ist eine Bilddatei. Du kannst sie in dein Fotobuch einfügen.</>,
