@@ -399,7 +399,7 @@ async function mapFlow(browser, errors) {
     await assertTabTrap(page, gallery);
     const resizedQuery = page.waitForRequest((request) => {
       const url = new URL(request.url());
-      return url.pathname === '/api/map/points' && url.searchParams.has('grid_columns');
+      return url.pathname === '/api/map/points/selection' && url.searchParams.has('grid_columns');
     });
     await page.setViewportSize({ width: 390, height: 844 });
     await resizedQuery;
@@ -800,12 +800,13 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const exportButton = page.getByRole('button', { name: 'Fotobuchbild gestalten' });
     const exportBounds = page.waitForRequest((request) => {
       const url = new URL(request.url());
-      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18';
+      return url.pathname === '/api/map/points/selection' && url.searchParams.get('grid_columns') === '18';
     });
     await exportButton.click();
     const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     await book.waitFor();
-    const bounds = new URL((await exportBounds).url()).searchParams;
+    const exportRequest = await exportBounds;
+    const bounds = new URL(exportRequest.url()).searchParams;
     assert.equal(bounds.get('west'), '-180', 'Export uses the camera instead of the fixed selection');
     assert.equal(bounds.get('east'), '180');
     const bookPreview = book.getByRole('img', { name: 'Vorschau des Fotobuchbildes' });
@@ -820,11 +821,12 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await book.getByLabel('Kartenstil', { exact: true }).selectOption('standard');
     const visibleBounds = page.waitForRequest((request) => {
       const url = new URL(request.url());
-      return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18'
+      return url.pathname === '/api/map/points/selection' && url.searchParams.get('grid_columns') === '18'
         && url.searchParams.get('west') !== '-180';
     });
     await book.getByLabel('Kartenbereich', { exact: true }).selectOption('viewport');
-    await visibleBounds;
+    assert.deepEqual((await visibleBounds).postDataJSON().selection.bounds, exportRequest.postDataJSON().selection.bounds,
+      'Choosing the current viewport should still restrict exported photos to the fixed selection');
     await book.getByLabel('Bildausschnitt', { exact: true }).selectOption('wide');
     await book.getByLabel('Markerfarbe', { exact: true }).selectOption('ocean');
     await bookPreview.waitFor();

@@ -168,36 +168,68 @@ Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgese
 <details>
 <summary>Fotokarte, Reiseverlauf und Alben</summary>
 
-Wähle in **Karte** unter **Zeitraum** ein Aufnahmejahr oder gib eigene Daten ein. Unter **Orte aus meinen Fotos** kannst du einen wiederkehrenden Aufnahmeort suchen und direkt die Fotos eines Jahres anzeigen. Mit **Bereich wählen** grenzt du die Karte räumlich ein. Die Offline-Übersicht gibt es unter **Kartendarstellung** in den Stilen **Standard**, **Landschaft** und **Satellit**.
+### Fotos eines Ortes aus einem bestimmten Jahr ansehen
 
-Aktiviere **Kartendetails online**, um beim Zoomen Straßen, Gebäude und feinere Gelände- oder Satellitenbilder zu laden. Nutze **+** oder einen Doppelklick in der Karte. **Fotoorte auf Karte zeigen** bringt dich aus der Fotoauswahl direkt in die Umgebung. Die Satellitendetails haben eine Auflösung von etwa zehn Metern pro Pixel. Straßen und Gebäudekonturen stammen aus der Straßenkarte.
+Öffne **Karte → Standorte** und suche unter **Orte aus meinen Fotos** nach einem Aufnahmeort. Im Beispiel gibt es in Moab Aufnahmen aus drei Jahren. Wähle **2025 · 3 Fotos**, um den Ort und das Aufnahmejahr gemeinsam zu filtern. Unter **Zeitraum** kannst du auch alle Fotos eines Aufnahmejahrs anzeigen oder eigene Daten eingeben.
 
-**Verlauf** zeigt die Stopps in Aufnahmefolge und passt die Karte an die Route an. Markierungen mit × zeigen mehrere Stopps an. Öffne die Markierung und wähle einen Stopp für seine Fotos. Für kurze Wege gibt es unter **Stoppabstand** die Option **Stadt und Spaziergang**. Gestrichelte Linien verbinden die beobachteten Orte. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
+![Fotoort Moab in der Ortssuche mit Aufnahmejahren 2025, 2023 und 2022](docs/screenshots/photo-map-place-years.webp)
 
-In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps**. Der Zeitraum steht unter **Kartenfilter**. **Fotobuchbild gestalten** ist in beiden Ansichten direkt erreichbar.
+Die aktiven Filter stehen oberhalb der Karte. Mit **Fotoorte auf Karte zeigen** zentrierst du die Karte auf die Fotoauswahl. **Verlauf dieser Auswahl** öffnet den Verlauf für denselben Bereich und Zeitraum. Mit **Bereich wählen** kannst du auch einen eigenen Bereich aufziehen.
 
-Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
+![Drei Fotos aus Moab im Jahr 2025 mit Ortsfilter, Jahresfilter und der Schaltfläche Verlauf dieser Auswahl](docs/screenshots/photo-map-place-selection.webp)
+
+### Wiederkehrende Stopps und einzelne Reisen finden
+
+**Verlauf** ordnet die Stopps nach Aufnahmezeit. Eine Markierung mit **×4** steht beispielsweise für vier Stopps am selben Kartenausschnitt. Öffne die Markierung und wähle in der Liste den gewünschten Besuch nach Datum. **Zur Stoppliste** bringt dich zurück zur Auswahl. Für kurze Wege gibt es unter **Stoppabstand** die Option **Stadt und Spaziergang**. Fotos ohne Standort, die zeitlich zu einem Stopp passen, sind gekennzeichnet und lassen sich ausblenden.
+
+![Vier Besuche in Moab als gemeinsame Kartenmarkierung mit Aufnahmezeiten in der Stoppliste](docs/screenshots/photo-map-repeat-stops.webp)
+
+![Ausgewählter Stopp bei Moab mit zwei Fotos und Zurück-Schaltfläche zur Stoppliste](docs/screenshots/photo-map-stop-photos.webp)
+
+Öffne **Reisen entdecken**, um eine Reise nach Ort und Datum auszuwählen. Bei vielen Vorschlägen kannst du die Liste über **Reisen suchen** eingrenzen. Du kannst einen Reisetag wählen und bei Bedarf An- oder Rückreise einbeziehen. **Route einpassen** bringt alle Stopps der aktuellen Auswahl wieder ins Blickfeld. Speichere die Auswahl bei Bedarf als Reisealbum. Du findest das Reisealbum später in **Bilder → Alben** oder unter **Album** in der Karte. Mit **Zum Album hinzufügen** sammelst du weitere Fotos aus Galerie oder Karte.
+
+![Ausgewählte Nationalparkreise mit Reisetagen, Route und Stopps vom September 2025](docs/screenshots/photo-map-selected-journey.webp)
+
+![Reisealbum „Nationalparks im Westen“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
+
+### Karte in einem kleinen Fenster oder mit mehr Details nutzen
+
+In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps**. Den Zeitraum stellst du unter **Kartenfilter** ein. **Fotobuchbild gestalten** ist in beiden Ansichten direkt erreichbar.
 
 ![Fotokarte im schmalen Fenster mit Kartenansicht, Fotoansicht und Kartenfilter](docs/screenshots/photo-map-compact.webp)
 
 ![Fotoansicht der Kompaktkarte mit Aufnahmen aus dem Kartenausschnitt](docs/screenshots/photo-map-compact-photos.webp)
 
-![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite.webp)
+Die Offline-Übersicht gibt es unter **Kartendarstellung** in den Stilen **Standard**, **Landschaft** und **Satellit**. Aktiviere **Kartendetails online**, um beim Zoomen Straßen, Gebäude und feinere Gelände- oder Satellitenbilder zu laden. Nutze **+** oder einen Doppelklick in der Karte. Die Satellitendetails haben eine Auflösung von etwa zehn Metern pro Pixel. Straßen und Gebäudekonturen stammen aus der Straßenkarte.
 
-![Reisealbum „Nationalparks im Westen“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
+![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite.webp)
 
 </details>
 
 <details>
 <summary>Fotobuchbild gestalten</summary>
 
-Öffne in **Karte** die gewünschte Auswahl und wähle **Fotobuchbild gestalten**. Wähle das Format passend zu deiner Fotobuchseite. Für eigene Maße stehen Pixel und Millimeter zur Wahl. Mit **Sichtbarer Kartenausschnitt** übernimmst du den Bildausschnitt. Das Fotobuchbild verwendet dafür die Offline-Karte. Bei einem Reiseverlauf kannst du zwischen **Karte auf einer Seite** und **Karte mit Stoppliste** wählen. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen.
+### Format und Layout wählen
 
-Speichere die Seite als PNG und füge sie in deinem Fotobuchprogramm als Bild ein. Wenn die Stoppliste mehrere Seiten umfasst, kannst du alle PNGs als ZIP speichern. Mit **Entwurf im Album speichern** sicherst du die Gestaltung für später.
+Wähle in **Karte** die gewünschten Fotos oder eine Reise und klicke auf **Fotobuchbild gestalten**. Stelle unter **Format** die Maße deiner Fotobuchseite ein. Es gibt A4 in Hoch- und Querformat, zwei Quadratformate und **Eigene Größe** für Maße in Millimetern oder Pixeln. Die Vorschau zeigt die Druckgröße, Auflösung und Pixelmaße. Im Beispiel ist die Seite 30 × 30 cm groß und auf 300 dpi eingestellt.
 
-![Fotobuchvorschau mit Reiseverlauf, Druckauflösung und Abmessungen](docs/screenshots/photobook.webp)
+Unter **Layout** liefert **Karte auf einer Seite** eine einzelne Seite mit Platz für einen Titel. **Randlose Karte** füllt die gesamte Bildfläche mit der Karte. Für Reisen bietet **Karte mit Stoppliste** Platz für eine nummerierte Liste.
 
-![Fotobuchvorschau mit Bestätigung für den ZIP-Export aller Seiten](docs/screenshots/photobook-zip.webp)
+![Quadratische Druckvorschau der Nationalparkreise mit 300 dpi und Bestätigung für das gespeicherte PNG](docs/screenshots/photobook.webp)
+
+### Ausschnitt und Beschriftung gestalten
+
+Wähle **Ganze Auswahl einrahmen**, um alle ausgewählten Stopps einzubeziehen. Mit **Sichtbarer Kartenausschnitt** übernimmst du den Ausschnitt aus der Karte. Unter **Ausschnitt anpassen** kannst du den Ausschnitt mit **Zoom** und den Pfeilen in der Vorschau ändern. Die Angabe unter der Vorschau zeigt, wie viele Stopps oder Fotos im Bild liegen. **Ausschnitt zurücksetzen** stellt die ursprüngliche Rahmung wieder her.
+
+![Randlose Karte mit geöffneten Zoom- und Verschiebereglern und der Anzahl sichtbarer Stopps](docs/screenshots/photobook-crop.webp)
+
+Unter **Darstellung** kannst du Kartenstil, Markierungen, Ortsnamen und Verbindungslinien einstellen. Mit **Stopps beschriften** gibst du einzelnen Reisestopps eigene Ortsnamen. Unter **Route gestalten** lassen sich Verkehrsmittel für einzelne Etappen eintragen. Der Export verwendet die Offline-Karte.
+
+### Als PNG oder ZIP speichern
+
+Wähle **PNG speichern** und füge die Datei in deinem Fotobuchprogramm als Bild ein, etwa in CEWE. Wenn die Stoppliste mehrere Seiten umfasst, blättere in der Vorschau und speichere die aktuelle Seite über **Diese Seite als PNG speichern**. **Alle Seiten als ZIP speichern** bündelt die einzelnen PNG-Dateien. Über **Entwurf im Album speichern** kannst du die Gestaltung eines Reisealbums später wieder öffnen.
+
+![A4-Fotobuchvorschau mit Stoppliste, Seitenwahl und Bestätigung für den ZIP-Export](docs/screenshots/photobook-zip.webp)
 
 </details>
 

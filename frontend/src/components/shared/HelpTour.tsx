@@ -55,7 +55,7 @@ const steps: HelpStep[] = [
     topic: "journeys",
     title: "Eine Reise als Album sammeln",
     actions: [
-      <>Öffne <strong>Karte</strong>, wähle <strong>Verlauf</strong> und stelle den <strong>Zeitraum</strong> deiner Reise ein.</>,
+      <>Wähle in <strong>Karte</strong> deine Fotos und öffne <strong>Verlauf dieser Auswahl</strong>. Im Kartenmodus <strong>Verlauf</strong> kannst du den Zeitraum auch direkt eingrenzen.</>,
       <>Öffne <strong>Reisen entdecken</strong> und wähle einen Vorschlag. Unter <strong>Reisetag</strong> kannst du einen Tag auswählen. Eine Markierung mit × auf der Karte öffnet mehrere Stopps zur Auswahl.</>,
       <>Wenn die Auswahl passt, wähle <strong>Als Reisealbum speichern</strong> und gib dem Album einen Namen.</>,
     ],
@@ -68,7 +68,7 @@ const steps: HelpStep[] = [
     title: "Ein Bild fürs Fotobuch speichern",
     actions: [
       <>Öffne in <strong>Karte</strong> den gewünschten Bereich oder Reiseverlauf. Wähle oben <strong>Fotobuchbild gestalten</strong>.</>,
-      <>Wähle das <strong>Format</strong> deines Fotobuchs. Prüfe die Vorschau und passe Titel, Farben oder Kartenbereich an. Für eine Reise kannst du eine <strong>Karte mit Stoppliste</strong> wählen.</>,
+      <>Wähle das <strong>Format</strong> und das <strong>Layout</strong> deiner Seite. Mit <strong>Ausschnitt anpassen</strong> kannst du die Karte in der Vorschau vergrößern und verschieben. Bei einer Reise kannst du die Stopps beschriften.</>,
       <>Speichere eine Seite als PNG. Bei mehreren Seiten kannst du <strong>Alle Seiten als ZIP speichern</strong> wählen. Entpacke die Datei, um die einzelnen Bilder in dein Fotobuch einzufügen.</>,
     ],
     note: <>Ein PNG ist eine Bilddatei. Du kannst sie in dein Fotobuch einfügen.</>,

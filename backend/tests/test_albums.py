@@ -156,11 +156,17 @@ class AlbumsTest(unittest.TestCase):
         self.assertEqual(result["layout_draft"], draft)
         with self.assertRaises(ValidationError):
             app._AlbumUpdateBody(layout_draft={"version": 1, "unknown": "/path"})
+        with self.assertRaises(ValidationError):
+            app._AlbumUpdateBody(layout_draft={"version": 1, "framing": {"zoom": 401, "horizontal": 0, "vertical": 0}})
+        framed = {**draft, "fullBleed": True, "framing": {"zoom": 160, "horizontal": 18, "vertical": -9},
+                  "useViewport": True, "viewportSnapshot": {"west": 178, "east": -177, "south": -4, "north": 3},
+                  "markerStyle": "dots", "showPlaceNames": False, "showRoute": True, "placeNames": {"1": "Zum Hafen"}}
+        self.assertEqual(app.update_album(album["id"], app._AlbumUpdateBody(layout_draft=framed))["layout_draft"], framed)
         large = {"version": 1, "transports": {f"{index:019}:{index:019}": "train" for index in range(800)}}
         with self.assertRaises(HTTPException) as too_big:
             app.update_album(album["id"], app._AlbumUpdateBody(layout_draft=large))
         self.assertEqual(too_big.exception.status_code, 422)
-        self.assertEqual(app.get_album(album["id"])["layout_draft"], draft)
+        self.assertEqual(app.get_album(album["id"])["layout_draft"], framed)
         cleared = app.update_album(album["id"], app._AlbumUpdateBody(layout_draft=None, journey=None))
         self.assertIsNone(cleared["layout_draft"])
         self.assertIsNone(cleared["journey"])

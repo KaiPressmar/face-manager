@@ -5,6 +5,7 @@ import { countWithLabel } from "../../utils/germanFormatting";
 
 const numbers = new Intl.NumberFormat("de-DE");
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" });
+const fullDate = new Intl.DateTimeFormat("de-DE", { dateStyle: "long", timeZone: "UTC" });
 
 export function journeyTime(value: string) {
   const date = new Date(value.slice(0, 19) + "Z");
@@ -51,12 +52,17 @@ export default function MapJourney({ journey, onSelect, stopGroup, onClearGroup,
     return () => { active = false; };
   }, [hasStops]);
   const locations = useMemo(() => describeJourneyPlaces(journey.stops, places ?? undefined), [journey.stops, places]);
-  const query = searchable(search.trim());
+  const words = searchable(search.trim()).split(/\s+/).filter(Boolean);
   const inGroup = useMemo(() => stopGroup ? new Set(stopGroup) : undefined, [stopGroup]);
   const stopList = inGroup ? journey.stops.filter((stop) => inGroup.has(stop.id)) : journey.stops;
-  const visibleStops = query ? stopList.filter((stop) => {
+  const visibleStops = words.length ? stopList.filter((stop) => {
     const location = locations.get(stop.id);
-    return searchable(`Stopp ${stop.number} ${location?.nearby?.name ?? ""} ${location?.coordinates ?? ""} ${journeyStopLabel(stop)}`).includes(query);
+    const days = [stop.start.slice(0, 10), stop.end.slice(0, 10)];
+    const writtenDays = days.map((day) => new Date(day))
+      .filter((day) => Number.isFinite(day.getTime())).map((day) => fullDate.format(day));
+    const text = searchable([`Stopp ${stop.number}`, location?.nearby?.name, location?.coordinates,
+      journeyStopLabel(stop), ...days, ...writtenDays].filter(Boolean).join(" "));
+    return words.every((word) => text.includes(word));
   }) : stopList;
   const showLocationNote = !areaFiltered && journey.missing_location_count > 0;
 
@@ -78,7 +84,7 @@ export default function MapJourney({ journey, onSelect, stopGroup, onClearGroup,
       <span>Stoppliste durchsuchen</span>
       <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ort, Datum oder Stoppnummer" />
     </label>}
-    {query && <p role="status" className="gps-page__results-hint">{numbers.format(visibleStops.length)} von {numbers.format(stopList.length)} Stopps in der Liste</p>}
+    {words.length > 0 && <p role="status" className="gps-page__results-hint">{numbers.format(visibleStops.length)} von {numbers.format(stopList.length)} Stopps in der Liste</p>}
     <ol aria-label="Chronologische Stopps" className="gps-journey__stops">
       {visibleStops.map((stop, index) => {
         const location = locations.get(stop.id);
