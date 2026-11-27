@@ -150,7 +150,7 @@ class AlbumsTest(unittest.TestCase):
         ))
         self.assertEqual(album["journey"], {"detail": "city", "from_date": "2024-01-01", "title": "Reise"})
         self.assertIsNone(album["layout_draft"])
-        draft = {"version": 1, "title": "Route", "palette": "coast", "style": "satellite",
+        draft = {"version": 1, "title": "Route", "palette": "coast", "style": "satellite", "format": "square-300",
                  "formatting": {"typeface": "sans"}, "transports": {"1:2": "train"}, "showStopsList": False}
         result = app.update_album(album["id"], app._AlbumUpdateBody(layout_draft=draft))
         self.assertEqual(result["layout_draft"], draft)

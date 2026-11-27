@@ -16,6 +16,7 @@ export interface MapAlbumStop extends AlbumPosition {
   id: string;
   number: number;
   title: string;
+  placeName?: string;
   subtitle?: string;
   arrivalMode?: AlbumTransport;
 }
@@ -39,7 +40,7 @@ export const albumAccents = {
   plum: { name: "Pflaume", color: "#713f69" },
 } as const;
 export type AlbumAccent = keyof typeof albumAccents;
-export type AlbumFormat = "a4" | "portrait" | "square" | "custom";
+export type AlbumFormat = "a4" | "portrait" | "square" | "square-210" | "square-300" | "custom";
 export const albumDensities = [150, 240, 300, 400] as const;
 export type AlbumDpi = (typeof albumDensities)[number];
 
@@ -85,6 +86,7 @@ export interface MapAlbumArtworkInput {
   stops?: readonly MapAlbumStop[];
   connections?: readonly AlbumConnection[];
   fitJourney?: boolean;
+  journeyPadding?: number;
 }
 
 export interface MapAlbumPage {
@@ -95,6 +97,7 @@ export interface MapAlbumPage {
   total: number;
   dpi: AlbumDpi;
   satelliteFallback?: boolean;
+  visibleStopCount?: number;
 }
 
 interface Pixel {
@@ -186,10 +189,15 @@ const layouts = {
   portrait: { width: 2480, height: 3508, margin: 145, mapHeight: 1500, firstStops: 14, continuedStops: 26 },
   square: { width: 3000, height: 3000, margin: 150, mapHeight: 1510, firstStops: 8, continuedStops: 20 },
 } as const;
+const squareBookSizes = { "square-210": 210, "square-300": 300 } as const;
 type Layout = Record<keyof typeof layouts.a4, number>;
 
 export function albumOutputSize(format: AlbumFormat, dpi: AlbumDpi, dimensions?: AlbumDimensions): AlbumDimensions | null {
   if (!albumDensities.includes(dpi)) return null;
+  if (format === "square-210" || format === "square-300") {
+    const side = Math.round(squareBookSizes[format] * dpi / 25.4);
+    return side * side <= 16_000_000 ? { width: side, height: side } : null;
+  }
   if (format !== "custom") {
     const { width, height } = layouts[format];
     return { width: Math.round(width * dpi / 300), height: Math.round(height * dpi / 300) };
@@ -203,7 +211,8 @@ export function albumOutputSize(format: AlbumFormat, dpi: AlbumDpi, dimensions?:
 
 function drawingLayout(format: AlbumFormat, dimensions: AlbumDimensions, marginStyle: AlbumFormatting["margins"]): Layout {
   const ratio = dimensions.width / dimensions.height;
-  const base = layouts[format === "custom" ? ratio > 1.2 ? "a4" : ratio < 1 / 1.2 ? "portrait" : "square" : format];
+  const base = layouts[format === "custom" ? ratio > 1.2 ? "a4" : ratio < 1 / 1.2 ? "portrait" : "square"
+    : format === "square-210" || format === "square-300" ? "square" : format];
   const scale = Math.min(base.width, base.height) / Math.min(dimensions.width, dimensions.height);
   const margin = Math.round(base.margin * (marginStyle === "narrow" ? .67 : marginStyle === "wide" ? 1.45 : 1));
   return format === "custom" ? {
@@ -331,13 +340,17 @@ function titleLines(title: string, width: number, scale: number) {
 
 function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted, rule }: Palette) {
   const { height, width, margin } = layout;
-  const title = input.title.trim() || "Meine Fotokarte";
+  const title = input.title.trim();
   const formatting = input.formatting;
   const typeface = formatting?.typeface === "sans" ? sans : serif;
   const centered = formatting?.alignment === "center";
   const x = centered ? width / 2 : margin;
   const textAnchor = centered ? 'text-anchor="middle"' : '';
-  const { lines, size } = titleLines(title, width - 2 * margin, clamp(formatting?.titleScale ?? 100, 75, 130) / 100);
+  const { lines, size } = title
+    ? titleLines(title, width - 2 * margin, clamp(formatting?.titleScale ?? 100, 75, 130) / 100)
+    : { lines: [], size: 0 };
+  const background = `<rect width="${width}" height="${height}" fill="${paper}"/>`;
+  if (!title && !input.subtitle?.trim() && !input.period?.trim()) return { mapTop: margin, svg: background };
   const titleTop = 124;
   let lastBaseline = titleTop + size * (1 + (lines.length - 1) * .99);
   const captions = [input.subtitle, input.period].flatMap((value) => {
@@ -350,7 +363,7 @@ function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted
   const divider = number(lastBaseline + 40);
   return {
     mapTop: divider + 45,
-    svg: `<rect width="${width}" height="${height}" fill="${paper}"/>
+    svg: `${background}
       ${lines.map((line, index) => text(x, titleTop + size * (1 + index * .99), line,
         `fill="${ink}" font-family="${typeface}" font-size="${size}" font-weight="600" ${textAnchor}`)).join("")}
       ${captions.join("")}
@@ -359,7 +372,8 @@ function header(input: MapAlbumArtworkInput, layout: Layout, { paper, ink, muted
 }
 
 function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number, bottom: number, continued: boolean,
-  transportOnly: boolean, { ink, muted, rule, routeInk, paper }: Palette, formatting?: AlbumFormatting) {
+  transportOnly: boolean, { ink, muted, rule, routeInk, paper }: Palette, markerNumbers: ReadonlyMap<string, number>,
+  formatting?: AlbumFormatting) {
   if (!stops.length) return "";
   const { margin, width } = layout;
   const heading = transportOnly ? "Verkehrsmittel nach Zielstopp" : continued ? "Weitere Stationen" : "Stationen";
@@ -376,7 +390,10 @@ function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number
       const label = stop.title.trim() || `Stopp ${stop.number}`;
       const titleSize = Math.min(48, (columnWidth - 105) / Math.max(1, textWidth(label, 1)));
       const arrival = stop.arrivalMode ? `Anreise: ${albumTransports[stop.arrivalMode].label}` : "";
-      const subtitle = [transportOnly ? "" : stop.subtitle, arrival].filter(Boolean).join(" · ");
+      const markerNumber = markerNumbers.get(stop.id);
+      const subtitle = [
+        transportOnly ? "" : stop.subtitle, arrival, markerNumber ? `Kartenpunkt ${markerNumber}` : "",
+      ].filter(Boolean).join(" · ");
       const subSize = Math.min(33, (columnWidth - 105) / Math.max(1, textWidth(subtitle, 1)));
       return `<g data-album-stop="${xml(stop.id)}">
         <line x1="${number(x)}" x2="${number(x + columnWidth)}" y1="${number(y)}" y2="${number(y)}" stroke="${rule}" stroke-width="2"/>
@@ -457,27 +474,32 @@ function transportIcon(mode: AlbumTransport, x: number, y: number, color: string
     fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
 }
 
-function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds, frame: Frame, { routeInk, paper }: Palette) {
+function journeyLines(connections: readonly AlbumConnection[], bounds: MapBounds, frame: Frame, { routeInk, paper }: Palette,
+  clipFrame = frame) {
   const center = (bounds.west + bounds.east) / 2;
   const badges: string[] = [];
   const used: Pixel[] = [];
   const underlay = readableOn(routeInk, paper, 3);
   const badgeInk = readableOn(paper, routeInk);
+  const drawn = new Set<string>();
   const lines = connections.flatMap(({ from, to, transport }) => {
     const base = nearLongitude(from.longitude, center);
     const finish = base + direction(from.longitude, to.longitude);
     const segments = [-360, 0, 360].flatMap((shift) => {
       const start = mapPixel(bounds, frame, base + shift, from.latitude);
       const end = mapPixel(bounds, frame, finish + shift, to.latitude);
-      const clipped = clipLine(start, end, frame);
+      const clipped = clipLine(start, end, clipFrame);
       if (!clipped) return [];
       const [a, b] = clipped;
       const dx = b.x - a.x, dy = b.y - a.y;
       const length = Math.hypot(dx, dy);
       const angle = number(Math.atan2(dy, dx) * 180 / Math.PI);
       const x = number(a.x + dx * .62), y = number(a.y + dy * .62);
+      const key = [a.x, a.y, b.x, b.y].map((coordinate) => Math.round(coordinate / 12)).join(":");
+      const duplicate = drawn.has(key);
+      drawn.add(key);
       const line = `<line x1="${number(a.x)}" y1="${number(a.y)}" x2="${number(b.x)}" y2="${number(b.y)}"`;
-      return [{ a, dx, dy, length, svg: `${line} stroke="${underlay}" stroke-width="16" stroke-linecap="round"/>
+      return [{ a, dx, dy, length, svg: duplicate ? "" : `${line} stroke="${underlay}" stroke-width="16" stroke-linecap="round"/>
         ${line} data-album-connection="true"
         stroke="${routeInk}" stroke-width="10" stroke-dasharray="17 19" stroke-linecap="round"/>
         ${length > 132 ? `<path d="M-13 -12 L4 0 L-13 12" fill="none" stroke="${routeInk}" stroke-width="9"
@@ -508,19 +530,38 @@ const markerOffsets: Pixel[] = [{ x: 0, y: 0 }, ...[1, 1.7, 2.4, 3.2, 4.1].flatM
     y: radius * Math.sin(index * Math.PI / 4),
   })))];
 
-function albumMarkers(input: MapAlbumArtworkInput, bounds: MapBounds, frame: Frame, { mapInk, paper, routeInk }: Palette) {
-  const stops = input.stops ?? [];
-  const points = stops.length ? stops.map((stop) => ({ ...stop, label: String(stop.number) }))
+function albumMarkers(input: MapAlbumArtworkInput, stops: readonly MapAlbumStop[], bounds: MapBounds, frame: Frame,
+  { mapInk, paper, routeInk, labelInk, labelHalo }: Palette) {
+  const mapOnly = stops.length > 0 && input.showStopsList === false;
+  const points: (AlbumPosition & { label: string; stop?: MapAlbumStop })[] = stops.length
+    ? stops.map((stop) => ({ ...stop, label: String(stop.number), stop }))
     : (input.points ?? []).map((point, index) => ({ ...point, label: String(point.count ?? index + 1) }));
-  const radius = number((points.length > 100 ? 30 : 41) * clamp(input.markerScale ?? 100, 70, 140) / 100);
+  const radius = number((mapOnly ? 22 : points.length > 100 ? 30 : 41) * clamp(input.markerScale ?? 100, 70, 140) / 100);
   const placed: Pixel[] = [];
+  const markerNumbers = new Map<string, number>();
   const center = (bounds.west + bounds.east) / 2;
   const color = stops.length ? routeInk : mapInk;
   const markerInk = readableOn(paper, color);
   const ring = contrast(paper, color) >= 3 ? "" : `stroke="${markerInk}" stroke-width="10"`;
-  const svg = points.map((point) => {
+  const groups: { origin: Pixel; members: typeof points }[] = [];
+  for (const point of points) {
     const origin = mapPixel(bounds, frame, nearLongitude(point.longitude, center), point.latitude);
-    if (!inside(origin, frame)) return "";
+    if (!inside(origin, frame)) continue;
+    const close = point.stop && groups.find(({ origin: other }) =>
+      Math.hypot(origin.x - other.x, origin.y - other.y) < Math.max(38, radius * 1.5));
+    if (close) close.members.push(point);
+    else groups.push({ origin, members: [point] });
+  }
+
+  const labels: { x: number; y: number; title: string; visits: number }[] = [];
+  const svg = groups.map(({ members, origin }) => {
+    const first = members[0];
+    const visits = members.length;
+    if (!mapOnly && first.stop) {
+      const number = first.stop.number;
+      for (const { stop } of members.slice(1)) if (stop) markerNumbers.set(stop.id, number);
+    }
+    const label = mapOnly ? visits > 1 ? String(visits) : "" : visits > 1 ? `${first.label}+` : first.label;
     const candidate = markerOffsets.map((offset) => ({
       x: origin.x + offset.x * radius * 2.22,
       y: origin.y + offset.y * radius * 2.22,
@@ -530,15 +571,43 @@ function albumMarkers(input: MapAlbumArtworkInput, bounds: MapBounds, frame: Fra
         y: clamp(origin.y, frame.y + radius + 10, frame.y + frame.height - radius - 10) };
     placed.push(candidate);
     const { x, y } = candidate;
-    const fontSize = Math.min(radius, radius * 2.55 / point.label.length);
-    return `<g data-album-marker="${xml(point.label)}">
+    const placeName = first.stop?.placeName;
+    if (mapOnly && placeName && members.every(({ stop }) => stop?.placeName === placeName)) {
+      labels.push({ x, y, title: placeName, visits });
+    }
+    const fontSize = Math.min(radius, radius * 2.55 / label.length);
+    const grouped = visits > 1 ? ` data-album-visits="${members.map(({ stop }) => stop?.number).join(",")}"` : "";
+    return `<g data-album-marker="${xml(first.label)}"${grouped}>
       ${x !== origin.x || y !== origin.y ? `<line x1="${number(origin.x)}" y1="${number(origin.y)}" x2="${number(x)}" y2="${number(y)}" stroke="${color}" stroke-width="4"/>` : ""}
       ${ring ? `<circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="none" ${ring}/>` : ""}
-      <circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="${paper}" stroke="${color}" stroke-width="6"/>
-      ${text(x, y + fontSize * .34, point.label, `fill="${markerInk}" text-anchor="middle" font-family="${sans}" font-weight="700" font-size="${number(fontSize)}"`)}
+      <circle cx="${number(x)}" cy="${number(y)}" r="${radius}" fill="${label ? paper : color}" stroke="${label ? color : paper}" stroke-width="6"/>
+      ${label ? text(x, y + fontSize * .34, label, `fill="${markerInk}" text-anchor="middle" font-family="${sans}" font-weight="700" font-size="${number(fontSize)}"`) : ""}
     </g>`;
   }).join("");
-  return { svg, positions: placed.map((position) => ({ ...position, radius })) };
+  const labelSize = 39;
+  const labelBoxes: Frame[] = [];
+  const placeLabels = labels.sort((a, b) => b.visits - a.visits).map(({ x, y, title }) => {
+    const width = textWidth(title, labelSize) + 16;
+    const height = labelSize + 8;
+    const offsets = [
+      { x: x + radius + 12, y: y - height / 2 },
+      { x: x - radius - width - 12, y: y - height / 2 },
+      { x: x - width / 2, y: y + radius + 12 },
+      { x: x - width / 2, y: y - radius - height - 12 },
+    ];
+    const position = offsets.find((point) => inside(point, frame, 6) &&
+      inside({ x: point.x + width, y: point.y + height }, frame, 6) &&
+      placed.every((marker) => marker.x + radius < point.x || marker.x - radius > point.x + width ||
+        marker.y + radius < point.y || marker.y - radius > point.y + height) &&
+      labelBoxes.every((box) => box.x + box.width < point.x || box.x > point.x + width ||
+        box.y + box.height < point.y || box.y > point.y + height));
+    if (!position) return "";
+    labelBoxes.push({ ...position, width, height });
+    return text(position.x + 8, position.y + labelSize, title, `data-album-place-label="true" fill="${labelInk}"
+      paint-order="stroke" stroke="${labelHalo}" stroke-width="7" stroke-linejoin="round" font-family="${sans}"
+      font-size="${labelSize}" font-weight="700"`);
+  }).join("");
+  return { svg: svg + placeLabels, markerNumbers, positions: placed.map((position) => ({ ...position, radius })) };
 }
 
 function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel & { radius: number })[], { labelInk, labelHalo }: Palette) {
@@ -602,10 +671,19 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const layout = drawingLayout(input.format, size, input.formatting?.margins);
   const palette = artworkPalette(input);
   const { width, height, margin, mapHeight } = layout;
-  const stops = input.stops ?? [];
+  const allStops = input.stops ?? [];
   const transportOnly = input.showStopsList === false;
-  const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode) : stops;
   const connections = input.connections ?? [];
+  const rawSubject = input.fitJourney && (allStops.length || connections.length)
+    ? fitAlbumJourney(allStops, connections, input.journeyPadding) : input.bounds;
+  const wraps = rawSubject.west > rawSubject.east;
+  const subject = wraps ? { ...rawSubject, east: rawSubject.east + 360 } : rawSubject;
+  const subjectCenter = (subject.west + subject.east) / 2;
+  const cropJourney = input.fitJourney === false && allStops.length > 0;
+  const stops = cropJourney ? allStops.filter(({ latitude, longitude }) => {
+    const x = nearLongitude(longitude, subjectCenter);
+    return x >= subject.west && x <= subject.east && latitude >= subject.south && latitude <= subject.north;
+  }) : allStops;
   const [{ default: detail }, raster] = await Promise.all([
     import("./world-detail.json"),
     input.style === "satellite" ? readMapRaster("satellite").catch(() => "")
@@ -619,18 +697,15 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const availableRows = Math.max(1, Math.floor((height - 305 - head.mapTop - mapHeight) / 112));
   const firstStops = Math.min(availableRows, Math.ceil(layout.firstStops / 2)) * columns;
   const continuedStops = Math.min(Math.ceil(layout.continuedStops / 2), Math.floor((height - 299 - head.mapTop) / 112)) * columns;
+  const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode).slice(0, firstStops) : stops;
   const availableHeight = height - head.mapTop - 245;
   const frameWidth = width - 2 * margin;
   const coverRows = Math.ceil(Math.min(listedStops.length, firstStops) / columns);
   const frameHeight = coverRows
     ? Math.max(mapHeight, Math.min(frameWidth * 1.05, availableHeight - 72 - coverRows * 142))
-    : Math.min(availableHeight, frameWidth * .78);
+    : Math.min(availableHeight, frameWidth * (allStops.length ? 1.15 : .95));
   const frameArea = { x: margin, y: number(head.mapTop + (listedStops.length ? 0 : (availableHeight - frameHeight) * .38)),
     width: frameWidth, height: number(frameHeight) };
-  const rawSubject = input.fitJourney && (stops.length || connections.length)
-    ? fitAlbumJourney(stops, connections) : input.bounds;
-  const wraps = rawSubject.west > rawSubject.east;
-  const subject = wraps ? { ...rawSubject, east: rawSubject.east + 360 } : rawSubject;
   const padding = clamp(input.contextPercent ?? (input.wideFrame ? 52 : 0), 0, 100) / 200;
   const longitudePadding = (subject.east - subject.west) * padding;
   const latitudePadding = (subject.north - subject.south) * padding;
@@ -646,12 +721,16 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const frame = { x: number(frameArea.x + (frameArea.width - fittedWidth) / 2),
     y: number(frameArea.y + (frameArea.height - fittedHeight) / 2),
     width: number(fittedWidth), height: number(fittedHeight) };
-  const markers = albumMarkers(input, bounds, frame, palette);
+  const markers = albumMarkers(input, stops, bounds, frame, mapPalette);
+  const cropStart = mapPixel(bounds, frame, subject.west, subject.north);
+  const cropEnd = mapPixel(bounds, frame, subject.east, subject.south);
+  const clipFrame = cropJourney
+    ? { ...cropStart, width: cropEnd.x - cropStart.x, height: cropEnd.y - cropStart.y } : frame;
   const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "")}</clipPath></defs>
     <g clip-path="url(#album-map-clip)">
       ${baseMap(detail, frame, bounds, style, raster, mapPalette)}
       ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, mapPalette) : ""}
-      ${journeyLines(connections, bounds, frame, palette)}${markers.svg}
+      ${journeyLines(connections, bounds, frame, palette, clipFrame)}${markers.svg}
     </g>
     ${frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
 
@@ -661,7 +740,11 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   return groups.map((group, index) => {
     const continuation = index > 0;
     const listTop = continuation ? head.mapTop + 35 : frameArea.y + frameArea.height + 41;
-    const legend = continuation ? "" : stops.length ? "Gestrichelte Linien verbinden Aufnahmeorte in zeitlicher Reihenfolge."
+    const grouped = markers.markerNumbers.size > 0;
+    const legend = continuation ? "" : allStops.length
+      ? transportOnly ? "Zahlen zeigen mehrere Stopps am selben Kartenpunkt. Linien verbinden Aufnahmeorte."
+        : grouped ? "+ kennzeichnet mehrere Stopps am selben Kartenpunkt. Linien verbinden Aufnahmeorte."
+          : "Gestrichelte Linien verbinden Aufnahmeorte in zeitlicher Reihenfolge."
       : input.points?.length ? "Zahlen zeigen die Anzahl der Fotos je Kartenpunkt." : "";
     const pageNumber = groups.length > 1 ? `${index + 1} / ${groups.length}` : "";
     const footer = `<line x1="${margin}" x2="${width - margin}" y1="${height - 147}" y2="${height - 147}" stroke="${palette.rule}" stroke-width="2"/>
@@ -672,9 +755,11 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
       ${pageNumber ? text(width - margin, height - 92, pageNumber, `fill="${palette.ink}" font-family="${sans}" font-size="31" text-anchor="end"`) : ""}`;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
       <title>${xml(input.title.trim() || "Meine Fotokarte")}</title>
-      ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly, palette, input.formatting)}${footer}
+      ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly,
+        palette, markers.markerNumbers, input.formatting)}${footer}
     </svg>`;
-    return { svg, ...size, dpi, number: index + 1, total: groups.length, ...(!continuation && satelliteFallback && { satelliteFallback }) };
+    return { svg, ...size, dpi, number: index + 1, total: groups.length, ...(!continuation && satelliteFallback && { satelliteFallback }),
+      ...(cropJourney && { visibleStopCount: stops.length }) };
   });
 }
 

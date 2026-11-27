@@ -396,6 +396,22 @@ def _status(conn, album_id=None):
     return {**dict(totals), "indexing": geo_backfill.indexing}
 
 
+def list_map_years(album_id=None):
+    """Return capture years with geotagged photos, independent of the viewport."""
+    where, params = photo_selection_sql(GeoPhotoSelection(album_id=album_id), require_coordinates=True)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"""SELECT DISTINCT substr(i.captured_at, 1, 4) AS year FROM image i
+                WHERE {where} AND i.captured_at IS NOT NULL
+                ORDER BY year DESC""",
+            params,
+        ).fetchall()
+        return [row["year"] for row in rows if re.fullmatch(r"[0-9]{4}", row["year"]) and row["year"] != "0000"]
+    finally:
+        conn.close()
+
+
 def list_map_points(
     west, east, south, north, from_date=None, to_date=None, zoom=2,
     grid_columns=MAP_GRID_SIZE, grid_rows=MAP_GRID_SIZE, *, album_id=None,

@@ -622,7 +622,7 @@ async function mapWithoutStorageFlow(browser, errors) {
       await page.goto(`${webBase}/#/weltkarte`);
       await page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' }).waitFor();
       await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
-      await page.getByText('Kartendarstellung und Export', { exact: true }).click();
+      await page.getByText('Kartendarstellung', { exact: true }).click();
       const style = page.getByLabel('Kartenstil');
       const names = page.getByLabel('Ländernamen anzeigen');
       assert.equal(await style.inputValue(), 'standard');
@@ -655,7 +655,7 @@ async function durablePreferencesFlow(browser, errors) {
     assert.deepEqual(await (await imported).json(), {
       map_style: 'satellite', map_country_names: false, image_grid_size: 'large', help_introduction_seen: true,
     });
-    await first.getByText('Kartendarstellung und Export', { exact: true }).click();
+    await first.getByText('Kartendarstellung', { exact: true }).click();
     const style = first.getByLabel('Kartenstil');
     assert.equal(await style.inputValue(), 'satellite');
 
@@ -684,7 +684,7 @@ async function durablePreferencesFlow(browser, errors) {
     await reopened.addInitScript(() => Reflect.deleteProperty(window, 'localStorage'));
     await reopened.goto(`${webBase}/#/weltkarte`);
     await reopened.locator('.gps-map__svg--landscape').waitFor();
-    await reopened.getByText('Kartendarstellung und Export', { exact: true }).click();
+    await reopened.getByText('Kartendarstellung', { exact: true }).click();
     assert.equal(await reopened.getByLabel('Ländernamen anzeigen').isChecked(), true);
     await reopened.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Bilder', exact: true }).click();
     await reopened.getByText('Ansicht', { exact: true }).click();
@@ -706,7 +706,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
-    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
+    await page.getByText('Kartendarstellung', { exact: true }).click();
     await page.getByLabel('Ländernamen anzeigen').check();
     await page.locator('.gps-map__place-label--country').first().waitFor();
     const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
@@ -729,7 +729,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
 
-    const exportButton = page.getByRole('button', { name: 'Bild exportieren' });
+    const exportButton = page.getByRole('button', { name: 'Fotobuchbild gestalten' });
     const exportBounds = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === '/api/map/points' && url.searchParams.get('grid_columns') === '18';
@@ -743,7 +743,9 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const bookPreview = book.getByRole('img', { name: 'Vorschau des Fotobuchbildes' });
     await bookPreview.waitFor();
     await book.getByLabel('Titel', { exact: true }).fill('Sommer & Meer');
+    await book.getByText('Schrift und Layout', { exact: true }).click();
     await book.getByLabel('Unterzeile (optional)', { exact: true }).fill('Unser Fotoalbum');
+    await book.getByText('Schrift und Layout', { exact: true }).click();
     await book.getByLabel('Format', { exact: true }).selectOption('portrait');
     await book.getByLabel('Farbwelt', { exact: true }).selectOption('coast');
     await book.getByText('Darstellung', { exact: true }).click();
@@ -812,21 +814,25 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     });
     await page.getByRole('button', { name: 'Verlauf', exact: true }).click();
     await page.locator('.gps-map__journey-line').first().waitFor();
-    await page.getByRole('button', { name: 'Reisestopp 1', exact: true }).press('Enter');
+    const activeMarker = page.getByRole('button', { name: '2 Stopps an dieser Stelle', exact: true });
+    await activeMarker.press('Enter');
+    const stopList = results.getByRole('list', { name: 'Chronologische Stopps' });
+    assert.equal(await stopList.getByRole('button').count(), 2);
+    await stopList.getByRole('button', { name: /^Stopp 1/ }).click();
     await results.getByRole('heading', { name: 'Fotos von Stopp 1' }).waitFor();
-    const activeMarker = page.getByRole('button', { name: 'Reisestopp 1', exact: true });
+    assert.equal(await activeMarker.getAttribute('aria-pressed'), 'true');
     await activeMarker.scrollIntoViewIfNeeded();
     assert.equal(await activeMarker.evaluate((element) => {
       const { x, y, width, height } = element.getBoundingClientRect();
       return document.elementFromPoint(x + width / 2, y + height / 2)
         ?.closest('.gps-map__journey-stop')?.getAttribute('aria-label');
-    }), 'Reisestopp 1');
+    }), '2 Stopps an dieser Stelle');
     const arrows = await page.locator('.gps-map__journey-direction').evaluateAll((paths) =>
       paths.map((path) => path.getAttribute('transform')?.split(' scale')[0]));
     assert.equal(new Set(arrows).size, 2, 'Return route direction arrows overlap');
     await results.getByRole('button', { name: /Berlin-000/ }).waitFor();
-    await results.getByRole('button', { pressed: true }).getByText('Bei Berlin', { exact: true }).waitFor();
     await exportButton.click();
+    await book.getByLabel('Layout', { exact: true }).selectOption('list');
     await bookPreview.waitFor();
     const journeyArtwork = await bookPreview.evaluate((image) => fetch(image.src).then((response) => response.text()));
     assert.match(journeyArtwork, /Bei Berlin/);
@@ -1599,10 +1605,10 @@ async function denseJourneyReview(browser, errors) {
     await screenshot(page, 'reise-europa');
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Karte', exact: true }).click();
-    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
-    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Stopps', exact: true }).click();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten' }).click();
     const album = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
+    await album.getByLabel('Layout', { exact: true }).selectOption('list');
     await album.getByLabel('Format', { exact: true }).selectOption({ label: 'Eigene Größe' });
     await album.getByLabel('Breite (px)', { exact: true }).fill('2400');
     await album.getByLabel('Höhe (px)', { exact: true }).fill('1600');
@@ -1636,9 +1642,12 @@ async function denseJourneyReview(browser, errors) {
     await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
     await map.scrollIntoViewIfNeeded();
     const box = await map.boundingBox();
-    await page.mouse.move(box.x + box.width * .32, box.y + box.height * .50);
+    const [mapX, mapY, mapWidth, mapHeight] = (await map.getAttribute('viewBox')).split(' ').map(Number);
+    const lyonX = box.x + box.width * ((4.8357 + 180) / 360 * 1000 - mapX) / mapWidth;
+    const lyonY = box.y + box.height * ((90 - 45.764) / 180 * 500 - mapY) / mapHeight;
+    await page.mouse.move(lyonX - 16, lyonY - 16);
     await page.mouse.down();
-    await page.mouse.move(box.x + box.width * .39, box.y + box.height * .60, { steps: 8 });
+    await page.mouse.move(lyonX + 16, lyonY + 16, { steps: 8 });
     await page.mouse.up();
     await page.getByText('1 Stopp · 5 Fotos', { exact: true }).waitFor();
     assert.equal(await scope.inputValue(), 'custom');
@@ -1657,12 +1666,13 @@ async function denseJourneyReview(browser, errors) {
     await includeInferred.check();
     await inferredPhoto.waitFor();
     await results.getByText('Nach Aufnahmezeit zugeordnet', { exact: true }).waitFor();
+    await results.getByRole('button', { name: 'Stopp auf Karte zeigen', exact: true }).click();
     const cityView = (await map.getAttribute('viewBox')).split(' ').map(Number);
     assert.ok(cityView[2] < 1, 'City stop did not zoom below a district-wide view');
     await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
     await page.getByRole('button', { name: 'Sichtbaren Bereich wählen', exact: true }).click();
     await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten' }).click();
     await album.getByText('Route gestalten', { exact: true }).click();
     const suggestion = album.getByRole('button', { name: /Zu Fuß für Etappe .* übernehmen/ }).first();
     await suggestion.waitFor();
@@ -1680,27 +1690,28 @@ async function denseJourneyReview(browser, errors) {
     await page.getByRole('searchbox', { name: 'Fotoorte suchen' }).fill('Berlin');
     await page.getByRole('button', { name: 'Berlin als Heimatort wählen' }).click();
     await page.getByText('Reisen entdecken', { exact: true }).click();
-    await results.getByRole('button', { name: /5 Stopps/ }).click();
+    const discovery = page.locator('details').filter({ has: page.getByText('Reisen entdecken', { exact: true }) });
+    await discovery.getByRole('button', { name: /5 Stopps/ }).click();
     await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
-    await results.getByLabel('Anreise einbeziehen').check();
+    await discovery.getByLabel('Anreise einbeziehen').check();
     await page.getByText('6 Stopps · 30 Fotos', { exact: true }).waitFor();
-    await results.getByLabel('Rückreise einbeziehen').check();
+    await discovery.getByLabel('Rückreise einbeziehen').check();
     await page.getByText('7 Stopps · 35 Fotos', { exact: true }).waitFor();
-    await results.getByLabel('Rückreise einbeziehen').uncheck();
-    await results.getByLabel('Anreise einbeziehen').uncheck();
+    await discovery.getByLabel('Rückreise einbeziehen').uncheck();
+    await discovery.getByLabel('Anreise einbeziehen').uncheck();
     await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
-    await results.getByRole('button', { name: 'Als Reisealbum speichern' }).click();
+    await discovery.getByRole('button', { name: 'Als Reisealbum speichern' }).click();
     await page.getByLabel('Albumname', { exact: true }).fill('Wien zu Fuß');
     await page.getByRole('button', { name: 'Album erstellen', exact: true }).click();
     await page.getByLabel('Album', { exact: true }).selectOption({ label: 'Wien zu Fuß' });
     await page.getByText('5 Stopps · 25 Fotos', { exact: true }).waitFor();
-    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten' }).click();
     await album.getByLabel('Titel', { exact: true }).fill('Wiener Spaziergang');
     await album.getByRole('button', { name: 'Entwurf im Album speichern', exact: true }).click();
     await album.getByText('Entwurf im Album gespeichert.', { exact: true }).waitFor();
     await page.keyboard.press('Escape');
     await album.waitFor({ state: 'hidden' });
-    await page.getByRole('button', { name: 'Bild exportieren' }).click();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten' }).click();
     assert.equal(await album.getByLabel('Titel', { exact: true }).inputValue(), 'Wiener Spaziergang');
     console.log('PASS dense journey fixture: 9 trips, inferred photo, city and transport hints, separate transfers, journey album and draft reload');
   } finally {

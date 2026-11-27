@@ -37,7 +37,7 @@ export function findNearbyPlace(places: readonly JourneyPlace[], latitude: numbe
     else high = middle;
   }
 
-  let closest: { name: string; distanceKm: number } | undefined;
+  let closest: { name: string; distanceKm: number; latitude: number; longitude: number } | undefined;
   let alternative = Infinity;
   const latitudeRadians = latitude * RAD;
   for (let index = low; index < places.length; index += 1) {
@@ -50,7 +50,7 @@ export function findNearbyPlace(places: readonly JourneyPlace[], latitude: numbe
     if (distanceKm > searchKm) continue;
     if (!closest || distanceKm < closest.distanceKm) {
       if (closest && name !== closest.name) alternative = closest.distanceKm;
-      closest = { name, distanceKm };
+      closest = { name, distanceKm, latitude: placeLatitude, longitude: placeLongitude };
     } else if (name !== closest.name) {
       alternative = Math.min(alternative, distanceKm);
     }
