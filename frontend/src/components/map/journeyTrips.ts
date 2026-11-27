@@ -11,6 +11,7 @@ export type TripSuggestion = {
 };
 export type TripSelection = {
   trip: TripSuggestion;
+  title?: string;
   includeArrival: boolean;
   includeDeparture: boolean;
   day: string;
@@ -20,7 +21,7 @@ const dayStart = (value: string) => value.slice(0, 10);
 const dayMs = (value: string) => Date.parse(dayStart(value) + "T00:00:00Z");
 const radians = Math.PI / 180;
 
-function kilometers(first: Position, second: Position) {
+export function kilometers(first: Position, second: Position) {
   const chord = Math.sin((first.latitude - second.latitude) * radians / 2) ** 2
     + Math.cos(first.latitude * radians) * Math.cos(second.latitude * radians)
     * Math.sin((first.longitude - second.longitude) * radians / 2) ** 2;
@@ -29,6 +30,33 @@ function kilometers(first: Position, second: Position) {
 
 function daysWithPhotos(stops: readonly JourneyStop[]) {
   return [...new Set(stops.flatMap((stop) => [dayStart(stop.start), dayStart(stop.end)]))].sort();
+}
+
+export function selectedTripDays({ trip, includeArrival, includeDeparture }: TripSelection) {
+  const transfers = [includeArrival ? trip.arrival : undefined, includeDeparture ? trip.departure : undefined]
+    .filter((stop): stop is JourneyStop => Boolean(stop));
+  return [...new Set([...trip.days, ...daysWithPhotos(transfers)])].sort();
+}
+
+function fitsBetweenStops(before: JourneyStop, uncertain: readonly JourneyStop[], after: JourneyStop) {
+  if (!before.end_utc || !after.start_utc || before.section !== after.section) return false;
+  const elapsedHours = (Date.parse(after.start_utc) - Date.parse(before.end_utc)) / 3600000;
+  const distance = kilometers(before, after);
+  if (!(elapsedHours > 0 && elapsedHours <= 24) || (distance > 200 && distance / elapsedHours > 1100)) return false;
+
+  // A camera without a reliable clock can interrupt an otherwise continuous
+  // visit. Require nearby, timed photos on both sides of the interruption.
+  const beforeEnd = Date.parse(before.end + "Z");
+  const afterStart = Date.parse(after.start + "Z");
+  const nearTime = 30 * 60000;
+  return uncertain.every((stop) => {
+    const start = Date.parse(stop.start + "Z");
+    const end = Date.parse(stop.end + "Z");
+    return end - start <= nearTime && (
+      (kilometers(before, stop) <= 1 && Math.abs(start - beforeEnd) <= nearTime && Math.abs(end - beforeEnd) <= nearTime)
+      || (kilometers(after, stop) <= 1 && Math.abs(start - afterStart) <= nearTime && Math.abs(end - afterStart) <= nearTime)
+    );
+  });
 }
 
 export function suggestTrips(journey: Journey, home?: TravelHome): TripSuggestion[] {
@@ -49,14 +77,31 @@ export function suggestTrips(journey: Journey, home?: TravelHome): TripSuggestio
     candidates.push({ id: first.id, core, arrival, departure, days: daysWithPhotos(core) });
   };
 
-  journey.stops.forEach((stop, index) => {
-    if (stop.uncertain || isHome(stop)) {
+  for (let index = 0; index < journey.stops.length; index += 1) {
+    const stop = journey.stops[index];
+    if (isHome(stop)) {
       addTrip(index);
       start = index + 1;
-      return;
+      continue;
+    }
+    if (stop.uncertain) {
+      const firstUncertain = index;
+      let next = journey.stops[index + 1];
+      while (next?.uncertain && !isHome(next)) {
+        index += 1;
+        next = journey.stops[index + 1];
+      }
+      if (firstUncertain > start && next && !isHome(next)
+        && fitsBetweenStops(journey.stops[firstUncertain - 1], journey.stops.slice(firstUncertain, index + 1), next)) {
+        index += 1;
+      } else {
+        addTrip(firstUncertain);
+        start = index + 1;
+      }
+      continue;
     }
     const previous = journey.stops[index - 1];
-    if (index <= start) return;
+    if (index <= start) continue;
     const linked = connections.has(`${previous.id}:${stop.id}`);
     const distance = kilometers(previous, stop);
     const hours = previous.end_utc && stop.start_utc ? (Date.parse(stop.start_utc) - Date.parse(previous.end_utc)) / 3600000 : null;
@@ -66,7 +111,7 @@ export function suggestTrips(journey: Journey, home?: TravelHome): TripSuggestio
       addTrip(index);
       start = index;
     }
-  });
+  }
   addTrip(journey.stops.length);
   return candidates.reverse();
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useModalFocus } from "../../hooks/useModalFocus";
 import { fetchMapPoints, type MapPoint } from "../../utils/api";
-import type { Journey } from "./mapData";
+import type { Journey, JourneyDetail } from "./mapData";
 import { describeJourneyPlaces, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
 import { journeyStopLabel } from "./MapJourney";
 import { suggestJourneyTransport } from "./journeyTransport";
@@ -22,7 +22,9 @@ export interface MapAlbumOpening {
   showCountryNames: boolean;
   fromDate: string;
   toDate: string;
+  scopeTitle?: string;
   journey?: Journey;
+  journeyDetail?: JourneyDetail;
   albumId?: string;
   draft?: unknown;
 }
@@ -57,7 +59,13 @@ type NativeAlbumSave = { save_album_png?: (name: string, data: string) => Promis
 const dateFormatter = new Intl.DateTimeFormat("de-DE", { dateStyle: "long", timeZone: "UTC" });
 const millimeters = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 2 });
 const MM_PER_INCH = 25.4;
-const formatOptions = [["a4", "A4 quer"], ["portrait", "A4 hoch"], ["square", "Quadratisch"]] as const;
+const formatOptions = [
+  ["a4", "A4 quer (29,7 × 21 cm)"],
+  ["portrait", "A4 hoch (21 × 29,7 cm)"],
+  ["square-210", "Quadratisch (21 × 21 cm)"],
+  ["square-300", "Quadratisch (30 × 30 cm)"],
+  ["custom", "Eigene Größe"],
+] as const;
 const colorFields = [["paper", "Papierfarbe"], ["accent", "Akzentfarbe"], ["land", "Landfarbe"], ["water", "Wasserfarbe"]] as const;
 const day = (value: string) => dateFormatter.format(new Date(value.slice(0, 10) + "T12:00:00Z"));
 const legKey = (leg: { from_stop_id: string; to_stop_id: string }) => `${leg.from_stop_id}:${leg.to_stop_id}`;
@@ -86,7 +94,8 @@ function readAlbumDraft(value: unknown) {
     ...draft, colors, transports, formatting, dpi,
     title: typeof draft.title === "string" ? draft.title.slice(0, 72) : undefined,
     subtitle: typeof draft.subtitle === "string" ? draft.subtitle.slice(0, 100) : undefined,
-    format: isChoice(["custom", "square", "portrait"], draft.format) ? draft.format : "a4" as const,
+    format: draft.format === "square" || isChoice(formatOptions.map(([value]) => value), draft.format)
+      ? draft.format : "a4" as const,
     dimensions: albumOutputSize("custom", dpi, draft.dimensions) ?? { width: 3000, height: 3000 },
     style: isChoice(["standard", "landscape", "satellite"], draft.style) ? draft.style : undefined,
     palette: draft.palette === "coast" ? "coast" as const : "sand" as const,
@@ -128,15 +137,15 @@ function downloadAlbumFile(blob: Blob, name: string) {
 
 function albumPeriod(opening: MapAlbumOpening) {
   const { fromDate, toDate, journey } = opening;
-  if (fromDate && toDate) return fromDate === toDate ? day(fromDate) : `${day(fromDate)} – ${day(toDate)}`;
-  if (fromDate) return `Ab ${day(fromDate)}`;
-  if (toDate) return `Bis ${day(toDate)}`;
   if (journey?.stops.length) {
     const observations = journey.stops.flatMap((stop) => [stop.start.slice(0, 10), stop.end.slice(0, 10)]).sort();
     const start = day(observations[0]);
     const end = day(observations[observations.length - 1]);
     return start === end ? start : `${start} – ${end}`;
   }
+  if (fromDate && toDate) return fromDate === toDate ? day(fromDate) : `${day(fromDate)} – ${day(toDate)}`;
+  if (fromDate) return `Ab ${day(fromDate)}`;
+  if (toDate) return `Bis ${day(toDate)}`;
   return undefined;
 }
 
@@ -144,7 +153,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   opening: MapAlbumOpening; onClose: () => void; onSaveDraft?: (draft: AlbumDraft) => Promise<void>;
 }) {
   const dialog = useRef<HTMLElement>(null);
-  const defaultTitle = opening.journey ? "Mein Reiseverlauf" : "Meine Fotokarte";
+  const defaultTitle = opening.scopeTitle?.trim().slice(0, 72) || (opening.journey ? "Meine Reise" : "Meine Fotokarte");
   const draft = useMemo(() => readAlbumDraft(opening.draft), [opening.draft]);
   const [title, setTitle] = useState(draft?.title ?? defaultTitle);
   const [subtitle, setSubtitle] = useState(draft?.subtitle ?? "");
@@ -159,12 +168,13 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const [formatting, setFormatting] = useState<AlbumFormatting>(draft?.formatting ?? {});
   const [contextPercent, setContextPercent] = useState(draft?.contextPercent ?? 0);
   const [markerScale, setMarkerScale] = useState(draft?.markerScale ?? 100);
-  const [useViewport, setUseViewport] = useState(Boolean(opening.hasSelection && draft?.useViewport));
+  const canChangeArea = Boolean(opening.hasSelection || opening.journey);
+  const [useViewport, setUseViewport] = useState(Boolean(canChangeArea && draft?.useViewport));
   const [transports, setTransports] = useState<Partial<Record<string, AlbumTransport>>>(draft?.transports ?? {});
   const [style, setStyle] = useState(draft?.style ?? opening.style);
   const [showNames, setShowNames] = useState(draft?.showNames ?? opening.showCountryNames);
   const [showPeriod, setShowPeriod] = useState(draft?.showPeriod ?? true);
-  const [showStopsList, setShowStopsList] = useState(draft?.showStopsList ?? true);
+  const [showStopsList, setShowStopsList] = useState(draft?.showStopsList ?? false);
   const [data, setData] = useState<AlbumData | null>(null);
   const [retry, setRetry] = useState(0);
   const [dataError, setDataError] = useState("");
@@ -193,7 +203,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
   const size = albumOutputSize(format, dpi, dimensions);
   const availableColorFields = colorFields.filter(([field]) => style !== "satellite" || field === "paper" || field === "accent");
   const invalidColor = availableColorFields.some(([field]) => Boolean(colors[field]?.trim() && !normalizeAlbumColor(colors[field])));
-  const canRender = Boolean(fileTitle && size && !invalidColor);
+  const canRender = Boolean(size && !invalidColor);
   const currentDesign: AlbumDraft = { version: 1, title, subtitle, format, dimensions, dpi, palette, accent, colors, formatting,
     contextPercent, markerScale, useViewport, transports, style, showNames, showPeriod, showStopsList };
   const designKey = JSON.stringify(currentDesign);
@@ -217,6 +227,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     return opening.journey.stops.map((stop) => {
       const location = places.get(stop.id);
       return { ...stop, title: location?.nearby ? `Bei ${location.nearby.name}` : location?.coordinates ?? `Stopp ${stop.number}`,
+        placeName: location?.nearby?.name,
         subtitle: `${location?.sharedName ? `${location.coordinates} · ` : ""}${journeyStopLabel(stop)}${stop.uncertain ? " · Zeitfolge unsicher" : ""}` };
     });
   }, [opening, data?.places]);
@@ -263,7 +274,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         palette, accent, colors, formatting, style, showCountryNames: showNames, showStopsList, bounds, contextPercent, markerScale,
         points: data.points, stops: stops?.map((stop) => ({ ...stop, arrivalMode: arrivals.get(stop.id) })),
         connections: opening.journey?.connections.map((leg) => ({ ...leg, transport: transports[legKey(leg)] })),
-        fitJourney: Boolean(opening.journey),
+        fitJourney: Boolean(opening.journey && !useViewport), journeyPadding: opening.journeyDetail === "city" ? .014 : .09,
       }).then((pages) => {
         if (current) {
           setRenderError(undefined);
@@ -276,7 +287,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
     }, 120);
     return () => { current = false; window.clearTimeout(timer); };
   }, [data, canRender, fileTitle, format, dimensions, dpi, opening, palette, accent, colors, formatting, style,
-    showNames, showPeriod, showStopsList, subtitle, renderKey, bounds, contextPercent, markerScale, stops, legs, transports]);
+    showNames, showPeriod, showStopsList, subtitle, renderKey, bounds, contextPercent, markerScale, stops, legs, transports, useViewport]);
 
   useEffect(() => {
     if (!previewPage) return;
@@ -443,12 +454,14 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
               setPageIndex(previewIndex + 1); setConfirmation("");
             }}>›</button>
           </div>}
-          {size && <span className="gps-album-dialog__dimensions">{millimeters.format(size.width / dpi * MM_PER_INCH)} × {millimeters.format(size.height / dpi * MM_PER_INCH)} mm · {dpi} dpi</span>}
+          {size && <span className="gps-album-dialog__dimensions">{millimeters.format(size.width / dpi * MM_PER_INCH)} × {millimeters.format(size.height / dpi * MM_PER_INCH)} mm · {dpi} dpi · {size.width} × {size.height} px</span>}
         </div>
         {updatingPreview && <p className="gps-album-dialog__feedback" role="status">{preview ? "Vorschau wird aktualisiert …" : "Vorschau wird erstellt …"}</p>}
-        {!fileTitle && <p className="gps-album-dialog__feedback" role="status">Gib einen Titel für das Fotobuchbild ein.</p>}
-        {fileTitle && !size && <p className="gps-album-dialog__feedback">Prüfe die Bildgröße.</p>}
-        {fileTitle && invalidColor && <p className="gps-album-dialog__feedback">Prüfe die Hexcodes unter „Eigene Farben“.</p>}
+        {!size && <p className="gps-album-dialog__feedback">Prüfe die Bildgröße.</p>}
+        {invalidColor && <p className="gps-album-dialog__feedback">Prüfe die Hexcodes unter „Eigene Farben“.</p>}
+        {page?.visibleStopCount === 0 && <p className="gps-album-dialog__feedback" role="status">
+          Im sichtbaren Kartenausschnitt liegt kein Stopp. Wähle „Ganze Auswahl einrahmen“ für die vollständige Route.
+        </p>}
         {error && <p className="gps-album-dialog__feedback" role="alert">{error}{" "}<button type="button" onClick={() => {
           setData(null); setRenderError(undefined); setRetry((value) => value + 1);
         }}>Erneut versuchen</button></p>}
@@ -458,14 +471,20 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
       </div>
       <div className="gps-album-dialog__editor">
         <fieldset className="gps-album-dialog__options" disabled={busy}>
-          <label>Titel<input required aria-invalid={!fileTitle} value={title} maxLength={72} onChange={(event) => {
+          <label className="gps-album-dialog__title-field">Titel<input value={title} placeholder="Ohne Titel" maxLength={72} onChange={(event) => {
             setTitle(event.target.value); setConfirmation("");
           }} /></label>
+          {opening.journey && <label><span id="gps-album-layout">Layout</span><select aria-labelledby="gps-album-layout" value={showStopsList ? "list" : "map"} onChange={(event) => {
+            setShowStopsList(event.target.value === "list"); setConfirmation(""); setPageIndex(0);
+          }}><option value="map">Karte auf einer Seite</option><option value="list">Karte mit Stoppliste</option></select></label>}
           <label><span id="gps-album-format">Format</span><select aria-labelledby="gps-album-format" value={format} onChange={(event) => {
-            setFormat(event.target.value as AlbumFormat); setConfirmation("");
+            const next = event.target.value as AlbumFormat;
+            setFormat(next);
+            if (next !== "custom" && !albumOutputSize(next, dpi)) setDpi(300);
+            setConfirmation("");
           }}>
             {formatOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            <option value="custom">Eigene Größe</option>
+            {draft?.format === "square" && <option value="square">Quadratisch (25,4 × 25,4 cm)</option>}
           </select></label>
           {format === "custom" && <>
             <label>Einheit der Bildgröße<select value={sizeUnit} onChange={(event) => changeSizeUnit(event.target.value === "mm" ? "mm" : "px")}>
@@ -484,9 +503,10 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
                 : "Wähle je Kante 1200 bis 4800 px."} Verwende höchstens 16 Megapixel und ein Seitenverhältnis zwischen 1 zu 2 und 2 zu 1.
             </p>}
           </>}
-          <label>Unterzeile (optional)<input value={subtitle} maxLength={100} onChange={(event) => {
-            setSubtitle(event.target.value); setConfirmation("");
-          }} /></label>
+          {canChangeArea && <label><span id="gps-album-area">Kartenbereich</span><select aria-labelledby="gps-album-area" value={useViewport ? "viewport" : "selection"} onChange={(event) => {
+            setUseViewport(event.target.value === "viewport"); setConfirmation(""); setPageIndex(0);
+          }}><option value="selection">{opening.journey ? "Ganze Auswahl einrahmen" : "Gewählter Bereich"}</option>
+            <option value="viewport">Sichtbarer Kartenausschnitt</option></select></label>}
           <label><span id="gps-album-palette">Farbwelt</span><select aria-labelledby="gps-album-palette" value={palette} onChange={(event) => {
             setPalette(event.target.value === "coast" ? "coast" : "sand"); setConfirmation("");
           }}><option value="sand">Sand &amp; Salbei</option><option value="coast">Küste &amp; Schiefer</option></select></label>
@@ -497,11 +517,10 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
             <label><span id="gps-album-dpi">Druckauflösung</span><select aria-labelledby="gps-album-dpi" value={dpi} onChange={(event) => {
               setDpi(Number(event.target.value) as AlbumDpi); setConfirmation("");
             }}>
-              {albumDensities.map((density) => <option key={density} value={density}>{density} dpi</option>)}
+              {albumDensities.map((density) => <option key={density} value={density}
+                disabled={format !== "custom" && !albumOutputSize(format, density)}>{density} dpi</option>)}
             </select></label>
-            {size && <output className="gps-album-dialog__dimensions">
-              {size.width} × {size.height} px · {millimeters.format(size.width / dpi * MM_PER_INCH)} × {millimeters.format(size.height / dpi * MM_PER_INCH)} mm
-            </output>}
+            {format === "square-300" && <p className="gps-album-dialog__feedback">Für 30 × 30 cm stehen bis zu 300 dpi zur Wahl.</p>}
           </fieldset>
         </details>
         <details className="gps-album-dialog__details">
@@ -512,7 +531,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
             }}><option value="standard">Standard</option><option value="landscape">Landschaft</option><option value="satellite">Satellit</option></select></label>
             <label><span id="gps-album-frame">Bildausschnitt</span><select aria-labelledby="gps-album-frame" value={contextPercent === 0 ? "close" : contextPercent === 52 ? "wide" : "custom"} onChange={(event) => {
               setContextPercent(event.target.value === "wide" ? 52 : event.target.value === "custom" ? 25 : 0); setConfirmation("");
-            }}><option value="close">{opening.journey ? "Ganze Reise einrahmen" : "Eng einrahmen"}</option>
+            }}><option value="close">Eng einrahmen</option>
               <option value="wide">Mehr Umgebung</option><option value="custom">Individuell</option></select></label>
             <label className="gps-album-dialog__slider"><span>Umgebung</span><input type="range" min={0} max={100} value={contextPercent} onChange={(event) => {
               setContextPercent(Number(event.target.value)); setConfirmation("");
@@ -520,10 +539,6 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
             <label className="gps-album-dialog__slider"><span>Markergröße</span><input type="range" min={70} max={140} value={markerScale} onChange={(event) => {
               setMarkerScale(Number(event.target.value)); setConfirmation("");
             }} aria-label="Markergröße" aria-valuetext={`${markerScale} Prozent`} /><span aria-hidden="true">{markerScale} %</span></label>
-            {!opening.journey && opening.hasSelection && <label><span id="gps-album-area">Kartenbereich</span>
-              <select aria-labelledby="gps-album-area" value={useViewport ? "viewport" : "selection"} onChange={(event) => {
-                setUseViewport(event.target.value === "viewport"); setConfirmation("");
-              }}><option value="selection">Gewählter Bereich</option><option value="viewport">Sichtbarer Bereich</option></select></label>}
             <label><span id="gps-album-accent">{opening.journey ? "Routenfarbe" : "Markerfarbe"}</span>
               <span className="gps-album-dialog__swatch" aria-hidden="true" style={{ backgroundColor: normalizeAlbumColor(colors.accent) ?? defaultColors.accent }} />
               <select aria-labelledby="gps-album-accent" value={accent} onChange={(event) => {
@@ -534,10 +549,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
             }} /> Ländernamen</label>
             <label><input type="checkbox" checked={showPeriod} onChange={(event) => {
               setShowPeriod(event.target.checked); setConfirmation("");
-            }} /> Zeitraum unter dem Titel</label>
-            {opening.journey && <label><input type="checkbox" checked={showStopsList} onChange={(event) => {
-              setShowStopsList(event.target.checked); setConfirmation(""); setPageIndex(0);
-            }} /> Stoppliste</label>}
+            }} /> Zeitraum im Bild</label>
           </fieldset>
         </details>
         <details className="gps-album-dialog__details gps-album-dialog__colors">
@@ -568,6 +580,9 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         <details className="gps-album-dialog__details">
           <summary tabIndex={0}>Schrift und Layout</summary>
           <fieldset disabled={busy}>
+            <label>Unterzeile (optional)<input value={subtitle} maxLength={100} onChange={(event) => {
+              setSubtitle(event.target.value); setConfirmation("");
+            }} /></label>
             <label>Schrift<select aria-label="Schrift" value={formatting.typeface ?? "serif"} onChange={(event) => {
               changeFormatting("typeface", event.target.value === "sans" ? "sans" : "serif");
             }}><option value="serif">Klassisch (Serifen)</option><option value="sans">Modern (serifenlos)</option></select></label>
@@ -619,6 +634,7 @@ export default function MapAlbumDialog({ opening, onClose, onSaveDraft }: {
         </details>}
       </div>
       <footer className="gps-album-dialog__footer">
+        <p className="gps-album-dialog__usage">Füge das PNG in deinem Fotobuchprogramm als Foto ein.</p>
         {saveError && <span role="alert">{saveError}</span>}
         {confirmation && <span role="status">{confirmation}</span>}
         {saving === "archive" && <span role="status">Seite {archivePage} von {pages.length} wird für das ZIP vorbereitet.</span>}

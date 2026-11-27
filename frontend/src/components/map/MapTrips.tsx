@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { findNearbyPlace, loadJourneyPlaces, type JourneyPlace } from "./journeyPlaces";
-import { suggestTrips, type TravelHome, type TripSelection } from "./journeyTrips";
+import { kilometers, selectedTripDays, suggestTrips, type TravelHome, type TripSelection } from "./journeyTrips";
 import type { Journey } from "./mapData";
 
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeZone: "UTC" });
 const labelDay = (value: string) => dates.format(new Date(value));
 
 interface Props {
-  journey: Journey;
+  journey?: Journey | null;
   home?: TravelHome;
   onClearHome: () => void;
   selection?: TripSelection;
@@ -16,10 +16,35 @@ interface Props {
   onSave: (opener: HTMLElement) => void;
 }
 
+function tripTitle(trip: TripSelection["trip"], places: JourneyPlace[]) {
+  const first = trip.core[0];
+  const last = trip.core[trip.core.length - 1];
+  const start = findNearbyPlace(places, first.latitude, first.longitude)?.name;
+  const end = findNearbyPlace(places, last.latitude, last.longitude)?.name;
+  if (!start || !end) return start || end || "Reisevorschlag";
+  if (start !== end) return `${start} – ${end}`;
+
+  const destinations = new Map<string, { distance: number; days: Set<string> }>();
+  for (const stop of trip.core) {
+    if (stop.uncertain) continue;
+    const place = findNearbyPlace(places, stop.latitude, stop.longitude);
+    if (!place || place.name === start) continue;
+    const destination = destinations.get(place.name) ?? { distance: 0, days: new Set<string>() };
+    destination.distance = Math.max(destination.distance, kilometers(first, stop));
+    destination.days.add(stop.start.slice(0, 10));
+    destination.days.add(stop.end.slice(0, 10));
+    destinations.set(place.name, destination);
+  }
+  const distanceThreshold = Math.max(35, Math.max(0, ...[...destinations.values()].map((place) => place.distance)) * .6);
+  const [representative] = [...destinations].filter(([, place]) => place.distance >= distanceThreshold)
+    .sort(([, a], [, b]) => b.days.size - a.days.size || b.distance - a.distance);
+  return representative ? `${start} – ${representative[0]} – ${end}` : start;
+}
+
 export default function MapTrips({ journey, home, onClearHome, selection, canSave, onChange, onSave }: Props) {
   const [open, setOpen] = useState(Boolean(selection));
   const [places, setPlaces] = useState<JourneyPlace[]>([]);
-  const candidates = useMemo(() => open && !selection ? suggestTrips(journey, home) : [], [journey, home, open, selection]);
+  const candidates = useMemo(() => open && !selection && journey ? suggestTrips(journey, home) : [], [journey, home, open, selection]);
   useEffect(() => {
     if (!open || places.length) return;
     let mounted = true;
@@ -34,10 +59,11 @@ export default function MapTrips({ journey, home, onClearHome, selection, canSav
         <button type="button" onClick={onClearHome}>Heimatort entfernen</button>
       </div> : <p>Über „Orte aus meinen Fotos“ kannst du freiwillig einen Heimatort für An- und Rückreise festlegen.</p>}
       {selection ? <>
+        <strong>{selection.title || tripTitle(selection.trip, places)}</strong>
         <div className="gps-map-discovery__actions">
           <label>Reisetag<select aria-label="Reisetag" value={selection.day} onChange={(event) => onChange({ ...selection, day: event.target.value })}>
             <option value="">Alle Reisetage</option>
-            {selection.trip.days.map((date) => <option key={date} value={date}>{labelDay(date)}</option>)}
+            {selectedTripDays(selection).map((date) => <option key={date} value={date}>{labelDay(date)}</option>)}
           </select></label>
           {selection.trip.arrival && <label><input type="checkbox" checked={selection.includeArrival}
             onChange={(event) => onChange({ ...selection, includeArrival: event.target.checked })} />Anreise einbeziehen</label>}
@@ -49,20 +75,15 @@ export default function MapTrips({ journey, home, onClearHome, selection, canSav
           <button type="button" onClick={() => onChange(undefined)}>Reiseauswahl aufheben</button>
         </div>
       </> : <>
-        <p>Vorschläge aus aufeinanderfolgenden Fotoorten. Prüfe die Reisetage und sichtbaren Stopps vor dem Speichern.</p>
-        {candidates.length === 0 && <p>In der aktuellen Auswahl liegen keine zusammenhängenden Reisetage.</p>}
+        {!journey ? <p role="status">Reiseverlauf wird geladen …</p> : candidates.length === 0 && <p>In der aktuellen Auswahl liegen keine zusammenhängenden Reisetage.</p>}
         <div className="gps-map-discovery__places">
           {candidates.map((trip) => {
-            const first = trip.core[0];
-            const last = trip.core[trip.core.length - 1];
-            const start = findNearbyPlace(places, first.latitude, first.longitude)?.name;
-            const end = findNearbyPlace(places, last.latitude, last.longitude)?.name;
-            const title = start && end && end !== start ? `${start} – ${end}` : start || end || "Reisevorschlag";
             const startDay = trip.days[0];
             const endDay = trip.days[trip.days.length - 1];
+            const title = tripTitle(trip, places);
             return <button type="button" key={trip.id} onClick={() => onChange({
-              trip, includeArrival: false, includeDeparture: false, day: "",
-            })}>{title} <small>{labelDay(startDay)}{startDay !== endDay && ` – ${labelDay(endDay)}`} · {trip.core.length} Stopps</small></button>;
+              trip, title: title === "Reisevorschlag" ? undefined : title, includeArrival: false, includeDeparture: false, day: "",
+            })}>{title} <small>{labelDay(startDay)}{startDay !== endDay && ` – ${labelDay(endDay)}`} · {trip.core.length} {trip.core.length === 1 ? "Stopp" : "Stopps"}</small></button>;
           })}
         </div>
       </>}

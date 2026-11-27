@@ -5,6 +5,8 @@ const { albumOutputSize, buildMapAlbumArtwork, fitAlbumJourney, normalizeAlbumCo
 
 const world = { west: -180, east: 180, south: -90, north: 90 };
 const artwork = { format: 'a4', title: 'Berlin & Paris <2026>', bounds: world, style: 'standard' };
+const markerNumbers = ({ svg }) => [...svg.matchAll(/data-album-marker="(\d+)"(?: data-album-visits="([\d,]+)")?/g)]
+  .flatMap(([, number, visits]) => (visits || number).split(',').map(Number)).sort((a, b) => a - b);
 
 test('unavailable satellite imagery falls back to attributed vector artwork', async () => {
   // No browser raster decoder is available in this runner.
@@ -21,6 +23,9 @@ test('print presets preserve physical dimensions across resolutions and constrai
   assert.deepEqual(albumOutputSize('a4', 150), { width: 1754, height: 1240 });
   assert.deepEqual(albumOutputSize('portrait', 400), { width: 3307, height: 4677 });
   assert.deepEqual(albumOutputSize('square', 400), { width: 4000, height: 4000 });
+  assert.deepEqual(albumOutputSize('square-210', 300), { width: 2480, height: 2480 });
+  assert.deepEqual(albumOutputSize('square-300', 300), { width: 3543, height: 3543 });
+  assert.equal(albumOutputSize('square-300', 400), null);
   for (const dimensions of [{ width: 1199, height: 1200 }, { width: 4801, height: 3000 },
     { width: 4600, height: 4000 }, { width: 3201, height: 1600 }, { width: 3000.2, height: 3000 }]) {
     assert.equal(albumOutputSize('custom', 240, dimensions), null);
@@ -59,7 +64,7 @@ test('one-column formatting and context preserve all stops and grow the atlas vi
   const wide = await buildMapAlbumArtwork({ ...common, contextPercent: 100 });
   const atlasSpans = (page) => page.svg.match(/<svg x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+"\s+viewBox="([^"]+)"/)[1].split(' ').map(Number);
   assert.ok(atlasSpans(wide[0])[2] > atlasSpans(tight[0])[2]);
-  assert.equal((wide[0].svg.match(/data-album-marker=/g) ?? []).length, stops.length);
+  assert.deepEqual(markerNumbers(wide[0]), stops.map(({ number }) => number));
   assert.deepEqual(wide.flatMap((page) => [...page.svg.matchAll(/data-album-stop="(custom-\d+)"/g)].map((match) => match[1])),
     stops.map(({ id }) => id));
 });
@@ -117,13 +122,56 @@ test('dense journeys preserve all station entries on continuation pages and allo
   assert.equal(pages.length, 4);
   const listed = pages.flatMap((page) => [...page.svg.matchAll(/data-album-stop="(s\d+)"/g)].map((match) => match[1]));
   assert.deepEqual(listed, stops.map(({ id }) => id));
-  assert.equal((pages[0].svg.match(/data-album-marker=/g) ?? []).length, stops.length);
+  assert.deepEqual(markerNumbers(pages[0]), stops.map(({ number }) => number));
   assert.match(pages[1].svg, /Weitere Stationen/);
   assert.match(pages[1].svg, />2 \/ 4</);
   const compact = await buildMapAlbumArtwork({ ...artwork, stops, connections, fitJourney: true, showStopsList: false });
   assert.equal(compact.length, 1);
   assert.doesNotMatch(compact[0].svg, /data-album-stop=/);
-  assert.equal((compact[0].svg.match(/data-album-marker=/g) ?? []).length, stops.length);
+  assert.deepEqual(markerNumbers(compact[0]), stops.map(({ number }) => number));
+});
+
+test('return visits share a readable map marker while the complete stop list retains each visit', async () => {
+  const berlin = { id: 's1', number: 1, title: 'Bei Berlin', placeName: 'Berlin', latitude: 52.52, longitude: 13.40 };
+  const paris = { id: 's2', number: 2, title: 'Bei Paris', placeName: 'Paris', latitude: 48.86, longitude: 2.35 };
+  const stops = [berlin, paris, { ...berlin, id: 's3', number: 3, longitude: 13.41 }];
+  const input = { ...artwork, stops, fitJourney: true };
+  const [compact] = await buildMapAlbumArtwork({ ...input, format: 'square-210', showStopsList: false });
+  const [detailed] = await buildMapAlbumArtwork(input);
+  assert.match(compact.svg, /data-album-marker="1" data-album-visits="1,3"/);
+  assert.match(compact.svg, /data-album-place-label="true"[^>]*>Berlin<\/text>/);
+  assert.match(compact.svg, /data-album-place-label="true"[^>]*>Paris<\/text>/);
+  assert.match(detailed.svg, /data-album-stop="s3"[\s\S]*?Kartenpunkt 1/);
+  assert.deepEqual(markerNumbers(detailed), [1, 2, 3]);
+});
+
+test('viewport export crops drawn visits and the stop list even when surrounding context is increased', async () => {
+  const near = { id: 'near', number: 1, title: 'Bei Lyon', latitude: 45.76, longitude: 4.83 };
+  const outside = { id: 'outside', number: 2, title: 'Bei Paris', latitude: 48.86, longitude: 2.35 };
+  const stops = [near, outside];
+  const input = { ...artwork, stops, connections: [{ from: near, to: outside }], fitJourney: false,
+    bounds: { west: 3.8, east: 5.8, south: 44.75, north: 46.75 }, contextPercent: 100 };
+  const [cropped] = await buildMapAlbumArtwork(input);
+  assert.equal(cropped.visibleStopCount, 1);
+  assert.match(cropped.svg, /data-album-connection=/);
+  assert.match(cropped.svg, /data-album-stop="near"/);
+  assert.doesNotMatch(cropped.svg, /data-album-stop="outside"|data-album-marker="2"/);
+  assert.deepEqual(markerNumbers(cropped), [1]);
+  const [complete] = await buildMapAlbumArtwork({ ...input, fitJourney: true });
+  assert.deepEqual(markerNumbers(complete), [1, 2]);
+});
+
+test('single-page layout remains one image with many assigned transports and an optional title', async () => {
+  const stops = Array.from({ length: 18 }, (_, index) => ({
+    id: String(index + 1), number: index + 1, arrivalMode: 'train',
+    title: `Stopp ${index + 1}`, longitude: 8 + index / 3, latitude: 49 + index / 5,
+  }));
+  const pages = await buildMapAlbumArtwork({ ...artwork, title: '', format: 'square-300',
+    stops, fitJourney: true, showStopsList: false });
+  assert.equal(pages.length, 1);
+  assert.deepEqual([pages[0].width, pages[0].height], [3543, 3543]);
+  assert.doesNotMatch(pages[0].svg, />Meine Fotokarte<\/text>/);
+  assert.deepEqual(markerNumbers(pages[0]), stops.map(({ number }) => number));
 });
 
 test('portrait wraps a long unbroken title and preserves the full subtitle', async () => {

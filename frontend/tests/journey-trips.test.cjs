@@ -53,3 +53,37 @@ test('unconnected distant observations do not form a trip and an overnight stay 
   const overnight = { ...stop(3, '2025-08-01', lyon), end: '2025-08-02T00:15:00' };
   assert.deepEqual(suggestTrips(journey([overnight]))[0].days, ['2025-08-01', '2025-08-02']);
 });
+
+const timed = (id, date, place, start, end) => ({
+  ...stop(id, date, place), start: `${date}T${start}:00`, end: `${date}T${end}:00`,
+  start_utc: `${date}T${start}:00+00:00`, end_utc: `${date}T${end}:00+00:00`,
+});
+
+function journeyWithUncertainPhoto(place = paris, nextPlace = lyon, section = 1, date = '2025-07-02') {
+  const source = journey([
+    timed(1, '2025-07-01', paris, '11:00', '11:10'),
+    timed(2, '2025-07-02', paris, '08:00', '08:10'),
+    { ...stop(3, '2025-07-02', place, true), start: '2025-07-02T08:11:00', end: '2025-07-02T08:15:00' },
+    { ...timed(4, date, nextPlace, '10:00', '10:10'), section },
+    { ...timed(5, '2025-07-04', nextPlace, '08:00', '08:10'), section },
+  ]);
+  source.connections = source.connections.filter(({ from_stop_id, to_stop_id }) => from_stop_id !== '3' && to_stop_id !== '3');
+  return source;
+}
+
+test('nearby photos with an uncertain clock remain in the same travel suggestion without adding a connection', () => {
+  const source = journeyWithUncertainPhoto();
+  const [trip] = suggestTrips(source);
+  assert.deepEqual(trip.core.map(({ id }) => id), ['1', '2', '3', '4', '5']);
+  const route = applyTripSelection(source, photoIdsForTrip({ trip, includeArrival: false, includeDeparture: false, day: '' }));
+  assert.deepEqual(route.connections.map(({ from_stop_id, to_stop_id }) => [from_stop_id, to_stop_id]), [['1', '2'], ['4', '5']]);
+  assert.equal(route.stops[2].uncertain, true);
+});
+
+test('uncertain photos cannot join remote, separated, or implausibly distant travel periods', () => {
+  const tokyo = { latitude: 35.6762, longitude: 139.6503 };
+  for (const source of [journeyWithUncertainPhoto(berlin), journeyWithUncertainPhoto(paris, tokyo),
+    journeyWithUncertainPhoto(paris, lyon, 2), journeyWithUncertainPhoto(paris, lyon, 1, '2025-07-03')]) {
+    assert.deepEqual(suggestTrips(source).map((trip) => trip.core.map(({ id }) => id)), [['4', '5'], ['1', '2']]);
+  }
+});

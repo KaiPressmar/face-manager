@@ -25,8 +25,9 @@ export function journeyStopLabel(stop: JourneyStop) {
 
 interface Props {
   journey: Journey;
-  selected?: string;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, opener: HTMLButtonElement) => void;
+  stopGroup?: readonly string[];
+  onClearGroup: () => void;
   areaFiltered: boolean;
   onClearArea: () => void;
   onClearDates?: () => void;
@@ -35,7 +36,7 @@ interface Props {
 const searchable = (text: string) => text.toLocaleLowerCase("de")
   .normalize("NFD").replace(/\p{Diacritic}/gu, "");
 
-export default function MapJourney({ journey, selected, onSelect, areaFiltered, onClearArea, onClearDates }: Props) {
+export default function MapJourney({ journey, onSelect, stopGroup, onClearGroup, areaFiltered, onClearArea, onClearDates }: Props) {
   const [places, setPlaces] = useState<readonly JourneyPlace[] | null>(null);
   const [search, setSearch] = useState("");
   const hasStops = journey.stops.length > 0;
@@ -51,14 +52,16 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
   }, [hasStops]);
   const locations = useMemo(() => describeJourneyPlaces(journey.stops, places ?? undefined), [journey.stops, places]);
   const query = searchable(search.trim());
-  const visibleStops = query ? journey.stops.filter((stop) => {
+  const inGroup = useMemo(() => stopGroup ? new Set(stopGroup) : undefined, [stopGroup]);
+  const stopList = inGroup ? journey.stops.filter((stop) => inGroup.has(stop.id)) : journey.stops;
+  const visibleStops = query ? stopList.filter((stop) => {
     const location = locations.get(stop.id);
     return searchable(`Stopp ${stop.number} ${location?.nearby?.name ?? ""} ${location?.coordinates ?? ""} ${journeyStopLabel(stop)}`).includes(query);
-  }) : journey.stops;
+  }) : stopList;
   const showLocationNote = !areaFiltered && journey.missing_location_count > 0;
 
   return <div className="gps-journey">
-    <p className="gps-page__results-hint">Die Stopps folgen den Aufnahmezeiten. Gestrichelte Linien verbinden beobachtete Orte in zeitlicher Richtung. Zwischen den Aufnahmen ist der tatsächliche Weg unbekannt.</p>
+    <p className="gps-page__results-hint">Gestrichelte Linien verbinden Aufnahmeorte in zeitlicher Reihenfolge.</p>
     {journey.indexing && <p className="gps-page__results-hint" role="status">Aufnahmezeiten werden im Hintergrund geprüft.</p>}
     {!hasStops && <div className="gps-page__empty">
       <strong>{areaFiltered ? "Keine Stopps in diesem Bereich und Zeitraum." : "In diesem Zeitraum gibt es keine Fotos mit Standort und Aufnahmezeit."}</strong>
@@ -67,11 +70,15 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
         {onClearDates && <button type="button" onClick={onClearDates}>Alle Zeiten zeigen</button>}
       </div>
     </div>}
-    {(journey.stops.length >= 8 || Boolean(search)) && <label className="gps-page__field">
+    {inGroup && <div className="gps-journey__group">
+      <p role="status">{countWithLabel(stopList.length, "Stopp", "Stopps")} an dieser Stelle auf der Karte</p>
+      <button type="button" onClick={() => { setSearch(""); onClearGroup(); }}>Alle Stopps zeigen</button>
+    </div>}
+    {(stopList.length >= 8 || Boolean(search)) && <label className="gps-page__field">
       <span>Stoppliste durchsuchen</span>
       <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ort, Datum oder Stoppnummer" />
     </label>}
-    {query && <p role="status" className="gps-page__results-hint">{numbers.format(visibleStops.length)} von {numbers.format(journey.stops.length)} Stopps in der Liste</p>}
+    {query && <p role="status" className="gps-page__results-hint">{numbers.format(visibleStops.length)} von {numbers.format(stopList.length)} Stopps in der Liste</p>}
     <ol aria-label="Chronologische Stopps" className="gps-journey__stops">
       {visibleStops.map((stop, index) => {
         const location = locations.get(stop.id);
@@ -80,7 +87,7 @@ export default function MapJourney({ journey, selected, onSelect, areaFiltered, 
         return <li key={stop.id}>
         {index > 0 && stop.section !== visibleStops[index - 1].section && <p className="gps-journey__gap">{areaFiltered
           ? "Neuer Abschnitt im gewählten Bereich" : "Neuer Abschnitt nach mehr als einem Tag ohne Beobachtung"}</p>}
-        <button type="button" aria-pressed={selected === stop.id} onClick={() => onSelect(stop.id)}>
+        <button type="button" onClick={(event) => onSelect(stop.id, event.currentTarget)}>
           <span className="gps-journey__stop-number"><span className="gps-journey__number-label">Stopp </span>{stop.number}</span>
           <span>
             {match && <strong>Bei {match.name}</strong>}

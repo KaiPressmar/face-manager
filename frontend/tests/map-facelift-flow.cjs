@@ -91,9 +91,8 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await gallery.getByRole('button', { name: 'Galerie schließen', exact: true }).click();
 
     await page.setViewportSize({ width: 320, height: 680 });
-    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Karte', exact: true }).click();
-    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
-    await page.getByRole('button', { name: 'Bild exportieren', exact: true }).click();
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Stopps', exact: true }).click();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten', exact: true }).click();
     const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     const preview = book.locator('.gps-album-dialog__preview[aria-busy="false"] img');
     await preview.waitFor();
@@ -103,6 +102,8 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
       return preview.top < editor.top && preview.bottom <= element.getBoundingClientRect().bottom && element.clientWidth === element.scrollWidth;
     }), 'The print preview does not fit in the initial narrow dialog');
     await screenshot(page, 'druckvorschau-schmal');
+    assert.equal(await book.getByLabel('Layout', { exact: true }).inputValue(), 'map');
+    await book.getByLabel('Layout', { exact: true }).selectOption('list');
     await book.getByRole('button', { name: 'Nächste Seite', exact: true }).click();
     const pages = book.getByRole('group', { name: 'Fotobuchseiten' });
     await pages.getByText(/Seite 2 von /).waitFor();
@@ -119,7 +120,7 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await page.keyboard.press('Escape');
     await discard.getByRole('button', { name: 'Entwurf verwerfen', exact: true }).click();
     await book.waitFor({ state: 'hidden' });
-    await page.getByRole('button', { name: 'Bild exportieren', exact: true }).and(page.locator(':focus')).waitFor();
+    await page.getByRole('button', { name: 'Fotobuchbild gestalten', exact: true }).and(page.locator(':focus')).waitFor();
     assert.equal(new URL(page.url()).hash, '#/weltkarte');
     await journey.and(page.locator('[aria-pressed=true]')).waitFor();
     console.log('PASS compact map, album history and reset, stable map refresh, visible provenance, narrow print preview and draft Back');
