@@ -184,12 +184,14 @@ const ImageRenamePage: React.FC<{
     if (active && renameReport) reportRef.current?.focus();
   }, [renameReport]);
 
-  const loadTotalCount = async () => {
+  const loadTotalCount = async (background = false) => {
     const controller = new AbortController();
     totalAbortRef.current?.abort();
     totalAbortRef.current = controller;
-    setIsTotalLoading(true);
-    setTotal(null);
+    if (!background) {
+      setIsTotalLoading(true);
+      setTotal(null);
+    }
     try {
       const nextTotal = await fetchImageRenameCandidateCount({
         folders: selectedFolders,
@@ -205,7 +207,7 @@ const ImageRenamePage: React.FC<{
         }
       }
     } catch {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && !background) {
         setTotal(null);
       }
     } finally {
@@ -215,7 +217,7 @@ const ImageRenamePage: React.FC<{
     }
   };
 
-  const loadData = async (nextOffset = 0) => {
+  const loadData = async (nextOffset = 0, background = false) => {
     pendingOffsetRef.current = nextOffset;
     const requestId = activeRequestRef.current + 1;
     activeRequestRef.current = requestId;
@@ -223,8 +225,8 @@ const ImageRenamePage: React.FC<{
     const controller = new AbortController();
     activeAbortRef.current = controller;
 
-    setIsLoading(true);
-    setLoadError(null);
+    if (!background) setIsLoading(true);
+    if (!background) setLoadError(null);
     try {
       const renameData = await fetchImageRenameCandidates({
         folders: selectedFolders,
@@ -235,9 +237,10 @@ const ImageRenamePage: React.FC<{
         offset: nextOffset,
         signal: controller.signal,
       });
-      if (activeRequestRef.current !== requestId) {
+      if (controller.signal.aborted || activeRequestRef.current !== requestId) {
         return;
       }
+      setLoadError(null);
       setItems(renameData.items);
       setAvailablePersons(renameData.available_persons);
       if (renameData.total !== null) {
@@ -254,7 +257,7 @@ const ImageRenamePage: React.FC<{
         }));
       }
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted || background) {
         return;
       }
       setLoadError(
@@ -264,6 +267,7 @@ const ImageRenamePage: React.FC<{
       );
     } finally {
       if (activeRequestRef.current === requestId) {
+        activeAbortRef.current = null;
         setIsLoading(false);
       }
     }
@@ -389,7 +393,7 @@ const ImageRenamePage: React.FC<{
 
     const refreshVisibleData = async () => {
       if (document.visibilityState !== "visible") return;
-      if (reviewOpenRef.current || submittingRef.current) {
+      if (reviewOpenRef.current || submittingRef.current || activeAbortRef.current) {
         scheduleRefresh();
         return;
       }
@@ -405,8 +409,8 @@ const ImageRenamePage: React.FC<{
       refreshInFlight = true;
       try {
         await Promise.all([
-          loadData(pendingOffsetRef.current),
-          loadTotalCount(),
+          loadData(pendingOffsetRef.current, true),
+          loadTotalCount(true),
           refreshLibraryTotal(),
         ]);
       } finally {

@@ -135,6 +135,7 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
 
   const activate = useCallback((next: RecordEntry, restore: boolean, snapshot?: Snapshot, updateRoute = true) => {
     const serial = ++presentation.current;
+    const focusAtActivation = document.activeElement;
     current.current = next;
     known.current.set(next.position, next);
     setRecord(next);
@@ -154,7 +155,12 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
         pane.scrollTop = snapshot?.top ?? 0;
         pane.scrollLeft = snapshot?.left ?? 0;
         if (Math.abs(pane.scrollTop - (snapshot?.top ?? 0)) <= 2 || tries >= 45) {
-          restoreFocus(pane, snapshot?.focus);
+          // A route can paint before its scroll position is restored. Keep
+          // focus where the user moved it during those frames.
+          const focused = document.activeElement;
+          if (!focused || focused === document.body || focused === focusAtActivation) {
+            restoreFocus(pane, snapshot?.focus);
+          }
           return;
         }
       }

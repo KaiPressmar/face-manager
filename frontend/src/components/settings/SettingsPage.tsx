@@ -123,10 +123,11 @@ const SETTINGS_NAV_ITEMS: { section: SettingsSection; label: string }[] = [
 type FeedbackArea = "erkennung" | "updates" | "protokoll" | "speicherorte";
 
 const SettingsPage: React.FC<{
+  active: boolean;
   activeSection?: SettingsSection;
   sharedLibrary: SharedLibraryController;
   onNavigateSection: (section: SettingsSection) => void;
-}> = ({ activeSection, sharedLibrary, onNavigateSection }) => {
+}> = ({ active, activeSection, sharedLibrary, onNavigateSection }) => {
   const { mode: themeMode, setMode: setThemeMode } = useTheme();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [strictnessInput, setStrictnessInput] = useState("0.50");
@@ -151,6 +152,7 @@ const SettingsPage: React.FC<{
   const backupInFlight = useRef(false);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [pathCleanup, setPathCleanup] = useState<ImagePathCleanupStatus | null>(null);
+  const [pathCleanupRevision, setPathCleanupRevision] = useState(0);
   const [feedback, setFeedback] = useState<Partial<Record<FeedbackArea, { text: string; error: boolean }>>>({});
   const [filenameFeedback, setFilenameFeedback] = useState<{ text: string; error: boolean } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -228,37 +230,30 @@ const SettingsPage: React.FC<{
   }, [settingsLoadAttempt]);
 
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
-    void fetchImagePathCleanup()
-      .then((next) => {
-        if (!cancelled) setPathCleanup(next);
-      })
-      .catch(() => {
-        // Maintenance state is supplementary; the settings remain usable.
-      });
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const next = await fetchImagePathCleanup();
+        if (cancelled) return;
+        setPathCleanup(next);
+        if (next.status === "queued" || next.status === "running") {
+          timer = window.setTimeout(refresh, 1000);
+        }
+      } catch {
+        if (!cancelled) timer = window.setTimeout(refresh, 5000);
+      }
+    };
+    void refresh();
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, []);
+  }, [active, pathCleanupRevision]);
 
   const pathCleanupIsActive =
     pathCleanup?.status === "queued" || pathCleanup?.status === "running";
-
-  useEffect(() => {
-    if (!pathCleanupIsActive) return;
-    let cancelled = false;
-    const timer = window.setInterval(() => {
-      void fetchImagePathCleanup()
-        .then((next) => {
-          if (!cancelled) setPathCleanup(next);
-        })
-        .catch(() => undefined);
-    }, 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [pathCleanupIsActive]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -625,6 +620,7 @@ const SettingsPage: React.FC<{
     try {
       const next = await startImagePathCleanup();
       setPathCleanup(next);
+      setPathCleanupRevision((revision) => revision + 1);
     } catch (cleanupError) {
       report("speicherorte",
         cleanupError instanceof Error
@@ -1146,11 +1142,11 @@ const SettingsPage: React.FC<{
                 hidden
                 onChange={handleImportChange}
               />
-              {pendingRestore && <RestoreConfirmation file={pendingRestore.file} preview={pendingRestore.preview}
+              {active && pendingRestore && <RestoreConfirmation file={pendingRestore.file} preview={pendingRestore.preview}
                 onClose={() => setPendingRestore(null)} onConfirm={() => void confirmRestore()} />}
             </section>
 
-            <ArchiveRepair />
+            <ArchiveRepair active={active} />
 
             <section className="settings-card">
               <h2 className="settings-card__title">Fehlerprotokoll</h2>

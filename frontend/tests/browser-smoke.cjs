@@ -1094,6 +1094,8 @@ async function liveWorkflowFlow(browser, errors) {
       await openingNextPage;
       const liveRefresh = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/image-renames');
       await publishLibraryChange('import_completed');
+      // The live refresh uses the requested page once its foreground load finishes.
+      nextPageGate.release();
       const liveOffset = new URL((await liveRefresh).url()).searchParams.get('offset');
       assert.equal(liveOffset, '25', 'Live refresh returned to the previous rename page');
     } finally {
@@ -1282,10 +1284,17 @@ async function responsiveFlow(browser, errors) {
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
     await page.locator('.topbar-import-button__label').waitFor();
-    await nav.getByRole('button', { name: 'Personen' }).click();
-    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
     const more = nav.getByRole('button', { name: /^Mehr/ });
-    await more.press('Enter');
+    await nav.getByRole('button', { name: 'Personen' }).evaluate((button) => {
+      button.focus();
+      button.click();
+      // Simulate moving to the next navigation control before route restoration.
+      button.closest('nav').querySelector('.workflow-sidebar__more').focus();
+    });
+    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.ok(await more.evaluate((button) => document.activeElement === button), 'Navigation restored focus after the user moved it');
+    await page.keyboard.press('Enter');
     await nav.getByRole('button', { name: 'Dateinamen' }).waitFor();
     await page.keyboard.press('Escape');
     assert.equal(await more.getAttribute('aria-expanded'), 'false');
@@ -1417,8 +1426,7 @@ async function reviewInboxFlow(browser, errors) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
-    // The entering page briefly transforms the fixed dialog's containing block.
-    // Check the actual paint order once the responsive layout has settled.
+    // Check the paint order once the responsive layout has settled.
     await page.waitForFunction(() => {
       const brand = document.querySelector('.sidebar__brand-mark');
       if (!brand) return false;
@@ -1678,6 +1686,64 @@ async function freshInstallFlow(browser, errors) {
   }
 }
 
+async function suggestionRefreshFlow(browser, errors) {
+  const page = await newPage(browser, 1580, 740, errors);
+  const proposals = Array.from({ length: 15 }, (_, index) => ({
+    cluster_id: index + 1, person_id: 1, person_name: `Person ${index + 1}`,
+    confidence: 0.95, support_count: 1, face_count: 1, recommended: true,
+    proposal_token: `proposal-${index + 1}`, face_ids: [601],
+    preview_face_ids: [601], reference_face_ids: [],
+  }));
+  let pending = false;
+  let accepted;
+  try {
+    await page.route('**/api/person-suggestions', (route) => route.fulfill({
+      headers: { 'X-Person-Suggestions-Pending': pending ? '1' : '0', 'X-Assignment-Library-Id': 'fixture' },
+      json: pending ? [] : proposals.filter((item) => item.cluster_id !== accepted),
+    }));
+    await page.route('**/api/review-suggestions', (route) => route.fulfill({ json: [] }));
+    await page.route(/\/api\/faces\/601\/crop\?/, (route) => route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"/>',
+    }));
+    await page.route('**/api/person-suggestions/accept', (route) => {
+      accepted = route.request().postDataJSON().assignments[0].cluster_id;
+      pending = true;
+      return route.fulfill({ json: { accepted_count: 1 } });
+    });
+
+    await page.goto(`${webBase}/#/gesichter-pruefen`);
+    const counter = page.getByRole('button', { name: /^Vorschläge / }).locator('b');
+    const action = page.getByRole('article', { name: 'Personenvorschlag für Person 7', exact: true })
+      .getByRole('button', { name: 'Auswahl zuordnen', exact: true });
+    const scroller = page.locator('[data-workspace-page="review"] .page-content');
+    await action.scrollIntoViewIfNeeded();
+    await action.and(page.locator('button:enabled')).waitFor();
+    const startingScroll = await scroller.evaluate((element) => element.scrollTop);
+    assert.ok(startingScroll > 100);
+    const pendingResponse = page.waitForResponse((response) => response.url().endsWith('/api/person-suggestions')
+      && response.headers()['x-person-suggestions-pending'] === '1');
+    await action.click();
+    await (await pendingResponse).finished();
+    await page.getByText('Vorschläge werden aktualisiert …', { exact: true }).waitFor();
+    const survivor = page.getByRole('article', { name: 'Personenvorschlag für Person 8', exact: true });
+    assert.ok(await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).isDisabled());
+    assert.equal(await counter.textContent(), '14');
+    assert.equal(await page.getByRole('heading', { name: 'Keine Vorschläge offen' }).count(), 0);
+    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Pending refresh reset the review scroll');
+
+    pending = false;
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).and(page.locator('button:enabled')).waitFor();
+    assert.equal(await counter.textContent(), '14');
+    assert.equal(await action.count(), 0);
+    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Completed refresh reset the review scroll');
+    console.log('PASS suggestion refresh: completed card removed, pending list retained, count and scroll stable');
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
@@ -1687,7 +1753,7 @@ async function freshInstallFlow(browser, errors) {
       durablePreferencesFlow,
       mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
       (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
-      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow,
+      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
       (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),

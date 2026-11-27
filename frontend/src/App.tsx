@@ -1,11 +1,11 @@
-import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import React, { Suspense, lazy, memo, useCallback, useEffect, useRef, useState } from "react";
 import Layout from "./components/layout/Layout";
 import type { TopbarAction } from "./components/layout/Topbar";
 import type { HelpDestination, HelpTopic } from "./components/shared/HelpTour";
-import PeoplePage from "./components/people/PeoplePage";
-import ClusterPage from "./components/clusters/ClusterPage";
-import ImageRenamePage from "./components/renaming/ImageRenamePage";
-import SettingsPage from "./components/settings/SettingsPage";
+import PeopleWorkspace from "./components/people/PeoplePage";
+import ReviewWorkspace from "./components/clusters/ClusterPage";
+import RenameWorkspace from "./components/renaming/ImageRenamePage";
+import SettingsWorkspace from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
 import { useSharedLibrary } from "./hooks/useSharedLibrary";
 import { useAppNavigation } from "./hooks/useAppNavigation";
@@ -45,7 +45,11 @@ export interface ClusterNavigationTarget {
   token: number;
 }
 
-const MapPage = lazy(() => import("./components/map/MapPage"));
+const PeoplePage = memo(PeopleWorkspace);
+const ClusterPage = memo(ReviewWorkspace);
+const ImageRenamePage = memo(RenameWorkspace);
+const SettingsPage = memo(SettingsWorkspace);
+const MapPage = memo(lazy(() => import("./components/map/MapPage")));
 const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
@@ -293,6 +297,9 @@ const App: React.FC = () => {
     navigate({ page: "map", mapAlbumId: id }, { replace: options?.replace, preserveWorkspace: true });
   }, [navigate]);
 
+  const handleOpenAlbumMap = useCallback((id: string) => navigate({ page: "map", mapAlbumId: id }), [navigate]);
+  const handleLeaveSharedReview = useCallback(() => navigate({ page: "review" }), [navigate]);
+
   const openHelpDestination = (destination: HelpDestination) => {
     setHelpTopic(null);
     if (destination === "import" || destination === "activities") {
@@ -321,7 +328,7 @@ const App: React.FC = () => {
             onOpenPeople={handleOpenPeople}
             geoSelection={geoSelection}
             onChangeGeoSelection={handleChangeGeoSelection}
-            onOpenAlbumMap={(id) => navigate({ page: "map", mapAlbumId: id })}
+            onOpenAlbumMap={handleOpenAlbumMap}
           />
         );
       case "map":
@@ -341,7 +348,7 @@ const App: React.FC = () => {
               active={active}
               sharedLibrary={sharedLibrary}
               onNavigateReview={handleNavigateReview}
-              onLeaveSharedReview={() => navigate({ page: "review" })}
+              onLeaveSharedReview={handleLeaveSharedReview}
             />
           </ErrorBoundary>
         );
@@ -355,6 +362,7 @@ const App: React.FC = () => {
       case "settings":
         return (
           <SettingsPage
+            active={active}
             activeSection={settingsSection}
             onNavigateSection={handleNavigateSettingsSection}
             sharedLibrary={sharedLibrary}
