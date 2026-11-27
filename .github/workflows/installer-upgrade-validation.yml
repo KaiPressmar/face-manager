@@ -9,11 +9,10 @@ on:
       - 'backend/requirements*.txt'
       - 'backend/desktop_main.py'
       - 'backend/desktop_runtime.py'
-      - 'frontend/package.json'
-      - 'frontend/package-lock.json'
+      - 'frontend/tsconfig.json'
+      - 'frontend/vite.config.js'
       - 'scripts/inventory-dependencies.py'
       - '.nvmrc'
-      - 'VERSION'
       - '.github/workflows/installer-upgrade-validation.yml'
       - '.github/workflows/release.yml'
 
