@@ -694,7 +694,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
   const localOrigin = new URL(webBase).origin;
   try {
     await page.route('**/*', (route) =>
-      new URL(route.request().url()).origin === localOrigin ? route.continue() : route.abort());
+      new URL(route.request().url()).origin === localOrigin ? route.fallback() : route.abort());
     await page.goto(`${webBase}/#/weltkarte`);
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
