@@ -27,6 +27,11 @@ module.exports = async function workspaceNavigationFlow(browser, errors, newPage
     assert.equal(await back.isDisabled(), true);
     const pictures = page.locator('[data-workspace-page="people"] > .page-content');
     await pictures.locator('[data-image-id]').first().waitFor();
+    const skipLink = page.getByRole('link', { name: 'Zum Hauptinhalt', exact: true });
+    await skipLink.press('Enter');
+    assert.ok(await page.getByRole('main').evaluate((element) => element === document.activeElement));
+    assert.equal(new URL(page.url()).hash, '#/bilder', 'Skipping navigation changed the current route');
+    assert.equal((await marker(page)).id, first.id, 'Skipping navigation added a history entry');
     const savedScroll = await pictures.evaluate((pane) => { pane.scrollTop = 400; return pane.scrollTop; });
     assert.ok(savedScroll > 150, 'Fixture does not have enough photos to test scroll restoration');
     await reset.click();

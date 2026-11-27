@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { FaceImage, fetchImageDetail, fetchImages, fetchImportQueue, ImagePage, type ImportQueueState } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import type { GeoPhotoSelection } from "../../utils/geoPhotoSelection";
@@ -141,6 +141,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const resolvedGeometryRef = useRef(new Map<number, ResolvedImageGeometry>());
   const queryKeyRef = useRef("");
   const pageHeaderRef = useRef<HTMLElement | null>(null);
+  const refreshAnchorRef = useRef<{ scroller: HTMLElement; imageId: string; offset: number; requestId: number }>();
   const pendingResume = useRef<Pick<PhotoWorkspace, "queryKey" | "loadedCount" | "scrollTop" | "selection">>();
   const liveRefreshTimerRef = useRef<number | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
@@ -172,6 +173,16 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       setGalleryRevision((value) => value + 1);
     },
   });
+
+  useLayoutEffect(() => {
+    const anchor = refreshAnchorRef.current;
+    refreshAnchorRef.current = undefined;
+    if (!active || !anchor || latestQueryRef.current !== anchor.requestId) return;
+    const card = anchor.scroller.querySelector<HTMLElement>(`[data-image-id="${anchor.imageId}"]`);
+    if (!card) return;
+    const offset = card.getBoundingClientRect().top - anchor.scroller.getBoundingClientRect().top;
+    anchor.scroller.scrollTop += offset - anchor.offset;
+  }, [active, images]);
 
   const clearGeometryRequests = useCallback(() => {
     geometryRequestsRef.current.forEach((request) => request.abort());
@@ -401,49 +412,27 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     let refreshInFlight = false;
     let refreshPending = false;
     let userBusyUntil = 0;
-    const captureViewportAnchor = () => {
+    const captureViewportAnchor = (fresh: ReadonlyMap<number, FaceImage>, requestId: number) => {
       const scroller = pageHeaderRef.current?.closest(".page-content");
       if (!(scroller instanceof HTMLElement) || scroller.scrollTop < 80) {
         return null;
       }
-      const scrollerTop = scroller.getBoundingClientRect().top;
-      const cards = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-image-id]"),
-      );
-      const anchor = cards.find((card) => card.getBoundingClientRect().bottom > scrollerTop);
-      if (!anchor) return null;
-      return {
-        scroller,
-        imageId: anchor.dataset.imageId ?? "",
-        offset: anchor.getBoundingClientRect().top - scrollerTop,
-      };
-    };
-
-    const restoreViewportAnchor = (
-      anchor: ReturnType<typeof captureViewportAnchor>,
-      requestId: number,
-    ) => {
-      if (!anchor) return;
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          if (!isMounted || latestQueryRef.current !== requestId) return;
-          const node = anchor.scroller.querySelector<HTMLElement>(
-            `[data-image-id="${anchor.imageId}"]`,
-          );
-          if (!node) return;
-          const nextOffset =
-            node.getBoundingClientRect().top -
-            anchor.scroller.getBoundingClientRect().top;
-          anchor.scroller.scrollTop += nextOffset - anchor.offset;
-        });
-      });
+      const viewport = scroller.getBoundingClientRect();
+      for (const card of scroller.querySelectorAll<HTMLElement>("[data-image-id]")) {
+        const imageId = card.dataset.imageId ?? "";
+        if (!fresh.has(Number(imageId))) continue;
+        const { top, bottom } = card.getBoundingClientRect();
+        if (bottom > viewport.top && top < viewport.bottom) {
+          return { scroller, imageId, offset: top - viewport.top, requestId };
+        }
+      }
+      return null;
     };
 
     const refreshVisibleImages = async (preserveViewport = true) => {
       const requestId = latestQueryRef.current;
       const request = new AbortController();
       refreshImagesRequestRef.current = request;
-      const anchor = preserveViewport ? captureViewportAnchor() : null;
       const count = loadedCountRef.current;
       try {
         const freshById = new Map<number, FaceImage>();
@@ -470,6 +459,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           freshById.set(id, applyImageGeometry(image, resolvedGeometryRef.current.get(id)));
         });
         const fresh = Array.from(freshById.values());
+        const anchor = preserveViewport ? captureViewportAnchor(freshById, requestId) : null;
+        refreshAnchorRef.current = anchor ?? undefined;
         // Keep existing cards at their current array index while the user is
         // below the top. New imports are appended to this live snapshot instead
         // of redistributing the masonry columns underneath the user's pointer.
@@ -490,7 +481,6 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         setDisplayedQueryKey(requestedQueryKey);
         setHasMore(page.has_more);
         setLoadError(false);
-        restoreViewportAnchor(anchor, requestId);
         prefetchedPageRef.current = null;
         prefetchedOffsetRef.current = null;
         prefetchPromiseRef.current = null;

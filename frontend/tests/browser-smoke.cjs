@@ -878,6 +878,8 @@ async function pagedLibraryFacesFlow(browser, errors) {
   const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
   let detailRequests = 0;
   let refreshing = false;
+  let releaseRefresh;
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
   const refreshPages = [];
   try {
     await page.addInitScript(() => {
@@ -890,11 +892,14 @@ async function pagedLibraryFacesFlow(browser, errors) {
         close() {}
       };
     });
-    await page.route('**/api/images?**', (route) => {
+    await page.route('**/api/images?**', async (route) => {
       const params = new URL(route.request().url()).searchParams;
       const offset = Number(params.get('offset'));
       const limit = Number(params.get('limit'));
-      if (refreshing && limit > 1) refreshPages.push([offset, limit]);
+      if (refreshing && limit > 1) {
+        refreshPages.push([offset, limit]);
+        await refreshGate;
+      }
       const items = photos.slice(offset, offset + limit).map((photo) =>
         refreshing && photo.id === 1205 ? { ...photo, filename: 'Aktualisiertes Foto' } : photo);
       return route.fulfill({ json: { items, offset, limit, total: photos.length, has_more: offset + items.length < photos.length, available_persons: [] } });
@@ -935,15 +940,31 @@ async function pagedLibraryFacesFlow(browser, errors) {
       await scrollToEnd();
       await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
     }
+    const pendingRefresh = page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return url.pathname === '/api/images' && url.searchParams.get('limit') === '200';
+    });
     refreshing = true;
     await page.evaluate(() => {
       window.pagedLibraryEvents.dispatchEvent(new MessageEvent('clusters', { data: '{"reason":"assignment"}' }));
     });
+    await pendingRefresh;
+    const viewport = page.locator('[data-workspace-page="people"] .page-content');
+    const desiredScroll = await viewport.evaluate((element) => {
+      element.scrollTop = 460;
+      return element.scrollTop;
+    });
+    assert.ok(desiredScroll > 100);
+    releaseRefresh();
     await page.getByRole('button', { name: 'Aktualisiertes Foto in Galerie öffnen' }).waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)))));
+    assert.ok(Math.abs(await viewport.evaluate((element) => element.scrollTop) - desiredScroll) <= 3,
+      'The photo refresh returned to the scroll position from before the request');
     assert.deepEqual(refreshPages, [[0, 200], [200, 40]]);
     assert.equal(await cards.count(), photos.length);
-    console.log('PASS paged library faces: lazy metadata, gallery, and refresh beyond 200 photos');
+    console.log('PASS paged library faces: lazy metadata, gallery, and scroll during refresh beyond 200 photos');
   } finally {
+    releaseRefresh();
     await page.close();
   }
 }
@@ -1007,23 +1028,42 @@ async function liveWorkflowFlow(browser, errors) {
     await page.getByRole('status').filter({ hasText: /^85 Fotos$/ }).waitFor();
     await page.getByRole('button', { name: 'Weitere Fotos laden', exact: true }).click();
     await page.waitForFunction(() => document.querySelectorAll('.gps-page__photo').length === 72);
-    await page.locator('.gps-page__photo').nth(36).click();
+    const removedPhoto = await page.locator('.gps-page__photo').first().getAttribute('aria-label');
+    const keptPhoto = await page.locator('.gps-page__photo').nth(36).getAttribute('aria-label');
+    const keptTile = page.getByRole('button', { name: keptPhoto, exact: true });
+    await keptTile.click();
     await gallery.waitFor();
     await page.route('**/api/map/images?**', async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({ response, json: { ...await response.json(), total: 84 } });
+      const url = new URL(route.request().url());
+      const limit = Number(url.searchParams.get('limit'));
+      const firstPage = !url.searchParams.has('before_id');
+      if (firstPage) url.searchParams.set('limit', String(limit + 1));
+      const response = await route.fetch({ url: url.href });
+      const result = await response.json();
+      await route.fulfill({ response, json: { ...result, total: 84, items: firstPage ? result.items.slice(1) : result.items } });
     });
     await publishLibraryChange('delete_image');
     await page.getByRole('status').filter({ hasText: /^84 Fotos$/ }).waitFor();
-    assert.equal(await page.locator('.gps-page__photo').count(), 36, 'Old pages survived a library change');
+    assert.equal(await page.locator('.gps-page__photo').count(), 72, 'Library refresh discarded the loaded extent');
+    assert.equal(await page.getByRole('button', { name: removedPhoto, exact: true }).count(), 0, 'Library refresh kept a deleted photo');
     assert.ok(await gallery.isVisible(), 'Library refresh closed the open map gallery');
     await page.keyboard.press('Escape');
-    await page.waitForFunction(() => document.activeElement?.id === 'gps-map-results');
+    await keptTile.and(page.locator(':focus')).waitFor();
     await page.unroute('**/api/map/images?**');
     await page.locator('.gps-page__photo').first().click();
     await gallery.waitFor();
-    await publishLibraryChange('database_import');
-    await gallery.waitFor({ state: 'hidden' });
+    const restoredMap = gate();
+    await page.route('**/api/map/images?**', async (route) => {
+      await restoredMap.ready;
+      await route.continue();
+    }, { times: 1 });
+    try {
+      await publishLibraryChange('database_import');
+      await gallery.waitFor({ state: 'hidden' });
+      assert.equal(await page.locator('.gps-page__photo').count(), 0, 'Photos from the replaced library stayed visible');
+    } finally {
+      restoredMap.release();
+    }
     await page.goto(`${webBase}/#/bilder`);
     await firstPhoto.waitFor();
     assert.equal(await gallery.count(), 0, 'A hidden library gallery reopened after restore');
@@ -1049,13 +1089,19 @@ async function liveWorkflowFlow(browser, errors) {
       current_filename: `foto-${index + 1}.jpg`, proposed_filename: `foto-${index + 1} Anna.jpg`,
       detected_person_names: ['Anna'], current_suffix_person_names: [],
     }));
-    await page.route('**/api/image-renames/count?**', (route) => route.fulfill({ json: { total } }));
+    let renameCountRequests = 0;
+    const renamePageRequests = [];
+    await page.route('**/api/image-renames/count?**', (route) => {
+      renameCountRequests += 1;
+      return route.fulfill({ json: { total } });
+    });
     const nextPageGate = gate();
     let holdNextPage = true;
     await page.route('**/api/image-renames?**', async (route) => {
       const query = new URL(route.request().url()).searchParams;
       const offset = Number(query.get('offset'));
       const limit = Number(query.get('limit'));
+      renamePageRequests.push({ offset, limit });
       if (offset === 25 && holdNextPage) {
         holdNextPage = false;
         await nextPageGate.ready;
@@ -1109,6 +1155,20 @@ async function liveWorkflowFlow(browser, errors) {
     await confirmRename.getByRole('button', { name: 'Dateien jetzt umbenennen' }).click();
     await pagination.getByText('Seite 1 von 1').waitFor();
     assert.equal(await page.locator('.rename-row').count(), 25);
+
+    await page.clock.install();
+    const requestsBeforeResize = renamePageRequests.length;
+    const countsBeforeResize = renameCountRequests;
+    const resizedPage = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/image-renames' && url.searchParams.get('limit') === '50';
+    });
+    await pagination.getByLabel('Pro Seite').selectOption('50');
+    await (await resizedPage).finished();
+    await page.clock.runFor(1200);
+    assert.deepEqual(renamePageRequests.slice(requestsBeforeResize), [{ offset: 0, limit: 50 }],
+      'Changing the page size triggered an extra background reload');
+    assert.equal(renameCountRequests, countsBeforeResize, 'Changing the page size refetched the unchanged count');
     console.log('PASS live workflows: stable gallery, map refresh, missing review link, rename page correction');
   } finally {
     await page.close();

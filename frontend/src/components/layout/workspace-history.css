@@ -36,3 +36,19 @@
 @media (pointer: coarse) {
   .workspace-history button { min-height: 44px; }
 }
+
+.workspace-skip-link {
+  position: fixed;
+  inset-block-start: 8px;
+  inset-inline-start: 8px;
+  z-index: 10;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  transform: translateY(calc(-100% - 16px));
+}
+
+.workspace-skip-link:focus {
+  transform: none;
+}

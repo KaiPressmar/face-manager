@@ -5,6 +5,15 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
   let albumId;
   try {
     await page.addInitScript(() => localStorage.setItem('face-manager:help-introduction-v1', 'seen'));
+    await page.addInitScript(() => {
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url) {
+          super(url);
+          window.mapTestEvents = this;
+        }
+      };
+    });
     const photosResponse = await page.request.get(`${apiBase}/map/images?west=-180&east=180&south=-90&north=90&limit=12`);
     assert.ok(photosResponse.ok());
     const { items } = await photosResponse.json();
@@ -50,6 +59,7 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await screenshot(page, 'kompakte-fotokarte');
     const mapTop = await map.evaluate((element) => Math.round(element.getBoundingClientRect().top));
     assert.ok(mapTop < 540, `The compact map starts at ${mapTop}px`);
+    await checkMapRefresh(page);
 
     const stops = items.slice(0, 11).map((image, index) => ({
       id: `review-${index}`, number: index + 1, section: 1,
@@ -109,9 +119,46 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await page.getByRole('button', { name: 'Bild exportieren', exact: true }).and(page.locator(':focus')).waitFor();
     assert.equal(new URL(page.url()).hash, '#/weltkarte');
     await journey.and(page.locator('[aria-pressed=true]')).waitFor();
-    console.log('PASS compact map, album workspace history and reset, visible provenance, narrow print preview and draft Back');
+    console.log('PASS compact map, album history and reset, stable map refresh, visible provenance, narrow print preview and draft Back');
   } finally {
     if (albumId) await page.request.delete(`${apiBase}/albums/${albumId}`);
     await page.close();
   }
 };
+
+async function checkMapRefresh(page) {
+  const tiles = page.locator('.gps-page__photo');
+  const results = page.locator('#gps-map-results');
+  const more = results.getByRole('button', { name: 'Weitere Fotos laden', exact: true });
+  await more.click();
+  await page.waitForFunction(() => document.querySelectorAll('#gps-map-results .gps-page__photo').length === 72);
+  const initialScroll = await results.evaluate((element) => {
+    element.scrollTop = 250;
+    return element.scrollTop;
+  });
+  assert.ok(initialScroll > 100);
+
+  const matches = (url) => url.pathname === '/api/map/images' && !url.searchParams.has('before_id');
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  await page.route(matches, async (route) => {
+    await gate;
+    await route.continue();
+  }, { times: 1 });
+  try {
+    const request = page.waitForRequest((pending) => matches(new URL(pending.url())));
+    await page.evaluate(() => window.mapTestEvents.dispatchEvent(new MessageEvent('clusters', {
+      data: '{"reason":"albums_changed"}',
+    })));
+    await request;
+    assert.equal(await tiles.count(), 72, 'A background refresh cleared the previous map photos');
+    assert.ok(await page.locator('.gps-map__marker').first().isVisible());
+    assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
+    release();
+    await more.and(page.locator(':enabled')).waitFor();
+    assert.equal(await tiles.count(), 72, 'A background refresh discarded loaded map pages');
+    assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
+  } finally {
+    release();
+  }
+}

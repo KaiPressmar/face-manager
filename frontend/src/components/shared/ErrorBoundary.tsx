@@ -31,7 +31,7 @@ class ErrorBoundary extends React.Component<Props, State> {
         <section className="page-error" role="alert">
           <span aria-hidden="true">!</span>
           <h2>{this.props.title ?? "Diese Ansicht konnte nicht angezeigt werden"}</h2>
-          <p>Deine Daten sind nicht betroffen. Lade die Ansicht erneut; falls das Problem bleibt, wechsle kurz zu einer anderen Seite.</p>
+          <p>Lade diese Ansicht erneut. Falls der Fehler erneut auftritt, findest du unten die technische Meldung.</p>
           <button className="neon-button" onClick={this.retry} type="button">Ansicht erneut laden</button>
           <details><summary>Technische Information</summary><code>{this.state.error.message}</code></details>
         </section>

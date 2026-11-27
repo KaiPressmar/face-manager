@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   type ApplyImageRenamePayload,
   type ApplyImageRenameResult,
@@ -126,11 +126,13 @@ const ImageRenamePage: React.FC<{
   const pendingOffsetRef = useRef(0);
   const activeAbortRef = useRef<AbortController | null>(null);
   const totalAbortRef = useRef<AbortController | null>(null);
+  const libraryTotalAbortRef = useRef<AbortController | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
   const reviewDialogRef = useRef<HTMLElement>(null);
   const reportRef = useRef<HTMLElement>(null);
   const submittingRef = useRef(false);
   const reviewOpenRef = useRef(false);
+  const hasFilters = selectedFolders.length > 0 || selectedPersons.length > 0;
 
   useWorkspaceNavigation<RenameWorkspace>("renaming", {
     capture: () => ({
@@ -196,13 +198,12 @@ const ImageRenamePage: React.FC<{
       const nextTotal = await fetchImageRenameCandidateCount({
         folders: selectedFolders,
         persons: selectedPersons,
-        sortBy: groupingMode,
-        sortDirection,
         signal: controller.signal,
       });
       if (!controller.signal.aborted) {
         setTotal(nextTotal);
-        if (selectedFolders.length === 0 && selectedPersons.length === 0) {
+        if (!hasFilters) {
+          libraryTotalAbortRef.current?.abort();
           setLibraryTotal(nextTotal);
         }
       }
@@ -273,10 +274,27 @@ const ImageRenamePage: React.FC<{
     }
   };
 
+  const refreshLibraryTotal = useCallback(async () => {
+    const controller = new AbortController();
+    libraryTotalAbortRef.current?.abort();
+    libraryTotalAbortRef.current = controller;
+    try {
+      const count = await fetchImageRenameCandidateCount({ signal: controller.signal });
+      if (!controller.signal.aborted) setLibraryTotal(count);
+    } catch {
+      // Keep the previous library count until another update is available.
+    }
+  }, []);
+
+  // Keep queued automatic updates attached to the workspace through filter changes.
+  const liveQuery = useRef({ loadData, loadTotalCount, hasFilters });
+  useLayoutEffect(() => {
+    liveQuery.current = { loadData, loadTotalCount, hasFilters };
+  });
+
   useEffect(() => {
     void loadData(pendingResume.current?.offset ?? 0);
   }, [groupingMode, pageSize, sortDirection, selectedFolders, selectedPersons, navigationRevision]);
-
 
   useEffect(() => {
     return () => {
@@ -285,9 +303,14 @@ const ImageRenamePage: React.FC<{
     };
   }, []);
 
+  // Sorting and pagination only change which rows are displayed.
   useEffect(() => {
     void loadTotalCount();
-  }, [groupingMode, sortDirection, selectedFolders, selectedPersons]);
+  }, [selectedFolders, selectedPersons]);
+
+  useEffect(() => {
+    if (active && hasFilters && libraryTotal === null) void refreshLibraryTotal();
+  }, [active, hasFilters, libraryTotal, refreshLibraryTotal]);
 
   useEffect(() => {
     if (!mutationRefresh) return;
@@ -377,20 +400,6 @@ const ImageRenamePage: React.FC<{
     let refreshTimer: number | null = null;
     let userBusyUntil = 0;
 
-    // Unfiltered candidate count, kept independent of the active filter so the
-    // bar can always say how much the filter narrowed things down.
-    const libraryTotalController = new AbortController();
-    const refreshLibraryTotal = async () => {
-      // The visible count already supplies this value when no filter is active.
-      if (selectedFolders.length === 0 && selectedPersons.length === 0) return;
-      try {
-        const count = await fetchImageRenameCandidateCount({ signal: libraryTotalController.signal });
-        if (isMounted) setLibraryTotal(count);
-      } catch {
-        // Keep the existing total and retry at the next live checkpoint.
-      }
-    };
-
     const refreshVisibleData = async () => {
       if (document.visibilityState !== "visible") return;
       if (reviewOpenRef.current || submittingRef.current || activeAbortRef.current) {
@@ -408,10 +417,11 @@ const ImageRenamePage: React.FC<{
       }
       refreshInFlight = true;
       try {
+        const query = liveQuery.current;
         await Promise.all([
-          loadData(pendingOffsetRef.current, true),
-          loadTotalCount(true),
-          refreshLibraryTotal(),
+          query.loadData(pendingOffsetRef.current, true),
+          query.loadTotalCount(true),
+          query.hasFilters ? refreshLibraryTotal() : undefined,
         ]);
       } finally {
         refreshInFlight = false;
@@ -464,12 +474,11 @@ const ImageRenamePage: React.FC<{
       scheduleRefresh(FINAL_REFRESH_DELAY_MS, true);
     } else {
       hasActivatedLiveRefreshRef.current = true;
-      void refreshLibraryTotal();
     }
 
     return () => {
       isMounted = false;
-      libraryTotalController.abort();
+      libraryTotalAbortRef.current?.abort();
       if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       unsubscribeClusters();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -477,7 +486,7 @@ const ImageRenamePage: React.FC<{
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [active, groupingMode, pageSize, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, refreshLibraryTotal]);
 
   const openRenameReview = () => {
     if (!canReview) return;
