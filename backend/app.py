@@ -117,6 +117,7 @@ from .services.background_activities import background_activities
 from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, list_map_images, list_map_points, list_map_years, list_selected_map_images
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
 from .services.journey import JourneyDetail, get_journey
+from .services.map_detail_tiles import MapDetailBusy, MapDetailSource, MapDetailUnavailable, fetch_map_detail_tile
 from .services.observed_places import list_observed_places
 from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
 from .services.update_manager import (
@@ -3324,6 +3325,19 @@ class _AlbumDraftFormatting(_AlbumDraftOptions):
     listColumns: Literal[1, 2] | None = None
 
 
+class _AlbumDraftFraming(_AlbumDraftOptions):
+    zoom: Annotated[int, Field(ge=50, le=400)]
+    horizontal: Annotated[int, Field(ge=-200, le=200)]
+    vertical: Annotated[int, Field(ge=-200, le=200)]
+
+
+class _AlbumDraftViewport(_AlbumDraftOptions):
+    west: Annotated[float, Field(ge=-180, le=180)]
+    east: Annotated[float, Field(ge=-180, le=180)]
+    south: Annotated[float, Field(ge=-90, le=90)]
+    north: Annotated[float, Field(ge=-90, le=90)]
+
+
 class _AlbumLayoutDraftBody(_AlbumDraftOptions):
     version: Literal[1]
     title: Annotated[str, Field(max_length=72)] | None = None
@@ -3338,6 +3352,7 @@ class _AlbumLayoutDraftBody(_AlbumDraftOptions):
     contextPercent: Annotated[int, Field(ge=0, le=100)] | None = None
     markerScale: Annotated[int, Field(ge=70, le=140)] | None = None
     useViewport: bool | None = None
+    viewportSnapshot: _AlbumDraftViewport | None = None
     transports: dict[
         Annotated[str, Field(pattern=r"^[0-9]{1,19}:[0-9]{1,19}$")],
         Literal["car", "train", "plane", "walk", "bike", "boat"],
@@ -3346,6 +3361,15 @@ class _AlbumLayoutDraftBody(_AlbumDraftOptions):
     showNames: bool | None = None
     showPeriod: bool | None = None
     showStopsList: bool | None = None
+    fullBleed: bool | None = None
+    framing: _AlbumDraftFraming | None = None
+    markerStyle: Literal["standard", "dots", "none"] | None = None
+    showPlaceNames: bool | None = None
+    showRoute: bool | None = None
+    placeNames: dict[
+        Annotated[str, Field(pattern=r"^[0-9]{1,19}$")],
+        Annotated[str, Field(max_length=60)],
+    ] | None = None
 
 
 _AlbumImageId = Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]
@@ -3508,6 +3532,48 @@ def get_map_points(
     result = list_map_points(west, east, south, north, from_date, to_date, zoom, grid_columns, grid_rows, album_id=album_id)
     _get_media_library_generation(generation)
     return result
+
+
+@app.post("/api/map/points/selection")
+def get_selected_map_points(
+    selection: Annotated[_GeoSelectionBody, Body(embed=True)],
+    west: Annotated[float, Query(ge=-180, le=180)] = -180,
+    east: Annotated[float, Query(ge=-180, le=180)] = 180,
+    south: Annotated[float, Query(ge=-90, le=90)] = -90,
+    north: Annotated[float, Query(ge=-90, le=90)] = 90,
+    grid_columns: Annotated[int, Query(ge=1, le=MAP_GRID_SIZE)] = MAP_GRID_SIZE,
+    grid_rows: Annotated[int, Query(ge=1, le=MAP_GRID_SIZE)] = MAP_GRID_SIZE,
+):
+    """Aggregate selected photos on the grid of the visible viewport."""
+    generation = _get_media_library_generation()
+    _validate_map_bounds(west, east, south, north, None, None)
+    result = list_map_points(
+        west, east, south, north, grid_columns=grid_columns, grid_rows=grid_rows,
+        selection=selection.to_selection(),
+    )
+    _get_media_library_generation(generation)
+    return result
+
+
+@app.get("/api/map/detail-tiles/{source}/{z}/{x}/{y}")
+def get_map_detail_tile(
+    source: MapDetailSource,
+    z: Annotated[int, ApiPath(ge=0, le=14)],
+    x: Annotated[int, ApiPath(ge=0, le=32767)],
+    y: Annotated[int, ApiPath(ge=0, le=16383)],
+):
+    """Relay one requested detail tile without sending library data."""
+    try:
+        tile = fetch_map_detail_tile(source, z, x, y)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MapDetailBusy as exc:
+        raise HTTPException(status_code=503, detail="Kartendetails sind vorübergehend ausgelastet.") from exc
+    except MapDetailUnavailable as exc:
+        raise HTTPException(status_code=502, detail="Diese Kartenkachel ist gerade nicht verfügbar.") from exc
+    return Response(content=tile.data, media_type=tile.media_type, headers={
+        "Cache-Control": tile.cache_control, "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.get("/api/map/images")

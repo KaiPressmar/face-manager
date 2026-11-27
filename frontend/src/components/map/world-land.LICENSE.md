@@ -43,3 +43,19 @@ Space Flight Center). NASA describes its imagery as generally exempt from
 U.S. copyright and permits informational use, including photo collections,
 with source acknowledgment. NASA does not endorse Face Manager.
 [NASA media usage guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/)
+
+## Optional online map detail
+
+OpenFreeMap serves vector tiles based on OpenStreetMap contributors' data
+(ODbL) and the OpenMapTiles schema. Face Manager projects road, name, water,
+building and green-space geometry into the app's map. [OpenFreeMap terms](https://openfreemap.org/tos/) · [OpenStreetMap contributors and ODbL](https://www.openstreetmap.org/copyright) · [OpenMapTiles](https://openmaptiles.org/)
+
+EOX Terrain Light provides the optional detailed terrain backdrop. [EOX maps and credits](https://maps.eox.at/#data)
+
+EOxCloudless by EOX IT Services GmbH provides the Sentinel-2 cloudless 2016
+backdrop with modified Copernicus Sentinel data 2016 and 2017, licensed under
+CC BY 4.0. The source resolution is approximately 10 meters per pixel. [EOX product and permitted integrations](https://cloudless.eox.at/documentation/faq) · [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+
+The app requests tiles only for the visible area after the user enables online
+detail and zooms in. The selected photo IDs and timestamps are omitted from
+requests. Photobook exports use the bundled offline map sources.

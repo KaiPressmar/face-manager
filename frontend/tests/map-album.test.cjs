@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { albumOutputSize, buildMapAlbumArtwork, fitAlbumJourney, normalizeAlbumColor, setMapAlbumPngDensity } =
+const { albumOutputSize, albumPhotoQueryBounds, buildMapAlbumArtwork, fitAlbumJourney, normalizeAlbumColor, setMapAlbumPngDensity } =
   require('./load-typescript.cjs')('src/components/map/MapAlbumArtwork.ts');
 
 const world = { west: -180, east: 180, south: -90, north: 90 };
@@ -172,6 +172,61 @@ test('single-page layout remains one image with many assigned transports and an 
   assert.deepEqual([pages[0].width, pages[0].height], [3543, 3543]);
   assert.doesNotMatch(pages[0].svg, />Meine Fotokarte<\/text>/);
   assert.deepEqual(markerNumbers(pages[0]), stops.map(({ number }) => number));
+});
+
+test('full-bleed layout fills the print page and removes title, border and list while retaining source credit', async () => {
+  const stops = [
+    { id: 'first', number: 1, title: 'Bei Lyon', latitude: 45.76, longitude: 4.83 },
+    { id: 'second', number: 2, title: 'Bei Paris', latitude: 48.86, longitude: 2.35, arrivalMode: 'train' },
+  ];
+  const pages = await buildMapAlbumArtwork({ ...artwork, title: 'Verdeckter Titel', period: 'Verdecktes Datum',
+    format: 'square-210', fullBleed: true, stops, fitJourney: true, showStopsList: true });
+  assert.equal(pages.length, 1);
+  const { svg, width, height } = pages[0];
+  assert.deepEqual([width, height], [2480, 2480]);
+  assert.match(svg, /data-album-bleed="true" width="3000" height="3000"/);
+  assert.match(svg, /id="album-map-clip"><rect x="0" y="0" width="3000" height="3000"\s/);
+  assert.match(svg, /Kartendaten von Natural Earth/);
+  assert.doesNotMatch(svg, /data-album-stop=|>Verdeckter Titel<\/text>|Verdecktes Datum|#9ead9f/);
+  assert.deepEqual(markerNumbers(pages[0]), [1, 2]);
+});
+
+test('manual framing shares geographic bounds with photo queries and excludes cropped visits', async () => {
+  const stops = [{ id: '1', number: 1, title: 'West', longitude: 2, latitude: 0 },
+    { id: '2', number: 2, title: 'Ost', longitude: 7, latitude: 0 }];
+  const bounds = { west: 0, east: 10, south: -5, north: 5 };
+  const framing = { zoom: 200, horizontal: 25, vertical: 0 };
+  assert.deepEqual(albumPhotoQueryBounds(bounds, framing), { west: 5, east: 10, south: -2.5, north: 2.5 });
+  const [page] = await buildMapAlbumArtwork({ ...artwork, bounds, framing, stops, fitJourney: false,
+    connections: [{ from: stops[0], to: stops[1] }] });
+  assert.equal(page.visibleStopCount, 1);
+  assert.deepEqual(markerNumbers(page), [2]);
+  assert.match(page.svg, /data-album-stop="2"/);
+  assert.doesNotMatch(page.svg, /data-album-stop="1"/);
+  assert.deepEqual(albumPhotoQueryBounds({ west: 175, east: -175, south: -5, north: 5 }, { ...framing, horizontal: 0 }),
+    { west: 177.5, east: -177.5, south: -2.5, north: 2.5 });
+});
+
+test('print names, connection lines and markers can be composed independently', async () => {
+  const stops = [
+    { id: '1', number: 1, title: 'Bei Berlin', placeName: 'Berlin', longitude: 13.4, latitude: 52.52 },
+    { id: '2', number: 2, title: 'Hafen & Altstadt', placeName: 'Hafen & Altstadt', customPlaceName: true,
+      longitude: 13.401, latitude: 52.52 },
+    { id: '3', number: 3, title: 'Bei Potsdam', placeName: 'Potsdam', longitude: 13.06, latitude: 52.4 },
+  ];
+  const input = { ...artwork, stops, fitJourney: true, showStopsList: false, journeyPadding: .04,
+    connections: [{ from: stops[0], to: stops[2] }] };
+  const [named] = await buildMapAlbumArtwork({ ...input, markerStyle: 'dots', showRoute: false });
+  assert.match(named.svg, /data-album-place-label="true"[^>]*>Hafen &amp; Altstadt<\/text>/);
+  assert.doesNotMatch(named.svg, /data-album-connection=|>Berlin<\/text>|Zahlen zeigen/);
+  assert.deepEqual(markerNumbers(named), [1, 2, 3]);
+  const [unnamed] = await buildMapAlbumArtwork({ ...input, showPlaceNames: false });
+  assert.doesNotMatch(unnamed.svg, /data-album-place-label/);
+  assert.match(unnamed.svg, /data-album-connection=/);
+  const [unmarked] = await buildMapAlbumArtwork({ ...input, markerStyle: 'none' });
+  assert.equal(unmarked.visibleStopCount, 3);
+  assert.doesNotMatch(unmarked.svg, /data-album-marker|data-album-place-label/);
+  assert.match(unmarked.svg, /data-album-connection=/);
 });
 
 test('portrait wraps a long unbroken title and preserves the full subtitle', async () => {

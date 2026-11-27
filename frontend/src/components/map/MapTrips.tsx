@@ -5,6 +5,7 @@ import type { Journey } from "./mapData";
 
 const dates = new Intl.DateTimeFormat("de-DE", { dateStyle: "medium", timeZone: "UTC" });
 const labelDay = (value: string) => dates.format(new Date(value));
+const searchKey = (value: string) => value.toLocaleLowerCase("de").normalize("NFD").replace(/\p{Diacritic}/gu, "");
 
 interface Props {
   journey?: Journey | null;
@@ -44,7 +45,15 @@ function tripTitle(trip: TripSelection["trip"], places: JourneyPlace[]) {
 export default function MapTrips({ journey, home, onClearHome, selection, canSave, onChange, onSave }: Props) {
   const [open, setOpen] = useState(Boolean(selection));
   const [places, setPlaces] = useState<JourneyPlace[]>([]);
+  const [search, setSearch] = useState("");
   const candidates = useMemo(() => open && !selection && journey ? suggestTrips(journey, home) : [], [journey, home, open, selection]);
+  const indexed = useMemo(() => candidates.map((trip) => {
+    const title = tripTitle(trip, places);
+    const names = trip.core.map((stop) => findNearbyPlace(places, stop.latitude, stop.longitude)?.name);
+    return { trip, title, search: searchKey([title, ...trip.days, ...trip.days.map(labelDay), ...names].join(" ")) };
+  }), [candidates, places]);
+  const words = searchKey(search.trim()).split(/\s+/).filter(Boolean);
+  const matching = indexed.filter((entry) => words.every((word) => entry.search.includes(word)));
   useEffect(() => {
     if (!open || places.length) return;
     let mounted = true;
@@ -76,11 +85,14 @@ export default function MapTrips({ journey, home, onClearHome, selection, canSav
         </div>
       </> : <>
         {!journey ? <p role="status">Reiseverlauf wird geladen …</p> : candidates.length === 0 && <p>In der aktuellen Auswahl liegen keine zusammenhängenden Reisetage.</p>}
+        {(candidates.length >= 8 || search) && <label>Reisen suchen
+          <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Ort oder Jahr" />
+        </label>}
+        {words.length > 0 && candidates.length > 0 && <p role="status">{matching.length} von {candidates.length} Reisen</p>}
         <div className="gps-map-discovery__places">
-          {candidates.map((trip) => {
+          {matching.map(({ trip, title }) => {
             const startDay = trip.days[0];
             const endDay = trip.days[trip.days.length - 1];
-            const title = tripTitle(trip, places);
             return <button type="button" key={trip.id} onClick={() => onChange({
               trip, title: title === "Reisevorschlag" ? undefined : title, includeArrival: false, includeDeparture: false, day: "",
             })}>{title} <small>{labelDay(startDay)}{startDay !== endDay && ` – ${labelDay(endDay)}`} · {trip.core.length} {trip.core.length === 1 ? "Stopp" : "Stopps"}</small></button>;

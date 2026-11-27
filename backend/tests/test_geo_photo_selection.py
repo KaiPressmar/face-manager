@@ -88,6 +88,34 @@ class GeoPhotoSelectionTest(unittest.TestCase):
             self.request, empty, folders=[], persons=[], face_statuses=[], all_photos=True,
         )["total"], 0)
 
+    def test_scoped_map_points_preserve_viewport_grid_and_album_totals(self):
+        album_id = "b" * 32
+        with closing(schema.get_conn()) as conn, conn:
+            conn.execute(
+                "INSERT INTO album(id, name, created_at, updated_at) VALUES (?, 'Inselreise', '', '')", (album_id,),
+            )
+            conn.executemany(
+                "INSERT INTO album_photo(album_id, image_id, position) VALUES (?, ?, ?)",
+                [(album_id, image_id, image_id - 1) for image_id in range(1, 7)],
+            )
+        filters = dict(
+            bounds={"west": 178, "east": -178, "south": 9, "north": 11},
+            from_date=date(2026, 5, 4), to_date=date(2026, 5, 4), album_id=album_id,
+        )
+        viewport = dict(west=160, east=-160, south=0, north=20, grid_columns=4, grid_rows=2)
+
+        scoped = app.get_selected_map_points(app._GeoSelectionBody(**filters), **viewport)
+        self.assertEqual(scoped["total"], 2)
+        self.assertEqual(scoped["library_total"], 6)
+        self.assertEqual(scoped["located_total"], 5)
+        self.assertEqual([(point["x"], point["y"], point["longitude"]) for point in scoped["points"]],
+                         [(1, 1, 179.0), (2, 1, -179.0)])
+
+        exact = app.get_selected_map_points(app._GeoSelectionBody(image_ids=[2, 5, 7, 2], **filters), **viewport)
+        self.assertEqual(exact["total"], 1)
+        self.assertEqual(exact["points"], [scoped["points"][1]])
+        self.assertEqual(app.get_selected_map_points(app._GeoSelectionBody(image_ids=[], **filters), **viewport)["total"], 0)
+
     def test_invalid_bounds_dates_and_exact_ids_fail_closed(self):
         for kwargs in (
             dict(west=-180, east=180),

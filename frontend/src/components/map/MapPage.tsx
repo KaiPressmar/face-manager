@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  fetchMapPoints,
+  fetchMapPoints, fetchSelectedMapPoints,
   type MapImage, type MapImageCursor, type MapPoint, type MapPointsResponse,
 } from "../../utils/api";
 import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds, type MapGrid, type MapView } from "./WorldMap";
@@ -95,7 +95,7 @@ const countries = [...countryLabels].sort((a, b) => a.name.localeCompare(b.name,
 
 function viewForBounds(bounds: MapBounds): MapView {
   // The interactive map has fixed world edges. Show both sides of a date-line crossing.
-  if (bounds.west > bounds.east) return INITIAL_VIEW;
+  if (bounds.west > bounds.east || bounds.west < -180 || bounds.east > 180) return INITIAL_VIEW;
   return normalizedView({
     longitude: (bounds.west + bounds.east) / 2,
     latitude: (bounds.south + bounds.north) / 2,
@@ -110,6 +110,7 @@ function journeyView(journey: Journey, detail: JourneyDetail) {
 const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNavigateToCluster, onOpenImages }) => {
   const [view, setView] = useState<MapView>(INITIAL_VIEW);
   const [mode, setMode] = useState<"locations" | "journey">("locations");
+  const [onlineDetails, setOnlineDetails] = useState(false);
   const { values: { map_style: mapStyle, map_country_names: showNames }, setPreference } = useUiPreferences();
   const [journeyResult, setJourneyResult] = useState<MapResult<Journey> | null>(null);
   const [journeyStopId, setJourneyStopId] = useState<string | undefined>();
@@ -235,8 +236,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     && viewport.south <= region.south + .0001 && viewport.north >= region.north - .0001);
   const regionChoice = isJourney ? region ? REGIONS.some((item) => item.label === regionName) ? regionName : "custom" : "Welt"
     : REGIONS.find((item) => JSON.stringify(item.view) === JSON.stringify(view))?.label || "custom";
-  const queryFrom = isJourney && trip?.day ? trip.day : fromDate;
-  const queryTo = isJourney && trip?.day ? trip.day : toDate;
+  const queryFrom = trip?.day || fromDate;
+  const queryTo = trip?.day || toDate;
   const shownDates = dateDraft ?? { from: formatMapDate(fromDate), to: formatMapDate(toDate) };
   const dates = { from_date: queryFrom || undefined, to_date: queryTo || undefined, album_id: albumId || undefined };
   // A background refresh can keep displaying the last route for this exact selection.
@@ -254,9 +255,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const stopDay = journeyStop?.start.slice(0, 10);
   const showImages = canShowResults && (!isJourney || Boolean(journeyStop));
   const canLoadImages = active && showImages;
+  const locationPhotoIds = useMemo(() => !isJourney && trip ? [...photoIdsForTrip(trip)] : undefined, [isJourney, trip]);
   const selection: GeoPhotoSelection = isJourney && journeyStop
     ? { ...dates, image_ids: journeyStop.image_ids }
-    : { ...dates, bounds: filterBounds };
+    : { ...dates, bounds: filterBounds, image_ids: locationPhotoIds };
   const stopMembership = useMemo(() => journeyStop?.image_ids.join(","), [journeyStop]);
   const inferredIds = useMemo(() => journeyStop?.inferred_image_ids?.length
     ? new Set(journeyStop.inferred_image_ids) : undefined, [journeyStop]);
@@ -268,9 +270,12 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     grid_columns: pointGrid?.columns,
     grid_rows: pointGrid?.rows,
   };
+  const pointSelection = region || locationPhotoIds
+    ? { ...dates, bounds: region ?? undefined, image_ids: locationPhotoIds }
+    : undefined;
   const filterKey = JSON.stringify(isJourney ? ["journey", journeyKey, journeyStopId, stopMembership] : selection);
   // A library update refreshes the current query without hiding its last results.
-  const pointKey = JSON.stringify(pointQuery);
+  const pointKey = JSON.stringify([pointQuery, pointSelection]);
   const pointResult = showPoints && pointsResult?.key === pointKey ? pointsResult : null;
   const imageResult = showImages && imagesResult?.key === filterKey ? imagesResult : null;
   const points = pointResult?.data;
@@ -407,7 +412,9 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     if (!canLoadPoints) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void fetchMapPoints(pointQuery, controller.signal)
+      const request = pointSelection ? fetchSelectedMapPoints(pointQuery, pointSelection, controller.signal)
+        : fetchMapPoints(pointQuery, controller.signal);
+      void request
         .then((data) => { if (!controller.signal.aborted) setPointsResult({ key: pointKey, data, error: "" }); })
         .catch((reason) => {
           if (!controller.signal.aborted) setPointsResult((current) => ({
@@ -562,7 +569,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   };
   const dateLabel = describeMapDates(queryFrom, queryTo);
   const photoScope = journeyStop ? `Stopp ${journeyStop.number}` : regionName || (region ? "Gewählter Bereich" : "Sichtbarer Kartenausschnitt");
-  const scopeLabels = [photoScope, dateLabel, selectedAlbum?.name].filter(Boolean);
+  const scopeLabels = [photoScope, dateLabel, selectedAlbum?.name, !isJourney && trip?.title].filter(Boolean);
   const hasFilters = !!(region || queryFrom || queryTo || dateDraft || albumId || trip);
   const onlyDates = Boolean(dateLabel && !region && view.zoom === INITIAL_VIEW.zoom && !albumId);
   const selectRegion = (bounds: MapBounds | null, name = "") => {
@@ -597,13 +604,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     setSaveSelection({ selection: chosen, count, travel });
   };
   const tripDays = journey?.stops.flatMap((stop) => [stop.start.slice(0, 10), stop.end.slice(0, 10)]).sort();
-  const tripLabel = trip ? trip.title || describeMapDates(trip.trip.days[0], trip.trip.days[trip.trip.days.length - 1]) : "";
-  const changeMode = (next: typeof mode) => {
+  const tripDates = trip ? describeMapDates(trip.trip.days[0], trip.trip.days[trip.trip.days.length - 1]) : "";
+  const tripLabel = [trip?.title, tripDates].filter(Boolean).join(" · ");
+  const changeMode = (next: typeof mode, currentArea = false) => {
     if (mode === next) return;
     checkpoint();
-    if (next === "locations" && trip) {
-      const coreDays = tripDays?.length ? tripDays : trip.trip.days;
-      useDateRange(trip.day || coreDays[0], trip.day || coreDays[coreDays.length - 1]);
+    if (currentArea) {
+      if (!region) selectRegion(viewport);
+      setIncludeInferred(false);
     }
     framedJourney.current = undefined;
     preserveRestoredView.current = false;
@@ -613,7 +621,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   };
   const showStopDay = (day: string) => {
     if (trip && selectedTripDays(trip).includes(day)) changeTrip({ ...trip, day });
-    else useDateRange(day, day);
+    else {
+      checkpoint();
+      useDateRange(day, day);
+    }
   };
   const chooseAlbum = (id: string) => {
     if (albumId === id) return;
@@ -665,11 +676,12 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
 
   const openPhotobook = (opener: HTMLButtonElement) => {
     albumOpenerRef.current = opener;
-    const from = trip && !trip.day ? tripDays?.[0] ?? queryFrom : queryFrom;
-    const to = trip && !trip.day ? tripDays?.[tripDays.length - 1] ?? queryTo : queryTo;
+    const selectedDays = trip && !trip.day ? tripDays ?? selectedTripDays(trip) : undefined;
+    const from = selectedDays?.[0] ?? queryFrom;
+    const to = selectedDays?.[selectedDays.length - 1] ?? queryTo;
     setAlbum({ bounds: filterBounds, viewport, hasSelection: Boolean(region), fromDate: from, toDate: to, style: mapStyle,
       albumId: albumId || undefined, draft: selectedAlbum?.layout_draft, showCountryNames: showNames,
-      scopeTitle: trip?.title || selectedAlbum?.name || regionName || undefined, journeyDetail,
+      scopeTitle: trip?.title || selectedAlbum?.name || regionName || undefined, journeyDetail, locationPhotoIds,
       journey: isJourney ? journey ?? undefined : undefined });
   };
   const openGallery = (opener: HTMLElement, index: number | null) => {
@@ -795,6 +807,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         </select></label>}
       {isJourney && <label className="gps-page__field gps-page__field--detail"><span>Stoppabstand</span><select aria-label="Stoppabstand" value={journeyDetail} onChange={(event) => {
         const detail = event.target.value === "city" ? "city" : "trip";
+        checkpoint();
+        preserveRestoredView.current = detail === "city" && Boolean(journeyStop);
         if (detail === "city" && journeyStop) {
           setView(normalizedView({ latitude: journeyStop.latitude, longitude: journeyStop.longitude, zoom: Math.max(1600, view.zoom) }));
         }
@@ -844,13 +858,13 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
             <strong>{isJourney ? "Standortverlauf" : "Fotostandorte"}</strong>
             {(!compactLayout || !showResultsPane) && <span aria-live="polite">{isJourney
               ? journey ? `${countWithLabel(journey.stops.length, "Stopp", "Stopps")} · ${countWithLabel(journey.photo_count, "Foto", "Fotos")}` : "–"
-              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${countWithLabel(points.total, "Foto", "Fotos")} im sichtbaren Ausschnitt` : "–"}</span>}
+              : pointsLoading ? "Karte wird aktualisiert …" : points ? `${countWithLabel(points.total, "Foto", "Fotos")} ${pointSelection ? "aus der Auswahl im Ausschnitt" : "im sichtbaren Ausschnitt"}` : "–"}</span>}
           </div>
           <div className="gps-page__map-actions">
             <button type="button" className={selectMode ? "gps-page__tool--active" : ""} aria-pressed={selectMode} onClick={() => setSelectMode((value) => !value)}>{selectMode ? "Auswahl beenden" : "Bereich wählen"}</button>
             {selectMode && <button type="button" onClick={() => selectRegion(viewport)}>Sichtbaren Bereich wählen</button>}
             {region && !isJourney && <button type="button" onClick={() => selectRegion(null)}>Auswahl löschen</button>}
-            {isJourney && !areaInView && !selectMode && <button type="button" onClick={showArea}>Filterbereich zeigen</button>}
+            {!areaInView && !selectMode && <button type="button" onClick={showArea}>Filterbereich zeigen</button>}
             {isJourney && Boolean(journey?.stops.length) && <button type="button" onClick={() => {
               if (journey) setView(journeyView(journey, journeyDetail));
             }}>Route einpassen</button>}
@@ -859,6 +873,11 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           </div>
         </div>
         {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
+        <div className="gps-page__online-details">
+          <label><input type="checkbox" checked={onlineDetails} aria-describedby="gps-online-details-note"
+            onChange={(event) => setOnlineDetails(event.target.checked)} />Kartendetails online</label>
+          <span id="gps-online-details-note">Fragt beim Zoomen den sichtbaren Bereich bei Kartenanbietern ab.</span>
+        </div>
         <WorldMap
           view={view}
           onViewChange={setView}
@@ -869,6 +888,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           style={mapStyle}
           showCountryNames={showNames}
           compactControls={compactLayout}
+          onlineDetails={onlineDetails && active && (!compactLayout || compactPane === "map")}
           journeyStops={journey?.stops}
           journeyConnections={journey?.connections}
           activeJourneyStop={journeyStopId}
@@ -922,8 +942,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
               aria-describedby="gps-journey-inference-note" />Passende Fotos ohne Standort einbeziehen</label>
             <p id="gps-journey-inference-note">Ein Foto ohne Standort kann zu einem Stopp passen, wenn es kurz zwischen zwei Fotos von dort aufgenommen wurde.</p>
           </div>}
-          {journeySelection && onOpenImages && <div className="gps-results-actions">
-            <button type="button" onClick={() => openInImages(journeySelection)}>Verlauf in Bilder öffnen</button>
+          {journeySelection && <div className="gps-results-actions">
+            {onOpenImages && <button type="button" onClick={() => openInImages(journeySelection)}>Verlauf in Bilder öffnen</button>}
+            {!trip && journey && <button type="button" onClick={(event) => openAlbumPicker(event.currentTarget, journeySelection,
+              journey.photo_count, true)}>Als Reisealbum speichern</button>}
           </div>}
         </>}
         {(!isJourney || journeyStop) && <>
@@ -940,12 +962,18 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           }}>Zur Stoppliste</button>
           <button type="button" onClick={() => {
             setView(normalizedView({ latitude: journeyStop.latitude, longitude: journeyStop.longitude,
-              zoom: Math.max(view.zoom, journeyDetail === "city" ? 1600 : 60) }));
+              zoom: Math.max(view.zoom, journeyDetail === "city" ? 6400 : 3200) }));
             if (compactLayout) switchCompactPane("map");
           }}>Stopp auf Karte zeigen</button>
         </div>}
         {images.length > 0 && <div className="gps-results-actions">
-          {stopDay && (fromDate !== stopDay || fromDate !== toDate) &&
+          {!isJourney && region && <button type="button" onClick={() => {
+            const frame = viewForBounds(region);
+            setView(normalizedView({ ...frame, zoom: Math.min(frame.zoom, 12000) }));
+            if (compactLayout) switchCompactPane("map");
+          }}>Fotoorte auf Karte zeigen</button>}
+          {!isJourney && <button type="button" onClick={() => changeMode("journey", true)}>Verlauf dieser Auswahl</button>}
+          {stopDay && (queryFrom !== stopDay || queryTo !== stopDay) &&
             <button type="button" onClick={() => showStopDay(stopDay)}>{shortDate.format(new Date(stopDay))} zeigen</button>}
           <button type="button" onClick={(event) => openGallery(event.currentTarget, null)}>Galerie öffnen</button>
           {onOpenImages && <button type="button" onClick={() => openInImages(selection)}>In Bilder öffnen</button>}
@@ -982,16 +1010,17 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       <span>{collection ? countWithLabel(Math.max(0, collection.library_total - collection.located_total - collection.pending_total), "Foto ohne Standort", "Fotos ohne Standort") : "… Fotos ohne Standort"}</span>
       {!!collection?.pending_total && <span className="gps-page__pending">{formatCount(collection.pending_total)} werden noch geprüft</span>}
       </>}
-      <span className="gps-page__privacy">Deine Fotostandorte bleiben privat. Die Karte funktioniert auch offline.</span>
+      <span className="gps-page__privacy">Kartenübersicht und Fotobuch-Export funktionieren offline.</span>
     </aside>
     {openedGallery && <MapGallery opening={openedGallery} onClose={closeGallery}
       onOpenImages={onOpenImages ? openInImages : undefined} onNavigateToCluster={onNavigateToCluster}
       onAddToAlbum={openAlbumPicker} />}
     {active && album && <MapAlbumDialog opening={album} onClose={closeAlbum}
       onSaveDraft={album.albumId ? async (draft) => { await updatePhotoAlbum(album.albumId!, { layout_draft: { ...draft } }); } : undefined} />}
-    {active && saveSelection && <AlbumPickerDialog selection={saveSelection.selection.image_ids ? undefined : saveSelection.selection}
-      imageIds={saveSelection.selection.image_ids} photoCount={saveSelection.count}
-      initialName={saveSelection.travel ? trip?.title || `Reise ${queryFrom || trip?.trip.days[0] || ""}`.trim() : undefined}
+    {active && saveSelection && <AlbumPickerDialog
+      selection={saveSelection.selection.bounds || !saveSelection.selection.image_ids ? saveSelection.selection : undefined}
+      imageIds={saveSelection.selection.bounds ? undefined : saveSelection.selection.image_ids} photoCount={saveSelection.count}
+      initialName={saveSelection.travel ? trip?.title || `Reise ${tripDays?.[0] || queryFrom}`.trim() : undefined}
       journey={saveSelection.travel ? { detail: journeyDetail, from_date: tripDays?.[0],
         to_date: tripDays?.[tripDays.length - 1], arrival_included: trip?.includeArrival,
         departure_included: trip?.includeDeparture } : undefined}

@@ -10,6 +10,7 @@ interface AlbumPosition {
 
 interface AlbumPoint extends AlbumPosition {
   count?: number;
+  placeName?: string;
 }
 
 export interface MapAlbumStop extends AlbumPosition {
@@ -17,6 +18,7 @@ export interface MapAlbumStop extends AlbumPosition {
   number: number;
   title: string;
   placeName?: string;
+  customPlaceName?: boolean;
   subtitle?: string;
   arrivalMode?: AlbumTransport;
 }
@@ -64,6 +66,16 @@ export interface AlbumFormatting {
   listColumns?: 1 | 2;
 }
 
+export type AlbumMarkerStyle = "standard" | "dots" | "none";
+
+export interface AlbumFraming {
+  zoom: number;
+  horizontal: number;
+  vertical: number;
+}
+
+export const defaultAlbumFraming: AlbumFraming = { zoom: 100, horizontal: 0, vertical: 0 };
+
 export interface MapAlbumArtworkInput {
   format: AlbumFormat;
   dimensions?: AlbumDimensions;
@@ -79,7 +91,12 @@ export interface MapAlbumArtworkInput {
   wideFrame?: boolean;
   contextPercent?: number;
   markerScale?: number;
+  framing?: AlbumFraming;
+  fullBleed?: boolean;
+  markerStyle?: AlbumMarkerStyle;
   showCountryNames?: boolean;
+  showPlaceNames?: boolean;
+  showRoute?: boolean;
   showStopsList?: boolean;
   bounds: MapBounds;
   points?: readonly AlbumPoint[];
@@ -98,6 +115,7 @@ export interface MapAlbumPage {
   dpi: AlbumDpi;
   satelliteFallback?: boolean;
   visibleStopCount?: number;
+  visiblePhotoCount?: number;
 }
 
 interface Pixel {
@@ -229,6 +247,26 @@ const direction = (from: number, to: number) => {
   const difference = to - from;
   return Math.abs(difference) > 180 ? difference - Math.sign(difference) * 360 : difference;
 };
+
+function adjustAlbumBounds(bounds: MapBounds, { zoom, horizontal, vertical }: AlbumFraming): MapBounds {
+  const east = bounds.east < bounds.west ? bounds.east + 360 : bounds.east;
+  const sourceWidth = east - bounds.west;
+  const sourceHeight = bounds.north - bounds.south;
+  const width = Math.min(360, sourceWidth * 100 / zoom);
+  const height = Math.min(180, sourceHeight * 100 / zoom);
+  let longitude = (bounds.west + east) / 2 + sourceWidth * horizontal / 100;
+  if (bounds.west >= -180 && east <= 180) longitude = clamp(longitude, -180 + width / 2, 180 - width / 2);
+  const latitude = clamp((bounds.south + bounds.north) / 2 + sourceHeight * vertical / 100, -90 + height / 2, 90 - height / 2);
+  return { west: longitude - width / 2, east: longitude + width / 2, south: latitude - height / 2, north: latitude + height / 2 };
+}
+
+export function albumPhotoQueryBounds(bounds: MapBounds, framing: AlbumFraming): MapBounds {
+  const { west, east, south, north } = adjustAlbumBounds(bounds, framing);
+  if (west >= east || south >= north) return bounds;
+  if (east - west >= 360) return { west: -180, east: 180, south, north };
+  const easternEdge = turn(east + 180) - 180;
+  return { west: turn(west + 180) - 180, east: easternEdge === -180 ? 180 : easternEdge, south, north };
+}
 
 const number = (value: number) => Number(value.toFixed(2));
 const xml = (value: string) => value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uD800-\uDFFF\uFFFE\uFFFF]/gu, "")
@@ -404,8 +442,13 @@ function stationList(stops: readonly MapAlbumStop[], layout: Layout, top: number
     }).join("");
 }
 
-function frameShape(frame: Frame, attrs: string) {
-  return `<rect x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}" rx="32" ${attrs}/>`;
+function frameShape(frame: Frame, attrs: string, rounded = true) {
+  return `<rect x="${frame.x}" y="${frame.y}" width="${frame.width}" height="${frame.height}"${rounded ? ' rx="32"' : ""} ${attrs}/>`;
+}
+
+function albumPageSvg(size: AlbumDimensions, layout: Layout, title: string, content: string) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${layout.width} ${layout.height}" preserveAspectRatio="none">
+    <title>${xml(title.trim() || "Meine Fotokarte")}</title>${content}</svg>`;
 }
 
 type Detail = typeof import("./world-detail.json");
@@ -532,13 +575,15 @@ const markerOffsets: Pixel[] = [{ x: 0, y: 0 }, ...[1, 1.7, 2.4, 3.2, 4.1].flatM
 
 function albumMarkers(input: MapAlbumArtworkInput, stops: readonly MapAlbumStop[], bounds: MapBounds, frame: Frame,
   { mapInk, paper, routeInk, labelInk, labelHalo }: Palette) {
-  const mapOnly = stops.length > 0 && input.showStopsList === false;
-  const points: (AlbumPosition & { label: string; stop?: MapAlbumStop })[] = stops.length
+  const mapOnly = stops.length > 0 && (input.fullBleed || input.showStopsList === false);
+  const markerStyle = stops.length && !mapOnly ? "standard" : input.markerStyle ?? "standard";
+  const markerNumbers = new Map<string, number>();
+  if (markerStyle === "none") return { svg: "", markerNumbers, positions: [], hasGroupedStops: false };
+  const points: (AlbumPoint & { label: string; stop?: MapAlbumStop })[] = stops.length
     ? stops.map((stop) => ({ ...stop, label: String(stop.number), stop }))
     : (input.points ?? []).map((point, index) => ({ ...point, label: String(point.count ?? index + 1) }));
-  const radius = number((mapOnly ? 22 : points.length > 100 ? 30 : 41) * clamp(input.markerScale ?? 100, 70, 140) / 100);
+  const radius = number((mapOnly || markerStyle === "dots" ? 22 : points.length > 100 ? 30 : 41) * clamp(input.markerScale ?? 100, 70, 140) / 100);
   const placed: Pixel[] = [];
-  const markerNumbers = new Map<string, number>();
   const center = (bounds.west + bounds.east) / 2;
   const color = stops.length ? routeInk : mapInk;
   const markerInk = readableOn(paper, color);
@@ -561,7 +606,8 @@ function albumMarkers(input: MapAlbumArtworkInput, stops: readonly MapAlbumStop[
       const number = first.stop.number;
       for (const { stop } of members.slice(1)) if (stop) markerNumbers.set(stop.id, number);
     }
-    const label = mapOnly ? visits > 1 ? String(visits) : "" : visits > 1 ? `${first.label}+` : first.label;
+    const labeled = mapOnly ? visits > 1 ? String(visits) : "" : visits > 1 ? `${first.label}+` : first.label;
+    const label = markerStyle === "dots" ? "" : labeled;
     const candidate = markerOffsets.map((offset) => ({
       x: origin.x + offset.x * radius * 2.22,
       y: origin.y + offset.y * radius * 2.22,
@@ -571,8 +617,10 @@ function albumMarkers(input: MapAlbumArtworkInput, stops: readonly MapAlbumStop[
         y: clamp(origin.y, frame.y + radius + 10, frame.y + frame.height - radius - 10) };
     placed.push(candidate);
     const { x, y } = candidate;
-    const placeName = first.stop?.placeName;
-    if (mapOnly && placeName && members.every(({ stop }) => stop?.placeName === placeName)) {
+    const renamed = members.find(({ stop }) => stop?.customPlaceName);
+    const placeName = renamed?.placeName ?? first.placeName;
+    if ((!stops.length || mapOnly) && input.showPlaceNames !== false && placeName &&
+        (renamed || members.every((point) => point.placeName === placeName))) {
       labels.push({ x, y, title: placeName, visits });
     }
     const fontSize = Math.min(radius, radius * 2.55 / label.length);
@@ -607,7 +655,8 @@ function albumMarkers(input: MapAlbumArtworkInput, stops: readonly MapAlbumStop[
       paint-order="stroke" stroke="${labelHalo}" stroke-width="7" stroke-linejoin="round" font-family="${sans}"
       font-size="${labelSize}" font-weight="700"`);
   }).join("");
-  return { svg: svg + placeLabels, markerNumbers, positions: placed.map((position) => ({ ...position, radius })) };
+  return { svg: svg + placeLabels, markerNumbers, positions: placed.map((position) => ({ ...position, radius })),
+    hasGroupedStops: groups.some(({ members }) => members.length > 1) };
 }
 
 function countryNames(bounds: MapBounds, frame: Frame, markers: readonly (Pixel & { radius: number })[], { labelInk, labelHalo }: Palette) {
@@ -674,16 +723,23 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const allStops = input.stops ?? [];
   const transportOnly = input.showStopsList === false;
   const connections = input.connections ?? [];
-  const rawSubject = input.fitJourney && (allStops.length || connections.length)
+  const defaultSubject = input.fitJourney && (allStops.length || connections.length)
     ? fitAlbumJourney(allStops, connections, input.journeyPadding) : input.bounds;
+  const framing = input.framing ?? defaultAlbumFraming;
+  const adjusted = framing.zoom !== 100 || framing.horizontal !== 0 || framing.vertical !== 0;
+  const rawSubject = adjusted ? adjustAlbumBounds(defaultSubject, framing) : defaultSubject;
   const wraps = rawSubject.west > rawSubject.east;
   const subject = wraps ? { ...rawSubject, east: rawSubject.east + 360 } : rawSubject;
   const subjectCenter = (subject.west + subject.east) / 2;
-  const cropJourney = input.fitJourney === false && allStops.length > 0;
-  const stops = cropJourney ? allStops.filter(({ latitude, longitude }) => {
+  const cropJourney = (adjusted || input.fitJourney === false) && allStops.length > 0;
+  const withinSubject = ({ latitude, longitude }: AlbumPosition) => {
     const x = nearLongitude(longitude, subjectCenter);
-    return x >= subject.west && x <= subject.east && latitude >= subject.south && latitude <= subject.north;
-  }) : allStops;
+    const tolerance = 1e-9;
+    return x >= subject.west - tolerance && x <= subject.east + tolerance &&
+      latitude >= subject.south - tolerance && latitude <= subject.north + tolerance;
+  };
+  const stops = cropJourney ? allStops.filter(withinSubject) : allStops;
+  const points = adjusted ? input.points?.filter(withinSubject) : input.points;
   const [{ default: detail }, raster] = await Promise.all([
     import("./world-detail.json"),
     input.style === "satellite" ? readMapRaster("satellite").catch(() => "")
@@ -697,21 +753,22 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const availableRows = Math.max(1, Math.floor((height - 305 - head.mapTop - mapHeight) / 112));
   const firstStops = Math.min(availableRows, Math.ceil(layout.firstStops / 2)) * columns;
   const continuedStops = Math.min(Math.ceil(layout.continuedStops / 2), Math.floor((height - 299 - head.mapTop) / 112)) * columns;
-  const listedStops = transportOnly ? stops.filter((stop) => stop.arrivalMode).slice(0, firstStops) : stops;
+  const listedStops = input.fullBleed ? [] : transportOnly ? stops.filter((stop) => stop.arrivalMode).slice(0, firstStops) : stops;
   const availableHeight = height - head.mapTop - 245;
   const frameWidth = width - 2 * margin;
   const coverRows = Math.ceil(Math.min(listedStops.length, firstStops) / columns);
   const frameHeight = coverRows
     ? Math.max(mapHeight, Math.min(frameWidth * 1.05, availableHeight - 72 - coverRows * 142))
     : Math.min(availableHeight, frameWidth * (allStops.length ? 1.15 : .95));
-  const frameArea = { x: margin, y: number(head.mapTop + (listedStops.length ? 0 : (availableHeight - frameHeight) * .38)),
-    width: frameWidth, height: number(frameHeight) };
+  const frameArea = input.fullBleed ? { x: 0, y: 0, width, height }
+    : { x: margin, y: number(head.mapTop + (listedStops.length ? 0 : (availableHeight - frameHeight) * .38)),
+        width: frameWidth, height: number(frameHeight) };
   const padding = clamp(input.contextPercent ?? (input.wideFrame ? 52 : 0), 0, 100) / 200;
   const longitudePadding = (subject.east - subject.west) * padding;
   const latitudePadding = (subject.north - subject.south) * padding;
   const bounds = fitFrame({
-    west: input.fitJourney || wraps ? subject.west - longitudePadding : Math.max(-180, subject.west - longitudePadding),
-    east: input.fitJourney || wraps ? subject.east + longitudePadding : Math.min(180, subject.east + longitudePadding),
+    west: input.fitJourney || wraps || subject.west < -180 ? subject.west - longitudePadding : Math.max(-180, subject.west - longitudePadding),
+    east: input.fitJourney || wraps || subject.east > 180 ? subject.east + longitudePadding : Math.min(180, subject.east + longitudePadding),
     south: Math.max(-90, subject.south - latitudePadding),
     north: Math.min(90, subject.north + latitudePadding),
   }, frameArea);
@@ -721,18 +778,44 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   const frame = { x: number(frameArea.x + (frameArea.width - fittedWidth) / 2),
     y: number(frameArea.y + (frameArea.height - fittedHeight) / 2),
     width: number(fittedWidth), height: number(fittedHeight) };
-  const markers = albumMarkers(input, stops, bounds, frame, mapPalette);
+  const markers = albumMarkers({ ...input, points }, stops, bounds, frame, mapPalette);
   const cropStart = mapPixel(bounds, frame, subject.west, subject.north);
   const cropEnd = mapPixel(bounds, frame, subject.east, subject.south);
   const clipFrame = cropJourney
     ? { ...cropStart, width: cropEnd.x - cropStart.x, height: cropEnd.y - cropStart.y } : frame;
-  const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "")}</clipPath></defs>
+  const plate = `<defs><clipPath id="album-map-clip">${frameShape(frame, "", !input.fullBleed)}</clipPath></defs>
     <g clip-path="url(#album-map-clip)">
       ${baseMap(detail, frame, bounds, style, raster, mapPalette)}
       ${input.showCountryNames ? countryNames(bounds, frame, markers.positions, mapPalette) : ""}
-      ${journeyLines(connections, bounds, frame, palette, clipFrame)}${markers.svg}
+      ${input.showRoute === false ? "" : journeyLines(connections, bounds, frame, palette, clipFrame)}${markers.svg}
     </g>
-    ${frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
+    ${input.fullBleed ? "" : frameShape(frame, 'fill="none" stroke="#9ead9f" stroke-width="3"')}`;
+
+  const sizeStatus = allStops.length ? { visibleStopCount: stops.length }
+    : { visiblePhotoCount: points?.reduce((count, point) => count + (point.count ?? 1), 0) ?? 0 };
+  if (input.fullBleed) {
+    const credit = "Kartendaten von Natural Earth";
+    const satelliteCredit = style === "satellite" ? satelliteSource.name : "";
+    const creditWidth = Math.max(textWidth(credit, 33), textWidth(satelliteCredit, 33)) + 42;
+    const creditHeight = satelliteCredit ? 96 : 58;
+    const corners = [
+      { x: width - creditWidth - 42, y: height - creditHeight - 42 },
+      { x: 42, y: height - creditHeight - 42 },
+      { x: width - creditWidth - 42, y: 42 },
+      { x: 42, y: 42 },
+    ];
+    const { x: creditX, y: creditY } = corners.find(({ x, y }) =>
+      markers.positions.every((marker) => marker.x + marker.radius < x || marker.x - marker.radius > x + creditWidth ||
+        marker.y + marker.radius < y || marker.y - marker.radius > y + creditHeight)) ?? corners[0];
+    const creditStyle = `fill="${palette.ink}" font-family="${sans}" font-size="33"`;
+    const svg = albumPageSvg(size, layout, input.title, `
+      <rect data-album-bleed="true" width="${width}" height="${height}" fill="${mapPalette.sea}"/>
+      ${plate}
+      <g><rect x="${number(creditX)}" y="${creditY}" width="${number(creditWidth)}" height="${creditHeight}" rx="8" fill="${palette.paper}" fill-opacity=".94"/>
+        ${text(creditX + 21, creditY + 39, credit, creditStyle)}
+        ${satelliteCredit ? text(creditX + 21, creditY + 77, satelliteCredit, creditStyle) : ""}</g>`);
+    return [{ svg, ...size, dpi, number: 1, total: 1, ...sizeStatus, ...(satelliteFallback && { satelliteFallback }) }];
+  }
 
   const groups = [listedStops.slice(0, firstStops)];
   for (let start = firstStops; start < listedStops.length; start += continuedStops) groups.push(listedStops.slice(start, start + continuedStops));
@@ -741,11 +824,13 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
     const continuation = index > 0;
     const listTop = continuation ? head.mapTop + 35 : frameArea.y + frameArea.height + 41;
     const grouped = markers.markerNumbers.size > 0;
-    const legend = continuation ? "" : allStops.length
-      ? transportOnly ? "Zahlen zeigen mehrere Stopps am selben Kartenpunkt. Linien verbinden Aufnahmeorte."
-        : grouped ? "+ kennzeichnet mehrere Stopps am selben Kartenpunkt. Linien verbinden Aufnahmeorte."
-          : "Gestrichelte Linien verbinden Aufnahmeorte in zeitlicher Reihenfolge."
-      : input.points?.length ? "Zahlen zeigen die Anzahl der Fotos je Kartenpunkt." : "";
+    const markerLegend = allStops.length
+      ? grouped ? "+ kennzeichnet mehrere Stopps am selben Kartenpunkt."
+        : transportOnly && input.markerStyle !== "dots" && markers.hasGroupedStops
+          ? "Zahlen zeigen mehrere Stopps am selben Kartenpunkt." : ""
+      : points?.length && input.markerStyle !== "dots" && input.markerStyle !== "none" ? "Zahlen zeigen Fotos je Kartenpunkt." : "";
+    const routeLegend = connections.length && input.showRoute !== false ? "Gestrichelte Linien verbinden Aufnahmeorte." : "";
+    const legend = continuation ? "" : [markerLegend, routeLegend].filter(Boolean).join(" ");
     const pageNumber = groups.length > 1 ? `${index + 1} / ${groups.length}` : "";
     const footer = `<line x1="${margin}" x2="${width - margin}" y1="${height - 147}" y2="${height - 147}" stroke="${palette.rule}" stroke-width="2"/>
       ${text(margin, height - 92, continuation ? "Fotokarte · Stationen" : "Kartendaten von Natural Earth", `fill="${palette.muted}" font-family="${sans}" font-size="31"`)}
@@ -753,13 +838,11 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
       ${!continuation && style === "satellite" ? text(margin, height - 47, `Satellitenbild von ${satelliteSource.name}`,
         `fill="${palette.muted}" font-family="${sans}" font-size="31"`) : ""}
       ${pageNumber ? text(width - margin, height - 92, pageNumber, `fill="${palette.ink}" font-family="${sans}" font-size="31" text-anchor="end"`) : ""}`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size.width}" height="${size.height}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
-      <title>${xml(input.title.trim() || "Meine Fotokarte")}</title>
+    const svg = albumPageSvg(size, layout, input.title, `
       ${head.svg}${index === 0 ? plate : ""}${stationList(group, layout, listTop, height - 177, continuation, transportOnly,
-        palette, markers.markerNumbers, input.formatting)}${footer}
-    </svg>`;
+        palette, markers.markerNumbers, input.formatting)}${footer}`);
     return { svg, ...size, dpi, number: index + 1, total: groups.length, ...(!continuation && satelliteFallback && { satelliteFallback }),
-      ...(cropJourney && { visibleStopCount: stops.length }) };
+      ...sizeStatus };
   });
 }
 

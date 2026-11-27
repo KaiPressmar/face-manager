@@ -56,6 +56,44 @@
   font-size: 12px;
 }
 
+.gps-map__scale {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  padding: 4px 6px 5px;
+  border-radius: 4px;
+  background: rgb(14 26 35 / .86);
+  color: #fff;
+  font-size: .6875rem;
+  line-height: 1.2;
+  pointer-events: none;
+}
+.gps-map__scale span:last-child { height: 5px; border: solid currentColor; border-width: 0 1px 1px; }
+.gps-map__details-info {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  padding: 7px 12px;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: .75rem;
+  line-height: 1.45;
+}
+.gps-map__details-info a { color: var(--text); text-decoration: underline; }
+.gps-map__details-info button {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+}
+
 .gps-map__relief image {
   mix-blend-mode: multiply;
   opacity: .68;
