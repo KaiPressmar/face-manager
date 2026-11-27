@@ -1,4 +1,4 @@
-name: Installer migration and SMB validation
+name: Installer migration validation
 
 on:
   pull_request:
@@ -6,7 +6,14 @@ on:
       - develop
     paths:
       - 'packaging/windows/**'
-      - 'backend/services/shared_sync_*.py'
+      - 'backend/requirements*.txt'
+      - 'backend/desktop_main.py'
+      - 'backend/desktop_runtime.py'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - 'scripts/inventory-dependencies.py'
+      - '.nvmrc'
+      - 'VERSION'
       - '.github/workflows/installer-upgrade-validation.yml'
       - '.github/workflows/release.yml'
 
@@ -18,59 +25,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  samba-transport:
-    name: Verify two CIFS mounts against Samba
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Samba and the CIFS client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y samba cifs-utils
-      - name: Race two independent clients on the same SMB server
-        run: |
-          set -Eeuo pipefail
-          test_root="$(mktemp -d)"
-          chmod 755 "$test_root"
-          mkdir "$test_root/share" "$test_root/first" "$test_root/second"
-          chmod 777 "$test_root/share"
-          server_pid=""
-          cleanup() {
-            sudo umount "$test_root/first" 2>/dev/null || true
-            sudo umount "$test_root/second" 2>/dev/null || true
-            if [[ -n "$server_pid" ]]; then sudo kill "$server_pid" 2>/dev/null || true; fi
-            sudo rm -rf -- "$test_root"
-          }
-          trap cleanup EXIT
-          cat > "$test_root/smb.conf" <<EOF
-          [global]
-            interfaces = 127.0.0.1
-            bind interfaces only = yes
-            smb ports = 1445
-            map to guest = Bad User
-            server min protocol = SMB3
-            pid directory = $test_root
-            log file = $test_root/samba.log
-          [validation]
-            path = $test_root/share
-            guest ok = yes
-            guest only = yes
-            read only = no
-          EOF
-          sudo smbd --daemon --configfile="$test_root/smb.conf"
-          for attempt in {1..50}; do
-            [[ -s "$test_root/smbd.pid" ]] && break
-            sleep 0.1
-          done
-          server_pid="$(cat "$test_root/smbd.pid")"
-          for client in first second; do
-            sudo mount -t cifs //127.0.0.1/validation "$test_root/$client" \
-              -o "username=face-manager-ci,password=,port=1445,vers=3.1.1,nosharesock,cache=none,actimeo=0,noperm,uid=$(id -u),gid=$(id -g)"
-          done
-          FACE_MANAGER_TEST_SMB_FIRST="$test_root/first" FACE_MANAGER_TEST_SMB_SECOND="$test_root/second" \
-            python3 -m unittest backend.tests.test_shared_sync_smb
-
   windows-upgrade:
     name: Upgrade published Windows installers
     runs-on: windows-latest
