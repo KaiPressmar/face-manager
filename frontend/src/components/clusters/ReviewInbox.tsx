@@ -58,44 +58,48 @@ const FaceSelection: React.FC<FaceSelectionProps> = ({
   ids, loads, excluded, blocked, eager, onLoad, onToggle, onOpenFace,
 }) => (
   <div className="review-person-faces">
-    {ids.map((id, index) => (
-      <div className="review-person-face" key={id}>
-        {loads[id] === "error" ? (
-          <span className="review-person-face__unavailable">Vorschau nicht verfügbar</span>
-        ) : (
-          <img
-            src={faceCropUrl(id)}
-            alt={"Gesicht " + (index + 1)}
-            loading={eager ? "eager" : "lazy"}
-            onLoad={(event) => onLoad(id, event.currentTarget.naturalWidth > 0 ? "loaded" : "error")}
-            onError={() => onLoad(id, "error")}
-          />
-        )}
-        {onToggle && (
-          <label className="review-person-face__select">
-            <input
-              type="checkbox"
-              aria-label={"Gesicht " + (index + 1) + " auswählen"}
-              checked={loads[id] === "loaded" && !excluded.has(id)}
-              disabled={blocked || loads[id] !== "loaded"}
-              onChange={() => onToggle(id)}
-            />
-            <span>Auswählen</span>
-          </label>
-        )}
-        {onOpenFace && (
-          <button
-            type="button"
-            className="review-person-face__open"
-            aria-label={"Original zu Gesicht " + (index + 1) + " öffnen"}
-            disabled={blocked}
-            onClick={(event) => onOpenFace(id, event.currentTarget)}
-          >
-            Original
-          </button>
-        )}
-      </div>
-    ))}
+    {ids.map((id, index) => {
+      const preview = loads[id] === "error" ? (
+        <span className="review-person-face__unavailable">Vorschau nicht verfügbar</span>
+      ) : (
+        <img
+          src={faceCropUrl(id)}
+          alt={"Gesicht " + (index + 1)}
+          loading={eager ? "eager" : "lazy"}
+          onLoad={(event) => onLoad(id, event.currentTarget.naturalWidth > 0 ? "loaded" : "error")}
+          onError={() => onLoad(id, "error")}
+        />
+      );
+      return (
+        <div className="review-person-face" key={id}>
+          {onOpenFace ? (
+            <button
+              type="button"
+              className="review-person-face__open"
+              aria-label={"Original zu Gesicht " + (index + 1) + " öffnen"}
+              title="Originalfoto öffnen"
+              disabled={blocked}
+              onClick={(event) => onOpenFace(id, event.currentTarget)}
+            >
+              {preview}
+              <span className="review-person-face__expand" aria-hidden="true">↗</span>
+            </button>
+          ) : preview}
+          {onToggle && (
+            <label className="review-person-face__select">
+              <input
+                type="checkbox"
+                aria-label={"Gesicht " + (index + 1) + " auswählen"}
+                checked={loads[id] === "loaded" && !excluded.has(id)}
+                disabled={blocked || loads[id] !== "loaded"}
+                onChange={() => onToggle(id)}
+              />
+              <span>Auswählen</span>
+            </label>
+          )}
+        </div>
+      );
+    })}
   </div>
 );
 
@@ -120,6 +124,13 @@ const ComparisonFaces: React.FC<{ ids: number[]; busy: boolean; onOpenFace?: Ope
     </div>
   );
 };
+
+const MoreActions: React.FC<React.PropsWithChildren> = ({ children }) => (
+  <details className="review-inbox-more">
+    <summary>Weitere Aktionen</summary>
+    <div className="review-inbox-more__actions">{children}</div>
+  </details>
+);
 
 interface PersonDetailProps {
   item: PersonSuggestion;
@@ -289,6 +300,12 @@ const ReviewInbox: React.FC<Props> = ({
   const markedArchive = markableArchive.filter(({ key }) => archiveMarks.has(key));
   const markedKeys = new Set(markedPeople.map((item) => item.cluster_id + ":" + item.proposal_token));
   const markedFaceCount = markedPeople.reduce((count, item) => count + item.face_ids.length, 0);
+  const offeredCount = preparedPeople.filter(({ item, ids }) =>
+    item.recommended && ids.length > 0 && !conflictingIds.has(item.cluster_id)).length
+    + preparedArchive.filter(({ item }) => item.recommended && item.face_count > 0
+      && item.face_count === item.preview_face_ids.length && !conflictingIds.has(item.cluster_id)).length;
+  const markableCount = markablePeople.length + markableArchive.length;
+  const markedCount = markedPeople.length + markedArchive.length;
 
   useEffect(() => {
     const peopleKeys = new Set(personSuggestions.map(personKey));
@@ -343,25 +360,24 @@ const ReviewInbox: React.FC<Props> = ({
         </section>
       )}
 
-      {(markablePeople.length > 0 || markableArchive.length > 0) && (
+      {(offeredCount > 1 || markedCount > 0) && (
         <section className="review-inbox-bulk" aria-label="Sammelbestätigung">
+          <p role="status">
+            {markedCount === 1 ? "1 Vorschlag markiert" : markedCount + " Vorschläge markiert"}
+            {markedFaceCount > 0 ? ` · ${markedFaceCount} ${markedFaceCount === 1 ? "Gesicht" : "Gesichter"} zur Zuordnung` : ""}
+          </p>
           <div>
-            <strong>Geprüfte Vorschläge gesammelt bestätigen</strong>
-            <p>Bei Personenvorschlägen gilt deine Auswahl aus den geladenen Vorschaubildern.</p>
-            <p role="status">{markedPeople.length + markedArchive.length} markiert · {markedFaceCount} Gesichter zur Zuordnung</p>
-          </div>
-          <div>
-            {markablePeople.length + markableArchive.length > 1 && <button className="review-inbox-bulk__select" disabled={blocked} onClick={() => {
+            {offeredCount > 1 && <button className="review-inbox-bulk__select" disabled={blocked || markableCount === 0} onClick={() => {
               setPersonMarks((current) => ({
                 ...current,
                 ...Object.fromEntries(markablePeople.map(({ item, key, selected }) => [key, personDecision(item, selected, "preview")])),
               }));
               setArchiveMarks((current) => new Set([...current, ...markableArchive.map(({ key }) => key)]));
             }} type="button">Angezeigte Empfehlungen markieren</button>}
-            {markablePeople.length > 0 && <button disabled={blocked || markedPeople.length === 0} onClick={() => onAcceptSelectedPeople(markedPeople)} type="button">
+            {markedPeople.length > 0 && <button disabled={blocked} onClick={() => onAcceptSelectedPeople(markedPeople)} type="button">
               {markedPeople.length === 1 ? "1 Zuordnung bestätigen" : markedPeople.length + " Zuordnungen bestätigen"}
             </button>}
-            {markableArchive.length > 0 && <button disabled={blocked || markedArchive.length === 0} onClick={() => onAcceptReview(markedArchive.map(({ item }) => item))} type="button">
+            {markedArchive.length > 0 && <button disabled={blocked} onClick={() => onAcceptReview(markedArchive.map(({ item }) => item))} type="button">
               {markedArchive.length === 1 ? "1 Gruppe aussortieren" : markedArchive.length + " Gruppen aussortieren"}
             </button>}
           </div>
@@ -370,7 +386,7 @@ const ReviewInbox: React.FC<Props> = ({
 
       {personSuggestions.length > 0 && (
         <section className="review-inbox-section">
-          <header><div><h2 ref={headingRef} tabIndex={-1}>Personenvorschläge prüfen</h2><p>Die Gesichter ähneln Fotos bereits bestätigter Personen.</p></div><b>{personSuggestions.length}</b></header>
+          <header><h2 ref={headingRef} tabIndex={-1}>Personenvorschläge prüfen</h2></header>
           <div className="review-inbox-grid">
             {preparedPeople.map(({ item, key, ids, loads, excluded, selected, ready }) => {
               const conflicting = conflictingIds.has(item.cluster_id);
@@ -379,13 +395,31 @@ const ReviewInbox: React.FC<Props> = ({
               return (
                 <article className="review-inbox-card review-person-card" aria-label={"Personenvorschlag für " + item.person_name} key={key}
                   data-suggestion-anchor={`person:${item.cluster_id}:${item.person_id}`} data-marked={marked || undefined}>
-                  <div className="review-inbox-card__identity">
-                    <div><span>Automatischer Vorschlag</span><strong>{item.person_name}</strong></div>
-                    <b className={item.recommended && !conflicting ? "review-confidence review-confidence--high" : "review-confidence"}>
-                      {conflicting ? "Widersprüchliche Vorschläge" : item.recommended ? "Hohe Ähnlichkeit" : "Einzeln prüfen"}
-                    </b>
-                  </div>
-                  <p className="review-person-card__summary">{item.face_count} in der Gruppe · {item.support_count} stützen den Vorschlag</p>
+                  <header className="review-inbox-card__identity">
+                    <div>
+                      <h3>{item.person_name}</h3>
+                      <p className="review-person-card__summary">
+                        {conflicting ? "Widersprüchliche Vorschläge" : `${item.support_count} von ${item.face_count} Gesichtern stützen den Vorschlag`}
+                      </p>
+                    </div>
+                    {item.recommended && !conflicting && (
+                      <label className="review-inbox-card__mark">
+                        <input
+                          type="checkbox"
+                          checked={marked}
+                          disabled={blocked || !ready}
+                          aria-label={item.person_name + " für die Sammelbestätigung markieren"}
+                          onChange={() => setPersonMarks((current) => {
+                            const next = { ...current };
+                            if (marked) delete next[key];
+                            else next[key] = personDecision(item, selected, "preview");
+                            return next;
+                          })}
+                        />
+                        Markieren
+                      </label>
+                    )}
+                  </header>
                   <div className="review-person-card__previews">
                     <div className="review-person-card__candidates">
                       <strong>Gesichter zum Prüfen</strong>
@@ -401,35 +435,29 @@ const ReviewInbox: React.FC<Props> = ({
                         />
                       ) : <p>Keine Vorschau zum Zuordnen</p>}
                     </div>
-                    <ComparisonFaces ids={item.reference_face_ids} busy={busy} onOpenFace={openFace} />
+                    <div className="review-person-card__decision">
+                      <ComparisonFaces ids={item.reference_face_ids} busy={busy} onOpenFace={openFace} />
+                      <p className="review-person-card__selection">
+                        {selected.length === 1 ? "1 Gesicht ausgewählt" : selected.length + " Gesichter ausgewählt"}
+                      </p>
+                      <div className="review-inbox-card__actions">
+                        {!conflicting && <button className="review-inbox-card__primary" disabled={blocked || !ready}
+                          onClick={() => void onAcceptPerson(personDecision(item, selected, "preview"))} type="button">
+                          Auswahl zuordnen
+                        </button>}
+                        <button className="review-inbox-card__review" disabled={busy} onClick={(event) => {
+                          openerRef.current = event.currentTarget;
+                          setDetail(item);
+                        }} type="button">Gruppe prüfen</button>
+                      </div>
+                    </div>
                   </div>
-                  <p className="review-person-card__selection">{selected.length} von {item.face_count} Gesichtern ausgewählt</p>
                   <div className="review-inbox-card__actions">
-                    {!conflicting && <button disabled={blocked || !ready} onClick={() => void onAcceptPerson(personDecision(item, selected, "preview"))} type="button">Auswahl zuordnen</button>}
-                    <button disabled={busy} onClick={(event) => {
-                      openerRef.current = event.currentTarget;
-                      setDetail(item);
-                    }} type="button">Gruppe prüfen</button>
-                    <button disabled={busy} onClick={() => onOpenCluster(item.cluster_id)} type="button">Gesichtsgruppe öffnen</button>
-                    <button disabled={blocked} onClick={() => onDismissPerson(item)} type="button">Vorschlag verwerfen</button>
+                    <MoreActions>
+                      <button disabled={busy} onClick={() => onOpenCluster(item.cluster_id)} type="button">Gesichtsgruppe öffnen</button>
+                      <button disabled={blocked} onClick={() => onDismissPerson(item)} type="button">Vorschlag verwerfen</button>
+                    </MoreActions>
                   </div>
-                  {item.recommended && !conflicting && (
-                    <label className="review-inbox-card__mark">
-                      <input
-                        type="checkbox"
-                        checked={marked}
-                        disabled={blocked || !ready}
-                        aria-label={item.person_name + " für die Sammelbestätigung markieren"}
-                        onChange={() => setPersonMarks((current) => {
-                          const next = { ...current };
-                          if (marked) delete next[key];
-                          else next[key] = personDecision(item, selected, "preview");
-                          return next;
-                        })}
-                      />
-                      Für Sammelbestätigung markieren
-                    </label>
-                  )}
                 </article>
               );
             })}
@@ -440,7 +468,7 @@ const ReviewInbox: React.FC<Props> = ({
 
       {reviewSuggestions.length > 0 && (
         <section className="review-inbox-section">
-          <header><div><h2>Vorschläge für die Ablage prüfen</h2><p>Diese Gesichter ähneln früher aussortierten Gruppen.</p></div><b>{reviewSuggestions.length}</b></header>
+          <header><h2 ref={personSuggestions.length === 0 ? headingRef : undefined} tabIndex={-1}>Vorschläge für die Ablage prüfen</h2></header>
           <div className="review-inbox-grid">
             {preparedArchive.map(({ item, key, loads, ready }) => {
               const label = item.review_status === "not_face" ? "Kein Gesicht" : "Unbekannte Person";
@@ -453,16 +481,16 @@ const ReviewInbox: React.FC<Props> = ({
                     <FaceSelection ids={item.preview_face_ids} loads={loads} excluded={EMPTY_EXCLUSIONS} blocked={busy} onLoad={(id, status) => faceLoaded(key, id, status)} />
                   </div>
                   <div className="review-inbox-card__body">
-                    <div className="review-inbox-card__identity">
-                      <div><span>Vorschlag für die Ablage</span><strong>{label}</strong></div>
-                      <b className="review-confidence">{conflicting ? "Widersprüchliche Vorschläge" : item.recommended ? "Hohe Ähnlichkeit" : "Einzeln prüfen"}</b>
-                    </div>
+                    <div className="review-inbox-card__identity"><h3>{label}</h3></div>
+                    {conflicting && <p>Widersprüchliche Vorschläge</p>}
                     <p>{item.face_count} {item.face_count === 1 ? "Gesicht" : "Gesichter"} in der Gruppe</p>
                     {!complete && <p>Öffne die Gesichtsgruppe, um alle Gesichter zu prüfen.</p>}
                     <div className="review-inbox-card__actions">
-                      {complete && !conflicting && <button disabled={blocked || !ready} onClick={() => onAcceptReview([item])} type="button">Als „{label}“ ablegen</button>}
+                      {complete && !conflicting && <button className="review-inbox-card__primary" disabled={blocked || !ready} onClick={() => onAcceptReview([item])} type="button">Als „{label}“ ablegen</button>}
                       <button disabled={busy} onClick={() => onOpenCluster(item.cluster_id)} type="button">Gesichtsgruppe öffnen</button>
-                      <button disabled={blocked} onClick={() => onDismissReview(item)} type="button">Vorschlag verwerfen</button>
+                      <MoreActions>
+                        <button disabled={blocked} onClick={() => onDismissReview(item)} type="button">Vorschlag verwerfen</button>
+                      </MoreActions>
                     </div>
                     {complete && item.recommended && !conflicting && (
                       <label className="review-inbox-card__mark">

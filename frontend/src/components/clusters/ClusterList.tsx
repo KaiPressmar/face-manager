@@ -175,10 +175,6 @@ const ClusterList: React.FC<ClusterListProps> = ({
     (sum, entry) => sum + entry.faceCount,
     0,
   );
-  const unknownFaceCount = unknownClusters.reduce(
-    (sum, cluster) => sum + cluster.face_count,
-    0,
-  );
   useEffect(() => {
     if (mode === "open") {
       setOpenSectionKey("unknown");
@@ -283,22 +279,10 @@ const ClusterList: React.FC<ClusterListProps> = ({
   return (
     <div className="cluster-nav-shell">
       <section className="cluster-nav-search">
-        <div className="cluster-nav-search__topline">
-          <div>
-            <span className="cluster-nav-search__eyebrow">Arbeitsliste</span>
-            <strong className="cluster-nav-search__title">
-              {mode === "open"
-                ? "Neue Gesichtsgruppen"
-                : mode === "people"
-                  ? "Bestätigte Personen"
-                  : "Aussortierte Gesichter"}
-            </strong>
-          </div>
-        </div>
         <div className="cluster-nav-search__row">
           <label className="cluster-nav-search__field">
-            <span className="cluster-nav-search__label">Suche</span>
             <input
+              aria-label={mode === "people" ? "Person suchen" : "Gesichtsgruppe suchen"}
               value={searchTerm}
               onChange={(event) => onSearch(event.target.value)}
               placeholder={mode === "people" ? "Person suchen" : "Gesichtsgruppe suchen"}
@@ -322,6 +306,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
             key={group.group_key}
             type="button"
             className={`cluster-nav-overview__item${openSectionKey === group.group_key ? " cluster-nav-overview__item--active" : ""}`}
+            aria-pressed={openSectionKey === group.group_key}
             onClick={() => {
               setOpenSectionKey(group.group_key);
               onSelectReviewGroup(group.group_key);
@@ -392,7 +377,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="cluster-nav-empty-state">Keine Personen zur Auswahl.</div>
+              <div className="cluster-nav-empty-state">{normalizedSearch ? "Keine passenden Personen." : "Keine benannten Personen."}</div>
             )}
           </div>
         </section>
@@ -401,13 +386,9 @@ const ClusterList: React.FC<ClusterListProps> = ({
       {mode === "open" && (
         <section className="cluster-nav-section cluster-nav-section--detail">
           <div className="cluster-nav-section__body cluster-nav-section__body--scroll">
-            <div className="cluster-nav-detail-title">
-              <strong>{UNKNOWN_PERSON_LABEL}</strong>
-              {renderCountSummary(unknownClusters.length, unknownFaceCount)}
-            </div>
             {unknownClusters.slice(0, visibleOpenCount).map((cluster) => renderClusterCard(cluster))}
-            {!normalizedSearch && unknownClusters.length === 0 && (
-              <div className="cluster-nav-empty-state">Keine offenen Gesichtsgruppen.</div>
+            {unknownClusters.length === 0 && (
+              <div className="cluster-nav-empty-state">{normalizedSearch ? "Keine passenden Gesichtsgruppen." : "Keine offenen Gesichtsgruppen."}</div>
             )}
             {visibleOpenCount < unknownClusters.length && (
               <button className="cluster-nav-load-more" onClick={() => setVisibleOpenCount((count) => count + LIST_BATCH_SIZE)} type="button">

@@ -94,8 +94,16 @@ async function checkPeopleHistory(page, webBase) {
   await page.goto(`${webBase}/#/gesichter-pruefen/ohne-namen`);
   const firstFace = page.locator('.cluster-group-card--active .face-grid-tile').first();
   await firstFace.waitFor();
-  const faceId = Number((await firstFace.locator('.face-grid-tile__id-badge').textContent()).trim().slice(1));
   const checkbox = firstFace.getByRole('checkbox');
+  const faceId = Number((await checkbox.getAttribute('aria-label')).match(/Gesicht (\d+) auswählen/)[1]);
+  const openOriginal = firstFace.getByRole('button', { name: `Originalfoto zu Gesicht ${faceId} öffnen` });
+  await openOriginal.press('Enter');
+  const gallery = page.getByRole('dialog', { name: 'Bildansicht' });
+  await gallery.waitFor();
+  assert.equal(await checkbox.isChecked(), false);
+  await page.keyboard.press('Escape');
+  await gallery.waitFor({ state: 'hidden' });
+  await openOriginal.and(page.locator(':focus')).waitFor();
   await checkbox.check({ force: true });
   const owner = page.getByRole('combobox', { name: 'Person suchen oder neuen Namen eingeben' });
   await owner.fill('Facelift Arbeitsprobe');
@@ -115,10 +123,10 @@ async function checkPeopleHistory(page, webBase) {
   await page.getByRole('status').filter({ hasText: 'Rückgängig gemacht: 1 Gesicht „Facelift Arbeitsprobe“ zugeordnet.' }).waitFor();
 
   await page.reload();
-  const restoredFace = page.locator('.face-grid-tile').filter({ has: page.getByText(`#${faceId}`, { exact: true }) });
-  const restoredCheck = restoredFace.getByRole('checkbox');
+  const restoredCheck = page.getByRole('checkbox', { name: `Gesicht ${faceId} auswählen`, exact: true });
   await restoredCheck.press('Space');
   await page.getByText('1 Gesicht markiert', { exact: true }).waitFor();
+  await page.getByText('Aussortieren oder lösen', { exact: true }).click();
   const archiveWritten = page.waitForResponse('**/api/faces/batch');
   await page.getByRole('button', { name: 'Als unbekannt aussortieren', exact: true }).click();
   const archived = await archiveWritten;
@@ -131,7 +139,8 @@ async function checkPeopleHistory(page, webBase) {
   const badge = page.locator(`[data-face-id="${faceId}"]`).getByRole('button', { name: 'Als unbekannt aussortiert im Archiv öffnen' });
   await badge.click();
   await page.waitForURL(/#\/gesichter-pruefen\/kategorie\/unknown_person\/gruppe\/\d+$/);
-  await page.locator('.cluster-group-card--active').getByText(`#${faceId}`, { exact: true }).waitFor();
+  await page.locator('.cluster-group-card--active')
+    .getByRole('checkbox', { name: `Gesicht ${faceId} auswählen`, exact: true }).waitFor();
   await undo.click();
   await page.getByRole('status').filter({ hasText: 'Rückgängig gemacht: 1 Gesicht als unbekannt aussortiert.' }).waitFor();
 }

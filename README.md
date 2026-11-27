@@ -70,7 +70,9 @@ Unter **Personen** kannst du neue Zuordnungen prüfen, Gesichter benennen und fr
 <details>
 <summary>Vorschläge</summary>
 
-Vergleiche die vorgeschlagenen Zuordnungen mit bereits bestätigten Fotos. Mit **Gruppe prüfen** öffnest du die Detailansicht und wählst aus, welche Gesichter du zuordnen möchtest.
+Vergleiche die vorgeschlagenen Zuordnungen mit bereits bestätigten Fotos. Mit **Gruppe prüfen** öffnest du die Detailansicht. Über **Auswahl zuordnen** bestätigst du die markierten Gesichter. Unter **Weitere Aktionen** kannst du die Gesichtsgruppe öffnen oder einen Vorschlag verwerfen.
+
+Mit **Markieren** kannst du mehrere Empfehlungen für eine gemeinsame Bestätigung auswählen.
 
 ![Übersicht mit zwei Personenvorschlägen und bestätigten Vergleichsfotos](docs/screenshots/people-review.webp)
 
@@ -81,7 +83,7 @@ Vergleiche die vorgeschlagenen Zuordnungen mit bereits bestätigten Fotos. Mit *
 <details>
 <summary>Ohne Namen</summary>
 
-Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen zuerst die passenden Gesichter. In kleinen Fenstern füllt die geöffnete Gruppe den Arbeitsbereich. Mit **Zur Gruppenliste** kehrst du zur Auswahl zurück.
+Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen zuerst die passenden Gesichter. Über **Aussortieren oder lösen** findest du weitere Gruppenaktionen. In schmalen Fenstern kehrst du mit **Zur Gruppenliste** zur Auswahl zurück.
 
 ![Unbenannte Gesichtsgruppen mit geöffneter Gruppe und Namenssuche](docs/screenshots/people-unnamed.webp)
 
@@ -92,7 +94,7 @@ Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen
 <details>
 <summary>Personen korrigieren</summary>
 
-Wähle eine bereits benannte Person und öffne eine ihrer Gruppen. Markiere falsch zugeordnete Gesichter und weise sie einer anderen Person zu oder wähle **Aus Gesichtsgruppe lösen**, um sie erneut zu prüfen.
+Wähle eine bereits benannte Person und öffne eine ihrer Gruppen. Mit **Person bearbeiten** kannst du den Namen ändern. Markiere falsch zugeordnete Gesichter und weise sie einer anderen Person zu. Unter **Aussortieren oder lösen** kannst du Gesichter aus der geöffneten Gruppe lösen und erneut prüfen.
 
 ![Bestätigte Personen mit geöffneter Gesichtsgruppe zur Korrektur](docs/screenshots/people-corrections.webp)
 
@@ -101,7 +103,7 @@ Wähle eine bereits benannte Person und öffne eine ihrer Gruppen. Markiere fals
 <details>
 <summary>Aussortiert</summary>
 
-Hier findest du **Unbekannte Personen** und **Keine Gesichter**. Mit **Erneut prüfen** legst du ausgewählte Treffer wieder unter **Ohne Namen** vor.
+Öffne **Unbekannte Personen** für aussortierte Gesichter oder **Keine Gesichter** für Fehlerkennungen. Mit **Erneut prüfen** legst du ausgewählte Treffer wieder unter **Ohne Namen** vor.
 
 ![Übersicht der Kategorien unter Aussortiert](docs/screenshots/people-archive.webp)
 
@@ -114,9 +116,9 @@ Hier findest du **Unbekannte Personen** und **Keine Gesichter**. Mit **Erneut pr
 <details>
 <summary>Abgleich prüfen</summary>
 
-Wenn du einen gemeinsamen Ordner eingerichtet hast, kannst du hier abweichende Zuordnungen prüfen. Vergleiche die Entscheidungen und die zugehörigen Bildausschnitte.
+Wenn du einen gemeinsamen Ordner eingerichtet hast, kannst du hier abweichende Zuordnungen prüfen. Vergleiche die Bildausschnitte und wähle bei einer beschreibbaren Freigabe **Übernehmen** unter der passenden Entscheidung. Mit **Zur Fallliste** lässt du den Fall offen.
 
-![Fall aus einem gemeinsamen Ordner mit zwei Entscheidungen und zugehörigen Bildausschnitten](docs/screenshots/people-shared-review.webp)
+![Fall aus einem gemeinsamen Ordner mit zwei nebeneinander angezeigten Entscheidungen und Bildausschnitten](docs/screenshots/people-shared-review.webp)
 
 </details>
 

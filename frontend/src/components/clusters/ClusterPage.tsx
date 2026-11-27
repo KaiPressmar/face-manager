@@ -101,7 +101,7 @@ const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
 const SUGGESTION_RETRY_DELAY_MS = 5000;
-const COMPACT_REVIEW_QUERY = "(max-width: 940px), (max-height: 620px)";
+const COMPACT_REVIEW_QUERY = "(max-width: 1180px), (max-height: 660px)";
 
 const DEFAULT_REVIEW_GROUPS: FaceReviewGroupSummary[] = [
   { group_key: "unknown_person", label: "Unbekannte Personen", face_count: 0, cluster_count: 0 },
@@ -452,8 +452,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   );
   const checkedFaceIds = selectedFaceIds.filter((faceId) => scopeFacesById.has(faceId));
   const selectedFaceIdSet = new Set(checkedFaceIds);
-  const allActionSectionSelected = actionSectionFaceIds.length > 0 &&
-    actionSectionFaceIds.every((id) => selectedFaceIdSet.has(id));
   const effectiveSectionCount = Math.max(
     visibleSectionCount,
     activeSectionIndex >= 0 ? activeSectionIndex + 1 : 0,
@@ -585,9 +583,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     selectedTarget?.type === "cluster"
       ? selectedSummary?.cluster_label?.trim() || `Gruppe ${selectedTarget.clusterId}`
       : actionSection?.label || selectedReviewGroupSummary?.label || "Arbeitsliste";
-
-  const selectedPersonLabel =
-    selectedSummary?.person_name?.trim() || UNKNOWN_PERSON_LABEL;
 
   const openClusters = useMemo(
     () => clusters.filter((cluster) => !(cluster.person_name || "").trim()),
@@ -1302,6 +1297,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     }
     if (!navigationTarget.groupKey && navigationTarget.clusterId === undefined && navigationTarget.reviewView) {
       cancelPendingNavigation();
+      if (resolvedWorkspaceViewRef.current !== navigationTarget.reviewView) setClusterSearch("");
       setWorkspaceView(navigationTarget.reviewView);
       return;
     }
@@ -1433,6 +1429,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       }
       return;
     }
+    // The navigation effect selects an explicit archive category. The default
+    // must not overwrite it using the previous render's selection.
+    if (navigationTarget?.groupKey && reviewGroups.some((group) => group.group_key === navigationTarget.groupKey)) return;
     const selectedIsArchive = selectedTarget?.type === "group" &&
       reviewGroups.some((group) => group.group_key === selectedTarget.groupKey);
     if (!selectedIsArchive) {
@@ -1440,7 +1439,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         ?? reviewGroups.find((group) => group.group_key === "not_face");
       setSelectedTarget(preferred ? { type: "group", groupKey: preferred.group_key } : null);
     }
-  }, [assignedClusters, openClusters, reviewGroups, selectedTarget, workspaceView]);
+  }, [assignedClusters, navigationTarget?.groupKey, openClusters, reviewGroups, selectedTarget, workspaceView]);
 
   useEffect(() => {
     const pendingClusterId = pendingMainScrollClusterIdRef.current;
@@ -1591,6 +1590,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       groupFaces: ClusterFace[],
       groupLabel: string,
       contextLabel: string,
+      opener: HTMLButtonElement,
     ) => {
       try {
         const initialImage = await fetchImageDetail(face.image_id, undefined, { resolveGeometry: true });
@@ -1600,6 +1600,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           initialImage,
           groupLabel,
           contextLabel,
+          opener,
         });
       } catch (error) {
         setWorkflowFeedback({ kind: "error", message: error instanceof Error ? error.message : "Das Foto konnte nicht geöffnet werden." });
@@ -1873,7 +1874,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       });
     }
 
-    return actions;
+    return actions.filter(({ action }) => selectedTarget.type !== "group" ||
+      (selectedTarget.groupKey !== "unknown_person" || action !== "mark_unknown_person") &&
+      (selectedTarget.groupKey !== "not_face" || action !== "mark_not_face"));
   }, [selectedTarget]);
 
   const rememberCompactList = React.useCallback(() => {
@@ -1983,18 +1986,19 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       }
     >
       <header className="review-page__header">
-        <div>
-          <h1>Gesichter prüfen</h1>
-        </div>
+        <h1>Gesichter prüfen</h1>
+        {workspaceView === "suggestions" && !sharedReviewActive && suggestionsPending && suggestionCount > 0 && (
+          <p role="status">Vorschläge werden aktualisiert …</p>
+        )}
       </header>
 
-      <nav className="review-page-tabs" aria-label="Prüfbereiche">
+      <nav className="review-page-tabs" data-shared-tab={sharedLibrary.configured || undefined} aria-label="Prüfbereiche">
         {([
-          ["suggestions", "Vorschläge", "Mögliche Zuordnungen prüfen", suggestionCount],
-          ["open", "Ohne Namen", "Benennen oder aussortieren", openClusters.length],
-          ["people", "Personen korrigieren", "Bestätigte Zuordnungen", assignedPersonCount],
-          ["archive", "Aussortiert", "Unbekannt und Fehlerkennungen", archivedFaceCount],
-        ] as const).map(([view, label, description, count]) => (
+          ["suggestions", "Vorschläge", suggestionCount],
+          ["open", "Ohne Namen", openClusters.length],
+          ["people", "Personen korrigieren", assignedPersonCount],
+          ["archive", "Aussortiert", archivedFaceCount],
+        ] as const).map(([view, label, count]) => (
           <button
             className={!sharedReviewActive && workspaceView === view ? "review-page-tab review-page-tab--active" : "review-page-tab"}
             aria-current={!sharedReviewActive && workspaceView === view ? "true" : undefined}
@@ -2002,9 +2006,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             onClick={() => selectWorkspaceView(view)}
             type="button"
           >
-            <span><strong>{label}</strong><small data-pending={view === "suggestions" && suggestionsPending || undefined}>
-              {view === "suggestions" && suggestionsPending ? "Vorschläge werden aktualisiert …" : description}
-            </small></span>
+            <strong>{label}</strong>
             <b>{view === "suggestions" && count === 0 && (suggestionsLoading || suggestionsPending || suggestionsError) ? "…" : count.toLocaleString()}</b>
           </button>
         ))}
@@ -2014,7 +2016,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             aria-current={sharedReviewActive ? "page" : undefined}
             href={navigationHash({ page: "review", reviewView: "shared" })}
           >
-            <span><strong>Abgleich prüfen</strong><small>Gemeinsamer Ordner</small></span>
+            <strong>Abgleich prüfen</strong>
             <b>{(sharedLibrary.resource?.conflict_count ?? sharedLibrary.resource?.conflicts?.length ?? 0).toLocaleString()}</b>
           </a>
         )}
@@ -2034,6 +2036,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           compactFocus.current = "list";
           selectWorkspaceView(workspaceView);
         }}><span aria-hidden="true">←</span> Zur Gruppenliste</button>}
+        {hasCompactDetail && hasFaceSelection && (
+          <button className="secondary-button cluster-compact-selection" type="button" onClick={() => {
+            const header = headerRef.current;
+            header?.scrollIntoView({ block: "start" });
+            header?.querySelector<HTMLInputElement>('[role="combobox"]')?.focus({ preventScroll: true });
+          }}>Auswahl bearbeiten ({checkedFaceIds.length})</button>
+        )}
         <FaceActionHistory active={active} busy={isMutating} compact={compact} revision={assignmentRevision}
           onBusy={setIsMutating} onChanged={async () => {
             setSelectedFaceIds([]);
@@ -2108,54 +2117,70 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                   : "cluster-detail-topbar"
               }
             >
-              <div className="cluster-detail-topbar__identity">
-                {selectedTarget.type === "cluster" ? (
+              <div className="cluster-detail-topbar__summary">
+                <div className="cluster-detail-topbar__identity">
                   <div className="cluster-detail-topbar__headline">
                     <div className="cluster-detail-topbar__entity">
-                      <strong>{selectedPersonLabel}</strong>
-                      {selectedSummary?.person_name?.trim() && (
-                        <button
-                          className="cluster-icon-button"
-                          type="button"
-                          title="Person bearbeiten"
-                          aria-label="Person bearbeiten"
-                          disabled={isMutating}
-                          onClick={() => {
-                            ensurePersonsLoaded();
-                            setDetailModal({ type: "manage_person" });
-                          }}
-                        >
-                          ✎
-                        </button>
+                      <strong>{selectedSummary?.person_name?.trim() || selectedClusterLabel}</strong>
+                    </div>
+                    {selectedSummary?.person_name?.trim() && (
+                      <div className="cluster-detail-topbar__entity cluster-detail-topbar__entity--secondary">
+                        <span>{selectedClusterLabel}</span>
+                      </div>
+                    )}
+                    {selectedTarget.type === "group" && actionSection && selectedReviewGroupSummary && (
+                      <div className="cluster-detail-topbar__entity cluster-detail-topbar__entity--secondary">
+                        <span>{selectedReviewGroupSummary.label}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="cluster-detail-toolbar">
+                  {selectedSummary?.person_name?.trim() && (
+                    <button
+                      className="cluster-action-button"
+                      type="button"
+                      disabled={isMutating}
+                      onClick={() => {
+                        ensurePersonsLoaded();
+                        setDetailModal({ type: "manage_person" });
+                      }}
+                    >Person bearbeiten</button>
+                  )}
+                  {selectedTarget.type === "group" && !targetFaceIds.length && (
+                    <span className="cluster-detail-toolbar__selection">Wähle eine Gruppe oder einzelne Gesichter.</span>
+                  )}
+                  {hasFaceSelection && <div className="cluster-detail-toolbar__selection">
+                    <span className="cluster-selection-status__count">
+                      {countWithLabel(checkedFaceIds.length, "Gesicht", "Gesichter")} markiert
+                    </span>
+                    <button className="cluster-selection-status__link" type="button" onClick={() => setSelectedFaceIds([])}>
+                      Auswahl aufheben
+                    </button>
+                  </div>}
+
+                  {selectedTarget.type === "group" &&
+                    secondaryActions.filter(({ action }) => action === "restore_to_manual_review").map(renderSecondaryAction)}
+
+                  {secondaryActions.length > 0 && <details className="cluster-secondary-actions"
+                    key={selectedClusterId ?? selectedReviewGroupKey ?? "default"}>
+                    <summary>{selectedTarget.type === "group" ? "Weitere Aktionen" : "Aussortieren oder lösen"}</summary>
+                    <div className="cluster-quick-actions-inline">
+                      {selectedTarget.type === "cluster" && (
+                        <button className="cluster-action-button" type="button" disabled={isMutating}
+                          onClick={() => setDetailModal({ type: "rename_cluster" })}>Gesichtsgruppe umbenennen</button>
+                      )}
+                      {secondaryActions.filter(({ action }) => action !== "restore_to_manual_review").map(renderSecondaryAction)}
+                      {selectedTarget.type === "cluster" && checkedFaceIds.length > removableFaceIds.length && (
+                        <p className="cluster-secondary-actions__scope">
+                          „Aus Gesichtsgruppe lösen“ betrifft nur die markierten Gesichter der geöffneten Gruppe.
+                        </p>
                       )}
                     </div>
-                    <span className="cluster-detail-topbar__divider" aria-hidden="true">
-                      /
-                    </span>
-                    <div className="cluster-detail-topbar__entity cluster-detail-topbar__entity--secondary">
-                      <span>{selectedClusterLabel}</span>
-                      <button
-                        className="cluster-icon-button"
-                          type="button"
-                          title="Gesichtsgruppe umbenennen"
-                          aria-label="Gesichtsgruppe umbenennen"
-                        disabled={isMutating}
-                        onClick={() => setDetailModal({ type: "rename_cluster" })}
-                      >
-                        ✎
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="cluster-detail-topbar__headline">
-                    <div className="cluster-detail-topbar__entity">
-                      <strong>{selectedClusterLabel}</strong>
-                    </div>
-                  </div>
-                )}
-
+                  </details>}
+                </div>
               </div>
-
               {(selectedTarget.type !== "group" || targetFaceIds.length > 0) && <PersonAssignment
                 key={`${selectedClusterId ?? selectedReviewGroupKey}-${actionSection?.key ?? "selection"}-${assignmentRevision}`}
                 people={persons}
@@ -2167,57 +2192,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                 onAssign={(name) => void handleBatchAction("assign_person", targetFaceIds, name)}
               />}
 
-              <div className="cluster-detail-toolbar">
-                <div className="cluster-detail-toolbar__selection">
-                  {(!compactDetail || visibleSections.length !== 1) && <button
-                    className="cluster-selection-status__link"
-                    type="button"
-                    onClick={() => setFaceGroupSelection(actionSectionFaceIds, !allActionSectionSelected)}
-                    disabled={actionSectionFaceIds.length === 0}
-                  >
-                    {allActionSectionSelected ? "Gruppenauswahl aufheben" : "Alle Gesichter dieser Gruppe auswählen"}
-                  </button>}
-                  {hasFaceSelection ? (
-                    <>
-                      <span className="cluster-selection-status__count">
-                        {countWithLabel(checkedFaceIds.length, "Gesicht", "Gesichter")} markiert
-                      </span>
-                      <button
-                        className="cluster-selection-status__link"
-                        type="button"
-                        onClick={() => setSelectedFaceIds([])}
-                      >
-                        Markierung entfernen
-                      </button>
-                    </>
-                  ) : !compactDetail && (
-                    <span className="cluster-selection-status__hint">
-                      {canActOnWholeGroup
-                        ? "Ohne Markierung gilt die Aktion für die gewählte Gesichtsgruppe."
-                        : "Wähle eine Gesichtsgruppe oder markiere einzelne Gesichter."}
-                    </span>
-                  )}
-                </div>
-
-                {secondaryActions.length > 0 && (
-                  compactDetail ? (
-                    <div className="cluster-quick-actions-compact">
-                      {secondaryActions.filter((item) => item.action === "restore_to_manual_review").map(renderSecondaryAction)}
-                      <details>
-                        <summary>{selectedTarget.type === "group" ? "Weitere Aktionen" : "Aussortieren oder lösen"}</summary>
-                        <div className="cluster-quick-actions-inline">
-                          {secondaryActions.filter((item) => item.action !== "restore_to_manual_review").map(renderSecondaryAction)}
-                        </div>
-                      </details>
-                    </div>
-                  ) : <div className="cluster-quick-actions-inline">
-                    <span className="cluster-quick-actions-inline__label">
-                      {hasFaceSelection ? "Ausgewählte aussortieren:" : "Gesichtsgruppe aussortieren:"}
-                    </span>
-                    {secondaryActions.map(renderSecondaryAction)}
-                  </div>
-                )}
-              </div>
             </header>
 
             <div
@@ -2280,12 +2254,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                           loaded={section.loaded}
                           selectedFaceIds={checkedFaceIds}
                           onToggleFace={toggleFaceSelection}
-                          onOpenImage={(face, groupFaces) =>
+                          onOpenImage={(face, groupFaces, opener) =>
                             void openFaceContext(
                               face,
                               groupFaces,
                               section.label,
                               faceGalleryContextLabel,
+                              opener,
                             )
                           }
                         />
@@ -2476,7 +2451,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             if (faceGallery.opener) {
               const opener = faceGallery.opener;
               window.requestAnimationFrame(() => {
-                if (opener.isConnected && opener.getClientRects().length) opener.focus();
+                if (opener.isConnected && opener.getClientRects().length) opener.focus({ preventScroll: true });
               });
             }
           }}

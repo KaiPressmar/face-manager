@@ -11,7 +11,13 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- In „Personen“ siehst du Vorschläge und Gesichter auch in kleineren Fenstern früher. Häufige Aktionen stehen direkt bei der Auswahl.
+- Beim Abgleich gemeinsamer Ordner kannst du die beiden Gesichtsausschnitte direkt vergleichen und zur Fallliste zurückkehren.
+
 ### Behoben
+
+- Die Suche in „Personen“ filtert beim Wechsel in einen anderen Prüfbereich nicht mehr die neue Liste.
+- Beim Schließen eines Originalfotos bleibt der Tastaturfokus am zugehörigen Gesicht. Direkte Links zu aussortierten Fehlerkennungen öffnen die richtige Kategorie.
 
 ## [0.19.0] - 2026-11-27
 
