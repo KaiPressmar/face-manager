@@ -162,8 +162,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
 
   const dateError = dateEntryError ?? (fromDate && toDate && fromDate > toDate ? reversedDates : undefined);
   const waitingForRouteAlbum = Boolean(openAlbumId && albumId !== openAlbumId);
-  const canLoad = active && !dateError && !waitingForRouteAlbum;
-  const canLoadPoints = canLoad && !isJourney && pointGrid !== null;
+  const canShowResults = !dateError && !waitingForRouteAlbum;
+  const canLoad = active && canShowResults;
+  const showPoints = canShowResults && !isJourney && pointGrid !== null;
+  const canLoadPoints = active && showPoints;
   const handleGridChange = useCallback((grid: MapGrid) => {
     setPointGrid((current) => current?.columns === grid.columns && current.rows === grid.rows ? current : grid);
   }, []);
@@ -180,7 +182,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const dates = { from_date: queryFrom || undefined, to_date: queryTo || undefined, album_id: albumId || undefined };
   // A background refresh can keep displaying the last route for this exact selection.
   const journeyKey = JSON.stringify([queryFrom, queryTo, region, journeyDetail, albumId]);
-  const journeyState = isJourney && canLoad && journeyResult?.key === journeyKey ? journeyResult : null;
+  const journeyState = isJourney && canShowResults && journeyResult?.key === journeyKey ? journeyResult : null;
   const baseJourney = journeyState?.data;
   const tripsSource = baseJourney ?? (trip ? journeyResult?.data : null);
   const journey = useMemo(() => {
@@ -190,11 +192,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   }, [baseJourney, includeInferred, trip]);
   const journeyStop = journey?.stops.find((stop) => stop.id === journeyStopId);
   const stopDay = journeyStop?.start.slice(0, 10);
-  const canLoadImages = canLoad && (!isJourney || Boolean(journeyStop));
+  const showImages = canShowResults && (!isJourney || Boolean(journeyStop));
+  const canLoadImages = active && showImages;
   const selection: GeoPhotoSelection = isJourney && journeyStop
     ? { ...dates, image_ids: journeyStop.image_ids }
     : { ...dates, bounds: filterBounds };
   const stopMembership = useMemo(() => journeyStop?.image_ids.join(","), [journeyStop]);
+  const inferredIds = useMemo(() => journeyStop?.inferred_image_ids?.length
+    ? new Set(journeyStop.inferred_image_ids) : undefined, [journeyStop]);
   const journeySelection: GeoPhotoSelection | undefined = journey?.photo_count
     ? { ...dates, image_ids: journey.stops.flatMap((stop) => stop.image_ids) }
     : undefined;
@@ -206,16 +211,16 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const filterKey = JSON.stringify(isJourney ? ["journey", journeyKey, journeyStopId, stopMembership] : selection);
   const pointKey = JSON.stringify([pointQuery, libraryRevision]);
   const imageKey = JSON.stringify([filterKey, libraryRevision]);
-  const pointResult = canLoadPoints && pointsResult?.key === pointKey ? pointsResult : null;
-  const imageResult = canLoadImages && imagesResult?.key === imageKey ? imagesResult : null;
+  const pointResult = showPoints && pointsResult?.key === pointKey ? pointsResult : null;
+  const imageResult = showImages && imagesResult?.key === imageKey ? imagesResult : null;
   const points = pointResult?.error ? null : pointResult?.data;
   const collection = pointsResult?.data;
   const images = imageResult?.data?.items ?? EMPTY_IMAGES;
   const imageTotal = imageResult?.data?.total ?? 0;
   const nextCursor = imageResult?.data?.nextCursor;
   const hasExtendedResults = imageResult?.data?.extended ?? false;
-  const pointsLoading = canLoadPoints && !pointResult;
-  const imagesLoading = canLoadImages && !imageResult;
+  const pointsLoading = showPoints && !pointResult;
+  const imagesLoading = showImages && !imageResult;
   const openedGallery = active ? gallery : null;
 
   const clearGallery = useCallback(() => setGallery(null), []);
@@ -321,9 +326,9 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     // The key encodes every query value. The debounce only starts for a changed query.
   }, [canLoadPoints, pointKey, pointRefresh]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (restoreResultScroll.current === undefined) resultsRef.current?.scrollTo({ top: 0 });
-  }, [canLoadImages, filterKey]);
+  }, [filterKey]);
 
   useLayoutEffect(() => {
     if (restoreResultScroll.current === undefined || !active || !resultsRef.current) return;
@@ -740,11 +745,9 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
             : hasFilters && <button type="button" onClick={reset}>Alle Standorte anzeigen</button>}
         </div>}
         {imagesLoading && <div className="gps-page__skeletons" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <div key={index} />)}</div>}
-        <div className="gps-page__grid">{images.map((image, index) => {
-          const inferred = journeyStop?.inferred_image_ids;
-          return <MapPhotoTile key={image.id} image={image} inferred={inferred?.length ? inferred.includes(image.id) : undefined}
-            onOpen={(event) => openGallery(event.currentTarget, index)} />;
-        })}</div>
+        <div className="gps-page__grid">{images.map((image, index) =>
+          <MapPhotoTile key={image.id} image={image} inferred={inferredIds?.has(image.id)}
+            onOpen={(event) => openGallery(event.currentTarget, index)} />)}</div>
         {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
         {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
         </>}

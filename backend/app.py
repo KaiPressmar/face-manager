@@ -177,7 +177,7 @@ from .services.storage import (
     list_images_page,
     list_cluster_summaries,
     list_persons,
-    list_person_suggestions,
+    get_person_suggestion_snapshot,
     list_review_suggestions,
     mark_faces_with_review_status,
     dismiss_person_suggestion,
@@ -231,6 +231,8 @@ _image_geometry_timer: threading.Timer | None = None
 _IMAGE_GEOMETRY_RETRY_SECONDS = 1.0
 _IMAGE_GEOMETRY_RETRY_BATCH = 32
 _MAX_PENDING_IMAGE_GEOMETRY = 1024
+PERSON_SUGGESTIONS_PENDING_HEADER = "X-Person-Suggestions-Pending"
+ASSIGNMENT_LIBRARY_ID_HEADER = "X-Assignment-Library-Id"
 
 
 def _describe_background_activity() -> str | None:
@@ -802,7 +804,10 @@ def configure_cors(application: FastAPI) -> None:
         allow_origins=allowed_origins,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=[PREVIEW_PROOF_HEADER, PREVIEW_ORIGINAL_HEADER],
+        expose_headers=[
+            PREVIEW_PROOF_HEADER, PREVIEW_ORIGINAL_HEADER,
+            PERSON_SUGGESTIONS_PENDING_HEADER, ASSIGNMENT_LIBRARY_ID_HEADER,
+        ],
     )
 
 
@@ -2040,10 +2045,16 @@ def _assignment_snapshot(read):
 
 
 @app.get("/api/person-suggestions")
-def api_person_suggestions():
+def api_person_suggestions(response: Response):
     """List conservative, reviewable matches for existing people."""
+    generation = _get_media_library_generation()
     with _cluster_operation_lock:
-        return list_person_suggestions()
+        suggestions, pending, library_id = get_person_suggestion_snapshot()
+    _get_media_library_generation(generation)
+    response.headers[PERSON_SUGGESTIONS_PENDING_HEADER] = "1" if pending else "0"
+    response.headers[ASSIGNMENT_LIBRARY_ID_HEADER] = library_id
+    response.headers["Cache-Control"] = "no-store"
+    return suggestions
 
 
 @app.post("/api/person-suggestions/accept")

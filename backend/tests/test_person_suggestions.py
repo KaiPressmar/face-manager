@@ -122,6 +122,29 @@ class PersonSuggestionTest(unittest.TestCase):
         self.assertTrue(proposal["recommended"])
         self.assertEqual(proposal["runner_up_margin"], 0)
 
+    def test_assignment_snapshot_distinguishes_pending_from_published_empty(self):
+        _, confirmed = self._group("Anna")
+        _, first = self._group()
+        _, second = self._group()
+        self._faces(confirmed, [(1, 0)] * 2)
+        self._faces(first, [(1, 0)] * 3)
+        self._faces(second, [(1, 0)] * 3)
+        self.assertTrue(storage.refresh_pending_person_suggestions())
+        proposals, pending, library_id = storage.get_person_suggestion_snapshot()
+        self.assertFalse(pending)
+        self.assertEqual(len(proposals), 2)
+
+        storage.accept_person_suggestion_assignments([self._decision(proposals[0])])
+        self.assertEqual(storage.get_person_suggestion_snapshot(), ([], True, library_id))
+
+        remaining = self._refresh()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(storage.get_person_suggestion_snapshot(), (remaining, False, library_id))
+        storage.accept_person_suggestion_assignments([self._decision(remaining[0])])
+        self.assertEqual(storage.get_person_suggestion_snapshot(), ([], True, library_id))
+        self.assertTrue(storage.refresh_pending_person_suggestions())
+        self.assertEqual(storage.get_person_suggestion_snapshot(), ([], False, library_id))
+
     def test_proposal_needs_support_from_three_distinct_canonical_photos(self):
         _, confirmed = self._group("Anna")
         _, open_group = self._group()

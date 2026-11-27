@@ -60,7 +60,7 @@ function RepairCandidate({ candidate, busy, selected, onChange }: {
   </label>;
 }
 
-export default function ArchiveRepair() {
+export default function ArchiveRepair({ active }: { active: boolean }) {
   const [preview, setPreview] = useState<ArchiveRepairPreview>();
   const [selected, setSelected] = useState<string[]>([]);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -160,7 +160,7 @@ export default function ArchiveRepair() {
       {preview.latest_batch && <button type="button" className="secondary-button" disabled={busy}
         onClick={() => setConfirmation("undo")}>Letzte Korrektur rückgängig machen</button>}
     </div>}
-    {confirmation && <Confirmation undo={confirmation === "undo"}
+    {active && confirmation && <Confirmation undo={confirmation === "undo"}
       count={confirmation === "undo" ? preview?.latest_batch?.count ?? 0 : selected.length}
       onClose={() => setConfirmation(undefined)} onConfirm={() => void run(confirmation)} />}
   </section>;

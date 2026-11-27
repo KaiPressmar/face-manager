@@ -760,7 +760,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     setShowAlbumLibrary(true);
   };
   const selectedCount = selectedAlbumImages?.size ?? 0;
-  const toggleAlbumPhoto = (id: number) => {
+  const toggleAlbumPhoto = useCallback((id: number) => {
     setSelectedAlbumImages((current) => {
       if (!current) return null;
       const next = new Set(current);
@@ -768,7 +768,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       else next.add(id);
       return next;
     });
-  };
+  }, []);
   const updateActiveAlbum = async (action: "cover" | "remove") => {
     if (!albumId || !selectedAlbumImages?.size || albumMutation.current || staleResults || isLoading || loadError) return;
     const ids = [...selectedAlbumImages];
@@ -1038,6 +1038,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       {(!loadError || images.length > 0) && (
         <ImageGrid
         key={galleryRevision}
+        active={active}
         images={images}
         isLoading={(isLoading || staleResults) && images.length === 0}
         interactionsDisabled={staleResults || isLoading || loadError}
