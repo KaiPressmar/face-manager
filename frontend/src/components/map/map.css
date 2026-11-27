@@ -48,7 +48,7 @@
 .gps-map__controls button:disabled:hover{background:rgba(255,255,255,.09)}
 .gps-page button:focus-visible,.gps-map__credit:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .gps-page__map-actions button{min-height:34px}
-@media(max-width:1200px){
+@media(max-width:1120px){
   .gps-page__layout{grid-template-columns:1fr}
   .gps-page__results{height:auto;min-height:0;max-height:none;overflow:visible}
   .gps-page__grid,.gps-page__skeletons{grid-template-columns:repeat(auto-fill,minmax(132px,1fr))}

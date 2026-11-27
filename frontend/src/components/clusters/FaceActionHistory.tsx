@@ -15,9 +15,10 @@ export function describeFaceAction(action: FaceHistoryAction): string {
     : `${count} als „Kein Gesicht“ aussortiert`;
 }
 
-export default function FaceActionHistory({ active, busy, revision, onBusy, onChanged }: {
+export default function FaceActionHistory({ active, busy, compact = false, revision, onBusy, onChanged }: {
   active: boolean;
   busy: boolean;
+  compact?: boolean;
   revision: number;
   onBusy: (busy: boolean) => void;
   onChanged: () => Promise<void>;
@@ -94,16 +95,18 @@ export default function FaceActionHistory({ active, busy, revision, onBusy, onCh
   };
 
   if (!history && !loadError && !feedback) return null;
+  const controls = (history?.undo || history?.redo) && <>
+    <button ref={undoButton} type="button" className="secondary-button" disabled={busy || !history.undo}
+      title={history.undo ? describeFaceAction(history.undo) : undefined} onClick={() => void replay("undo")}>Rückgängig</button>
+    <button ref={redoButton} type="button" className="secondary-button" disabled={busy || !history.redo}
+      title={history.redo ? describeFaceAction(history.redo) : undefined} onClick={() => void replay("redo")}>Wiederholen</button>
+  </>;
   return <section className="face-action-history" aria-label="Änderungsverlauf">
     <div className="face-action-history__tools">
-      {(history?.undo || history?.redo) && <>
-        <button ref={undoButton} type="button" className="secondary-button" disabled={busy || !history.undo}
-          title={history.undo ? describeFaceAction(history.undo) : undefined} onClick={() => void replay("undo")}>Rückgängig</button>
-        <button ref={redoButton} type="button" className="secondary-button" disabled={busy || !history.redo}
-          title={history.redo ? describeFaceAction(history.redo) : undefined} onClick={() => void replay("redo")}>Wiederholen</button>
-      </>}
+      {!compact && controls}
       {history && <details>
-        <summary>Letzte Änderungen</summary>
+        <summary aria-label={compact ? "Letzte Änderungen" : undefined}>{compact ? "Änderungen" : "Letzte Änderungen"}</summary>
+        {compact && controls && <div className="face-action-history__tools">{controls}</div>}
         {history.blocked_reason ? <p>{history.blocked_reason}</p> : history.entries.length > 0 ? <ol>
           {history.entries.map((entry) => <li key={entry.id}>
             <span>{describeFaceAction(entry)}{entry.undone ? " · rückgängig gemacht" : ""}</span>

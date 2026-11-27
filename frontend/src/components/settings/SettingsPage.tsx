@@ -669,9 +669,6 @@ const SettingsPage: React.FC<{
       <div className="settings-page__header" id="settings-start">
         <div>
           <h1 className="settings-page__title">Einstellungen</h1>
-          <p className="settings-page__copy">
-            Passe Erkennung, Dateinamen und Darstellung an oder sichere deine Daten.
-          </p>
         </div>
       </div>
 

@@ -807,7 +807,8 @@ const BackgroundTasksStatus: React.FC<{
       >
         <span className="activity-center__indicator" aria-hidden="true" />
         <span className="activity-center__trigger-copy">
-          <strong>{compactLabel}</strong>
+          <strong className="activity-center__status-label">{compactLabel}</strong>
+          <strong className="activity-center__compact-label" aria-hidden="true">Aktivitäten</strong>
           <small>{compactEta}</small>
         </span>
         {unseenFinished > 0 && <b aria-label={`${unseenFinished} neue Abschlüsse`}>{unseenFinished}</b>}

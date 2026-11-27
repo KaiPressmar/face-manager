@@ -31,11 +31,10 @@ const Layout: React.FC<{
   onShowHelp: () => void;
   onImportStateChange: (open: boolean) => void;
   topbarAction?: TopbarAction;
-  invitation?: React.ReactNode;
   preferenceNotice?: React.ReactNode;
   children: React.ReactNode;
 }> = ({ page, navigation, sharedLibrary, sharedLibraryReadError, onChangePage, onShowReleaseNotes, onShowUpdate,
-  onShowHelp, onImportStateChange, topbarAction, invitation, preferenceNotice, children }) => {
+  onShowHelp, onImportStateChange, topbarAction, preferenceNotice, children }) => {
   return (
     <div className="app-shell">
       <a className="workspace-skip-link" href="#app-workspace" onClick={(event) => {
@@ -50,23 +49,24 @@ const Layout: React.FC<{
       />
 
       <div className="app-main">
-        <Topbar route={`${navigation.id}:${window.location.hash}`}
-          sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
-          onImportStateChange={onImportStateChange} action={topbarAction} />
-        <nav className="workspace-history" aria-label="Ansichtsverlauf">
-          <button type="button" disabled={!navigation.canBack} onClick={() => navigation.step(-1)}
-            title={navigation.backPage ? `Zurück zu „${labels[navigation.backPage]}“` : "Zurück"} aria-keyshortcuts="Alt+ArrowLeft">
-            <span aria-hidden="true">←</span> Zurück
-          </button>
-          <button type="button" disabled={!navigation.canForward} onClick={() => navigation.step(1)}
-            title={navigation.forwardPage ? `Vorwärts zu „${labels[navigation.forwardPage]}“` : "Vorwärts"} aria-keyshortcuts="Alt+ArrowRight">
-            <span aria-hidden="true">→</span> Vorwärts
-          </button>
-          <button type="button" className="workspace-history__reset" onClick={navigation.reset}>Zur Ausgangsansicht</button>
-        </nav>
+        <div className="workspace-header">
+          <nav className="workspace-history" aria-label="Ansichtsverlauf">
+            <button type="button" aria-label="Zurück" disabled={!navigation.canBack} onClick={() => navigation.step(-1)}
+              title={navigation.backPage ? `Zurück zu „${labels[navigation.backPage]}“` : "Zurück"} aria-keyshortcuts="Alt+ArrowLeft">
+              <span aria-hidden="true">←</span><span className="workspace-history__direction">Zurück</span>
+            </button>
+            <button type="button" aria-label="Vorwärts" disabled={!navigation.canForward} onClick={() => navigation.step(1)}
+              title={navigation.forwardPage ? `Vorwärts zu „${labels[navigation.forwardPage]}“` : "Vorwärts"} aria-keyshortcuts="Alt+ArrowRight">
+              <span aria-hidden="true">→</span><span className="workspace-history__direction">Vorwärts</span>
+            </button>
+            <button type="button" className="workspace-history__reset" onClick={navigation.reset}>Zur Ausgangsansicht</button>
+          </nav>
+          <Topbar route={`${navigation.id}:${window.location.hash}`}
+            sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
+            onImportStateChange={onImportStateChange} action={topbarAction} />
+        </div>
         {navigation.notice && <p className="workspace-history__notice" role="status">{navigation.notice}</p>}
         {preferenceNotice}
-        {invitation}
         <main id="app-workspace" className="app-viewport" tabIndex={-1}>{children}</main>
       </div>
     </div>

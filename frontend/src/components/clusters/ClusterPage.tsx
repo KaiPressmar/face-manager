@@ -44,6 +44,7 @@ import { navigationHash } from "../../utils/navigation";
 import SharedLibraryReview from "./SharedLibraryReview";
 import FaceActionHistory, { describeFaceAction } from "./FaceActionHistory";
 import { useWorkspaceNavigation } from "../../hooks/useWorkspaceNavigation";
+import "./cluster-workspace.css";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
 
@@ -100,6 +101,7 @@ const LIVE_REFRESH_BATCH_MS = 2500;
 const FINAL_REFRESH_DELAY_MS = 120;
 const USER_IDLE_DELAY_MS = 900;
 const SUGGESTION_RETRY_DELAY_MS = 5000;
+const COMPACT_REVIEW_QUERY = "(max-width: 940px), (max-height: 620px)";
 
 const DEFAULT_REVIEW_GROUPS: FaceReviewGroupSummary[] = [
   { group_key: "unknown_person", label: "Unbekannte Personen", face_count: 0, cluster_count: 0 },
@@ -163,6 +165,17 @@ function mergeReviewGroups(reviewGroups: FaceReviewGroupSummary[]): FaceReviewGr
 
 const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibrary, onLeaveSharedReview, onNavigateReview, active = true }) => {
   const sharedReviewActive = navigationTarget?.reviewView === "shared";
+  const [matchesCompact, setMatchesCompact] = useState(() => window.matchMedia(COMPACT_REVIEW_QUERY).matches);
+  const compact = matchesCompact && Boolean(onNavigateReview);
+  const compactDetail = compact && (navigationTarget?.clusterId !== undefined || Boolean(navigationTarget?.groupKey));
+  const showDetail = !compact || compactDetail;
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_REVIEW_QUERY);
+    const update = () => setMatchesCompact(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   const [clusters, setClusters] = useState<ClusterSummary[]>([]);
   const [reviewGroups, setReviewGroups] =
     useState<FaceReviewGroupSummary[]>(DEFAULT_REVIEW_GROUPS);
@@ -222,6 +235,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const suggestionAnchor = useRef<{ scroller: HTMLElement; cards: { key: string; top: number }[] }>();
   const detailsRequestIdRef = useRef(0);
   const appliedNavigationTokenRef = useRef<number | null>(null);
+  const compactRoutePending = compactDetail && appliedNavigationTokenRef.current !== navigationTarget?.token;
   const pendingNavigationClusterIdRef = useRef<number | null>(null);
   const pendingMainScrollClusterIdRef = useRef<number | null>(null);
   const selectionSourceRef = useRef<"explicit" | "navigation" | "scroll" | "system">("system");
@@ -234,22 +248,42 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const headerRef = useRef<HTMLDivElement | null>(null);
   const detailContentRef = useRef<HTMLDivElement | null>(null);
   const sidebarRef = useRef<HTMLElement>(null);
+  const reviewPageRef = useRef<HTMLDivElement>(null);
+  const compactBackRef = useRef<HTMLButtonElement>(null);
+  const compactSidebarScroll = useRef<Partial<Record<ReviewWorkspaceView, number>>>({});
+  const compactListOpener = useRef<HTMLElement | null>(null);
+  const compactFocus = useRef<"list" | "detail">();
+  const pendingCompactArchiveSection = useRef<string>();
   const restoredReview = useRef<ReviewWorkspace>();
   const pendingWorkspaceScroll = useRef<Pick<ReviewWorkspace, "scrollTop" | "sidebarTop">>();
   const pendingArchiveScroll = useRef<string>();
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
   const liveRefreshTimerRef = useRef<number | null>(null);
   const needsCatchUpRefreshRef = useRef(false);
+  const getDetailScroller = React.useCallback(
+    () => {
+      const inner = detailContentRef.current;
+      if (!compact && inner && getComputedStyle(inner).overflowY === "auto") return inner;
+      return reviewPageRef.current?.closest<HTMLElement>(".page-content") ?? null;
+    },
+    [compact],
+  );
 
   const { replaceWithOverview } = useWorkspaceNavigation<ReviewWorkspace>("review", {
     capture: () => ({
       view: workspaceView, target: selectedTarget, archive: archiveSelection, search: clusterSearch,
       sectionCount: visibleSectionCount, scrollTop: detailContentRef.current?.scrollTop ?? 0,
-      sidebarTop: sidebarRef.current?.querySelector(".cluster-nav-section__body--scroll")?.scrollTop ?? 0,
+      sidebarTop: sidebarRef.current?.querySelector(".cluster-nav-section__body--scroll, .cluster-person-tree__list")?.scrollTop ?? 0,
     }),
     restore: (snapshot) => {
       restoredReview.current = snapshot;
       pendingWorkspaceScroll.current = { scrollTop: snapshot?.scrollTop ?? 0, sidebarTop: snapshot?.sidebarTop ?? 0 };
+      compactFocus.current = undefined;
+      pendingCompactArchiveSection.current = undefined;
+      if (!snapshot) {
+        compactSidebarScroll.current = {};
+        compactListOpener.current = null;
+      }
       pendingArchiveScroll.current = undefined;
       cancelPendingNavigation();
       selectionSourceRef.current = "navigation";
@@ -406,9 +440,15 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   );
   const actionSection = detailSections[activeSectionIndex];
   const actionSectionFaceIds = actionSection?.faces.map((face) => face.id) ?? [];
+  const scopedSections = useMemo(
+    () => compactDetail && activeSectionKey
+      ? detailSections.filter((section) => section.key === activeSectionKey)
+      : detailSections,
+    [activeSectionKey, compactDetail, detailSections],
+  );
   const scopeFacesById = useMemo(
-    () => new Map(detailSections.flatMap((section) => section.faces.map((face) => [face.id, face] as const))),
-    [detailSections],
+    () => new Map(scopedSections.flatMap((section) => section.faces.map((face) => [face.id, face] as const))),
+    [scopedSections],
   );
   const checkedFaceIds = selectedFaceIds.filter((faceId) => scopeFacesById.has(faceId));
   const selectedFaceIdSet = new Set(checkedFaceIds);
@@ -418,8 +458,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     visibleSectionCount,
     activeSectionIndex >= 0 ? activeSectionIndex + 1 : 0,
   );
-  const visibleSections = detailSections.slice(0, effectiveSectionCount);
-  const hiddenSectionCount = detailSections.length - visibleSections.length;
+  const visibleSections = useMemo(
+    () => scopedSections.slice(0, effectiveSectionCount),
+    [scopedSections, effectiveSectionCount],
+  );
+  const hiddenSectionCount = scopedSections.length - visibleSections.length;
 
   useEffect(() => {
     const position = pendingWorkspaceScroll.current;
@@ -427,11 +470,31 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     const frame = window.requestAnimationFrame(() => {
       if (pendingWorkspaceScroll.current !== position) return;
       detailContentRef.current?.scrollTo({ top: position.scrollTop });
-      sidebarRef.current?.querySelector(".cluster-nav-section__body--scroll")?.scrollTo({ top: position.sidebarTop });
+      sidebarRef.current?.querySelector(".cluster-nav-section__body--scroll, .cluster-person-tree__list")?.scrollTo({ top: position.sidebarTop });
       pendingWorkspaceScroll.current = undefined;
     });
     return () => window.cancelAnimationFrame(frame);
   }, [active, detailSections, isDetailsLoading, isListLoading, workspaceView]);
+
+  useLayoutEffect(() => {
+    if (!active || !compact || sharedReviewActive || workspaceView === "suggestions" || pendingWorkspaceScroll.current) return;
+    const focus = compactFocus.current;
+    const scroller = getDetailScroller();
+    if (!scroller) return;
+    if (compactDetail) {
+      scroller.scrollTop = 0;
+      if (focus === "detail") {
+        compactBackRef.current?.focus({ preventScroll: true });
+        compactFocus.current = undefined;
+      }
+    } else if (focus === "list") {
+      scroller.scrollTop = compactSidebarScroll.current[workspaceView] ?? 0;
+      const opener = compactListOpener.current;
+      (opener?.isConnected && sidebarRef.current?.contains(opener) ? opener : sidebarRef.current)
+        ?.focus({ preventScroll: true });
+      compactFocus.current = undefined;
+    }
+  }, [active, compact, compactDetail, getDetailScroller, navigationTarget?.token, sharedReviewActive, workspaceView]);
   const faceGalleryContextLabel =
     selectedTarget?.type === "group"
       ? `Kategorie: ${selectedReviewGroupSummary?.label || "Gesichter prüfen"}`
@@ -450,10 +513,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     behavior: ScrollBehavior = "smooth",
   ) => {
     const node = sectionRefs.current[sectionKey];
-    const scroller = detailContentRef.current;
+    const scroller = getDetailScroller();
     if (!node || !scroller) {
       return false;
     }
+    // A direct compact route already shows only its selected group.
+    if (compactDetail && activeSectionKey === sectionKey) return true;
     const nextTop =
       scroller.scrollTop +
       node.getBoundingClientRect().top -
@@ -461,10 +526,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       8;
     scroller.scrollTo({ top: Math.max(0, nextTop), behavior });
     return true;
-  }, []);
+  }, [activeSectionKey, compactDetail, getDetailScroller]);
 
   const captureDetailAnchor = React.useCallback(() => {
-    const scroller = detailContentRef.current;
+    if (!showDetail) return null;
+    const scroller = getDetailScroller();
     if (!scroller || pendingMainScrollClusterIdRef.current !== null) {
       return null;
     }
@@ -482,14 +548,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       key: anchor.key,
       offset: anchor.node.getBoundingClientRect().top - scrollerTop,
     };
-  }, []);
+  }, [getDetailScroller, showDetail]);
 
   const restoreDetailAnchor = React.useCallback(
     (anchor: ReturnType<typeof captureDetailAnchor>) => {
       if (!anchor || pendingMainScrollClusterIdRef.current !== null) return;
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
-          const scroller = detailContentRef.current;
+          const scroller = getDetailScroller();
           const node = sectionRefs.current[anchor.key];
           if (!scroller || !node || pendingMainScrollClusterIdRef.current !== null) {
             return;
@@ -500,7 +566,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         });
       });
     },
-    [],
+    [getDetailScroller],
   );
 
   // Compact shape for the sidebar, which lists the archive sub-groups the same
@@ -1141,19 +1207,19 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
   useEffect(() => {
     const selectionSource = selectionSourceRef.current;
-    loadTargetDetails(selectedTarget);
+    if (showDetail || workspaceView === "archive") loadTargetDetails(selectedTarget);
     if (selectionSource !== "scroll") {
       setSelectedFaceIds([]);
       setDetailModal(null);
     }
     selectionSourceRef.current = "system";
-  }, [loadTargetDetails, selectedTarget]);
+  }, [loadTargetDetails, selectedTarget, showDetail, workspaceView]);
 
   // Eagerly load only the selected cluster and its immediate neighbours so the
   // initial view and nearby scrolling feel instant. Everything else is loaded
   // lazily by the viewport observer below instead of fetching the whole scope.
   useEffect(() => {
-    if (scopedClusterIds.length === 0) {
+    if (!showDetail || compact || scopedClusterIds.length === 0) {
       return;
     }
     const anchorIndex =
@@ -1163,14 +1229,15 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     const startIndex = Math.max(0, anchorIndex - 1);
     const endIndex = Math.min(scopedClusterIds.length, anchorIndex + 2);
     scopedClusterIds.slice(startIndex, endIndex).forEach(loadClusterFaces);
-  }, [scopedClusterIds, selectedClusterId, loadClusterFaces]);
+  }, [scopedClusterIds, selectedClusterId, loadClusterFaces, compact, showDetail]);
 
   // Load the remaining groups as their section approaches the viewport, so a
   // long scope (every group of a person, every new group) never fetches all
   // faces up front. Sections reserve their height meanwhile, keeping scrolling
   // stable.
   useEffect(() => {
-    const pending = detailSections.filter(
+    if (!active || !showDetail) return;
+    const pending = visibleSections.filter(
       (section) => section.clusterId != null && !section.loaded,
     );
     if (pending.length === 0) {
@@ -1199,11 +1266,11 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           }
         });
       },
-      { root: detailContentRef.current, rootMargin: "600px 0px", threshold: 0 },
+      { root: getDetailScroller(), rootMargin: "600px 0px", threshold: 0 },
     );
     nodeToClusterId.forEach((_, node) => observer.observe(node));
     return () => observer.disconnect();
-  }, [detailSections, loadClusterFaces]);
+  }, [active, getDetailScroller, loadClusterFaces, showDetail, visibleSections]);
 
   useEffect(() => {
     if (selectedTarget?.type !== "cluster") {
@@ -1240,7 +1307,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     }
     if (navigationTarget.groupKey) {
       cancelPendingNavigation();
-      const sectionKey = navigationTarget.archiveClusterId === undefined ? undefined : `cluster-${navigationTarget.archiveClusterId}`;
+      const sectionKey = navigationTarget.archiveClusterId === undefined
+        ? pendingCompactArchiveSection.current
+        : `cluster-${navigationTarget.archiveClusterId}`;
+      pendingCompactArchiveSection.current = undefined;
       setArchiveSelection(sectionKey ? { groupKey: navigationTarget.groupKey, sectionKey } : null);
       pendingArchiveScroll.current = sectionKey;
       setWorkspaceView("archive");
@@ -1284,6 +1354,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   useEffect(() => {
     const sectionKey = pendingArchiveScroll.current;
     if (!sectionKey || !reviewGroupDetails || reviewGroupDetails.group_key !== selectedReviewGroupKey || isDetailsLoading) return;
+    if (compactDetail && activeArchiveSectionKey !== sectionKey) return;
     const frame = window.requestAnimationFrame(() => {
       if (pendingArchiveScroll.current !== sectionKey) return;
       pendingArchiveScroll.current = undefined;
@@ -1293,7 +1364,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       replaceWithOverview();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [isDetailsLoading, replaceWithOverview, reviewGroupDetails, scrollToSection, selectedReviewGroupKey]);
+  }, [activeArchiveSectionKey, compactDetail, isDetailsLoading, replaceWithOverview, reviewGroupDetails, scrollToSection, selectedReviewGroupKey]);
 
   /**
    * After a group was emptied by an assignment, continue with the one that
@@ -1805,6 +1876,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     return actions;
   }, [selectedTarget]);
 
+  const rememberCompactList = React.useCallback(() => {
+    if (!compact || compactDetail) return;
+    compactSidebarScroll.current[workspaceView] = getDetailScroller()?.scrollTop ?? 0;
+    const focused = document.activeElement;
+    compactListOpener.current = focused instanceof HTMLElement && sidebarRef.current?.contains(focused) ? focused : null;
+    compactFocus.current = "detail";
+  }, [compact, compactDetail, getDetailScroller, workspaceView]);
+
   const selectCluster = (
     clusterId: number,
     options: { scrollToCluster?: boolean; source?: "explicit" | "navigation" | "scroll" | "system" } = {},
@@ -1834,18 +1913,21 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   };
 
   const scrollMainContentToTop = React.useCallback(() => {
-    const scroller = detailContentRef.current;
+    if (compact) return;
+    const scroller = getDetailScroller();
     if (scroller) {
       scroller.scrollTo({ top: 0, behavior: "smooth" });
     }
-  }, []);
+  }, [compact, getDetailScroller]);
 
   /** Jump to one group from the sidebar (table-of-contents style). */
   const selectArchiveSection = React.useCallback(
     (sectionKey: string) => {
       if (selectedReviewGroupKey === null) return;
       const clusterId = sectionKey.startsWith("cluster-") ? Number(sectionKey.slice("cluster-".length)) : undefined;
-      if (onNavigateReview && clusterId !== undefined) {
+      if (onNavigateReview && (clusterId !== undefined || compact)) {
+        rememberCompactList();
+        if (clusterId === undefined) pendingCompactArchiveSection.current = sectionKey;
         onNavigateReview({ groupKey: selectedReviewGroupKey, archiveClusterId: clusterId });
         return;
       }
@@ -1854,7 +1936,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       setArchiveSelection({ groupKey: selectedReviewGroupKey, sectionKey });
       scrollToSection(sectionKey);
     },
-    [cancelPendingNavigation, onNavigateReview, scrollToSection, selectedReviewGroupKey],
+    [cancelPendingNavigation, compact, onNavigateReview, rememberCompactList, scrollToSection, selectedReviewGroupKey],
   );
 
   const selectWorkspaceView = (view: ReviewWorkspaceView) => {
@@ -1868,8 +1950,32 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     setWorkspaceView(view);
   };
 
+  const renderSecondaryAction = (item: (typeof secondaryActions)[number]) => {
+    const requiresSelection = item.action === "remove_from_cluster";
+    return (
+      <button
+        key={item.action}
+        type="button"
+        className="cluster-action-button"
+        title={requiresSelection && removableFaceIds.length === 0
+          ? "Zuerst Gesichter dieser Gruppe markieren"
+          : item.description}
+        disabled={isMutating || targetFaceIds.length === 0 || (requiresSelection && removableFaceIds.length === 0)}
+        onClick={() => runQuickAction(item.action)}
+      >
+        {item.label}
+      </button>
+    );
+  };
+
+  const hasCompactDetail = compactDetail && workspaceView !== "suggestions" && !sharedReviewActive;
+  const hasCompactList = compact && !compactDetail && workspaceView !== "suggestions" && !sharedReviewActive;
   return (
     <div
+      ref={reviewPageRef}
+      data-compact-review={compact || undefined}
+      data-compact-detail={hasCompactDetail || undefined}
+      data-compact-list={hasCompactList || undefined}
       className={
         workspaceView === "suggestions" || sharedReviewActive
           ? "review-page"
@@ -1896,7 +2002,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             onClick={() => selectWorkspaceView(view)}
             type="button"
           >
-            <span><strong>{label}</strong><small>{view === "suggestions" && suggestionsPending ? "Vorschläge werden aktualisiert …" : description}</small></span>
+            <span><strong>{label}</strong><small data-pending={view === "suggestions" && suggestionsPending || undefined}>
+              {view === "suggestions" && suggestionsPending ? "Vorschläge werden aktualisiert …" : description}
+            </small></span>
             <b>{view === "suggestions" && count === 0 && (suggestionsLoading || suggestionsPending || suggestionsError) ? "…" : count.toLocaleString()}</b>
           </button>
         ))}
@@ -1921,14 +2029,20 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           {workflowFeedback.message}
         </p>
       )}
-      {!sharedReviewActive && <FaceActionHistory active={active} busy={isMutating} revision={assignmentRevision}
-        onBusy={setIsMutating} onChanged={async () => {
-          setSelectedFaceIds([]);
-          setWorkflowFeedback(null);
-          setAssignmentRevision((value) => value + 1);
-          ensurePersonsLoaded(true);
-          await refreshAllData();
-        }} />}
+      {!sharedReviewActive && <div className={hasCompactDetail ? "cluster-compact-navigation" : "cluster-workspace-navigation"}>
+        {hasCompactDetail && <button type="button" className="secondary-button cluster-compact-back" ref={compactBackRef} onClick={() => {
+          compactFocus.current = "list";
+          selectWorkspaceView(workspaceView);
+        }}><span aria-hidden="true">←</span> Zur Gruppenliste</button>}
+        <FaceActionHistory active={active} busy={isMutating} compact={compact} revision={assignmentRevision}
+          onBusy={setIsMutating} onChanged={async () => {
+            setSelectedFaceIds([]);
+            setWorkflowFeedback(null);
+            setAssignmentRevision((value) => value + 1);
+            ensurePersonsLoaded(true);
+            await refreshAllData();
+          }} />
+      </div>}
 
       <div ref={suggestionPane} hidden={workspaceView !== "suggestions" || sharedReviewActive}>
         <ReviewInbox
@@ -1939,6 +2053,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           error={suggestionsError}
           onRetry={() => void loadSuggestions()}
           onOpenCluster={(clusterId) => {
+            rememberCompactList();
             setWorkspaceView("open");
             selectCluster(clusterId, { scrollToCluster: true, source: "explicit" });
           }}
@@ -1953,7 +2068,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       </div>
       {workspaceView !== "suggestions" && !sharedReviewActive && (
       <div className="cluster-workspace">
-      <aside className="cluster-workspace__sidebar" ref={sidebarRef}>
+      <aside className="cluster-workspace__sidebar" ref={sidebarRef} hidden={compactDetail} tabIndex={-1}
+        aria-label="Gesichtsgruppen und Suche">
         <ClusterList
           mode={workspaceView}
           clusters={clusters}
@@ -1961,8 +2077,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           selected={selectedClusterId}
           selectedReviewGroupKey={selectedReviewGroupKey}
           highlightedClusterId={highlightedClusterId}
-          onSelect={(clusterId) => selectCluster(clusterId, { scrollToCluster: true })}
+          onSelect={(clusterId) => {
+            rememberCompactList();
+            selectCluster(clusterId, { scrollToCluster: true });
+          }}
           onSelectReviewGroup={(groupKey) => {
+            rememberCompactList();
             scrollMainContentToTop();
             selectReviewGroup(groupKey as FaceReviewGroupKey);
           }}
@@ -1975,9 +2095,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         />
       </aside>
 
-      <div className="cluster-workspace__main">
-        {isListLoading && !selectedTarget ? (
-          <div style={{ opacity: 0.5, paddingTop: 40, textAlign: "center" }}>Ansicht wird geladen…</div>
+      {showDetail && <div className="cluster-workspace__main">
+        {compactRoutePending || (isListLoading && !selectedTarget) ? (
+          <div role="status" style={{ opacity: 0.7, paddingTop: 24, textAlign: "center" }}>Ansicht wird geladen…</div>
         ) : selectedTarget ? (
           <div className="cluster-detail-layout">
             <header
@@ -2049,14 +2169,14 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
               <div className="cluster-detail-toolbar">
                 <div className="cluster-detail-toolbar__selection">
-                  <button
+                  {(!compactDetail || visibleSections.length !== 1) && <button
                     className="cluster-selection-status__link"
                     type="button"
                     onClick={() => setFaceGroupSelection(actionSectionFaceIds, !allActionSectionSelected)}
                     disabled={actionSectionFaceIds.length === 0}
                   >
                     {allActionSectionSelected ? "Gruppenauswahl aufheben" : "Alle Gesichter dieser Gruppe auswählen"}
-                  </button>
+                  </button>}
                   {hasFaceSelection ? (
                     <>
                       <span className="cluster-selection-status__count">
@@ -2070,7 +2190,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                         Markierung entfernen
                       </button>
                     </>
-                  ) : (
+                  ) : !compactDetail && (
                     <span className="cluster-selection-status__hint">
                       {canActOnWholeGroup
                         ? "Ohne Markierung gilt die Aktion für die gewählte Gesichtsgruppe."
@@ -2080,34 +2200,21 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                 </div>
 
                 {secondaryActions.length > 0 && (
-                  <div className="cluster-quick-actions-inline">
+                  compactDetail ? (
+                    <div className="cluster-quick-actions-compact">
+                      {secondaryActions.filter((item) => item.action === "restore_to_manual_review").map(renderSecondaryAction)}
+                      <details>
+                        <summary>{selectedTarget.type === "group" ? "Weitere Aktionen" : "Aussortieren oder lösen"}</summary>
+                        <div className="cluster-quick-actions-inline">
+                          {secondaryActions.filter((item) => item.action !== "restore_to_manual_review").map(renderSecondaryAction)}
+                        </div>
+                      </details>
+                    </div>
+                  ) : <div className="cluster-quick-actions-inline">
                     <span className="cluster-quick-actions-inline__label">
                       {hasFaceSelection ? "Ausgewählte aussortieren:" : "Gesichtsgruppe aussortieren:"}
                     </span>
-                    {secondaryActions.map((item) => {
-                      // Removing faces only makes sense for a partial pick.
-                      const requiresSelection = item.action === "remove_from_cluster";
-                      return (
-                        <button
-                          key={item.action}
-                          type="button"
-                          className="cluster-action-button"
-                          title={
-                            requiresSelection && removableFaceIds.length === 0
-                              ? "Zuerst Gesichter dieser Gruppe markieren"
-                              : item.description
-                          }
-                          disabled={
-                            isMutating ||
-                            targetFaceIds.length === 0 ||
-                            (requiresSelection && removableFaceIds.length === 0)
-                          }
-                          onClick={() => runQuickAction(item.action)}
-                        >
-                          {item.label}
-                        </button>
-                      );
-                    })}
+                    {secondaryActions.map(renderSecondaryAction)}
                   </div>
                 )}
               </div>
@@ -2168,6 +2275,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                         </header>
                         <ClusterFacesGrid
                           faces={section.faces}
+                          getScrollContainer={getDetailScroller}
                           reservedCount={section.faceCount}
                           loaded={section.loaded}
                           selectedFaceIds={checkedFaceIds}
@@ -2204,7 +2312,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
             Kein Eintrag ausgewählt.
           </div>
         )}
-      </div>
+      </div>}
       </div>
       )}
 

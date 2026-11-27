@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 
 module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot = async () => {}) {
+  await checkCompactMap(browser, errors, newPage, webBase, screenshot);
   const page = await newPage(browser, 1212, 799, errors);
   let albumId;
   try {
@@ -37,7 +38,7 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     assert.equal(new URL(page.url()).hash, route);
     await page.getByRole('button', { name: 'Filter zurücksetzen', exact: true }).click();
     await page.waitForFunction(() => location.hash === '#/weltkarte');
-    assert.equal(await from.inputValue(), '');
+    assert.equal(await from.count(), 0);
     await page.getByRole('button', { name: 'Zurück', exact: true }).click();
     await page.waitForFunction((hash) => location.hash === hash, route);
     await locations.and(page.locator('[aria-pressed=true]')).waitFor();
@@ -51,7 +52,7 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await page.getByRole('button', { name: 'Zur Ausgangsansicht', exact: true }).click();
     await page.waitForFunction(() => location.hash === '#/weltkarte');
     await locations.and(page.locator('[aria-pressed=true]')).waitFor();
-    assert.equal(await from.inputValue(), '');
+    assert.equal(await from.count(), 0);
     await page.reload();
     await locations.and(page.locator('[aria-pressed=true]')).waitFor();
     assert.equal(new URL(page.url()).hash, '#/weltkarte');
@@ -90,6 +91,8 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await gallery.getByRole('button', { name: 'Galerie schließen', exact: true }).click();
 
     await page.setViewportSize({ width: 320, height: 680 });
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Karte', exact: true }).click();
+    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
     await page.getByRole('button', { name: 'Bild exportieren', exact: true }).click();
     const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     const preview = book.locator('.gps-album-dialog__preview[aria-busy="false"] img');
@@ -126,7 +129,85 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
   }
 };
 
+async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
+  const page = await newPage(browser, 320, 760, errors, { isMobile: true, hasTouch: true });
+  try {
+    await page.addInitScript(() => localStorage.setItem('face-manager:help-introduction-v1', 'seen'));
+    await page.goto(`${webBase}/#/weltkarte`);
+    const panes = page.getByRole('group', { name: 'Kartenansicht' });
+    const mapButton = panes.getByRole('button', { name: 'Karte', exact: true });
+    const photoButton = panes.getByRole('button', { name: 'Fotos', exact: true });
+    const filters = page.getByRole('button', { name: 'Kartenfilter', exact: true });
+    const map = page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' });
+    const results = page.locator('#gps-map-results');
+    await map.waitFor();
+    await page.locator('.gps-map__marker').first().waitFor();
+    assert.equal(await mapButton.getAttribute('aria-pressed'), 'true');
+    assert.equal(await results.isHidden(), true);
+    assert.equal(await filters.getAttribute('aria-expanded'), 'false');
+    const frame = await map.boundingBox();
+    assert.ok(frame && frame.y < 650 && frame.width <= 320, 'The map does not fit in the initial compact workspace');
+    await screenshot(page, 'fotokarte-schmal');
+
+    const mapControls = page.getByRole('group', { name: 'Kartensteuerung' });
+    const pan = mapControls.getByText('Verschieben', { exact: true });
+    const east = mapControls.getByRole('button', { name: 'Nach Osten verschieben' });
+    assert.equal(await east.count(), 0);
+    await mapControls.getByRole('button', { name: 'Vergrößern' }).click();
+    const zoomed = await map.getAttribute('viewBox');
+    await pan.click();
+    await east.press('Enter');
+    assert.notEqual(await map.getAttribute('viewBox'), zoomed);
+    await pan.click();
+    await mapControls.getByRole('button', { name: 'Weltkarte anzeigen' }).click();
+
+    await filters.click();
+    const period = page.getByLabel('Zeitraum', { exact: true });
+    await period.selectOption('custom');
+    const from = page.getByLabel('Von', { exact: true });
+    await from.waitFor();
+    await from.press('Escape');
+    assert.equal(await filters.getAttribute('aria-expanded'), 'false');
+    assert.ok(await filters.evaluate((element) => document.activeElement === element));
+    await filters.click();
+    assert.ok(await from.isVisible(), 'Custom dates were lost after collapsing the filters');
+    await period.selectOption('all');
+    await filters.click();
+
+    await photoButton.click();
+    await results.getByText('85 Fotos', { exact: true }).waitFor();
+    assert.equal(await map.count(), 0);
+    await screenshot(page, 'kartenfotos-schmal');
+    const scroll = await results.evaluate((element) => { element.scrollTop = 300; return element.scrollTop; });
+    assert.ok(scroll > 150);
+    await mapButton.click();
+    await map.waitFor();
+    await photoButton.click();
+    await results.waitFor();
+    assert.equal(await results.evaluate((element) => element.scrollTop), scroll);
+
+    await mapButton.click();
+    const marker = page.locator('.gps-map__marker').first();
+    await marker.press('Enter');
+    await results.waitFor();
+    assert.equal(await photoButton.getAttribute('aria-pressed'), 'true');
+    assert.ok(await results.evaluate((element) => document.activeElement === element), 'A marker did not transfer focus to its photos');
+    assert.equal(await results.evaluate((element) => element.scrollTop), 0);
+    await page.setViewportSize({ width: 768, height: 600 });
+    await panes.waitFor();
+    assert.equal(await photoButton.getAttribute('aria-pressed'), 'true');
+    assert.ok(await results.isVisible());
+    console.log('PASS compact map: secondary navigation, custom dates, Escape focus, photo scroll and marker shortcut');
+  } finally {
+    await page.close();
+  }
+}
+
 async function checkMapRefresh(page) {
+  const places = page.getByText('Orte aus meinen Fotos', { exact: true });
+  await places.click();
+  const placeSearch = page.getByRole('searchbox', { name: 'Fotoorte suchen' });
+  await placeSearch.fill('Berlin');
   const tiles = page.locator('.gps-page__photo');
   const results = page.locator('#gps-map-results');
   const more = results.getByRole('button', { name: 'Weitere Fotos laden', exact: true });
@@ -153,6 +234,8 @@ async function checkMapRefresh(page) {
     await request;
     assert.equal(await tiles.count(), 72, 'A background refresh cleared the previous map photos');
     assert.ok(await page.locator('.gps-map__marker').first().isVisible());
+    assert.ok(await placeSearch.isVisible(), 'A background refresh closed the photo place search');
+    assert.equal(await placeSearch.inputValue(), 'Berlin');
     assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
     release();
     await more.and(page.locator(':enabled')).waitFor();
@@ -160,5 +243,6 @@ async function checkMapRefresh(page) {
     assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
   } finally {
     release();
+    await places.click();
   }
 }
