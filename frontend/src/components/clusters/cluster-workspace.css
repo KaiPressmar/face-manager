@@ -279,3 +279,95 @@
     padding: 10px;
   }
 }
+
+.review-workspace-slot {
+  height: 100%;
+}
+
+.review-page .review-page__header[hidden],
+.review-page[data-profile-correction] .cluster-workspace__sidebar[hidden] {
+  display: none;
+}
+
+.person-review-navigation {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  flex: none;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.person-review-navigation__primary,
+.person-review-navigation__secondary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.person-review-navigation :is(button, a) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 40px;
+  padding: 5px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: .86rem;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.person-review-navigation :is(button, a):hover,
+.person-review-navigation [aria-current="page"] {
+  color: var(--text);
+}
+.person-review-navigation [aria-current="page"] {
+  border-bottom-color: var(--accent);
+}
+.person-review-navigation b {
+  font-variant-numeric: tabular-nums;
+  font-size: .8em;
+}
+.person-review-return {
+  flex: none;
+  margin-bottom: 8px;
+}
+.review-page[data-profile-correction] .cluster-workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+.review-page[data-compact-detail] .person-review-navigation {
+  display: none;
+}
+@media (pointer: coarse) {
+  .person-review-navigation :is(button, a) {
+    min-height: 44px;
+  }
+}
+
+.face-action-history__dialog {
+  width: min(560px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+}
+.face-action-history__dialog header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.face-action-history__dialog h2 {
+  margin: 0;
+  font-size: 1.2rem;
+}

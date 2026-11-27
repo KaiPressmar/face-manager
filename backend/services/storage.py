@@ -30,6 +30,7 @@ from ..db.schema import (
     VALID_FACE_REVIEW_STATUSES,
     get_conn,
     normalize_person_name_key,
+    person_name_sort_key,
 )
 from ..error_logging import (
     DEFAULT_FILE_LOG_LEVEL,
@@ -63,6 +64,7 @@ VALID_UI_THEMES = ("system", "light", "dark")
 DEFAULT_AUTOMATIC_UPDATE_CHECKS = True
 UNKNOWN_PERSON_LABEL = "Unbekannt"
 MAX_IMAGE_PAGE_SIZE = 200
+MAX_PERSON_DIRECTORY_PAGE_SIZE = 100
 SQLITE_SAFE_ID_BATCH_SIZE = 500
 _RECLUSTER_FACE_IDS_TABLE = "face_manager_recluster_face_ids"
 _RECLUSTER_PROTECTED_CLUSTER_IDS_TABLE = (
@@ -1746,7 +1748,9 @@ def normalize_face_status_filters(face_statuses):
     return sorted({str(status) for status in face_statuses} & allowed)
 
 
-def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_photos=False, selection=None):
+def _matching_images_cte(
+    folders=None, persons=None, face_statuses=None, *, all_photos=False, selection=None, person_id=None,
+):
     """Build the common CTE used for image pagination queries."""
     folders = folders or []
     persons = _normalize_person_filters(persons)
@@ -1757,7 +1761,7 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_
 
     face_clause = ""
     face_params = []
-    if not all_photos and not persons and not face_statuses:
+    if not all_photos and not persons and not face_statuses and person_id is None:
         face_clause = """
         AND EXISTS (
             SELECT 1 FROM face f
@@ -1801,8 +1805,23 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_
         """
         status_params = list(face_statuses)
 
+    person_images = ""
+    profile_params = []
+    profile_location_join = ""
+    if person_id is not None:
+        person_images = """
+        person_images AS (
+            SELECT DISTINCT f.image_id
+            FROM cluster c
+            JOIN face f ON f.cluster_id = c.id AND f.review_status = ?
+            WHERE c.person_id = ?
+        ),
+        """
+        profile_params = [FACE_REVIEW_STATUS_ACTIVE, person_id]
+        profile_location_join = "JOIN person_images ON person_images.image_id = location.image_id"
+
     sql = f"""
-    WITH ranked_locations AS (
+    WITH {person_images} ranked_locations AS (
         SELECT
             location.image_id,
             location.path,
@@ -1813,6 +1832,7 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_
                 PARTITION BY location.image_id ORDER BY location.path
             ) AS location_rank
         FROM image_location location
+        {profile_location_join}
         {location_where}
     ),
     matching_images AS (
@@ -1831,7 +1851,7 @@ def _matching_images_cte(folders=None, persons=None, face_statuses=None, *, all_
         {status_clause}
     )
     """
-    return sql, [*params, *selection_params, *face_params, *person_params, *status_params]
+    return sql, [*profile_params, *params, *selection_params, *face_params, *person_params, *status_params]
 
 
 def _image_order_by(prefix: str, sort_by: str, sort_direction: str):
@@ -1897,6 +1917,7 @@ def list_images_page(
     *,
     all_photos: bool = False,
     selection: GeoPhotoSelection | None = None,
+    person_id: int | None = None,
 ):
     """List one page of images with clustered faces and preferred locations."""
     folders = folders or []
@@ -1920,12 +1941,13 @@ def list_images_page(
         limit,
         offset,
         all_photos,
+        person_id,
     )
 
     def load_page():
         cte, params = _matching_images_cte(
             folders=folders, persons=persons, face_statuses=face_statuses, all_photos=all_photos,
-            selection=selection,
+            selection=selection, person_id=person_id,
         )
         matching_order = _image_order_by("matching_images.", sort_by, sort_direction)
         paged_order = _image_order_by("paged_images.", sort_by, sort_direction)
@@ -2426,7 +2448,8 @@ def list_cluster_summaries():
                 c.id AS cluster_id,
                 c.label AS cluster_label,
                 p.name AS person_name,
-                COUNT(f.id) AS face_count
+                COUNT(f.id) AS face_count,
+                MIN(f.id) AS representative_face_id
             FROM cluster c
             JOIN face f ON f.cluster_id = c.id
             LEFT JOIN person p ON c.person_id = p.id
@@ -2447,6 +2470,7 @@ def list_cluster_summaries():
                 "cluster_label": r["cluster_label"],
                 "person_name": r["person_name"],
                 "face_count": int(r["face_count"]),
+                "representative_face_id": r["representative_face_id"],
             }
             for r in rows
         ]
@@ -2509,7 +2533,8 @@ def _load_cluster_summary(cluster_id: int):
             c.id AS cluster_id,
             c.label AS cluster_label,
             p.name AS person_name,
-            COUNT(f.id) AS face_count
+            COUNT(f.id) AS face_count,
+            MIN(f.id) AS representative_face_id
         FROM cluster c
         JOIN face f ON f.cluster_id = c.id
         LEFT JOIN person p ON c.person_id = p.id
@@ -2527,6 +2552,7 @@ def _load_cluster_summary(cluster_id: int):
         "cluster_label": row["cluster_label"],
         "person_name": row["person_name"],
         "face_count": int(row["face_count"]),
+        "representative_face_id": row["representative_face_id"],
     }
 
 
@@ -3421,27 +3447,48 @@ def rename_cluster(cluster_id: int, label: str):
     invalidate_image_query_cache()
 
 
-def rename_person(person_id: int, name: str):
-    """Rename one person and keep all assigned clusters attached."""
-    conn = get_conn()
-    cur = conn.cursor()
-    person_row = cur.execute(
-        "SELECT id FROM person WHERE id = ?",
-        (person_id,),
-    ).fetchone()
-    if person_row is None:
-        conn.close()
-        raise LookupError(f"Person {person_id} not found")
+class StalePersonRenameTargetError(ValueError):
+    """The name has a different owner from the one the user confirmed."""
 
-    canonical_person_id = _resolve_person_id(cur, name)
-    if canonical_person_id != person_id:
-        cur.execute(
-            "UPDATE cluster SET person_id = ? WHERE person_id = ?",
-            (canonical_person_id, person_id),
-        )
-        cur.execute("DELETE FROM person WHERE id = ?", (person_id,))
-    conn.commit()
-    conn.close()
+
+_UNGUARDED_PERSON_RENAME = object()
+
+
+def rename_person(person_id: int, name: str, *, expected_target_person_id=_UNGUARDED_PERSON_RENAME):
+    """Rename or explicitly merge a person while keeping assigned clusters attached."""
+    normalized_name = (name or "").strip()
+    if not normalized_name:
+        raise ValueError("Missing person_name")
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if cur.execute("SELECT 1 FROM person WHERE id = ?", (person_id,)).fetchone() is None:
+            raise LookupError(f"Person {person_id} not found")
+
+        if expected_target_person_id is _UNGUARDED_PERSON_RENAME:
+            canonical_person_id = _resolve_person_id(cur, normalized_name)
+        else:
+            # Resolve the confirmed target while holding the writer transaction.
+            target_ids = [row["id"] for row in cur.execute(
+                "SELECT id FROM person WHERE id != ? AND person_name_key(name) = ?",
+                (person_id, normalize_person_name_key(normalized_name)),
+            )]
+            expected_ids = [] if expected_target_person_id is None else [expected_target_person_id]
+            if target_ids != expected_ids:
+                raise StalePersonRenameTargetError(
+                    "Das Namensziel hat sich geändert. Prüfe den Namen und die Personen erneut."
+                )
+            canonical_person_id = person_id if expected_target_person_id is None else expected_target_person_id
+            if canonical_person_id == person_id:
+                cur.execute("UPDATE person SET name = ? WHERE id = ? AND name != ?",
+                            (normalized_name, person_id, normalized_name))
+
+        if canonical_person_id != person_id:
+            cur.execute(
+                "UPDATE cluster SET person_id = ? WHERE person_id = ?",
+                (canonical_person_id, person_id),
+            )
+            cur.execute("DELETE FROM person WHERE id = ?", (person_id,))
     invalidate_image_query_cache()
     return canonical_person_id
 
@@ -4182,6 +4229,74 @@ def _load_persons():
     ).fetchall()
     conn.close()
     return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+
+_PERSON_DIRECTORY_STATS = """
+    SELECT p.id, p.name, MIN(f.id) AS representative_face_id,
+           COUNT(DISTINCT f.image_id) AS photo_count
+    FROM directory_people p
+    LEFT JOIN cluster c ON c.person_id = p.id
+    LEFT JOIN face f ON f.cluster_id = c.id AND f.review_status = ?
+        AND EXISTS (SELECT 1 FROM image_location WHERE image_id = f.image_id)
+    GROUP BY p.id, p.name
+    ORDER BY person_name_sort_key(p.name), person_name_key(p.name), p.id
+"""
+
+
+def list_person_directory(search: str = "", limit: int = 24, offset: int = 0) -> dict:
+    """Return one page of profiles, aggregating faces only for the requested people."""
+    search_key = person_name_sort_key(search)
+    limit = max(1, min(limit, MAX_PERSON_DIRECTORY_PAGE_SIZE))
+    offset = max(0, offset)
+    where = "WHERE instr(person_name_sort_key(name), ?) > 0" if search_key else ""
+    filter_params = [search_key] if search_key else []
+
+    def load_page():
+        with closing(get_conn()) as conn:
+            conn.execute("BEGIN")
+            total = conn.execute(f"SELECT COUNT(*) FROM person {where}", filter_params).fetchone()[0]
+            rows = conn.execute(
+                f"""WITH directory_people AS (
+                        SELECT id, name FROM person {where}
+                        ORDER BY person_name_sort_key(name), person_name_key(name), id
+                        LIMIT ? OFFSET ?
+                    )
+                    {_PERSON_DIRECTORY_STATS}""",
+                (*filter_params, limit, offset, FACE_REVIEW_STATUS_ACTIVE),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        return {
+            "items": items, "total": total, "offset": offset, "limit": limit,
+            "has_more": offset + len(items) < total,
+        }
+
+    return app_cache.get_or_set(
+        ("person_directory", search_key, limit, offset),
+        load_page,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={QUERY_CACHE_TAG_IMAGES, QUERY_CACHE_TAG_PERSONS},
+    )
+
+
+def get_person_directory_entry(person_id: int) -> dict | None:
+    """Read one profile using the same portrait and photo scope as the directory."""
+    def load_entry():
+        with closing(get_conn()) as conn:
+            row = conn.execute(
+                f"""WITH directory_people AS (
+                        SELECT id, name FROM person WHERE id = ?
+                    )
+                    {_PERSON_DIRECTORY_STATS}""",
+                (person_id, FACE_REVIEW_STATUS_ACTIVE),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    return app_cache.get_or_set(
+        ("person_directory_entry", person_id),
+        load_entry,
+        ttl_seconds=QUERY_CACHE_TTL_SECONDS,
+        tags={QUERY_CACHE_TAG_IMAGES, QUERY_CACHE_TAG_PERSONS},
+    )
 
 
 def list_filename_rename_candidates(

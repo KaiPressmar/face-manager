@@ -1,10 +1,12 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { faceCropUrl, type PersonSuggestion, type PersonSuggestionDecision, type ReviewSuggestion } from "../../utils/api";
-import { useModalFocus } from "../../hooks/useModalFocus";
+import type { ReviewProposal } from "../../utils/navigation";
 import "./review-workflow.css";
 
 interface Props {
+  openProposal?: ReviewProposal;
+  onNavigateProposal: (target?: ReviewProposal) => void;
   personSuggestions: PersonSuggestion[];
   reviewSuggestions: ReviewSuggestion[];
   busy: boolean;
@@ -14,10 +16,10 @@ interface Props {
   onOpenCluster: (clusterId: number) => void;
   onOpenFace?: (faceId: number, proposalToken: string, opener: HTMLButtonElement) => void;
   onAcceptPerson: (decision: PersonSuggestionDecision) => Promise<boolean>;
-  onAcceptSelectedPeople: (decisions: PersonSuggestionDecision[]) => void;
-  onDismissPerson: (item: PersonSuggestion) => void;
-  onAcceptReview: (suggestions: ReviewSuggestion[]) => void;
-  onDismissReview: (item: ReviewSuggestion) => void;
+  onAcceptSelectedPeople: (decisions: PersonSuggestionDecision[]) => Promise<boolean>;
+  onDismissPerson: (item: PersonSuggestion) => Promise<boolean>;
+  onAcceptReview: (suggestions: ReviewSuggestion[]) => Promise<boolean>;
+  onDismissReview: (item: ReviewSuggestion) => Promise<boolean>;
   onOpenNewFaces: () => void;
 }
 
@@ -71,7 +73,7 @@ const FaceSelection: React.FC<FaceSelectionProps> = ({
         />
       );
       return (
-        <div className="review-person-face" key={id}>
+        <div className="review-person-face" key={id} data-selected={Boolean(onToggle && loads[id] === "loaded" && !excluded.has(id)) || undefined}>
           {onOpenFace ? (
             <button
               type="button"
@@ -94,7 +96,6 @@ const FaceSelection: React.FC<FaceSelectionProps> = ({
                 disabled={blocked || loads[id] !== "loaded"}
                 onChange={() => onToggle(id)}
               />
-              <span>Auswählen</span>
             </label>
           )}
         </div>
@@ -132,44 +133,62 @@ const MoreActions: React.FC<React.PropsWithChildren> = ({ children }) => (
   </details>
 );
 
-interface PersonDetailProps {
-  item: PersonSuggestion;
-  current: PersonSuggestion | undefined;
-  stale: boolean;
-  busy: boolean;
+const facesLabel = (count: number) => count === 1 ? "1 Gesicht" : `${count} Gesichter`;
+const archiveLabel = (item: ReviewSuggestion) =>
+  item.review_status === "not_face" ? "Kein Gesicht" : "Unbekannte Person";
+
+type Proposal =
+  | { kind: "person"; item: PersonSuggestion }
+  | { kind: "archive"; item: ReviewSuggestion };
+
+const itemKey = (proposal: Proposal) => proposal.kind === "person" ? personKey(proposal.item) : archiveKey(proposal.item);
+const targetMatches = (proposal: Proposal, target: ReviewProposal) =>
+  proposal.kind === target.kind && proposal.item.cluster_id === target.clusterId;
+
+interface DetailProps {
+  proposal: Proposal;
+  current: Proposal | undefined;
   blocked: boolean;
-  initialExclusions: ReadonlySet<number>;
+  conflicting: boolean;
   onClose: () => void;
   onRefresh: () => void;
   onOpenCluster: () => void;
   onOpenFace?: OpenFace;
   onAccept: Props["onAcceptPerson"];
+  onAcceptReview: Props["onAcceptReview"];
+  onDismiss: () => Promise<boolean>;
 }
 
-const PersonDetail: React.FC<PersonDetailProps> = ({
-  item, current, stale, busy, blocked, initialExclusions, onClose, onRefresh, onOpenCluster, onOpenFace, onAccept,
+const ProposalDetail: React.FC<DetailProps> = ({
+  proposal, current, blocked, conflicting, onClose, onRefresh, onOpenCluster, onOpenFace,
+  onAccept, onAcceptReview, onDismiss,
 }) => {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const [visibleCount, setVisibleCount] = useState(FACE_BATCH_SIZE);
   const [loads, setLoads] = useState<FaceLoads>({});
-  const [excluded, setExcluded] = useState<Set<number>>(() => new Set(initialExclusions));
+  const [excluded, setExcluded] = useState<ReadonlySet<number>>(EMPTY_EXCLUSIONS);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
-  useModalFocus(dialogRef, onClose, !busy && !saving);
-
-  const ids = item.face_ids.slice(0, visibleCount);
+  const person = proposal.kind === "person" ? proposal.item : undefined;
+  const archive = proposal.kind === "archive" ? proposal.item : undefined;
+  const allIds = person?.face_ids ?? archive?.preview_face_ids ?? [];
+  const ids = allIds.slice(0, visibleCount);
   const selected = selectedFaces(ids, loads, excluded);
   const waiting = ids.some((id) => !loads[id]);
-  const disabled = blocked || saving || stale;
+  const completeArchive = !!archive && archive.face_count > 0 && archive.face_count === allIds.length;
+  const stale = !current || itemKey(current) !== itemKey(proposal);
+  const disabled = blocked || saving || stale || conflicting;
+  const canAssign = !disabled && !!person?.proposal_token && !waiting && selected.length > 0;
+  const canFile = !disabled && completeArchive && allIds.every((id) => loads[id] === "loaded");
 
-  const accept = async () => {
-    if (disabled || waiting || !selected.length) return;
+  useLayoutEffect(() => titleRef.current?.focus({ preventScroll: true }), []);
+
+  const save = async (action: () => Promise<boolean>) => {
+    if (disabled) return;
     setSaving(true);
     setFailed(false);
     try {
-      const saved = await onAccept(personDecision(item, selected, "detail"));
-      if (saved) onClose();
+      if (await action()) onClose();
       else setFailed(true);
     } catch {
       setFailed(true);
@@ -179,361 +198,386 @@ const PersonDetail: React.FC<PersonDetailProps> = ({
   };
 
   return (
-    <div className="modal-backdrop review-person-detail-backdrop" onMouseDown={(event) => {
-      if (event.target === event.currentTarget && !busy && !saving) onClose();
-    }}>
-      <section className="review-person-detail" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId}>
-        <header className="review-person-detail__header">
-          <div>
-            <h2 id={titleId}>Gruppe prüfen</h2>
-            <p>Automatischer Vorschlag für <strong>{item.person_name}</strong></p>
-          </div>
-          <button type="button" className="modal-close-button" aria-label="Gruppenprüfung schließen" disabled={busy || saving} onClick={onClose}>×</button>
-        </header>
-        {stale || failed ? (
-          <div className="review-workflow-feedback" role="alert">
-            <span>{stale ? "Der Vorschlag hat sich geändert." : "Die Zuordnung konnte nicht gespeichert werden."}</span>
-            <button type="button" className="secondary-button" disabled={busy || saving} onClick={() => {
+    <section className="review-person-detail" aria-label={person ? "Gruppe prüfen" : "Ablagevorschlag prüfen"}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || saving) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}>
+      <button className="review-person-detail__back" type="button" disabled={saving} onClick={onClose}>
+        <span aria-hidden="true">← </span>Zu den Vorschlägen
+      </button>
+      <header>
+        <h2 ref={titleRef} tabIndex={-1}>
+          {person ? `Zuordnung zu ${person.person_name}` : `Als „${archiveLabel(archive!)}“ ablegen`}
+        </h2>
+        <p>{person ? `${person.face_count} in der Gruppe · ${allIds.length} im Vorschlag` : facesLabel(archive!.face_count)}</p>
+      </header>
+      {(stale || failed || conflicting) && (
+        <div className="review-workflow-feedback" role="alert">
+          <span>{stale ? "Der Vorschlag hat sich geändert." : conflicting
+            ? "Widersprüchliche Vorschläge. Prüfe die Gesichtsgruppe einzeln."
+            : "Die Änderung konnte nicht gespeichert werden."}</span>
+          {(stale || failed) && (
+            <button type="button" className="secondary-button" disabled={blocked || saving} onClick={() => {
               setFailed(false);
               onRefresh();
-            }}>{current && current.proposal_token !== item.proposal_token ? "Aktuellen Vorschlag laden" : "Vorschläge neu laden"}</button>
-          </div>
-        ) : null}
-        <ComparisonFaces ids={item.reference_face_ids} busy={disabled} onOpenFace={onOpenFace} />
-        <h3>Gesichter zum Prüfen</h3>
-        <p>{item.face_count} in der Gruppe · {item.face_ids.length} im Vorschlag</p>
-        <FaceSelection
-          ids={ids}
-          loads={loads}
-          excluded={excluded}
-          blocked={disabled}
-          eager
-          onLoad={(id, status) => setLoads((currentLoads) => (
-            currentLoads[id] === status ? currentLoads : { ...currentLoads, [id]: status }
-          ))}
-          onToggle={(id) => setExcluded((currentExcluded) => {
-            const next = new Set(currentExcluded);
-            if (next.has(id)) next.delete(id);
-            else next.add(id);
-            return next;
-          })}
-          onOpenFace={onOpenFace}
-        />
-        {visibleCount < item.face_ids.length && (
-          <button type="button" className="secondary-button" disabled={disabled} onClick={() => setVisibleCount((count) => count + FACE_BATCH_SIZE)}>
-            Weitere Gesichter anzeigen
+            }}>{current && stale ? "Aktuellen Vorschlag laden" : "Vorschläge neu laden"}</button>
+          )}
+        </div>
+      )}
+      <div className="review-person-detail__evidence">
+        {person && (
+          <ComparisonFaces ids={person.reference_face_ids} busy={disabled} onOpenFace={onOpenFace} />
+        )}
+        <div>
+          <h3>{person ? "Gesichter zum Prüfen" : "Gesichter in der Gruppe"}</h3>
+          {person && <p className="review-person-detail__hint">Foto öffnet das Original. Das Häkchen wählt das Gesicht aus.</p>}
+          {archive && !completeArchive && <p className="review-person-detail__hint">Öffne die Gesichtsgruppe, um alle Gesichter zu prüfen.</p>}
+          <FaceSelection
+            ids={ids}
+            loads={loads}
+            excluded={excluded}
+            blocked={disabled}
+            eager
+            onLoad={(id, status) => setLoads((currentLoads) =>
+              currentLoads[id] === status ? currentLoads : { ...currentLoads, [id]: status })}
+            onToggle={person ? (id) => setExcluded((before) => {
+              const next = new Set(before);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            }) : undefined}
+            onOpenFace={onOpenFace}
+          />
+          {visibleCount < allIds.length && (
+            <button type="button" className="secondary-button" disabled={saving}
+              onClick={() => setVisibleCount((count) => count + FACE_BATCH_SIZE)}>Weitere Gesichter anzeigen</button>
+          )}
+        </div>
+      </div>
+      <footer className="review-person-detail__actions">
+        {person && (
+          <>
+            <button type="button" className="primary-button" disabled={!canAssign}
+              onClick={() => void save(() => onAccept(personDecision(person, selected, "detail")))}>
+              {selected.length > 0 ? `${facesLabel(selected.length)} zuordnen` : "Gesichter zuordnen"}
+            </button>
+            <p role="status">{selected.length} von {allIds.length} ausgewählt</p>
+          </>
+        )}
+        {archive && completeArchive && !conflicting && (
+          <button type="button" className="primary-button" disabled={!canFile}
+            onClick={() => void save(() => onAcceptReview([archive]))}>
+            Als „{archiveLabel(archive)}“ ablegen
           </button>
         )}
-        <footer className="review-person-detail__actions">
-          <p role="status">{selected.length} von {item.face_count} Gesichtern ausgewählt</p>
-          <button type="button" className="primary-button" onClick={() => void accept()} disabled={disabled || waiting || !selected.length}>Auswahl zuordnen</button>
-          <button type="button" className="secondary-button" disabled={disabled} onClick={onOpenCluster}>Gesichtsgruppe öffnen</button>
-        </footer>
-      </section>
-    </div>
+        {archive && (
+          <button type="button" className="secondary-button" disabled={saving} onClick={onOpenCluster}>
+            Gesichtsgruppe öffnen
+          </button>
+        )}
+        <MoreActions>
+          {person && <button type="button" className="secondary-button" disabled={saving} onClick={onOpenCluster}>
+            Gesichtsgruppe öffnen
+          </button>}
+          <button type="button" className="secondary-button" disabled={disabled} onClick={() => void save(onDismiss)}>
+            Vorschlag verwerfen
+          </button>
+        </MoreActions>
+      </footer>
+    </section>
   );
 };
 
+function QueuePhotos({ ids, loads, onLoad }: {
+  ids: number[];
+  loads: FaceLoads;
+  onLoad: (id: number, status: FaceStatus) => void;
+}) {
+  return (
+    <span className="review-queue-row__photos" aria-hidden="true">
+      {Array.from(new Set(ids)).map((id) => loads[id] === "error" ? (
+        <span className="review-queue-row__placeholder" key={id}>–</span>
+      ) : (
+        <img key={id} alt="" loading="lazy" src={faceCropUrl(id)}
+          onLoad={(event) => onLoad(id, event.currentTarget.naturalWidth > 0 ? "loaded" : "error")}
+          onError={() => onLoad(id, "error")} />
+      ))}
+      {ids.length === 0 && <span className="review-queue-row__placeholder">–</span>}
+    </span>
+  );
+}
+
 const ReviewInbox: React.FC<Props> = ({
+  openProposal, onNavigateProposal,
   personSuggestions, reviewSuggestions, busy, loading, error, onRetry, onOpenCluster, onOpenFace,
   onAcceptPerson, onAcceptSelectedPeople, onDismissPerson, onAcceptReview, onDismissReview, onOpenNewFaces,
 }) => {
   const [visiblePersonCount, setVisiblePersonCount] = useState(CARD_BATCH_SIZE);
   const [visibleReviewCount, setVisibleReviewCount] = useState(CARD_BATCH_SIZE);
   const [loadsByKey, setLoadsByKey] = useState<Record<string, FaceLoads>>({});
-  const [excludedByKey, setExcludedByKey] = useState<Record<string, ReadonlySet<number>>>({});
-  const [personMarks, setPersonMarks] = useState<Record<string, PersonSuggestionDecision>>({});
-  const [archiveMarks, setArchiveMarks] = useState<Set<string>>(() => new Set());
-  const [detail, setDetail] = useState<PersonSuggestion | null>(null);
+  const [batch, setBatch] = useState<ReviewProposal["kind"] | null>(null);
+  const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
+  const [detailSnapshot, setDetailSnapshot] = useState<Proposal | undefined>();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const queueRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const openerRef = useRef<HTMLButtonElement | null>(null);
+  const openerRef = useRef<{ button: HTMLButtonElement; next: HTMLButtonElement | undefined; scrollTop: number } | null>(null);
+  const wasOpen = useRef(false);
 
+  const proposals = useMemo<Proposal[]>(() => [
+    ...personSuggestions.map((item): Proposal => ({ kind: "person", item })),
+    ...reviewSuggestions.map((item): Proposal => ({ kind: "archive", item })),
+  ], [personSuggestions, reviewSuggestions]);
   const conflictingIds = useMemo(() => {
     const personIds = new Set(personSuggestions.map((item) => item.cluster_id));
     return new Set(reviewSuggestions.filter((item) => personIds.has(item.cluster_id)).map((item) => item.cluster_id));
   }, [personSuggestions, reviewSuggestions]);
+
   const blocked = busy || loading || !!error;
   const shownPeople = personSuggestions.slice(0, visiblePersonCount);
-  const shownReviews = reviewSuggestions.slice(0, visibleReviewCount);
-  const currentDetail = detail ? personSuggestions.find((item) => item.cluster_id === detail.cluster_id) : undefined;
+  const shownArchive = reviewSuggestions.slice(0, visibleReviewCount);
+  const current = openProposal ? proposals.find((proposal) => targetMatches(proposal, openProposal)) : undefined;
+  const detail = openProposal && detailSnapshot && targetMatches(detailSnapshot, openProposal) ? detailSnapshot : current;
 
-  const faceLoaded = (key: string, id: number, status: FaceStatus) => {
-    setLoadsByKey((current) => {
-      if (current[key]?.[id] === status) return current;
-      return { ...current, [key]: { ...current[key], [id]: status } };
+  useLayoutEffect(() => {
+    if (!openProposal) {
+      if (detailSnapshot) setDetailSnapshot(undefined);
+    } else if (current && (!detailSnapshot || !targetMatches(detailSnapshot, openProposal))) {
+      setDetailSnapshot(current);
+    }
+  }, [openProposal, current, detailSnapshot]);
+
+  useLayoutEffect(() => {
+    const opening = Boolean(openProposal);
+    if (opening === wasOpen.current) return;
+    wasOpen.current = opening;
+    const scroller = rootRef.current?.closest<HTMLElement>(".page-content");
+    if (opening) {
+      scroller?.scrollTo({ top: 0 });
+      return;
+    }
+    const opener = openerRef.current;
+    openerRef.current = null;
+    if (!opener) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (!rootRef.current?.getClientRects().length || rootRef.current.closest("[inert]")) return;
+      scroller?.scrollTo({ top: opener.scrollTop });
+      const focus = [opener.button, opener.next, headingRef.current].find((node) =>
+        node?.isConnected && node.getClientRects().length > 0 && !node.matches(":disabled"));
+      focus?.focus({ preventScroll: true });
     });
-  };
-
-  const previewsFor = (item: PersonSuggestion) => {
-    const eligibleIds = new Set(item.face_ids);
-    return item.preview_face_ids.filter((id) => eligibleIds.has(id));
-  };
-
-  const preparedPeople = shownPeople.map((item) => {
-    const key = personKey(item);
-    const ids = previewsFor(item);
-    const loads = loadsByKey[key] ?? EMPTY_LOADS;
-    const excluded = excludedByKey[key] ?? EMPTY_EXCLUSIONS;
-    const selected = selectedFaces(ids, loads, excluded);
-    const ready = !!item.proposal_token && selected.length > 0 && ids.every((id) => !!loads[id])
-      && !conflictingIds.has(item.cluster_id);
-    return { item, key, ids, loads, excluded, selected, ready };
-  });
-
-  const preparedArchive = shownReviews.map((item) => {
-    const key = archiveKey(item);
-    const loads = loadsByKey[key] ?? EMPTY_LOADS;
-    const ready = item.face_count > 0 && item.face_count === item.preview_face_ids.length
-      && item.preview_face_ids.every((id) => loads[id] === "loaded")
-      && !conflictingIds.has(item.cluster_id);
-    return { item, key, loads, ready };
-  });
-
-  const markablePeople = preparedPeople.filter(({ item, ready }) => item.recommended && ready);
-  const markableArchive = preparedArchive.filter(({ item, ready }) => item.recommended && ready);
-  const markedPeople = markablePeople.flatMap(({ key, selected }) => {
-    const mark = personMarks[key];
-    if (!mark || mark.face_ids.length !== selected.length
-      || mark.face_ids.some((id, index) => id !== selected[index])) return [];
-    return [mark];
-  });
-  const markedArchive = markableArchive.filter(({ key }) => archiveMarks.has(key));
-  const markedKeys = new Set(markedPeople.map((item) => item.cluster_id + ":" + item.proposal_token));
-  const markedFaceCount = markedPeople.reduce((count, item) => count + item.face_ids.length, 0);
-  const offeredCount = preparedPeople.filter(({ item, ids }) =>
-    item.recommended && ids.length > 0 && !conflictingIds.has(item.cluster_id)).length
-    + preparedArchive.filter(({ item }) => item.recommended && item.face_count > 0
-      && item.face_count === item.preview_face_ids.length && !conflictingIds.has(item.cluster_id)).length;
-  const markableCount = markablePeople.length + markableArchive.length;
-  const markedCount = markedPeople.length + markedArchive.length;
+    return () => window.cancelAnimationFrame(frame);
+  }, [openProposal]);
 
   useEffect(() => {
-    const peopleKeys = new Set(personSuggestions.map(personKey));
-    const reviewKeys = new Set(reviewSuggestions.map(archiveKey));
-    const trimRecord = <T,>(current: Record<string, T>, keep: (key: string) => boolean) => {
-      const next = Object.entries(current).filter(([key]) => keep(key));
-      return next.length === Object.keys(current).length ? current : Object.fromEntries(next);
+    const keys = new Set(proposals.map(itemKey));
+    setLoadsByKey((currentLoads) => {
+      const kept = Object.entries(currentLoads).filter(([key]) => keys.has(key));
+      return kept.length === Object.keys(currentLoads).length ? currentLoads : Object.fromEntries(kept);
+    });
+    setMarks((currentMarks) => {
+      const kept = [...currentMarks].filter((key) => keys.has(key));
+      return kept.length === currentMarks.size ? currentMarks : new Set(kept);
+    });
+  }, [proposals]);
+
+  const faceLoaded = (key: string, id: number, status: FaceStatus) => {
+    setLoadsByKey((currentLoads) => currentLoads[key]?.[id] === status ? currentLoads
+      : { ...currentLoads, [key]: { ...currentLoads[key], [id]: status } });
+  };
+
+  const personIds = (item: PersonSuggestion) => {
+    const eligible = new Set(item.face_ids);
+    return item.preview_face_ids.filter((id) => eligible.has(id));
+  };
+  const batchEligible = (proposal: Proposal) => {
+    const { item } = proposal;
+    if (!item.recommended || conflictingIds.has(item.cluster_id)) return false;
+    return proposal.kind === "person"
+      ? !!proposal.item.proposal_token && personIds(proposal.item).length > 0
+      : item.face_count > 0 && item.face_count === item.preview_face_ids.length;
+  };
+  const markable = (proposal: Proposal, ids: number[]) => {
+    const loads = loadsByKey[itemKey(proposal)];
+    return ids.length > 0 && batchEligible(proposal) && ids.every((id) => loads?.[id] === "loaded");
+  };
+
+  const chosenPeople = shownPeople.flatMap((item) => {
+    const proposal = { kind: "person", item } as const;
+    const ids = personIds(item);
+    return marks.has(personKey(item)) && markable(proposal, ids) ? [personDecision(item, ids, "preview")] : [];
+  });
+  const chosenArchive = shownArchive.filter((item) => marks.has(archiveKey(item))
+    && markable({ kind: "archive", item }, item.preview_face_ids));
+  const readyBatchKeys = batch === "person" ? shownPeople.filter((item) => markable({ kind: "person", item }, personIds(item))).map(personKey)
+    : shownArchive.filter((item) => markable({ kind: "archive", item }, item.preview_face_ids)).map(archiveKey);
+  const chosenCount = batch === "person" ? chosenPeople.length : chosenArchive.length;
+  const chosenFaces = batch === "person" ? chosenPeople.reduce((count, item) => count + item.face_ids.length, 0)
+    : chosenArchive.reduce((count, item) => count + item.face_count, 0);
+
+  const show = (proposal: Proposal, button: HTMLButtonElement) => {
+    const buttons = Array.from(queueRef.current?.querySelectorAll<HTMLButtonElement>("button[data-proposal-open]") ?? []);
+    const index = buttons.indexOf(button);
+    openerRef.current = {
+      button,
+      next: buttons[index + 1] ?? buttons[index - 1],
+      scrollTop: rootRef.current?.closest<HTMLElement>(".page-content")?.scrollTop ?? 0,
     };
-    setLoadsByKey((current) => trimRecord(current, (key) => peopleKeys.has(key) || reviewKeys.has(key)));
-    setExcludedByKey((current) => trimRecord(current, (key) => peopleKeys.has(key)));
-    setPersonMarks((current) => trimRecord(current, (key) => peopleKeys.has(key)));
-    setArchiveMarks((current) => {
-      const next = new Set(Array.from(current).filter((key) => reviewKeys.has(key)));
-      return next.size === current.size ? current : next;
-    });
-  }, [personSuggestions, reviewSuggestions]);
-
-  const togglePreviewFace = (key: string, id: number) => {
-    setExcludedByKey((current) => {
-      const next = new Set(current[key] ?? EMPTY_EXCLUSIONS);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return { ...current, [key]: next };
-    });
-    setPersonMarks((current) => Object.fromEntries(Object.entries(current).filter(([storedKey]) => storedKey !== key)));
+    setDetailSnapshot(proposal);
+    onNavigateProposal({ kind: proposal.kind, clusterId: proposal.item.cluster_id });
+  };
+  const toggleBatch = (kind: ReviewProposal["kind"]) => {
+    setMarks(new Set());
+    setBatch((currentBatch) => currentBatch === kind ? null : kind);
   };
 
-  const closeDetail = (restoreFocus = true) => {
-    setDetail(null);
-    if (restoreFocus) {
-      window.requestAnimationFrame(() => {
-        if (document.activeElement !== document.body) return;
-        if (openerRef.current?.isConnected && !openerRef.current.disabled) openerRef.current.focus({ preventScroll: true });
-        else headingRef.current?.focus({ preventScroll: true });
-      });
-    }
+  const row = (proposal: Proposal) => {
+    const { item } = proposal;
+    const person = proposal.kind === "person" ? proposal.item : undefined;
+    const archive = proposal.kind === "archive" ? proposal.item : undefined;
+    const key = itemKey(proposal);
+    const inBatch = batch === proposal.kind && batchEligible(proposal);
+    const ids = person ? personIds(person) : item.preview_face_ids;
+    const previewIds = inBatch ? ids : person
+      ? [...person.reference_face_ids.slice(0, 1), ...ids.slice(0, 2)] : ids.slice(0, 3);
+    const label = person?.person_name ?? archiveLabel(archive!);
+    const anchor = person ? `person:${item.cluster_id}:${person.person_id}` : `archive:${item.cluster_id}`;
+    const summary = conflictingIds.has(item.cluster_id) ? "Widersprüchliche Vorschläge"
+      : inBatch && person ? `${facesLabel(ids.length)} in der Vorschau` : facesLabel(item.face_count);
+    const contents = (
+      <>
+        <QueuePhotos ids={previewIds} loads={loadsByKey[key] ?? EMPTY_LOADS}
+          onLoad={(id, status) => faceLoaded(key, id, status)} />
+        <span className="review-queue-row__text"><strong>{label}</strong><small>{summary}</small></span>
+      </>
+    );
+    return (
+      <article key={key} aria-label={person ? `Personenvorschlag für ${label}` : `Ablagevorschlag: ${label}`}
+        data-suggestion-anchor={anchor} className="review-queue-row">
+        {inBatch ? (
+          <label className="review-queue-row__control" data-marked={marks.has(key) || undefined}>
+            {contents}
+            <input type="checkbox" checked={marks.has(key) && markable(proposal, ids)}
+              aria-label={`${label} für die Sammelbestätigung markieren`}
+              disabled={blocked || !markable(proposal, ids)}
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                setMarks((before) => {
+                  const next = new Set(before);
+                  if (checked) next.add(key);
+                  else next.delete(key);
+                  return next;
+                });
+              }} />
+          </label>
+        ) : (
+          <button type="button" className="review-queue-row__control" data-proposal-open disabled={busy}
+            aria-label={person ? `Vorschlag für ${label} prüfen` : `Ablagevorschlag „${label}“ prüfen`}
+            onClick={(event) => show(proposal, event.currentTarget)}>
+            {contents}<span aria-hidden="true">›</span>
+          </button>
+        )}
+      </article>
+    );
   };
 
-  const hasSuggestions = personSuggestions.length > 0 || reviewSuggestions.length > 0;
   return (
-    <div className="review-inbox" aria-busy={loading || busy}>
-      {error && <div className="review-workflow-feedback" role="alert">
-        <span>{error}</span>
-        <button type="button" className="secondary-button" onClick={onRetry} disabled={busy}>Erneut laden</button>
-      </div>}
-      {!hasSuggestions && loading && <p className="review-workflow-feedback" role="status">Vorschläge werden geladen …</p>}
-      {!hasSuggestions && !loading && !error && (
-        <section className="review-inbox-empty">
-          <h2 ref={headingRef} tabIndex={-1}>Keine Vorschläge offen</h2>
-          <p>Unter „Ohne Namen“ kannst du Gesichter auch ohne Vorschlag prüfen und zuweisen.</p>
-          <button className="neon-button" onClick={onOpenNewFaces} type="button">Ohne Namen öffnen</button>
-        </section>
-      )}
-
-      {(offeredCount > 1 || markedCount > 0) && (
-        <section className="review-inbox-bulk" aria-label="Sammelbestätigung">
-          <p role="status">
-            {markedCount === 1 ? "1 Vorschlag markiert" : markedCount + " Vorschläge markiert"}
-            {markedFaceCount > 0 ? ` · ${markedFaceCount} ${markedFaceCount === 1 ? "Gesicht" : "Gesichter"} zur Zuordnung` : ""}
-          </p>
-          <div>
-            {offeredCount > 1 && <button className="review-inbox-bulk__select" disabled={blocked || markableCount === 0} onClick={() => {
-              setPersonMarks((current) => ({
-                ...current,
-                ...Object.fromEntries(markablePeople.map(({ item, key, selected }) => [key, personDecision(item, selected, "preview")])),
-              }));
-              setArchiveMarks((current) => new Set([...current, ...markableArchive.map(({ key }) => key)]));
-            }} type="button">Angezeigte Empfehlungen markieren</button>}
-            {markedPeople.length > 0 && <button disabled={blocked} onClick={() => onAcceptSelectedPeople(markedPeople)} type="button">
-              {markedPeople.length === 1 ? "1 Zuordnung bestätigen" : markedPeople.length + " Zuordnungen bestätigen"}
-            </button>}
-            {markedArchive.length > 0 && <button disabled={blocked} onClick={() => onAcceptReview(markedArchive.map(({ item }) => item))} type="button">
-              {markedArchive.length === 1 ? "1 Gruppe aussortieren" : markedArchive.length + " Gruppen aussortieren"}
-            </button>}
-          </div>
-        </section>
-      )}
-
-      {personSuggestions.length > 0 && (
-        <section className="review-inbox-section">
-          <header><h2 ref={headingRef} tabIndex={-1}>Personenvorschläge prüfen</h2></header>
-          <div className="review-inbox-grid">
-            {preparedPeople.map(({ item, key, ids, loads, excluded, selected, ready }) => {
-              const conflicting = conflictingIds.has(item.cluster_id);
-              const marked = markedKeys.has(key);
-              const openFace: OpenFace | undefined = onOpenFace && ((id, opener) => onOpenFace(id, item.proposal_token, opener));
-              return (
-                <article className="review-inbox-card review-person-card" aria-label={"Personenvorschlag für " + item.person_name} key={key}
-                  data-suggestion-anchor={`person:${item.cluster_id}:${item.person_id}`} data-marked={marked || undefined}>
-                  <header className="review-inbox-card__identity">
-                    <div>
-                      <h3>{item.person_name}</h3>
-                      <p className="review-person-card__summary">
-                        {conflicting ? "Widersprüchliche Vorschläge" : `${item.support_count} von ${item.face_count} Gesichtern stützen den Vorschlag`}
-                      </p>
-                    </div>
-                    {item.recommended && !conflicting && (
-                      <label className="review-inbox-card__mark">
-                        <input
-                          type="checkbox"
-                          checked={marked}
-                          disabled={blocked || !ready}
-                          aria-label={item.person_name + " für die Sammelbestätigung markieren"}
-                          onChange={() => setPersonMarks((current) => {
-                            const next = { ...current };
-                            if (marked) delete next[key];
-                            else next[key] = personDecision(item, selected, "preview");
-                            return next;
-                          })}
-                        />
-                        Markieren
-                      </label>
-                    )}
-                  </header>
-                  <div className="review-person-card__previews">
-                    <div className="review-person-card__candidates">
-                      <strong>Gesichter zum Prüfen</strong>
-                      {ids.length ? (
-                        <FaceSelection
-                          ids={ids}
-                          loads={loads}
-                          excluded={excluded}
-                          blocked={blocked || conflicting}
-                          onLoad={(id, status) => faceLoaded(key, id, status)}
-                          onToggle={(id) => togglePreviewFace(key, id)}
-                          onOpenFace={openFace}
-                        />
-                      ) : <p>Keine Vorschau zum Zuordnen</p>}
-                    </div>
-                    <div className="review-person-card__decision">
-                      <ComparisonFaces ids={item.reference_face_ids} busy={busy} onOpenFace={openFace} />
-                      <p className="review-person-card__selection">
-                        {selected.length === 1 ? "1 Gesicht ausgewählt" : selected.length + " Gesichter ausgewählt"}
-                      </p>
-                      <div className="review-inbox-card__actions">
-                        {!conflicting && <button className="review-inbox-card__primary" disabled={blocked || !ready}
-                          onClick={() => void onAcceptPerson(personDecision(item, selected, "preview"))} type="button">
-                          Auswahl zuordnen
-                        </button>}
-                        <button className="review-inbox-card__review" disabled={busy} onClick={(event) => {
-                          openerRef.current = event.currentTarget;
-                          setDetail(item);
-                        }} type="button">Gruppe prüfen</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="review-inbox-card__actions">
-                    <MoreActions>
-                      <button disabled={busy} onClick={() => onOpenCluster(item.cluster_id)} type="button">Gesichtsgruppe öffnen</button>
-                      <button disabled={blocked} onClick={() => onDismissPerson(item)} type="button">Vorschlag verwerfen</button>
-                    </MoreActions>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-          {visiblePersonCount < personSuggestions.length && <button className="review-inbox-load-more" onClick={() => setVisiblePersonCount((count) => count + CARD_BATCH_SIZE)} type="button">Weitere Personenvorschläge anzeigen</button>}
-        </section>
-      )}
-
-      {reviewSuggestions.length > 0 && (
-        <section className="review-inbox-section">
-          <header><h2 ref={personSuggestions.length === 0 ? headingRef : undefined} tabIndex={-1}>Vorschläge für die Ablage prüfen</h2></header>
-          <div className="review-inbox-grid">
-            {preparedArchive.map(({ item, key, loads, ready }) => {
-              const label = item.review_status === "not_face" ? "Kein Gesicht" : "Unbekannte Person";
-              const complete = item.face_count === item.preview_face_ids.length && item.face_count > 0;
-              const conflicting = conflictingIds.has(item.cluster_id);
-              return (
-                <article className="review-inbox-card" key={key} data-suggestion-anchor={`archive:${item.cluster_id}`}
-                  data-marked={archiveMarks.has(key) || undefined}>
-                  <div className="review-inbox-card__preview">
-                    <FaceSelection ids={item.preview_face_ids} loads={loads} excluded={EMPTY_EXCLUSIONS} blocked={busy} onLoad={(id, status) => faceLoaded(key, id, status)} />
-                  </div>
-                  <div className="review-inbox-card__body">
-                    <div className="review-inbox-card__identity"><h3>{label}</h3></div>
-                    {conflicting && <p>Widersprüchliche Vorschläge</p>}
-                    <p>{item.face_count} {item.face_count === 1 ? "Gesicht" : "Gesichter"} in der Gruppe</p>
-                    {!complete && <p>Öffne die Gesichtsgruppe, um alle Gesichter zu prüfen.</p>}
-                    <div className="review-inbox-card__actions">
-                      {complete && !conflicting && <button className="review-inbox-card__primary" disabled={blocked || !ready} onClick={() => onAcceptReview([item])} type="button">Als „{label}“ ablegen</button>}
-                      <button disabled={busy} onClick={() => onOpenCluster(item.cluster_id)} type="button">Gesichtsgruppe öffnen</button>
-                      <MoreActions>
-                        <button disabled={blocked} onClick={() => onDismissReview(item)} type="button">Vorschlag verwerfen</button>
-                      </MoreActions>
-                    </div>
-                    {complete && item.recommended && !conflicting && (
-                      <label className="review-inbox-card__mark">
-                        <input type="checkbox" checked={archiveMarks.has(key)} disabled={blocked || !ready} onChange={() => setArchiveMarks((current) => {
-                          const next = new Set(current);
-                          if (next.has(key)) next.delete(key);
-                          else next.add(key);
-                          return next;
-                        })} />
-                        Für Sammelablage markieren
-                      </label>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-          {visibleReviewCount < reviewSuggestions.length && <button className="review-inbox-load-more" onClick={() => setVisibleReviewCount((count) => count + CARD_BATCH_SIZE)} type="button">Weitere Vorschläge für die Ablage anzeigen</button>}
-        </section>
-      )}
-
-      {detail && (
-        <PersonDetail
-          key={personKey(detail)}
-          item={detail}
-          current={currentDetail}
-          stale={!currentDetail || currentDetail.proposal_token !== detail.proposal_token || conflictingIds.has(detail.cluster_id)}
-          blocked={blocked}
-          busy={busy}
-          initialExclusions={excludedByKey[personKey(detail)] ?? EMPTY_EXCLUSIONS}
+    <div ref={rootRef} className="review-inbox" aria-busy={loading || busy}>
+      <div ref={queueRef} hidden={!!openProposal} className="review-queue">
+        {error && <div className="review-workflow-feedback" role="alert">
+          <span>{error}</span>
+          <button type="button" className="secondary-button" onClick={onRetry} disabled={busy}>Erneut laden</button>
+        </div>}
+        {!proposals.length && loading && <p className="review-workflow-feedback" role="status">Vorschläge werden geladen …</p>}
+        {!proposals.length && !loading && !error && (
+          <section className="review-inbox-empty">
+            <h2 ref={headingRef} tabIndex={-1}>Keine Vorschläge offen</h2>
+            <button className="secondary-button" onClick={onOpenNewFaces} type="button">Ohne Namen öffnen</button>
+          </section>
+        )}
+        {batch && (
+          <section className="review-inbox-bulk" aria-label="Sammelbestätigung">
+            <p role="status">{chosenCount === 1 ? "1 Vorschlag" : `${chosenCount} Vorschläge`} · {facesLabel(chosenFaces)}</p>
+            <div>
+              <button className="review-inbox-bulk__select" type="button" disabled={busy} onClick={() => toggleBatch(batch)}>
+                Auswahl beenden
+              </button>
+              {readyBatchKeys.length > 1 && <button className="review-inbox-bulk__select" type="button"
+                disabled={blocked || readyBatchKeys.every((key) => marks.has(key))}
+                onClick={() => setMarks(new Set(readyBatchKeys))}>Geladene Empfehlungen markieren</button>}
+              <button type="button" disabled={blocked || chosenCount === 0} onClick={() => {
+                const result = batch === "person" ? onAcceptSelectedPeople(chosenPeople) : onAcceptReview(chosenArchive);
+                void result.then((accepted) => {
+                  if (accepted) {
+                    setBatch(null);
+                    setMarks(new Set());
+                    requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }));
+                  }
+                });
+              }}>
+                {batch === "person" ? `${facesLabel(chosenFaces)} zuordnen` : chosenCount === 1 ? "1 Gruppe ablegen" : `${chosenCount} Gruppen ablegen`}
+              </button>
+            </div>
+          </section>
+        )}
+        {shownPeople.length > 0 && (
+          <section className="review-queue__section">
+            <header className="review-queue__heading">
+              <h2 ref={headingRef} tabIndex={-1}>Personenvorschläge</h2>
+              {!batch && shownPeople.some((item) => batchEligible({ kind: "person", item })) && (
+                <button type="button" className="secondary-button" disabled={blocked} onClick={() => toggleBatch("person")}>
+                  Mehrere auswählen
+                </button>
+              )}
+            </header>
+            <div className="review-queue__items">{shownPeople.map((item) => row({ kind: "person", item }))}</div>
+            {visiblePersonCount < personSuggestions.length && (
+              <button className="review-inbox-load-more" type="button"
+                onClick={() => setVisiblePersonCount((count) => count + CARD_BATCH_SIZE)}>Weitere Personenvorschläge anzeigen</button>
+            )}
+          </section>
+        )}
+        {shownArchive.length > 0 && (
+          <section className="review-queue__section">
+            <header className="review-queue__heading">
+              <h2 ref={shownPeople.length ? undefined : headingRef} tabIndex={-1}>Vorschläge zum Aussortieren</h2>
+              {!batch && shownArchive.some((item) => batchEligible({ kind: "archive", item })) && (
+                <button type="button" className="secondary-button" disabled={blocked} onClick={() => toggleBatch("archive")}>
+                  Mehrere Ablagevorschläge auswählen
+                </button>
+              )}
+            </header>
+            <div className="review-queue__items">{shownArchive.map((item) => row({ kind: "archive", item }))}</div>
+            {visibleReviewCount < reviewSuggestions.length && (
+              <button className="review-inbox-load-more" type="button"
+                onClick={() => setVisibleReviewCount((count) => count + CARD_BATCH_SIZE)}>Weitere Ablagevorschläge anzeigen</button>
+            )}
+          </section>
+        )}
+      </div>
+      {openProposal && (detail ? (
+        <ProposalDetail key={itemKey(detail)} proposal={detail} current={current} blocked={blocked}
+          conflicting={conflictingIds.has(detail.item.cluster_id)}
+          onClose={() => onNavigateProposal()}
+          onRefresh={() => current && itemKey(current) !== itemKey(detail) ? setDetailSnapshot(current) : onRetry()}
+          onOpenCluster={() => onOpenCluster(detail.item.cluster_id)}
+          onOpenFace={detail.kind === "person" && onOpenFace
+            ? (id, opener) => onOpenFace(id, detail.item.proposal_token, opener) : undefined}
           onAccept={onAcceptPerson}
-          onClose={closeDetail}
-          onRefresh={() => {
-            if (currentDetail && currentDetail.proposal_token !== detail.proposal_token) setDetail(currentDetail);
-            else onRetry();
-          }}
-          onOpenCluster={() => {
-            closeDetail(false);
-            onOpenCluster(detail.cluster_id);
-          }}
-          onOpenFace={onOpenFace && ((id, opener) => onOpenFace(id, detail.proposal_token, opener))}
-        />
-      )}
+          onAcceptReview={onAcceptReview}
+          onDismiss={() => detail.kind === "person" ? onDismissPerson(detail.item) : onDismissReview(detail.item)} />
+      ) : (
+        <section className="review-person-detail" aria-label="Vorschlag prüfen">
+          <button type="button" className="review-person-detail__back" onClick={() => onNavigateProposal()}>
+            <span aria-hidden="true">← </span>Zu den Vorschlägen
+          </button>
+          <p role={error ? "alert" : "status"}>{error ?? (loading ? "Vorschlag wird geladen …" : "Dieser Vorschlag ist nicht mehr offen.")}</p>
+          {error && <button type="button" className="secondary-button" onClick={onRetry}>Erneut laden</button>}
+        </section>
+      ))}
     </div>
   );
 };

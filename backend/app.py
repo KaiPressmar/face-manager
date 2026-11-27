@@ -20,6 +20,7 @@ from queue import Full, Queue
 from typing import Annotated, List, Literal
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     FileResponse,
@@ -173,7 +174,11 @@ from .services.storage import (
     list_image_locations,
     list_available_image_persons,
     list_filename_rename_candidates,
+    MAX_PERSON_DIRECTORY_PAGE_SIZE,
+    StalePersonRenameTargetError,
+    get_person_directory_entry,
     get_person_faces,
+    list_person_directory,
     list_images_page,
     list_cluster_summaries,
     list_persons,
@@ -2413,6 +2418,49 @@ def api_persons():
     return list_persons()
 
 
+@app.get("/api/person-directory")
+def api_person_directory(
+    search: Annotated[str, Query(max_length=200)] = "",
+    limit: Annotated[int, Query(ge=1, le=MAX_PERSON_DIRECTORY_PAGE_SIZE)] = 24,
+    offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+):
+    generation = _get_media_library_generation()
+    result = list_person_directory(search, limit, offset)
+    _get_media_library_generation(generation)
+    return result
+
+
+@app.get("/api/person-directory/{person_id}")
+def api_person_profile(person_id: Annotated[int, ApiPath(ge=1, le=2**63 - 1)]):
+    generation = _get_media_library_generation()
+    library_id = get_person_suggestion_epoch()
+    profile = get_person_directory_entry(person_id)
+    _get_media_library_generation(generation)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Diese Person wurde nicht gefunden.")
+    return {**profile, "assignment_library_id": library_id}
+
+
+@app.get("/api/person-directory/{person_id}/photos")
+def api_person_photos(
+    request: Request,
+    person_id: Annotated[int, ApiPath(ge=1, le=2**63 - 1)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PERSON_DIRECTORY_PAGE_SIZE)] = 24,
+    offset: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+):
+    generation = _get_media_library_generation()
+    if get_person_directory_entry(person_id) is None:
+        _get_media_library_generation(generation)
+        raise HTTPException(status_code=404, detail="Diese Person wurde nicht gefunden.")
+    rows, total = list_images_page(limit=limit, offset=offset, person_id=person_id)
+    items = _group_image_rows(rows, get_display_platform(request))
+    _get_media_library_generation(generation)
+    return {
+        "items": items, "total": total, "offset": offset, "limit": limit,
+        "has_more": offset + len(items) < total, "available_persons": [],
+    }
+
+
 @app.get("/api/persons/{person_id}/faces")
 def api_person_faces(person_id: int):
     """List faces assigned to a person.
@@ -2430,23 +2478,41 @@ def api_person_faces(person_id: int):
 @safe_cluster_mutation
 def api_rename_person(person_id: int, data: dict = Body(...)):
     """Rename one person."""
+    if "expected_library_id" in data:
+        _require_person_management_library(data["expected_library_id"])
     name = data.get("name") or data.get("person_name") or data.get("personName")
     if not name or not str(name).strip():
         raise HTTPException(status_code=400, detail="Gib einen Namen ein.")
+    options = {}
+    if "expected_target_person_id" in data:
+        target_id = data["expected_target_person_id"]
+        if target_id is not None and (type(target_id) is not int or not 0 < target_id <= 2**63 - 1):
+            raise HTTPException(status_code=400, detail="Wähle eine gültige Zielperson aus.")
+        options["expected_target_person_id"] = target_id
     try:
-        next_person_id = rename_person(person_id, str(name))
+        next_person_id = rename_person(person_id, str(name), **options)
+    except StalePersonRenameTargetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     reset_import_resources()
+    person_suggestion_worker.wake()
+    notify_clusters_changed("rename_person")
     return {"status": "ok", "person_id": next_person_id}
 
 
 @app.delete("/api/persons/{person_id}")
 @safe_cluster_mutation
-def api_delete_person(person_id: int, reassignment_group: str = Query(...)):
+def api_delete_person(
+    person_id: int,
+    reassignment_group: str = Query(...),
+    expected_library_id: Annotated[str | None, Query(max_length=128)] = None,
+):
     """Delete one person and reclassify all assigned faces."""
+    if expected_library_id is not None:
+        _require_person_management_library(expected_library_id)
     try:
         normalize_face_review_group(reassignment_group)
         delete_person(person_id, reassignment_group)
@@ -2458,6 +2524,14 @@ def api_delete_person(person_id: int, reassignment_group: str = Query(...)):
     mark_cluster_assignments_dirty("delete_person")
     notify_clusters_changed("delete_person")
     return {"status": "ok"}
+
+
+def _require_person_management_library(expected_library_id: str) -> None:
+    if expected_library_id != get_person_suggestion_epoch():
+        raise HTTPException(
+            status_code=409,
+            detail="Die Bibliothek hat sich geändert. Öffne das Personenprofil erneut.",
+        )
 
 
 # -----------------------------

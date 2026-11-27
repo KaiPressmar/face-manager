@@ -203,11 +203,16 @@ export function useAppNavigation(initialEntry: NavigationEntry, applyEntry: (ent
   const resume = useCallback((page: AppPage) => {
     if (current.current.entry.page === page) return;
     const last = latestByPage.current.get(page);
-    addEntry(last?.entry ?? { page }, {}, last ? snapshots.current.get(last.id) : undefined);
+    const overview: NavigationEntry = page === "review" ? { page, reviewView: "directory" } : { page };
+    addEntry(last?.entry ?? overview, {}, last ? snapshots.current.get(last.id) : undefined);
   }, [addEntry]);
 
   const reset = useCallback(() => {
-    if (!closeTopNavigationDialog()) addEntry({ page: current.current.entry.page });
+    const { page, reviewView, personId, proposal } = current.current.entry;
+    if (!closeTopNavigationDialog()) {
+      addEntry(page === "review" && (reviewView === "directory" || personId !== undefined || proposal)
+        ? { page, reviewView: "directory" } : { page });
+    }
   }, [addEntry]);
 
   const workspace = useMemo<WorkspaceNavigationContextValue>(() => ({

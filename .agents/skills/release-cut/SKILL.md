@@ -49,7 +49,22 @@ Use an explicit `X.Y.Z` if the user gave one. Otherwise derive `major` / `minor`
 `patch` from the nature of the `Unreleased` items and **confirm with the user**
 before proceeding. The target must be strictly newer than the current `VERSION`.
 
-### 3. Prepare on a release branch
+### 3. Refresh the README screenshots before version preparation
+
+On the latest `develop`, compare the README tour with the running release
+candidate. Walk through the documented views with public example data. Capture
+fresh images for any stale or missing screenshots and update the surrounding
+text and alt text. Review new or substantially changed workflows at desktop and
+compact sizes where applicable. Check all image paths even when captures are
+already current. Follow [Capture and verify README screenshots](../../../docs/screenshots/maintenance.md).
+
+Land any fixes into `develop` via **release-commit** before continuing. Reuse
+fresh captures from the feature PR if the documented UI still matches the
+release candidate. Record the screenshot check and any refresh PR in the
+release PR validation notes. Keep this work separate from the scripted
+four-file version bump.
+
+### 4. Prepare on a release branch
 
 ```bash
 git switch -c chore/release-preparation
@@ -67,13 +82,13 @@ say what changes for them, in everyday German, with no technical terms. Refine a
 unclear bullet now, while it is part of this unmerged release prep — do **not**
 touch sections from earlier, already-released versions.
 
-### 4. Validate
+### 5. Validate
 
 ```bash
 ./scripts/check-all.sh
 ```
 
-### 5. Release-prep PR into develop (squash, auto-merge, wait for CI)
+### 6. Release-prep PR into develop (squash, auto-merge, wait for CI)
 
 ```bash
 git add VERSION frontend/package.json frontend/package-lock.json CHANGELOG.md
@@ -93,7 +108,7 @@ gh pr checks <pr-number> --watch
 gh pr view <pr-number> --json state,mergedAt,mergeCommit,url
 ```
 
-### 6. Release PR from develop into main (merge commit, auto-merge, wait for CI)
+### 7. Release PR from develop into main (merge commit, auto-merge, wait for CI)
 
 ```bash
 git switch develop && git pull --ff-only origin develop
@@ -121,7 +136,7 @@ and starts a fresh PR event with the correct body. Then wait for all current CI
 checks and the auto-merge to land. Do not rerun a failed old PR event after
 editing its body; reruns retain the original event payload.
 
-### 7. Let CI publish; then report
+### 8. Let CI publish; then report
 
 Do **not** tag or create the release. Capture the release PR's merge commit, find
 the main CI run for that commit, and wait for it to succeed. Then find the
@@ -162,7 +177,7 @@ non-zero size, URL, and digest; report both installer sizes and SHA-256 digests.
 If CI failed before publishing, report that instead — never fill the gap by
 tagging or creating the release manually.
 
-### 8. Sync local branches after the release
+### 9. Sync local branches after the release
 
 Bring both long-lived branches up to date so the next cycle starts clean:
 
