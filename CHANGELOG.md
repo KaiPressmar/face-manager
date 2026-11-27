@@ -11,6 +11,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+- Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
+
 ### Behoben
 
 ## [0.18.0] - 2026-11-26

@@ -39,8 +39,6 @@ Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub
 
 Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel über die Seitenleiste bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite.
 
-Über **Schnellwechsel** oder **Strg+K** findest du Bereiche auch anhand von Suchbegriffen wie „Reise“ oder „Sicherung“.
-
 <a id="app-tour"></a>
 
 ## Bebilderte Tour
@@ -105,8 +103,6 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
 
 ![Hilfe mit dem Thema „Fotos auf der Karte finden“, Themenauswahl und direktem Einstieg](docs/screenshots/help-017.webp)
-
-![Schnellwechsel mit Suchfeld und fünf Arbeitsbereichen](docs/screenshots/quick-switch-0180.webp)
 
 ![Aktivitäten mit laufendem Import, Standortprüfung und einem abgeschlossenen Import](docs/screenshots/activities-017.webp)
 

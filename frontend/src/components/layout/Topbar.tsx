@@ -6,8 +6,6 @@ import { subscribeToTopic } from "../../utils/events";
 import BackgroundTasksStatus from "../import/BackgroundTasksStatus";
 import FolderPickerModal from "../shared/FolderPickerModal";
 import RuntimeStatus, { type RuntimeStatusInfo } from "./RuntimeStatus";
-import QuickSwitch from "./QuickSwitch";
-import type { AppPage } from "../../utils/navigation";
 
 const THEME_CYCLE: Record<ThemeMode, ThemeMode> = {
   system: "light",
@@ -24,15 +22,13 @@ const THEME_META: Record<ThemeMode, { icon: string; label: string }> = {
 export type TopbarAction = { destination: "import" | "activities"; sequence: number };
 
 const Topbar: React.FC<{
-  page: AppPage;
   route: string;
-  onChangePage: (page: AppPage) => void;
   sharedLibrary?: SharedLibraryState | null;
   sharedLibraryReadError?: string | null;
   onShowHelp: () => void;
   onImportStateChange: (open: boolean) => void;
   action?: TopbarAction;
-}> = ({ page, route, onChangePage, sharedLibrary, sharedLibraryReadError, onShowHelp, onImportStateChange, action }) => {
+}> = ({ route, sharedLibrary, sharedLibraryReadError, onShowHelp, onImportStateChange, action }) => {
   const [runtime, setRuntime] = useState<RuntimeStatusInfo | null>(null);
   const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   // Adding pictures is the one setup action that stays relevant forever, so it
@@ -136,7 +132,6 @@ const Topbar: React.FC<{
         </div>
 
         <div className="topbar__utilities">
-          <QuickSwitch route={page} onSelect={onChangePage} />
           <RuntimeStatus runtime={runtime} unavailable={runtimeUnavailable} route={route} />
           <button id="app-help-trigger" className="theme-toggle" type="button" onClick={onShowHelp}>Hilfe</button>
           <button
