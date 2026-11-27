@@ -87,6 +87,7 @@
 
 .review-page[data-compact-list] > .cluster-workspace-navigation {
   grid-column: 2;
+  min-width: 0;
   max-width: 45vw;
 }
 
@@ -94,11 +95,7 @@
   margin: 0;
 }
 
-.review-page[data-compact-review] .face-action-history summary {
-  font-size: .85rem;
-}
-
-.review-page[data-compact-review] .face-action-history details {
+.review-page[data-compact-list] .face-action-history__open {
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
