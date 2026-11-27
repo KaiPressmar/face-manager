@@ -257,6 +257,7 @@ interface Props {
   onMarkerClick: (marker: MapPoint) => void;
   selectionMode: boolean;
   onCancelSelection: () => void;
+  compactControls?: boolean;
   style?: MapStyle;
   showCountryNames?: boolean;
   journeyStops?: readonly JourneyStop[];
@@ -281,7 +282,7 @@ const noJourneyConnections: readonly JourneyConnection[] = [];
 
 const WorldMap: React.FC<Props> = ({
   view, onViewChange, points, grid, onGridChange, selection, onSelectionChange, onMarkerClick,
-  selectionMode, onCancelSelection, style = "standard", showCountryNames = false,
+  selectionMode, onCancelSelection, compactControls = false, style = "standard", showCountryNames = false,
   journeyStops = noJourneyStops, journeyConnections = noJourneyConnections, activeJourneyStop, onJourneyStopClick,
 }) => {
   const landClipId = `gps-map-land-${useId()}`;
@@ -461,17 +462,23 @@ const WorldMap: React.FC<Props> = ({
       if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); }
     },
   });
+  const panControls = <>
+    <button type="button" aria-label="Nach Norden verschieben" title="Nach Norden" onClick={() => pan(0, 0.2)}>↑</button>
+    <button type="button" aria-label="Nach Westen verschieben" title="Nach Westen" onClick={() => pan(-0.2, 0)}>←</button>
+    <button type="button" aria-label="Nach Osten verschieben" title="Nach Osten" onClick={() => pan(0.2, 0)}>→</button>
+    <button type="button" aria-label="Nach Süden verschieben" title="Nach Süden" onClick={() => pan(0, -0.2)}>↓</button>
+  </>;
 
   return (
     <div className="gps-map__viewport">
       <div className="gps-map__controls" role="group" aria-label="Kartensteuerung">
         <button type="button" aria-label="Vergrößern" title="Vergrößern" disabled={view.zoom >= MAX_ZOOM} onClick={() => onViewChange(normalizedView({ ...view, zoom: view.zoom * 1.5 }))}>+</button>
         <button type="button" aria-label="Verkleinern" title="Verkleinern" disabled={view.zoom <= 1} onClick={() => onViewChange(normalizedView({ ...view, zoom: view.zoom / 1.5 }))}>−</button>
-        <button type="button" aria-label="Nach Norden verschieben" title="Nach Norden" onClick={() => pan(0, 0.2)}>↑</button>
-        <button type="button" aria-label="Nach Westen verschieben" title="Nach Westen" onClick={() => pan(-0.2, 0)}>←</button>
-        <button type="button" aria-label="Nach Osten verschieben" title="Nach Osten" onClick={() => pan(0.2, 0)}>→</button>
-        <button type="button" aria-label="Nach Süden verschieben" title="Nach Süden" onClick={() => pan(0, -0.2)}>↓</button>
         <button type="button" aria-label="Weltkarte anzeigen" title="Weltkarte anzeigen" onClick={() => onViewChange({ longitude: 0, latitude: 0, zoom: 1 })}>⌖</button>
+        {compactControls ? <details className="gps-map__pan-controls">
+          <summary>Verschieben</summary>
+          <div role="group" aria-label="Karte verschieben">{panControls}</div>
+        </details> : panControls}
       </div>
       <div className="gps-map__canvas">
       <svg ref={svgRef} className={`gps-map__svg${selectionMode ? " gps-map__svg--select" : ""}${landscape ? " gps-map__svg--landscape" : ""}${satelliteVisible ? " gps-map__svg--satellite" : ""}`}

@@ -44,7 +44,7 @@ const steps: HelpStep[] = [
     title: "Fotos auf der Karte finden",
     actions: [
       <>Öffne <strong>Karte</strong> und wähle <strong>Standorte</strong>. Wähle einen Punkt auf der Karte, um die Fotos dort zu sehen.</>,
-      <>Wähle unter <strong>Zeitraum</strong> einen Vorschlag oder gib bei <strong>Von</strong> und <strong>Bis</strong> ein Datum ein, etwa 24.12.2025.</>,
+      <>Wähle unter <strong>Zeitraum</strong> einen Vorschlag oder <strong>Eigener Zeitraum</strong>. In kleinen Fenstern findest du den Zeitraum unter <strong>Kartenfilter</strong>.</>,
       <>Wähle <strong>Bereich wählen</strong> und ziehe ein Rechteck auf der Karte. Mit <strong>Sichtbaren Bereich wählen</strong> übernimmst du stattdessen den gesamten sichtbaren Ausschnitt.</>,
     ],
     note: <>Auf der Karte erscheinen Fotos mit gespeicherten Standortdaten. Mit <strong>Auswahl löschen</strong> entfernst du den gewählten Bereich.</>,
@@ -67,7 +67,7 @@ const steps: HelpStep[] = [
     topic: "photobook",
     title: "Ein Bild fürs Fotobuch speichern",
     actions: [
-      <>Öffne in <strong>Karte</strong> den Bereich oder Reiseverlauf, den du abbilden möchtest. Wähle <strong>Bild exportieren</strong>.</>,
+      <>Öffne in <strong>Karte</strong> den gewünschten Bereich oder Reiseverlauf. Wähle unter <strong>Kartendarstellung und Export</strong> die Aktion <strong>Bild exportieren</strong>.</>,
       <>Gib einen <strong>Titel</strong> ein und wähle <strong>Format</strong> und <strong>Farbwelt</strong>. Schau dir die Vorschau an.</>,
       <>Speichere eine Seite als PNG. Bei mehreren Seiten kannst du <strong>Alle Seiten als ZIP speichern</strong> wählen. Entpacke die Datei, um die einzelnen Bilder in dein Fotobuch einzufügen.</>,
     ],

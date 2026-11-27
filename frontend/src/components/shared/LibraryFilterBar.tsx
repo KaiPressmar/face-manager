@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import { identityColor } from "../../utils/colors";
 import { countWithLabel } from "../../utils/germanFormatting";
 
@@ -101,6 +101,8 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
 }) => {
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filtersId = useId();
 
   const selectedSet = useMemo(() => new Set(selectedPersons), [selectedPersons]);
 
@@ -146,6 +148,7 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
   };
 
   const activeSortValue = `${sortBy}:${sortDirection}`;
+  const activeFilterCount = selectedFolderCount + selectedPersons.length + (faceStatuses?.length ?? 0);
 
   return (
     <section className="filter-bar" aria-label="Filter und Sortierung">
@@ -157,6 +160,16 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
               : <strong>{countWithLabel(resultCount, resultSingular, resultNoun)}</strong>}
         </div>
 
+        <div className="filter-bar__actions">
+          {actions}
+          <button type="button" className="filter-bar__control filter-bar__toggle"
+            aria-expanded={filtersOpen} aria-controls={filtersId} onClick={() => setFiltersOpen((open) => !open)}>
+            Filter und Sortierung{activeFilterCount > 0 && <b>{activeFilterCount}</b>}
+          </button>
+        </div>
+      </div>
+
+      <div id={filtersId} className="filter-bar__panel" data-open={filtersOpen}>
         <div className="filter-bar__tools">
           <div className="filter-bar__tool-group">
             <div className="filter-bar__tool-group-controls">
@@ -208,7 +221,6 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
             </div>
           </div>
 
-          {actions && <div className="filter-bar__tool-group-controls">{actions}</div>}
           {children && (
             <details className="filter-bar__view">
               <summary className="filter-bar__control">Ansicht</summary>
@@ -217,106 +229,105 @@ const LibraryFilterBar: React.FC<LibraryFilterBarProps> = ({
           )}
           {onResetFilters && <button type="button" className="filter-bar__control" onClick={onResetFilters}>Filter zurücksetzen</button>}
         </div>
-      </div>
-
-      <div className="filter-bar__chips" role="group" aria-label="Nach Personen filtern">
-        <span className="filter-bar__row-label">Personen</span>
-        <button
-          className={
-            selectedPersons.length === 0
-              ? "person-filter__chip person-filter__chip--active"
-              : "person-filter__chip"
-          }
-          onClick={() => onPersonsChange([])}
-          aria-pressed={selectedPersons.length === 0}
-          aria-label="Alle Personen"
-          type="button"
-        >
-          Alle
-        </button>
-
-        {visiblePersons.map((person) => (
+        <div className="filter-bar__chips" role="group" aria-label="Nach Personen filtern">
+          <span className="filter-bar__row-label">Personen</span>
           <button
-            key={person}
-            onClick={() => togglePerson(person)}
-            aria-pressed={selectedSet.has(person)}
+            className={
+              selectedPersons.length === 0
+                ? "person-filter__chip person-filter__chip--active"
+                : "person-filter__chip"
+            }
+            onClick={() => onPersonsChange([])}
+            aria-pressed={selectedPersons.length === 0}
+            aria-label="Alle Personen"
+            type="button"
+          >
+            Alle
+          </button>
+
+          {visiblePersons.map((person) => (
+            <button
+              key={person}
+              onClick={() => togglePerson(person)}
+              aria-pressed={selectedSet.has(person)}
+              className={`person-filter__chip${
+                selectedSet.has(person) ? " person-filter__chip--active" : ""
+              }`}
+              style={{ "--person-color": identityColor(person) } as React.CSSProperties}
+              title={person}
+              type="button"
+            >
+              {person}
+            </button>
+          ))}
+
+          {hiddenCount > 0 && (
+            <button
+              className="person-filter__chip person-filter__chip--more"
+              onClick={() => setExpanded(true)}
+              type="button"
+            >
+              ＋ {hiddenCount} weitere
+            </button>
+          )}
+
+          {expanded && !query && filteredPersons.length > COLLAPSED_LIMIT && (
+            <button
+              className="person-filter__chip person-filter__chip--more"
+              onClick={() => setExpanded(false)}
+              type="button"
+            >
+              Weniger
+            </button>
+          )}
+
+          {query && filteredPersons.length === 0 && (
+            <span className="filter-bar__hint">Keine Person passt zu „{search}“.</span>
+          )}
+          {(persons.includes(UNASSIGNED_FILTER_VALUE) || selectedSet.has(UNASSIGNED_FILTER_VALUE)) && <button
             className={`person-filter__chip${
-              selectedSet.has(person) ? " person-filter__chip--active" : ""
+              selectedSet.has(UNASSIGNED_FILTER_VALUE) ? " person-filter__chip--active" : ""
             }`}
-            style={{ "--person-color": identityColor(person) } as React.CSSProperties}
-            title={person}
+            onClick={() => togglePerson(UNASSIGNED_FILTER_VALUE)}
+            aria-pressed={selectedSet.has(UNASSIGNED_FILTER_VALUE)}
+            title="Gesichter, die noch keiner Person zugeordnet sind"
             type="button"
           >
-            {person}
-          </button>
-        ))}
+            {UNASSIGNED_FILTER_LABEL}
+          </button>}
+        </div>
 
-        {hiddenCount > 0 && (
-          <button
-            className="person-filter__chip person-filter__chip--more"
-            onClick={() => setExpanded(true)}
-            type="button"
-          >
-            ＋ {hiddenCount} weitere
-          </button>
+        {faceStatuses && onFaceStatusesChange && (
+          <details className="filter-bar__archive">
+            <summary>Ausgesonderte Gesichter{faceStatuses.length > 0 && ` (${faceStatuses.length})`}</summary>
+            <div className="filter-bar__categories" role="group" aria-label="Ausgesonderte Gesichter filtern">
+              {STATUS_FILTERS.map((status) => {
+                const isActive = faceStatuses.includes(status.value);
+                return (
+                  <button
+                    key={status.value}
+                    className={`person-filter__chip${
+                      isActive ? " person-filter__chip--active" : ""
+                    }`}
+                    onClick={() =>
+                      onFaceStatusesChange(
+                        isActive
+                          ? faceStatuses.filter((entry) => entry !== status.value)
+                          : [...faceStatuses, status.value],
+                      )
+                    }
+                    title={status.hint}
+                    aria-pressed={isActive}
+                    type="button"
+                  >
+                    {status.label}
+                  </button>
+                );
+              })}
+            </div>
+          </details>
         )}
-
-        {expanded && !query && filteredPersons.length > COLLAPSED_LIMIT && (
-          <button
-            className="person-filter__chip person-filter__chip--more"
-            onClick={() => setExpanded(false)}
-            type="button"
-          >
-            Weniger
-          </button>
-        )}
-
-        {query && filteredPersons.length === 0 && (
-          <span className="filter-bar__hint">Keine Person passt zu „{search}“.</span>
-        )}
-        {(persons.includes(UNASSIGNED_FILTER_VALUE) || selectedSet.has(UNASSIGNED_FILTER_VALUE)) && <button
-          className={`person-filter__chip${
-            selectedSet.has(UNASSIGNED_FILTER_VALUE) ? " person-filter__chip--active" : ""
-          }`}
-          onClick={() => togglePerson(UNASSIGNED_FILTER_VALUE)}
-          aria-pressed={selectedSet.has(UNASSIGNED_FILTER_VALUE)}
-          title="Gesichter, die noch keiner Person zugeordnet sind"
-          type="button"
-        >
-          {UNASSIGNED_FILTER_LABEL}
-        </button>}
       </div>
-
-      {faceStatuses && onFaceStatusesChange && (
-        <details className="filter-bar__archive">
-          <summary>Ausgesonderte Gesichter{faceStatuses.length > 0 && ` (${faceStatuses.length})`}</summary>
-          <div className="filter-bar__categories" role="group" aria-label="Ausgesonderte Gesichter filtern">
-            {STATUS_FILTERS.map((status) => {
-              const isActive = faceStatuses.includes(status.value);
-              return (
-                <button
-                  key={status.value}
-                  className={`person-filter__chip${
-                    isActive ? " person-filter__chip--active" : ""
-                  }`}
-                  onClick={() =>
-                    onFaceStatusesChange(
-                      isActive
-                        ? faceStatuses.filter((entry) => entry !== status.value)
-                        : [...faceStatuses, status.value],
-                    )
-                  }
-                  title={status.hint}
-                  aria-pressed={isActive}
-                  type="button"
-                >
-                  {status.label}
-                </button>
-              );
-            })}
-          </div>
-        </details>
-      )}
     </section>
   );
 };

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   type ApplyImageRenamePayload,
   type ApplyImageRenameResult,
@@ -133,6 +133,8 @@ const ImageRenamePage: React.FC<{
   const submittingRef = useRef(false);
   const reviewOpenRef = useRef(false);
   const hasFilters = selectedFolders.length > 0 || selectedPersons.length > 0;
+  const [bulkActionsOpen, setBulkActionsOpen] = useState(false);
+  const bulkActionsId = useId();
 
   useWorkspaceNavigation<RenameWorkspace>("renaming", {
     capture: () => ({
@@ -617,7 +619,7 @@ const ImageRenamePage: React.FC<{
 
   const renderPaginationControls = (position: "top" | "bottom") => (
     <nav
-      className={`rename-pagination rename-pagination--${position}`}
+      className={`rename-pagination rename-pagination--${position}${pageCount === 1 ? " rename-pagination--single" : ""}`}
       aria-label={position === "top" ? "Seitennavigation oben" : "Seitennavigation unten"}
     >
       <div className="rename-pagination__summary">
@@ -796,11 +798,9 @@ const ImageRenamePage: React.FC<{
     <div className="settings-page" ref={pageRef}>
       <div className="settings-page__header rename-page-header">
         <div>
-          <div className="settings-page__eyebrow">Bibliothek</div>
           <h1 className="settings-page__title">Dateinamen</h1>
           <p className="settings-page__copy">
-            Ergänze auf Wunsch die Namen zugeordneter Personen. Prüfe die Vorschläge
-            und wähle die Fotos, deren Dateien du umbenennen möchtest.
+            Wähle Fotos und prüfe die vorgeschlagenen Dateinamen.
           </p>
         </div>
         <button
@@ -869,13 +869,16 @@ const ImageRenamePage: React.FC<{
         </div>
       )}
 
-      <section className="settings-card rename-toolbar">
+      <section className="settings-card rename-toolbar" aria-label="Dateiauswahl">
         <div className="rename-toolbar__heading">
           <strong>Dateien zur Prüfung auswählen</strong>
-          <span>Markiere einzelne Dateien, diese Seite oder alle Treffer des Filters.</span>
         </div>
         <div className="rename-toolbar__controls">
-          <div className="settings-actions">
+          <button type="button" className="secondary-button rename-toolbar__toggle" aria-expanded={bulkActionsOpen}
+            aria-controls={bulkActionsId} onClick={() => setBulkActionsOpen((open) => !open)}>
+            Auswahl{selectedCount > 0 ? ` (${number.format(selectedCount)})` : ""}
+          </button>
+          <div id={bulkActionsId} className="settings-actions rename-toolbar__bulk" data-open={bulkActionsOpen}>
             <button className="neon-card" onClick={handleSelectPage} disabled={selectableItems.length === 0 || isLoading || isSubmitting}>
               Diese Seite auswählen ({number.format(selectableItems.length)})
             </button>

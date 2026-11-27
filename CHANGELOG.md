@@ -19,6 +19,9 @@ Requests, nicht in diese Versionshinweise.
 - Ansichten öffnen sich direkt. Kartenfotos, Bildauswahl und der aktuelle Bildausschnitt bleiben bei Hintergrundaktualisierungen und beim Wiederöffnen erhalten.
 - Mit der Tastatur kannst du direkt zum Hauptinhalt springen.
 - Statusangaben unter „Personen“ sind im hellen Design besser lesbar.
+- In kleinen Fenstern kannst du Gesichtsgruppen auf voller Breite prüfen und direkt zur Gruppenliste zurückkehren.
+- Auf der Fotokarte wechselst du in kleinen Fenstern direkt zwischen Karte, Fotos und Reisestopps.
+- Navigation und Filter brauchen in kleinen Fenstern weniger Platz, sodass du Fotos, Dateien und Einstellungen früher siehst.
 
 ### Behoben
 

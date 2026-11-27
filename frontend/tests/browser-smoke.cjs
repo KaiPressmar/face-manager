@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const albumLibraryFlow = require('./album-library-flow.cjs');
 const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
+const compactReviewFlow = require('./compact-review-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
@@ -154,7 +155,8 @@ async function firstAssignmentFlow(browser, errors) {
     await assign.click();
     await page.waitForURL(reviewHash);
     await openTab.waitFor();
-    await page.locator('.cluster-detail-topbar').waitFor();
+    await page.locator('.cluster-workspace__sidebar').waitFor();
+    assert.equal(await page.locator('.cluster-detail-topbar').isVisible(), false);
     await page.reload();
     await openTab.waitFor();
     await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
@@ -339,6 +341,7 @@ async function mapFlow(browser, errors) {
       await new Promise((resolve) => setTimeout(resolve, 600));
       await route.continue().catch(() => {});
     });
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await mapRequest;
     assert.equal(await markers.count(), 0, 'Markers from the previous filter stayed active during loading');
@@ -356,6 +359,7 @@ async function mapFlow(browser, errors) {
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
     await waitForCount(29);
     await borders.first().waitFor();
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2025-01-01');
     await page.getByLabel('Bis', { exact: true }).fill('2025-12-31');
     await waitForCount(14);
@@ -615,7 +619,7 @@ async function mapWithoutStorageFlow(browser, errors) {
       await page.goto(`${webBase}/#/weltkarte`);
       await page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' }).waitFor();
       await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
-      await page.getByText('Kartendarstellung', { exact: true }).click();
+      await page.getByText('Kartendarstellung und Export', { exact: true }).click();
       const style = page.getByLabel('Kartenstil');
       const names = page.getByLabel('Ländernamen anzeigen');
       assert.equal(await style.inputValue(), 'standard');
@@ -648,7 +652,7 @@ async function durablePreferencesFlow(browser, errors) {
     assert.deepEqual(await (await imported).json(), {
       map_style: 'satellite', map_country_names: false, image_grid_size: 'large', help_introduction_seen: true,
     });
-    await first.getByText('Kartendarstellung', { exact: true }).click();
+    await first.getByText('Kartendarstellung und Export', { exact: true }).click();
     const style = first.getByLabel('Kartenstil');
     assert.equal(await style.inputValue(), 'satellite');
 
@@ -677,7 +681,7 @@ async function durablePreferencesFlow(browser, errors) {
     await reopened.addInitScript(() => Reflect.deleteProperty(window, 'localStorage'));
     await reopened.goto(`${webBase}/#/weltkarte`);
     await reopened.locator('.gps-map__svg--landscape').waitFor();
-    await reopened.getByText('Kartendarstellung', { exact: true }).click();
+    await reopened.getByText('Kartendarstellung und Export', { exact: true }).click();
     assert.equal(await reopened.getByLabel('Ländernamen anzeigen').isChecked(), true);
     await reopened.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Bilder', exact: true }).click();
     await reopened.getByText('Ansicht', { exact: true }).click();
@@ -699,7 +703,7 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
     await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
-    await page.getByText('Kartendarstellung', { exact: true }).click();
+    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
     await page.getByLabel('Ländernamen anzeigen').check();
     await page.locator('.gps-map__place-label--country').first().waitFor();
     const reliefLoaded = page.waitForResponse((response) => response.url().endsWith('/map/world-relief.webp') && response.ok());
@@ -1344,6 +1348,18 @@ async function responsiveFlow(browser, errors) {
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
     await page.locator('.topbar-import-button__label').waitFor();
+    for (const width of [320, 390, 768, 901]) {
+      await page.setViewportSize({ width, height: 568 });
+      await assertReviewFits(page, [page.locator('.workspace-header')], `Compact app header at ${width}px`);
+    }
+    await page.setViewportSize({ width: 320, height: 568 });
+    const filters = page.getByRole('button', { name: 'Filter und Sortierung', exact: true });
+    assert.equal(await filters.getAttribute('aria-expanded'), 'false');
+    assert.ok(await page.getByRole('button', { name: 'Fotos auswählen', exact: true }).isVisible());
+    await filters.press('Enter');
+    await page.getByRole('combobox', { name: 'Sortierung' }).waitFor();
+    await filters.press('Enter');
+    await page.getByRole('combobox', { name: 'Sortierung' }).waitFor({ state: 'hidden' });
     const more = nav.getByRole('button', { name: /^Mehr/ });
     await nav.getByRole('button', { name: 'Personen' }).evaluate((button) => {
       button.focus();
@@ -1361,6 +1377,14 @@ async function responsiveFlow(browser, errors) {
     await more.press('Enter');
     await nav.getByRole('button', { name: 'Dateinamen' }).click();
     await page.getByRole('heading', { name: 'Dateinamen', exact: true }).waitFor();
+    const fileSelection = page.getByRole('region', { name: 'Dateiauswahl' });
+    const bulk = fileSelection.getByRole('button', { name: 'Auswahl', exact: true });
+    assert.equal(await bulk.getAttribute('aria-expanded'), 'false');
+    await bulk.press('Enter');
+    await fileSelection.getByRole('button', { name: /Diese Seite auswählen/ }).waitFor();
+    await bulk.press('Enter');
+    const preview = await fileSelection.getByRole('button', { name: 'Umbenennung prüfen' }).boundingBox();
+    assert.ok(preview && preview.y >= 0 && preview.y + preview.height <= 568, 'Rename review requires scrolling at 320×568');
     await page.setViewportSize({ width: 390, height: 844 });
 
     for (const route of ['weltkarte', 'bilder', 'dateinamen', 'gesichter-pruefen', 'einstellungen']) {
@@ -1558,6 +1582,7 @@ async function denseJourneyReview(browser, errors) {
     assert.ok(await results.getByRole('button', { name: /Bei Paris/ }).count() >= 8);
     await search.clear();
     await scope.selectOption('Europa');
+    await page.getByLabel('Zeitraum', { exact: true }).selectOption('custom');
     await page.getByLabel('Von', { exact: true }).fill('2024-07-13');
     const delivery = page.waitForResponse((response) => {
       const url = new URL(response.url());
@@ -1580,6 +1605,8 @@ async function denseJourneyReview(browser, errors) {
     await screenshot(page, 'reise-europa');
 
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Karte', exact: true }).click();
+    await page.getByText('Kartendarstellung und Export', { exact: true }).click();
     await page.getByRole('button', { name: 'Bild exportieren' }).click();
     const album = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     await album.getByLabel('Format', { exact: true }).selectOption({ label: 'Eigene Größe' });
@@ -1604,7 +1631,9 @@ async function denseJourneyReview(browser, errors) {
     assert.equal(png.readUInt32BE(png.indexOf(Buffer.from('pHYs')) + 4), 9449);
     await page.keyboard.press('Escape');
     await album.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Kartenfilter', exact: true }).click();
     await scope.selectOption('Asien');
+    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Stopps', exact: true }).click();
     await results.getByText('Keine Stopps in diesem Bereich und Zeitraum.', { exact: true }).waitFor();
     await results.getByRole('button', { name: 'Bereich entfernen' }).click();
     await page.getByText('4 Stopps · 20 Fotos', { exact: true }).waitFor();
@@ -1813,6 +1842,7 @@ async function suggestionRefreshFlow(browser, errors) {
       durablePreferencesFlow,
       mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
       (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
+      (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
       pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),

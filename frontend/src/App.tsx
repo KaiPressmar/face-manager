@@ -386,18 +386,6 @@ const App: React.FC = () => {
         onShowHelp={() => showHelp(helpTopicForPage[page])}
         onImportStateChange={setImportDialogOpen}
         topbarAction={topbarAction}
-        invitation={initialNotesChecked && !preferencesLoading && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
-          <aside className="help-invitation" aria-labelledby="help-invitation-title">
-            <div>
-              <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
-              <p>Wir zeigen dir die ersten Schritte. Du findest die Einführung auch jederzeit unter „Hilfe“.</p>
-            </div>
-            <div className="help-invitation__actions">
-              <button type="button" onClick={() => showHelp("photos")}>Einführung starten</button>
-              <button type="button" onClick={() => { dismissIntroduction(); focusHelpButton(); }}>Später</button>
-            </div>
-          </aside>
-        )}
         onShowUpdate={
           availableUpdate ? () => setShowUpdate(true) : undefined
         }
@@ -413,6 +401,18 @@ const App: React.FC = () => {
             const active = target === page;
             return (
               <PagePane key={target} page={target} active={active}>
+                {target === "people" && initialNotesChecked && !preferencesLoading && !introSeen && !queuedDialog && !helpTopic && !importDialogOpen && (
+                  <aside className="help-invitation" aria-labelledby="help-invitation-title">
+                    <div>
+                      <strong id="help-invitation-title">Möchtest du Face Manager kennenlernen?</strong>
+                      <p>Wir zeigen dir die ersten Schritte. Du findest die Einführung auch jederzeit unter „Hilfe“.</p>
+                    </div>
+                    <div className="help-invitation__actions">
+                      <button type="button" onClick={() => showHelp("photos")}>Einführung starten</button>
+                      <button type="button" onClick={() => { dismissIntroduction(); focusHelpButton(); }}>Später</button>
+                    </div>
+                  </aside>
+                )}
                 <ErrorBoundary title={pageErrorTitles[target]}>{renderPage(target, active)}</ErrorBoundary>
               </PagePane>
             );

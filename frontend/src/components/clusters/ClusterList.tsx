@@ -342,15 +342,16 @@ const ClusterList: React.FC<ClusterListProps> = ({
                   <strong>Personen</strong>
                   {renderCountSummary(personSectionClusterCount, personSectionFaceCount)}
                 </div>
-                <div className="cluster-person-tree__list" role="tree" aria-label="Personen und Gesichtsgruppen">
+                <div className="cluster-person-tree__list" role="group" aria-label="Personen und Gesichtsgruppen">
                   {personEntries.slice(0, visiblePersonCount).map(({ personName, clusters, faceCount }) => {
                     const isExpanded = expandedPersonNames[personName] ?? false;
                     const isActivePerson =
                       selectedGroupName === personName && selectedReviewGroupKey === null;
                     return (
-                      <div key={personName} className="cluster-person-tree__item" role="treeitem" aria-expanded={isExpanded}>
+                      <div key={personName} className="cluster-person-tree__item">
                         <button
                           type="button"
+                          aria-expanded={isExpanded}
                           className={`cluster-person-browser__person${isActivePerson ? " cluster-person-browser__person--active" : ""}`}
                           onClick={() => {
                             const shouldExpand = !isExpanded;
@@ -405,6 +406,9 @@ const ClusterList: React.FC<ClusterListProps> = ({
               {renderCountSummary(unknownClusters.length, unknownFaceCount)}
             </div>
             {unknownClusters.slice(0, visibleOpenCount).map((cluster) => renderClusterCard(cluster))}
+            {!normalizedSearch && unknownClusters.length === 0 && (
+              <div className="cluster-nav-empty-state">Keine offenen Gesichtsgruppen.</div>
+            )}
             {visibleOpenCount < unknownClusters.length && (
               <button className="cluster-nav-load-more" onClick={() => setVisibleOpenCount((count) => count + LIST_BATCH_SIZE)} type="button">
                 Weitere {Math.min(LIST_BATCH_SIZE, unknownClusters.length - visibleOpenCount)} Gesichtsgruppen

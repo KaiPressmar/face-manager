@@ -14,7 +14,7 @@
 }
 
 .gps-page {
-  padding: clamp(12px, 2vw, 22px) clamp(12px, 2.4vw, 28px) 32px;
+  padding: 0 0 24px;
 }
 
 .gps-page__header {
@@ -54,9 +54,34 @@
 .gps-page__toolbar .gps-page__field--region { flex-basis: 10.5rem; }
 .gps-page__toolbar .gps-page__field--period { flex-basis: 9.4rem; min-width: min(100%, 9.4rem); }
 .gps-page__toolbar .gps-page__field--detail { flex-basis: 11.25rem; min-width: min(100%, 11.25rem); }
+.gps-page__toolbar[hidden], .gps-page__map-card[hidden], .gps-page__results[hidden] { display: none; }
+.gps-page__compact-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.gps-page__pane-switch { flex: 1 1 auto; }
+.gps-page__pane-switch button { flex: 1 1 0; }
+.gps-page__filter-button {
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-2);
+  font-size: .8125rem;
+}
+.gps-page__filter-button[aria-expanded="true"] {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
 .gps-page__field span, .gps-page__field select, .gps-page__field input { font-size: .8125rem; }
 .gps-page__header button, .gps-page__map-actions button, .gps-results-actions button { min-height: 40px; }
 .gps-page__layout { margin-top: 10px; }
+.gps-page__results:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .gps-page__map-head { gap: 8px 12px; padding: 8px 12px; }
 .gps-page__map-head strong, .gps-page__map-head span, .gps-page__map-actions button { font-size: .8125rem; }
 .gps-page__map-actions { flex-wrap: wrap; justify-content: flex-end; }
@@ -67,12 +92,26 @@
 .gps-page__map-settings > details[open] { grid-column: 1 / -1; }
 .gps-page__map-settings .gps-map-options { margin: 0; }
 .gps-page__map-settings summary { min-height: 36px; }
+.gps-map-options button { justify-self: start; }
 .gps-page__filters { margin: 8px 0 0; }
 .gps-page__route-note { margin: 8px 0; color: var(--text-muted); font-size: .875rem; }
 .gps-page__field span, .gps-page__map-head span,
 .gps-page__map-foot, .gps-page__map-foot span:last-child, .gps-page__hint,
 .gps-page__results-hint, .gps-page__collection, .gps-page__pending { color: var(--text-muted); }
 .gps-page__date-help { grid-column: 1 / -1; flex-basis: 100%; margin: 0; color: var(--text-muted); font-size: .8125rem; }
+.gps-map__pan-controls summary {
+  min-height: 44px;
+  align-content: center;
+  padding: 0 9px;
+  border-radius: 6px;
+  background: rgb(255 255 255 / .09);
+  color: #fff;
+  font-size: .8125rem;
+  cursor: pointer;
+}
+.gps-map__pan-controls > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-top: 4px; }
+.gps-map__pan-controls[open] { flex: 1 1 100%; }
+.gps-map__pan-controls[open] summary { text-align: center; }
 .gps-results-actions, .gps-selection-gallery__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .gps-results-actions { margin: 12px 0; font-size: 12px; }
 .gps-journey__stops { list-style: none; max-height: 300px; overflow: auto; padding: 3px; margin: 8px 0; }
@@ -229,6 +268,18 @@
   max-height: min(43vh, 500px);
   border-radius: 2px;
   box-shadow: 0 8px 30px rgb(0 0 0 / .18);
+}
+@media (max-width: 960px) {
+  .gps-page__header button, .gps-page__pane-switch button, .gps-page__map-actions button,
+  .gps-results-actions button, .gps-page__toolbar select, .gps-page__toolbar input,
+  .gps-page__filters button, .gps-page__map-settings summary {
+    min-height: 44px;
+  }
+  .gps-page__toolbar .gps-page__field { min-width: 0; }
+  .gps-page__results { max-height: clamp(245px, 56dvh, 620px); overflow: auto; }
+  .gps-page__map-settings { grid-template-columns: 1fr; }
+  .gps-page__map-settings summary { align-content: center; }
+  .gps-map__controls button { min-width: 44px; height: 44px; }
 }
 @media (min-width: 960px) {
   .gps-album-dialog { display: grid; grid-template-columns: minmax(370px, .9fr) minmax(0, 1fr); grid-template-areas: "header header" "editor preview" "footer footer"; align-items: start; }
