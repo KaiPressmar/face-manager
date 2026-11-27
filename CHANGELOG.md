@@ -9,6 +9,14 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+### Verbessert
+
+### Behoben
+
+## [0.20.0] - 2026-11-27
+
+### Neu
+
 - In „Personen“ findest du bekannte Personen über ein Verzeichnis mit Porträts und Suche. Jedes Profil zeigt die zugehörigen Fotos und bietet direkte Aktionen zum Korrigieren und Bearbeiten.
 
 ### Verbessert
