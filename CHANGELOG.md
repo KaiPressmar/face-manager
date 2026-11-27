@@ -11,6 +11,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Verbessert
 
+### Behoben
+
+## [0.22.0] - 2026-11-27
+
+### Verbessert
+
 - Mit „Kartendetails online“ siehst du beim Zoomen Straßen und Gebäude sowie feinere Gelände- und Satellitenbilder. Ein Maßstab zeigt die Entfernung im aktuellen Ausschnitt.
 - Öffne den Verlauf direkt aus einer Standortauswahl und speichere ihn als Reisealbum. In langen Listen findest du Reisen und Stopps über Ort oder Datum.
 - Gestalte ein randloses Fotobuchbild, verschiebe oder zoome den Ausschnitt in der Vorschau und passe Ortsnamen, Markierungen und Verbindungslinien an.
