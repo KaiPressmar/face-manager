@@ -1,6 +1,7 @@
 param(
     [switch]$RequireSigned,
-    [switch]$FastValidationInstaller
+    [Alias('FastValidationInstaller')]
+    [switch]$FastCompression
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,7 +92,7 @@ if (-not (Test-Path $iscc)) {
 }
 
 $compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$distDir")
-if ($FastValidationInstaller) {
+if ($FastCompression) {
     $compileArguments += "/DInstallerCompression=lzma/fast"
 }
 & $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
@@ -100,9 +101,11 @@ $installerPath = Join-Path $distDir "FaceManager-Setup-$version.exe"
 if (-not (Test-Path $installerPath)) {
     throw "Inno Setup did not create $installerPath"
 }
-if ((Get-Item $installerPath).Length -ge 2GB) {
+$installerSize = (Get-Item -LiteralPath $installerPath).Length
+if ($installerSize -ge 2GB) {
     throw "The Windows installer must stay below GitHub's 2 GiB release asset limit."
 }
+Write-Host "Installer size: $installerSize bytes"
 
 $installerVersionInfo = (Get-Item $installerPath).VersionInfo
 $installerProductVersion = $installerVersionInfo.ProductVersion.Trim()

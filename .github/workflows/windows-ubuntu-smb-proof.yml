@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/windows-ubuntu-smb-proof.yml'
       - 'scripts/test-wsl-smb.ps1'
+      - 'backend/services/shared_sync_job_announcements.py'
       - 'backend/services/shared_sync_jobs.py'
       - 'backend/services/shared_sync_transport.py'
       - 'backend/services/shared_sync_worker.py'
@@ -16,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: smb-proof-${{ github.event.pull_request.number || github.run_id }}
+  group: smb-proof-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

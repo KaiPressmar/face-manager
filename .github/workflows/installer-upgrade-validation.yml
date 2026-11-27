@@ -48,7 +48,7 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Build candidate installer
-        run: ./packaging/windows/build-release.ps1 -FastValidationInstaller
+        run: ./packaging/windows/build-release.ps1 -FastCompression
       - name: Verify upgrades from legacy CPU, legacy GPU, and combined installers
         timeout-minutes: 30
         env:

@@ -163,7 +163,7 @@ jobs:
       - name: Build Windows release bundle
         id: build
         shell: pwsh
-        run: ./packaging/windows/build-release.ps1
+        run: ./packaging/windows/build-release.ps1 -FastCompression
 
       - name: Exercise upgrades from legacy and combined Windows installers
         shell: pwsh
