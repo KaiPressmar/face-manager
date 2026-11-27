@@ -45,7 +45,7 @@ const Layout: React.FC<{
       />
 
       <div className="app-main">
-        <Topbar page={page} route={`${navigation.id}:${window.location.hash}`} onChangePage={onChangePage}
+        <Topbar route={`${navigation.id}:${window.location.hash}`}
           sharedLibrary={sharedLibrary} sharedLibraryReadError={sharedLibraryReadError} onShowHelp={onShowHelp}
           onImportStateChange={onImportStateChange} action={topbarAction} />
         <nav className="workspace-history" aria-label="Ansichtsverlauf">

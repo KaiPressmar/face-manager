@@ -1552,7 +1552,7 @@ async function backgroundActivitiesFlow(browser, errors) {
   }
 }
 
-async function quickSwitchFlow(browser, errors) {
+async function freshInstallFlow(browser, errors) {
   const page = await newPage(browser, 320, 680, errors);
   try {
     await page.route('**/api/changelog/current', (route) => route.fulfill({
@@ -1565,24 +1565,8 @@ async function quickSwitchFlow(browser, errors) {
     await acknowledgement;
     await page.waitForFunction(() => !document.querySelector('[aria-labelledby="whats-new-title"]'));
     assert.equal(await page.getByRole('dialog', { name: /Neu in Face Manager/ }).count(), 0);
-    const trigger = page.getByRole('button', { name: 'Schnellwechsel', exact: true });
-    await trigger.click();
-    const dialog = page.getByRole('dialog', { name: 'Schnellwechsel' });
-    const search = dialog.getByRole('searchbox', { name: 'Bereich finden' });
-    assert.ok(await search.evaluate((element) => element === document.activeElement));
-    await search.fill('nichts-passendes');
-    await dialog.getByRole('status').filter({ hasText: 'Kein Bereich gefunden' }).waitFor();
-    await search.press('Escape');
-    assert.ok(await trigger.evaluate((element) => element === document.activeElement));
-
-    await page.keyboard.press('Control+k');
-    await search.fill('reisealbum');
-    await search.press('ArrowDown');
-    await page.keyboard.press('Enter');
-    await page.getByRole('heading', { name: 'Fotokarte', exact: true }).waitFor();
-    await dialog.waitFor({ state: 'hidden' });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
-    console.log('PASS first start and quick switch: 320px, keyword search, keyboard, focus, empty results');
+    console.log('PASS first start at 320px: opens the library and dismisses release notes');
   } finally {
     await page.close();
   }
@@ -1601,7 +1585,7 @@ async function quickSwitchFlow(browser, errors) {
       (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase),
       (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
       (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
-      quickSwitchFlow,
+      freshInstallFlow,
       (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
     ];
     for (const flow of flows) await flow(browser, errors);
