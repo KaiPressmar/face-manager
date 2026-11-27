@@ -30,12 +30,26 @@ const screenshot = async (page, name) => {
   if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, `${name}.png`), fullPage: true });
 };
 
-async function newPage(browser, width, height, errors, options = {}) {
+async function newPage(browser, width, height, errors, { persistentPreferences = false, ...options } = {}) {
   const page = await browser.newPage({ viewport: { width, height }, ...options });
   page.setDefaultTimeout(12000);
   page.on('pageerror', (error) => errors.push(error.message));
   // Android 12's system WebView in CI lacks Array.prototype.at.
   await page.addInitScript(() => Reflect.deleteProperty(Array.prototype, 'at'));
+  if (!persistentPreferences) {
+    // Each flow starts with fresh presentation preferences unless it exercises
+    // installation-wide persistence against the actual test backend.
+    const preferences = {};
+    await page.route('**/api/ui-preferences', (route) => {
+      if (route.request().method() === 'PATCH') {
+        const { values, only_if_absent } = route.request().postDataJSON();
+        for (const [key, value] of Object.entries(values)) {
+          if (!only_if_absent || !Object.hasOwn(preferences, key)) preferences[key] = value;
+        }
+      }
+      return route.fulfill({ json: preferences });
+    });
+  }
   return page;
 }
 
@@ -368,7 +382,7 @@ async function mapFlow(browser, errors) {
     const firstMarker = markers.first();
     const markerLabel = await firstMarker.getAttribute('aria-label');
     const markerCount = Number(markerLabel?.match(/^([\d.]+) Foto/)?.[1].replaceAll('.', ''));
-    assert.ok(markerCount > 1, 'Fixture marker needs multiple photos to test the viewer sequence');
+    assert.ok(markerCount > 2, 'Fixture marker needs multiple photos to test the viewer sequence and an uncached original');
     await firstMarker.press('Enter');
     await waitForCount(markerCount);
     const galleryTile = page.locator('.gps-page__photo').first();
@@ -417,11 +431,13 @@ async function mapFlow(browser, errors) {
     await gallery.waitFor();
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
-    await page.route('**/api/images/*/file', (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
-    await galleryTile.click();
+    const originalFile = /\/api\/images\/\d+\/file(?:\?.*)?$/;
+    await page.route(originalFile, (route) => route.fulfill({ status: 404, body: 'Missing fixture' }));
+    // Open a photo whose original has not already been decoded in this document.
+    await page.locator('.gps-page__photo').nth(2).click();
     await gallery.getByRole('alert').filter({ hasText: 'Die Bilddatei konnte nicht geöffnet werden.' }).waitFor();
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
-    await page.unroute('**/api/images/*/file');
+    await page.unroute(originalFile);
 
     const resetMapFilters = page.getByRole('button', { name: 'Filter zurücksetzen', exact: true });
     if (await resetMapFilters.count()) await resetMapFilters.click();
@@ -583,12 +599,102 @@ async function existingFlow(browser, errors) {
   }
 }
 
+async function mapWithoutStorageFlow(browser, errors) {
+  for (const storageBlocked of [false, true]) {
+    const page = await newPage(browser, 1440, 1000, errors);
+    try {
+      await page.addInitScript((blocked) => {
+        if (blocked) {
+          Object.defineProperty(window, 'localStorage', {
+            get() { throw new DOMException('Storage is disabled', 'SecurityError'); },
+          });
+        } else {
+          Reflect.deleteProperty(window, 'localStorage');
+        }
+      }, storageBlocked);
+      await page.goto(`${webBase}/#/weltkarte`);
+      await page.getByRole('group', { name: 'Weltkarte mit Fotostandorten' }).waitFor();
+      await page.getByLabel('Kartenausschnitt', { exact: true }).selectOption('Europa');
+      await page.getByText('Kartendarstellung', { exact: true }).click();
+      const style = page.getByLabel('Kartenstil');
+      const names = page.getByLabel('Ländernamen anzeigen');
+      assert.equal(await style.inputValue(), 'standard');
+      assert.equal(await names.isChecked(), false);
+      await style.selectOption('landscape');
+      await page.locator('.gps-map__svg--landscape').waitFor();
+      await names.check();
+      await page.locator('.gps-map__place-label--country').first().waitFor();
+    } finally {
+      await page.close();
+    }
+  }
+  console.log('PASS map: defaults and display controls with missing or blocked localStorage');
+}
+
+async function durablePreferencesFlow(browser, errors) {
+  const options = { persistentPreferences: true };
+  const first = await newPage(browser, 1440, 1000, errors, options);
+  const waitForPreferenceWrite = (page, status) => page.waitForResponse((response) =>
+    response.url().endsWith('/api/ui-preferences') && response.request().method() === 'PATCH' && response.status() === status);
+  try {
+    await first.addInitScript(() => {
+      localStorage.setItem('face-manager:map-style', 'satellite');
+      localStorage.setItem('face-manager:map-country-names', 'false');
+      localStorage.setItem('face-manager:image-grid-size', 'large');
+      localStorage.setItem('face-manager:help-introduction-v1', 'seen');
+    });
+    const imported = waitForPreferenceWrite(first, 200);
+    await first.goto(`${webBase}/#/weltkarte`);
+    assert.deepEqual(await (await imported).json(), {
+      map_style: 'satellite', map_country_names: false, image_grid_size: 'large', help_introduction_seen: true,
+    });
+    await first.getByText('Kartendarstellung', { exact: true }).click();
+    const style = first.getByLabel('Kartenstil');
+    assert.equal(await style.inputValue(), 'satellite');
+
+    await first.route('**/api/ui-preferences', (route) => route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 503, json: {} }) : route.continue());
+    const rejected = waitForPreferenceWrite(first, 503);
+    await style.selectOption('landscape');
+    await rejected;
+    await first.locator('.gps-map__svg--landscape').waitFor();
+    await first.unroute('**/api/ui-preferences');
+    const retry = first.getByRole('alert').filter({ hasText: 'Die Ansichts- und Hilfeeinstellungen konnten nicht gespeichert werden.' })
+      .getByRole('button', { name: 'Erneut versuchen', exact: true });
+    await retry.waitFor();
+    const [retried] = await Promise.all([waitForPreferenceWrite(first, 200), retry.click()]);
+    assert.equal((await retried.json()).map_style, 'landscape');
+
+    const labels = waitForPreferenceWrite(first, 200);
+    await first.getByLabel('Ländernamen anzeigen').check();
+    assert.equal((await (await labels).json()).map_country_names, true);
+  } finally {
+    await first.close();
+  }
+
+  const reopened = await newPage(browser, 1440, 1000, errors, options);
+  try {
+    await reopened.addInitScript(() => Reflect.deleteProperty(window, 'localStorage'));
+    await reopened.goto(`${webBase}/#/weltkarte`);
+    await reopened.locator('.gps-map__svg--landscape').waitFor();
+    await reopened.getByText('Kartendarstellung', { exact: true }).click();
+    assert.equal(await reopened.getByLabel('Ländernamen anzeigen').isChecked(), true);
+    await reopened.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Bilder', exact: true }).click();
+    await reopened.getByText('Ansicht', { exact: true }).click();
+    assert.equal(await reopened.getByRole('slider', { name: 'Bildgröße im Raster' }).getAttribute('aria-valuetext'), 'Groß');
+    assert.equal(await reopened.getByText('Möchtest du Face Manager kennenlernen?', { exact: true }).count(), 0);
+  } finally {
+    await reopened.close();
+  }
+  console.log('PASS preferences: import, failed save and retry, persistence across isolated browser contexts with missing storage');
+}
+
 async function mapSelectionAndJourneyFlow(browser, errors) {
   const page = await newPage(browser, 1440, 1000, errors);
   const localOrigin = new URL(webBase).origin;
   try {
     await page.route('**/*', (route) =>
-      new URL(route.request().url()).origin === localOrigin ? route.continue() : route.abort());
+      new URL(route.request().url()).origin === localOrigin ? route.fallback() : route.abort());
     await page.goto(`${webBase}/#/weltkarte`);
     const results = page.locator('#gps-map-results');
     await results.getByText('85 Fotos', { exact: true }).waitFor();
@@ -1636,12 +1742,13 @@ async function suggestionRefreshFlow(browser, errors) {
   const errors = [];
   try {
     const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
-      previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
+      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
+      durablePreferencesFlow,
+      mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
       (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
       pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
       (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
       (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
-      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase),
       (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
       (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
       freshInstallFlow,

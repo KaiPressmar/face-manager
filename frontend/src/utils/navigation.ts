@@ -40,14 +40,21 @@ export interface WorkspaceHistoryMarker {
   position: number;
   generation: number;
   libraryId?: string;
+  hasForward?: boolean;
+  nativeForwardEntries?: string[];
 }
 
 export const MAX_HISTORY_PHOTO_IDS = 200;
+export const MAX_NATIVE_FORWARD_ENTRIES = 32;
 
 export function workspaceHistoryMarker(state: unknown): WorkspaceHistoryMarker | undefined {
   const marker = (state as { faceManagerWorkspace?: WorkspaceHistoryMarker } | null)?.faceManagerWorkspace;
   if (marker && typeof marker.id === "string" && marker.id && Number.isSafeInteger(marker.position)
-    && marker.position >= 0 && Number.isSafeInteger(marker.generation) && marker.generation >= 0) return marker;
+    && marker.position >= 0 && Number.isSafeInteger(marker.generation) && marker.generation >= 0
+    && (marker.hasForward === undefined || typeof marker.hasForward === "boolean")
+    && (marker.nativeForwardEntries === undefined || (Array.isArray(marker.nativeForwardEntries)
+      && marker.nativeForwardEntries.length <= MAX_NATIVE_FORWARD_ENTRIES
+      && Array.from(marker.nativeForwardEntries).every((id) => typeof id === "string" && id)))) return marker;
   return undefined;
 }
 

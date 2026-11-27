@@ -117,6 +117,7 @@ from .services.geo import MAP_GRID_SIZE, PHOTO_METADATA_ACTIVITY, geo_backfill, 
 from .services.geo_query import GeoBounds, GeoPhotoSelection, validate_photo_selection
 from .services.journey import JourneyDetail, get_journey
 from .services.observed_places import list_observed_places
+from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
 from .services.update_manager import (
     UpdateError,
     parse_semver,
@@ -1250,6 +1251,40 @@ def _preview_cache_fields(limit: int | None, unreadable: bool) -> dict:
         "preview_cache_limit_mib_default": DEFAULT_PREVIEW_CACHE_LIMIT_MIB,
         "preview_cache_limit_error": unreadable,
     }
+
+
+@app.get("/api/ui-preferences")
+def api_get_ui_preferences(response: Response) -> dict:
+    """Return the UI preferences saved for this installation."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return load_ui_preferences()
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        logger.warning("Could not read UI preferences", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Die Anzeigeeinstellungen konnten nicht geladen werden.",
+        ) from exc
+
+
+@app.patch("/api/ui-preferences")
+def api_update_ui_preferences(payload: object = Body(...)) -> dict:
+    """Merge validated UI preferences without changing the photo library."""
+    if not isinstance(payload, dict) or "values" not in payload or payload.keys() - {"values", "only_if_absent"}:
+        raise HTTPException(status_code=422, detail="Die Anfrage für die Anzeigeeinstellungen ist ungültig.")
+    only_if_absent = payload.get("only_if_absent", False)
+    if not isinstance(only_if_absent, bool):
+        raise HTTPException(status_code=422, detail="Die Anfrage für die Anzeigeeinstellungen ist ungültig.")
+    try:
+        values = validate_ui_preferences(payload["values"])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return update_ui_preferences(values, only_if_absent=only_if_absent)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        logger.warning("Could not save UI preferences", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Die Anzeigeeinstellungen konnten nicht gespeichert werden.",
+        ) from exc
 
 
 @app.get("/api/settings")
