@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { UiPreferencesProvider } from "./hooks/useUiPreferences";
 import { ThemeProvider } from "./theme/ThemeContext";
 import { applyTheme, readCachedTheme } from "./utils/theme";
 
@@ -17,7 +18,9 @@ applyTheme(readCachedTheme());
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider>
-      <App />
+      <UiPreferencesProvider>
+        <App />
+      </UiPreferencesProvider>
     </ThemeProvider>
   </React.StrictMode>
 );

@@ -12,8 +12,12 @@ Requests, nicht in diese Versionshinweise.
 ### Verbessert
 
 - Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
+- Face Manager merkt sich Kartenstil, Ländernamen, Rastergröße und den Status der Einführung über Neustarts hinweg.
 
 ### Behoben
+
+- Die Fotokarte öffnet sich unter Ubuntu wieder.
+- Der Ansichtsverlauf funktioniert auch nach dem Neuladen bei gesperrtem Browserspeicher.
 
 ## [0.18.0] - 2026-11-26
 
