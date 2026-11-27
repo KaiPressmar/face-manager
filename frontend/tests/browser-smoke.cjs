@@ -550,8 +550,8 @@ async function existingFlow(browser, errors) {
     await page.getByRole('button', { name: /Benennungsschema ändern/ }).click();
     await page.waitForURL('**/einstellungen/dateinamen');
     await page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Personen' }).click();
-    await page.getByRole('button', { name: /Ohne Namen.*Benennen/ }).click();
-    await page.getByRole('button', { name: /Personen korrigieren.*Bestätigte/ }).click();
+    await page.getByRole('button', { name: /^Ohne Namen / }).click();
+    await page.getByRole('button', { name: /^Personen korrigieren / }).click();
     const cards = page.locator('.page-pane--active button.cluster-person-browser__cluster-card');
     await cards.first().waitFor();
     const card = (await cards.count()) > 1 ? cards.nth(1) : cards.first();
@@ -578,6 +578,7 @@ async function existingFlow(browser, errors) {
     await page.keyboard.press('Escape');
     await personDialog.waitFor({ state: 'hidden' });
 
+    await page.getByText('Aussortieren oder lösen', { exact: true }).click();
     await page.getByRole('button', { name: 'Gesichtsgruppe umbenennen' }).click();
     const renameDialog = page.getByRole('dialog', { name: 'Gesichtsgruppe umbenennen' });
     await renameDialog.waitFor();
@@ -595,7 +596,7 @@ async function existingFlow(browser, errors) {
     await page.getByText('Neu Beispiel', { exact: true }).first().waitFor();
     await page.unroute('**/api/persons');
 
-    await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
+    await page.getByRole('button', { name: /^Aussortiert / }).click();
     await screenshot(page, 'existing-flows');
     console.log('PASS existing flows: library/folder retry, person filter, import, rename, settings, review tabs');
   } finally {
@@ -1084,7 +1085,7 @@ async function liveWorkflowFlow(browser, errors) {
     await page.getByRole('alert').filter({ hasText: 'Diese Gesichtsgruppe ist nicht mehr verfügbar' }).waitFor();
     await page.waitForURL('**/#/gesichter-pruefen');
     const groupRequest = page.waitForRequest('**/api/face-review-groups/unknown_person/faces');
-    await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
+    await page.getByRole('button', { name: /^Aussortiert / }).click();
     await groupRequest;
 
     let total = 27;

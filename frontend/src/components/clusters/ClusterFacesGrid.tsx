@@ -7,7 +7,7 @@ interface ClusterFacesGridProps {
   selectedFaceIds: number[];
   onToggleFace: (faceId: number) => void;
   /** Open the full picture a crop was cut from, to judge it in context. */
-  onOpenImage?: (face: ClusterFace, groupFaces: ClusterFace[]) => void;
+  onOpenImage?: (face: ClusterFace, groupFaces: ClusterFace[], opener: HTMLButtonElement) => void;
   /** When false, render skeleton cells reserving `reservedCount` rows. */
   loaded?: boolean;
   /** Item count used to reserve height while faces are not yet loaded. */
@@ -28,54 +28,39 @@ const FaceTile: React.FC<{
   face: ClusterFace;
   isSelected: boolean;
   onToggle: (faceId: number) => void;
-  onOpenImage?: (face: ClusterFace) => void;
+  onOpenImage?: (face: ClusterFace, opener: HTMLButtonElement) => void;
 }> = ({ face, isSelected, onToggle, onOpenImage }) => (
-  <label
+  <div
     className={isSelected ? "face-grid-tile face-grid-tile--selected" : "face-grid-tile"}
-    style={{
-      width: TILE_SIZE,
-      height: TILE_SIZE,
-    }}
+    style={{ width: TILE_SIZE, height: TILE_SIZE }}
   >
-    <img
-      src={faceCropUrl(face.id)}
-      loading="lazy"
-      className="face-grid-tile__image"
-      style={{ opacity: isSelected ? 0.9 : 1 }}
-      alt=""
-    />
-
-    <span className="face-grid-tile__overlay" />
-    <span className="face-grid-tile__id-badge">{`#${face.id}`}</span>
-
+    <label className="face-grid-tile__select" onClick={(event) => event.stopPropagation()}>
+      <img src={faceCropUrl(face.id)} loading="lazy" className="face-grid-tile__image" alt="" />
+      <span className="face-grid-tile__selector">
+        <input
+          type="checkbox"
+          checked={isSelected}
+          onChange={() => onToggle(face.id)}
+          className="face-grid-tile__checkbox"
+          aria-label={`Gesicht ${face.id} auswählen`}
+        />
+      </span>
+    </label>
     {onOpenImage && (
       <button
         type="button"
         className="face-grid-tile__expand"
-        title="Ganzes Bild ansehen"
-        aria-label={`Ganzes Bild zu Gesicht ${face.id} ansehen`}
+        title="Originalfoto öffnen"
+        aria-label={`Originalfoto zu Gesicht ${face.id} öffnen`}
         onClick={(event) => {
-          // The tile is a label around a checkbox, so keep the click from
-          // toggling the selection as well.
-          event.preventDefault();
           event.stopPropagation();
-          onOpenImage(face);
+          onOpenImage(face, event.currentTarget);
         }}
       >
         ⤢
       </button>
     )}
-
-    <span className="face-grid-tile__selector">
-      <input
-        type="checkbox"
-        checked={isSelected}
-        onChange={() => onToggle(face.id)}
-        className="face-grid-tile__checkbox"
-        aria-label={`Gesicht ${face.id} auswählen`}
-      />
-    </span>
-  </label>
+  </div>
 );
 
 const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({
@@ -203,7 +188,7 @@ const ClusterFacesGrid: React.FC<ClusterFacesGridProps> = ({
                 onToggle={onToggleFace}
                 onOpenImage={
                   onOpenImage
-                    ? (openedFace) => onOpenImage(openedFace, arrangedFaces)
+                    ? (openedFace, opener) => onOpenImage(openedFace, arrangedFaces, opener)
                     : undefined
                 }
               />

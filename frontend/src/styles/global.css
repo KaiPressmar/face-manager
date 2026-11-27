@@ -465,8 +465,8 @@ button:disabled {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(248px, 300px) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: clamp(205px, 23%, 275px) minmax(0, 1fr);
+  gap: 12px;
   align-items: stretch;
 }
 
@@ -959,12 +959,11 @@ button:disabled {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 7px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-1);
-  box-shadow: var(--shadow-card);
 }
 
 .cluster-detail-topbar--highlighted {
@@ -1574,87 +1573,53 @@ button:disabled {
   box-shadow: var(--shadow-selected), var(--shadow-card-hover);
 }
 
-.face-grid-tile__image {
+.face-grid-tile__select {
   position: relative;
-  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+.face-grid-tile:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.face-grid-tile__image {
+  display: block;
+  pointer-events: none;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition:
-    transform 0.22s ease,
-    opacity 0.18s ease;
 }
 
-.face-grid-tile:hover .face-grid-tile__image {
-  transform: scale(1.04);
-}
-
-.face-grid-tile__overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  background:
-    linear-gradient(180deg, rgba(3, 10, 18, 0.06), rgba(3, 10, 18, 0.48)),
-    linear-gradient(180deg, rgba(0, 229, 255, 0.16), rgba(0, 0, 0, 0));
-  opacity: 0.88;
-  pointer-events: none;
-}
-
-.face-grid-tile__id-badge {
-  position: absolute;
-  left: 8px;
-  bottom: 8px;
-  z-index: 3;
-  padding: 4px 7px;
-  border-radius: 999px;
-  background: rgba(6, 10, 16, 0.74);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #dbe7ee; /* fixed light: sits on a photo scrim in both themes */
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-/* Opens the whole picture a crop came from. Stays out of the way until the
-   tile is hovered or focused, so the grid keeps reading as faces. */
 .face-grid-tile__expand {
   position: absolute;
-  left: 8px;
-  top: 8px;
-  z-index: 4;
+  left: 5px;
+  top: 5px;
+  z-index: 2;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  background: rgba(6, 10, 16, 0.78);
-  color: #dbe7ee;
-  font-size: 13px;
-  line-height: 1;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(6, 10, 16, 0.85);
+  color: #fff;
+  font-size: 16px;
   cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity var(--dur) var(--ease),
-    background var(--dur) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
-
-.face-grid-tile:hover .face-grid-tile__expand,
-.face-grid-tile__expand:focus-visible {
-  opacity: 1;
 }
 
 .face-grid-tile__expand:hover {
-  background: rgba(0, 229, 255, 0.24);
-  transform: scale(1.08);
+  background: #263745;
 }
 
-@media (hover: none) {
-  /* No hover on touch, so keep it permanently reachable. */
+@media (pointer: coarse) {
   .face-grid-tile__expand {
-    opacity: 1;
+    width: 44px;
+    height: 44px;
   }
 }
 
