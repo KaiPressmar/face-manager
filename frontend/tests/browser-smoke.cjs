@@ -1284,10 +1284,17 @@ async function responsiveFlow(browser, errors) {
     const nav = page.getByRole('navigation', { name: 'Hauptnavigation' });
     assert.ok(await nav.evaluate((element) => element.scrollWidth <= element.clientWidth));
     await page.locator('.topbar-import-button__label').waitFor();
-    await nav.getByRole('button', { name: 'Personen' }).click();
-    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
     const more = nav.getByRole('button', { name: /^Mehr/ });
-    await more.press('Enter');
+    await nav.getByRole('button', { name: 'Personen' }).evaluate((button) => {
+      button.focus();
+      button.click();
+      // Simulate moving to the next navigation control before route restoration.
+      button.closest('nav').querySelector('.workflow-sidebar__more').focus();
+    });
+    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    assert.ok(await more.evaluate((button) => document.activeElement === button), 'Navigation restored focus after the user moved it');
+    await page.keyboard.press('Enter');
     await nav.getByRole('button', { name: 'Dateinamen' }).waitFor();
     await page.keyboard.press('Escape');
     assert.equal(await more.getAttribute('aria-expanded'), 'false');
