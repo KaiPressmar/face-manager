@@ -70,7 +70,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
       return button.contains(document.elementFromPoint(x + width / 2, y + height / 2));
     }),
       'First group requires scrolling in the initial 320×568 list');
-    await page.locator('.face-action-history summary').waitFor();
+    await page.getByRole('button', { name: 'Änderungsverlauf', exact: true }).waitFor();
     const enlargedText = await page.addStyleTag({ content: 'html { font-size: 200% }' });
     await ensureReflow();
     await enlargedText.evaluate((element) => element.remove());

@@ -22,6 +22,8 @@ prescribes, so users get clean release notes and developers keep the detail.
 - Never edit a released `CHANGELOG.md` section. Only touch `## [Unreleased]`.
 - Never `git tag` or `gh release create` — publishing is automated by CI.
 - The in-app changelog is for users; the PR is for developers. Keep them separate.
+- Refresh the affected README screenshots in the same PR as a visible UI
+  change. See [Capture and verify README screenshots](../../../docs/screenshots/maintenance.md).
 
 ## Steps
 
@@ -87,7 +89,23 @@ Validate the changelog on its own before the full gate:
 python3 scripts/changelog.py check
 ```
 
-### 3. Ensure a conforming work branch
+### 3. Refresh the README and screenshots
+
+During diff review, map changes in layout, controls, labels, navigation, or
+visible workflows to the README tour. Start the changed app with public
+example data, exercise the affected workflows, and capture replacement
+screenshots of the real rendered UI before committing. Add a screenshot when a
+new view or workflow belongs in the tour. Include relevant desktop and compact
+states. Update adjacent instructions, alt text, and in-app help as needed.
+
+Follow [Capture and verify README screenshots](../../../docs/screenshots/maintenance.md)
+to inspect the captures and verify that the README image paths resolve. Use the
+current branch and avoid screenshots with private data, loading placeholders, or
+errors outside the documented workflow. Include the refreshed images in the PR.
+In **Developer Notes**, list the UI views captured or state which tour views
+were checked when no screenshot changes were needed.
+
+### 4. Ensure a conforming work branch
 
 Work branches are `feature/*`, `fix/*`, `docs/*`, or `chore/*`. If on `develop`,
 `main`, or a non-conforming branch (e.g. `agent/*`), move the work onto a
@@ -100,7 +118,7 @@ git switch -c fix/<short-topic> origin/develop   # pick the right prefix
 
 Confirm the branch name with the user if the prefix is ambiguous.
 
-### 4. Run the full validation gate
+### 5. Run the full validation gate
 
 Validate the finished diff before creating its dedicated commit:
 
@@ -111,7 +129,7 @@ Validate the finished diff before creating its dedicated commit:
 Fix anything it reports, review the complete diff again, and confirm the
 classification and changelog still match the final implementation.
 
-### 5. Commit (Conventional Commits)
+### 6. Commit (Conventional Commits)
 
 Stage intentionally and commit. Follow the `caveman-commit` conventions:
 `<type>(<scope>): <imperative summary>`, types `feat|fix|refactor|perf|docs|test|
@@ -119,7 +137,7 @@ chore|build|ci|style|revert`, imperative, lowercase after the colon, no trailing
 period, subject ≤50 (hard cap 72). Add a body only for a non-obvious *why*,
 breaking changes, or migrations. Reference issues at the end (`Closes #42`).
 
-### 6. Push and open the PR into develop
+### 7. Push and open the PR into develop
 
 ```bash
 git push -u origin HEAD
@@ -142,7 +160,7 @@ Fill the template:
 - **Validation** — tick the boxes that hold (`check-all.sh` passed, changelog
   updated for user-visible outcomes, `VERSION` unchanged, etc.).
 
-### 7. Verify CI, then auto-merge
+### 8. Verify CI, then auto-merge
 
 `--auto` can merge immediately when branch protection does not require pending
 checks. Before invoking it, capture the PR head and wait for CI on that commit:
@@ -167,7 +185,7 @@ Report the PR URL and its merge state. PRs into `develop` are squash-merged.
 Passing checks do not guarantee auto-merge has completed; always verify the PR
 itself reports `state=MERGED` and has a merge commit.
 
-### 8. Sync local branches after the merge
+### 9. Sync local branches after the merge
 
 Once the PR actually merges, bring the local repo up to date so the next task
 starts clean:

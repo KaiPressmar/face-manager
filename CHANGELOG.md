@@ -9,8 +9,12 @@ Requests, nicht in diese Versionshinweise.
 
 ### Neu
 
+- In „Personen“ findest du bekannte Personen über ein Verzeichnis mit Porträts und Suche. Jedes Profil zeigt die zugehörigen Fotos und bietet direkte Aktionen zum Korrigieren und Bearbeiten.
+
 ### Verbessert
 
+- Unter „Prüfen“ öffnest du Zuordnungsvorschläge einzeln. Dort kannst du Gesichter direkt mit bestätigten Fotos vergleichen. Für mehrere Vorschläge gibt es einen eigenen Auswahlmodus.
+- Umbenennen, Zusammenführen und Entfernen sind im jeweiligen Personenprofil gebündelt. Die letzten Änderungen öffnest du bei Bedarf über den Verlauf.
 - In „Personen“ siehst du Vorschläge und Gesichter auch in kleineren Fenstern früher. Häufige Aktionen stehen direkt bei der Auswahl.
 - Beim Abgleich gemeinsamer Ordner kannst du die beiden Gesichtsausschnitte direkt vergleichen und zur Fallliste zurückkehren.
 

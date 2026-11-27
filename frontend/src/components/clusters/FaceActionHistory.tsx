@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   fetchFaceActionHistory, replayFaceAction, type FaceActionHistory as History, type FaceHistoryAction,
 } from "../../utils/api";
+import { useModalFocus } from "../../hooks/useModalFocus";
 import { subscribeToTopic } from "../../utils/events";
 import { countWithLabel } from "../../utils/germanFormatting";
 
@@ -23,6 +24,11 @@ export default function FaceActionHistory({ active, busy, compact = false, revis
   onBusy: (busy: boolean) => void;
   onChanged: () => Promise<void>;
 }) {
+  const [open, setOpen] = useState(false);
+  const titleId = useId();
+  const dialog = useRef<HTMLElement>(null);
+  useModalFocus(dialog, () => setOpen(false), !busy, open && active);
+  useEffect(() => { if (!active) setOpen(false); }, [active]);
   const [history, setHistory] = useState<History>();
   const [loadError, setLoadError] = useState("");
   const [feedback, setFeedback] = useState<{ message: string; error?: boolean }>();
@@ -104,8 +110,18 @@ export default function FaceActionHistory({ active, busy, compact = false, revis
   return <section className="face-action-history" aria-label="Änderungsverlauf">
     <div className="face-action-history__tools">
       {!compact && controls}
-      {history && <details>
-        <summary aria-label={compact ? "Letzte Änderungen" : undefined}>{compact ? "Änderungen" : "Letzte Änderungen"}</summary>
+      {history && <button type="button" className="secondary-button face-action-history__open" onClick={() => setOpen(true)}>
+        Änderungsverlauf
+      </button>}
+    </div>
+    {history && open && <div className="modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !busy) setOpen(false);
+    }}>
+      <section className="face-action-history__dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} ref={dialog}>
+        <header>
+          <h2 id={titleId}>Änderungsverlauf</h2>
+          <button className="secondary-button" type="button" onClick={() => setOpen(false)} disabled={busy}>Schließen</button>
+        </header>
         {compact && controls && <div className="face-action-history__tools">{controls}</div>}
         {history.blocked_reason ? <p>{history.blocked_reason}</p> : history.entries.length > 0 ? <ol>
           {history.entries.map((entry) => <li key={entry.id}>
@@ -113,12 +129,13 @@ export default function FaceActionHistory({ active, busy, compact = false, revis
             <small>{dateLabel.format(new Date(entry.created_at))}</small>
           </li>)}
         </ol> : <p>Noch keine umkehrbaren Änderungen.</p>}
-      </details>}
-    </div>
+        {feedback && <p role={feedback.error ? "alert" : "status"}>{feedback.message}</p>}
+      </section>
+    </div>}
     {loadError && <div className="review-workflow-feedback" role="alert">{loadError}{" "}
       <button type="button" className="secondary-button" onClick={() => void reload()}>Erneut laden</button>
     </div>}
-    {feedback && <p className={`review-workflow-feedback${feedback.error ? " review-workflow-feedback--error" : ""}`}
+    {feedback && !open && <p className={`review-workflow-feedback${feedback.error ? " review-workflow-feedback--error" : ""}`}
       role={feedback.error ? "alert" : "status"}>{feedback.message}</p>}
   </section>;
 }

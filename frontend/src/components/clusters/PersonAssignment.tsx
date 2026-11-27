@@ -11,6 +11,8 @@ interface Props {
   busy: boolean;
   faceCount: number;
   wholeGroup: boolean;
+  currentPersonName?: string;
+  explicitScope?: boolean;
   onRetry: () => void;
   onAssign: (name: string) => void;
 }
@@ -18,7 +20,7 @@ interface Props {
 const personKey = (name: string) => name.trim().normalize("NFC").toLocaleLowerCase("de");
 
 const PersonAssignment: React.FC<Props> = ({
-  people, peopleStatus, busy, faceCount, wholeGroup, onRetry, onAssign,
+  people, peopleStatus, busy, faceCount, wholeGroup, currentPersonName, explicitScope, onRetry, onAssign,
 }) => {
   const listId = useId();
   const [query, setQuery] = useState("");
@@ -55,13 +57,17 @@ const PersonAssignment: React.FC<Props> = ({
     closeOptions();
   };
 
-  const canAssign = !disabled && peopleStatus === "ready" && !!name;
+  const alreadyAssigned = Boolean(currentPersonName && search === personKey(currentPersonName));
+  const canAssign = !alreadyAssigned && !disabled && peopleStatus === "ready" && !!name;
   const submit = () => {
     if (!canAssign) return;
     closeOptions();
     onAssign(exact?.name ?? name);
   };
-  const actionLabel = !name
+  const count = faceCount === 1 ? "1 Gesicht" : `${faceCount} Gesichter`;
+  const actionLabel = explicitScope && name && !alreadyAssigned
+    ? exact ? `${count} „${exact.name}“ zuordnen` : `„${name}“ anlegen und ${count} zuordnen`
+    : !name || alreadyAssigned
     ? "Person zuweisen"
     : exact
       ? "„" + exact.name + "“ zuweisen"
@@ -145,6 +151,9 @@ const PersonAssignment: React.FC<Props> = ({
       <p id={listId + "-scope"} className="cluster-assignment-workflow__scope">
         {wholeGroup ? "Ganze Gruppe" : "Auswahl"} · {faceCount === 1 ? "1 Gesicht" : faceCount + " Gesichter"}
       </p>
+      {alreadyAssigned && <p className="cluster-assignment-workflow__scope" role="status">
+        Die Gesichter sind dieser Person bereits zugeordnet.
+      </p>}
       {peopleStatus === "loading" && <p className="cluster-assignment-workflow__scope" role="status">Personen werden geladen …</p>}
       {peopleStatus === "error" && (
         <div className="review-workflow-feedback" role="alert">

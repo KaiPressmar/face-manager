@@ -36,7 +36,7 @@ Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub
 ## Erste Schritte
 
 1. Öffne **Bilder hinzufügen** (in sehr schmalen Fenstern **+ Bilder**) und wähle einen oder mehrere Bilderordner. Unter **Aktivitäten** siehst du den Fortschritt.
-2. Öffne **Personen → Ohne Namen**, wähle eine Gesichtsgruppe und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
+2. Öffne **Personen → Prüfen → Ohne Namen**, wähle eine Gesichtsgruppe und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
 3. In **Bilder** kannst du nach Personen, Ordnern oder Alben filtern. Unter **Karte** findest du Fotos mit gespeicherten Aufnahmeorten.
 
 Unter **Hilfe** kannst du direkt ein Thema auswählen. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel zwischen den Bereichen bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite. In schmalen Fenstern findest du **Dateinamen** und **Einstellungen** unter **Mehr**.
@@ -65,16 +65,29 @@ Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder**
 <details>
 <summary>Personen und Gesichtsgruppen</summary>
 
-Unter **Personen** kannst du neue Zuordnungen prüfen, Gesichter benennen und frühere Entscheidungen korrigieren.
+Unter **Personen** findest du die bereits benannten Personen. Über **Prüfen** öffnest du die Aufgaben für Gesichter, deren Zuordnung noch offen ist.
+
+<details>
+<summary>Personenverzeichnis, Profil und Verwaltung</summary>
+
+Suche eine Person nach Namen und öffne ihr Profil. Dort siehst du ihre Fotos. **Zuordnungen korrigieren** öffnet die Gesichter dieser Person. Unter **Person verwalten** kannst du ihren Namen ändern, sie mit einem anderen Eintrag zusammenführen oder sie aus dem Verzeichnis entfernen. Vor dem Zusammenführen oder Entfernen siehst du, wohin die zugeordneten Gesichter wechseln.
+
+![Personenverzeichnis mit Suchfeld und Porträts bestätigter Personen](docs/screenshots/people-directory.webp)
+
+![Profil von Eileen Collins mit zugeordneten Fotos und Aktionen](docs/screenshots/people-profile.webp)
+
+![Dialog zur Namensänderung mit Optionen zum Zusammenführen und Entfernen](docs/screenshots/people-management.webp)
+
+</details>
 
 <details>
 <summary>Vorschläge</summary>
 
-Vergleiche die vorgeschlagenen Zuordnungen mit bereits bestätigten Fotos. Mit **Gruppe prüfen** öffnest du die Detailansicht. Über **Auswahl zuordnen** bestätigst du die markierten Gesichter. Unter **Weitere Aktionen** kannst du die Gesichtsgruppe öffnen oder einen Vorschlag verwerfen.
+Öffne einen Vorschlag, um die Gesichter mit bereits bestätigten Fotos zu vergleichen. Bestätige die markierte Auswahl mit **Gesichter zuordnen**. Unter **Weitere Aktionen** kannst du die Gesichtsgruppe öffnen oder den Vorschlag verwerfen.
 
-Mit **Markieren** kannst du mehrere Empfehlungen für eine gemeinsame Bestätigung auswählen.
+Mit **Mehrere auswählen** kannst du passende Empfehlungen gemeinsam bestätigen.
 
-![Übersicht mit zwei Personenvorschlägen und bestätigten Vergleichsfotos](docs/screenshots/people-review.webp)
+![Übersicht mit zwei Personenvorschlägen und Vorschaubildern](docs/screenshots/people-review.webp)
 
 ![Detailansicht eines Personenvorschlags mit Gesichtsauswahl und Vergleichsfotos](docs/screenshots/people-suggestion-detail.webp)
 
@@ -87,6 +100,8 @@ Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen
 
 ![Unbenannte Gesichtsgruppen mit geöffneter Gruppe und Namenssuche](docs/screenshots/people-unnamed.webp)
 
+![Gruppenliste mit Gesichtsvorschauen im schmalen Fenster](docs/screenshots/people-unnamed-list-compact.webp)
+
 ![Geöffnete Gesichtsgruppe im schmalen Fenster mit Namenssuche und Rückkehr zur Gruppenliste](docs/screenshots/people-review-compact.webp)
 
 </details>
@@ -94,9 +109,11 @@ Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen
 <details>
 <summary>Personen korrigieren</summary>
 
-Wähle eine bereits benannte Person und öffne eine ihrer Gruppen. Mit **Person bearbeiten** kannst du den Namen ändern. Markiere falsch zugeordnete Gesichter und weise sie einer anderen Person zu. Unter **Aussortieren oder lösen** kannst du Gesichter aus der geöffneten Gruppe lösen und erneut prüfen.
+Öffne im Profil **Zuordnungen korrigieren** oder wähle im Prüfbereich **Personen korrigieren**, um zwischen Personen und Gruppen zu wechseln. Markiere falsch zugeordnete Gesichter und weise sie einer anderen Person zu. Über die weiteren Aktionen kannst du die markierten Gesichter auch wieder zur Prüfung vorlegen.
 
-![Bestätigte Personen mit geöffneter Gesichtsgruppe zur Korrektur](docs/screenshots/people-corrections.webp)
+![Gesichter von Eileen Collins in der Korrekturansicht mit markiertem Gesicht](docs/screenshots/people-corrections.webp)
+
+![Korrekturübersicht mit der Suche nach Personen und Gesichtsgruppen](docs/screenshots/people-correction-overview.webp)
 
 </details>
 
@@ -123,11 +140,11 @@ Wenn du einen gemeinsamen Ordner eingerichtet hast, kannst du hier abweichende Z
 </details>
 
 <details>
-<summary>Letzte Änderungen und Gesichter manuell markieren</summary>
+<summary>Änderungsverlauf und Gesichter manuell markieren</summary>
 
-Unter **Letzte Änderungen** siehst du kürzlich ausgeführte Aktionen. Unterstützte Änderungen an der lokalen Bibliothek kannst du mit **Rückgängig** zurücknehmen und mit **Wiederholen** erneut ausführen.
+Im **Änderungsverlauf** siehst du kürzlich ausgeführte Aktionen. Unterstützte Änderungen an der lokalen Bibliothek kannst du mit **Rückgängig** zurücknehmen und mit **Wiederholen** erneut ausführen.
 
-![Geöffnete Liste der letzten Änderungen mit Rückgängig und Wiederholen](docs/screenshots/people-history.webp)
+![Dialog mit den zuletzt ausgeführten Änderungen](docs/screenshots/people-history.webp)
 
 Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person.
 

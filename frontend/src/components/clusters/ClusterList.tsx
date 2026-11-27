@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-import { ClusterSummary, FaceReviewGroupSummary } from "../../utils/api";
+import { ClusterSummary, FaceReviewGroupSummary, faceCropUrl } from "../../utils/api";
 import { countWithLabel } from "../../utils/germanFormatting";
+import "./cluster-list.css";
 
 const UNKNOWN_PERSON_LABEL = "Noch zu prüfen";
 const REVIEW_GROUP_LABELS: Record<string, string> = {
@@ -239,11 +240,14 @@ const ClusterList: React.FC<ClusterListProps> = ({
   const renderClusterCard = (cluster: ClusterSummary) => {
     const isSelected = selected === cluster.cluster_id;
     const displayLabel = cluster.cluster_label?.trim() || `Gesichtsgruppe ${cluster.cluster_id}`;
+    const portrait = mode === "open" && cluster.representative_face_id != null
+      ? faceCropUrl(cluster.representative_face_id)
+      : undefined;
     return (
       <button
         key={cluster.cluster_id}
         type="button"
-        className={`neon-card cluster-person-browser__cluster-card${isSelected ? " neon-card--active" : ""}`}
+        className={`neon-card cluster-person-browser__cluster-card${portrait ? " cluster-list-row--with-portrait" : ""}${isSelected ? " neon-card--active" : ""}`}
         ref={(node) => {
           clusterRefs.current[cluster.cluster_id] = node;
         }}
@@ -259,11 +263,24 @@ const ClusterList: React.FC<ClusterListProps> = ({
         aria-pressed={isSelected}
         onClick={() => onSelect(cluster.cluster_id)}
       >
-        <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: isSelected ? "var(--text-strong)" : "var(--text)" }}>
-          {displayLabel}
-        </span>
-        <span style={{ display: "block", color: "var(--muted)", fontSize: 13, marginTop: 2 }}>
-          {countWithLabel(cluster.face_count, "Gesicht", "Gesichter")}
+        {portrait && (
+          <img
+            alt=""
+            className="cluster-list-row__portrait"
+            decoding="async"
+            height={32}
+            loading="lazy"
+            src={portrait}
+            width={32}
+          />
+        )}
+        <span className="cluster-list-row__text">
+          <span style={{ display: "block", fontSize: 14, fontWeight: 700, color: isSelected ? "var(--text-strong)" : "var(--text)" }}>
+            {displayLabel}
+          </span>
+          <span style={{ display: "block", color: "var(--muted)", fontSize: 13, marginTop: 2 }}>
+            {countWithLabel(cluster.face_count, "Gesicht", "Gesichter")}
+          </span>
         </span>
       </button>
     );

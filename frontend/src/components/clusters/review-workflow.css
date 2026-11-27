@@ -16,99 +16,6 @@
   border-color: var(--warning);
 }
 
-.review-page .review-inbox {
-  gap: 14px;
-}
-
-.review-page .review-inbox-bulk {
-  flex-flow: row wrap;
-  align-items: center;
-  gap: 6px 12px;
-  padding: 5px 9px;
-}
-
-.review-page .review-inbox-bulk > div:last-child {
-  flex: 0 1 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.review-page .review-inbox-bulk button,
-.review-page .review-inbox-card__actions button,
-.review-page .review-inbox-load-more {
-  min-height: 40px;
-  font-size: 12px;
-}
-
-.review-page .review-inbox-bulk button:disabled {
-  opacity: 0.55;
-}
-
-.review-page .review-inbox-bulk .review-inbox-bulk__select {
-  background: var(--surface-2);
-  color: var(--text);
-  border: 1px solid var(--border-strong);
-}
-
-.review-page .review-inbox-card__identity h3 {
-  margin: 0;
-  color: var(--text-strong);
-  font-size: 17px;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-}
-
-.review-page .review-inbox-bulk p {
-  margin: 0;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.review-page .review-inbox-card__body > p {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.review-page .review-inbox-grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(345px, 100%), 1fr));
-}
-
-.review-page .review-inbox-section {
-  gap: 8px;
-}
-
-.review-page .review-inbox-section > header h2 {
-  margin: 0;
-}
-
-.review-page .review-inbox-card__identity {
-  flex-wrap: wrap;
-}
-
-.review-page .review-inbox-card__identity > div {
-  min-width: 0;
-}
-
-.review-page .review-inbox-card[data-marked="true"] {
-  border-color: var(--accent-border);
-}
-
-.review-inbox-card__mark {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 34px;
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.review-inbox-card__mark input {
-  width: 16px;
-  height: 16px;
-}
-
 .cluster-assignment-workflow {
   display: grid;
   gap: 7px;
@@ -148,84 +55,202 @@
   white-space: normal;
 }
 
-.review-page .review-person-card {
-  align-content: start;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr);
-  padding: 12px;
-}
+.face-action-history { margin-block: .25rem .75rem; }
+.face-action-history__tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.face-action-history summary { cursor: pointer; min-height: 36px; padding: .5rem; }
+.face-action-history ol { margin: .25rem .5rem .5rem; padding-inline-start: 1.35rem; }
+.face-action-history li { margin-block: .3rem; }
+.face-action-history li small { display: inline-block; margin-inline-start: .6rem; color: var(--muted); }
 
-.review-page .review-person-card > .review-inbox-card__identity {
+.review-page .review-inbox,
+.review-queue,
+.review-queue__section {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.review-person-card__previews {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(108px, 30%, 136px);
-  gap: 10px;
-}
-
-.review-person-card__candidates .review-person-faces {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  max-width: 240px;
-}
-
-.review-person-card__candidates,
-.review-person-reference {
+  gap: 12px;
   min-width: 0;
 }
 
-.review-person-card__candidates > strong,
-.review-person-reference > strong {
-  display: block;
-  margin-bottom: 5px;
-  font-size: 12px;
+.review-queue[hidden] {
+  display: none;
 }
 
-.review-person-reference {
-  align-self: start;
-  padding: 8px;
+.review-queue__items {
+  display: grid;
+  gap: 5px;
+}
+
+.review-queue__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+}
+
+.review-queue__heading h2,
+.review-person-detail :is(h2, h3, p) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.review-queue__heading h2 {
+  font-size: 17px;
+}
+
+.review-queue-row__control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+  min-height: 52px;
+  max-width: 100%;
+  padding: 5px 9px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--surface-1);
+  text-align: start;
+}
+
+.review-queue-row__control:hover,
+.review-queue-row__control[data-marked] {
+  border-color: var(--accent-border);
   background: var(--surface-2);
 }
 
-.review-person-card__decision {
-  display: grid;
-  align-content: start;
-  gap: 7px;
-  min-width: 0;
-  padding-inline-start: 8px;
-  border-inline-start: 1px solid var(--border);
+.review-queue-row__control input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
-.review-person-card__decision .review-person-reference {
-  padding: 0;
+.review-queue-row__photos {
+  display: flex;
+  align-items: center;
+  max-width: min(34vw, 174px);
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.review-queue-row__photos img,
+.review-queue-row__placeholder {
+  display: grid;
+  place-items: center;
+  width: clamp(23px, 4vw, 39px);
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 5px;
+  background: var(--surface-2);
+}
+
+.review-queue-row__text {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.review-queue-row__text small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.review-page .review-inbox-bulk {
+  flex-flow: row wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 9px;
+}
+
+.review-page .review-inbox-bulk p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-page .review-inbox-bulk > div:last-child {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+}
+
+.review-page .review-inbox-bulk button,
+.review-page .review-inbox-load-more {
+  min-height: 40px;
+  max-width: 100%;
+  font-size: 12px;
+  white-space: normal;
+}
+
+.review-page .review-inbox-bulk .review-inbox-bulk__select {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+}
+
+.review-inbox-bulk button:disabled,
+.review-person-detail button:disabled {
+  opacity: .55;
+}
+
+.review-person-detail {
+  display: grid;
+  gap: 9px;
+  width: min(940px, 100%);
+  min-width: 0;
+  color: var(--text);
+}
+
+.review-person-detail header h2 {
+  font-size: clamp(19px, 2.5vw, 25px);
+}
+
+.review-person-detail header p,
+.review-person-detail__hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.review-person-detail__back {
+  justify-self: start;
+  min-height: 44px;
   border: 0;
-  border-radius: 0;
-  background: none;
+  padding: 3px 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: start;
+}
+
+.review-person-detail__evidence {
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.review-person-detail__evidence > div {
+  min-width: 0;
+}
+
+.review-person-detail__evidence h3,
+.review-person-reference > strong {
+  font-size: 14px;
+}
+
+.review-person-detail__evidence .review-person-faces,
+.review-person-reference__photos {
+  margin-block-start: 6px;
 }
 
 .review-person-reference__photos {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-}
-
-.review-person-card__previews .review-person-reference__photos {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px;
-  max-width: 112px;
-}
-
-.review-person-card__previews .review-person-reference__photos img {
-  width: 100%;
+  gap: 5px;
 }
 
 .review-person-reference__photos button {
-  display: block;
   padding: 0;
   border: 0;
   border-radius: 6px;
@@ -234,36 +259,31 @@
 
 .review-person-reference__photos img {
   display: block;
-  width: 56px;
+  width: clamp(48px, 7vw, 72px);
   aspect-ratio: 1;
   object-fit: cover;
   border-radius: 6px;
 }
 
-.review-page .review-person-card__summary,
-.review-page .review-person-card__selection {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.review-page .review-person-card__summary {
-  margin-top: 3px;
-}
-
 .review-person-faces {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(72px, 100%), 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(min(92px, 100%), 1fr));
+  gap: 8px;
+  max-width: 648px;
 }
 
 .review-person-face {
-  display: grid;
-  align-content: start;
+  position: relative;
   min-width: 0;
-  background: var(--surface-2);
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.review-person-face[data-selected] {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .review-person-face img,
@@ -271,239 +291,121 @@
   display: block;
   width: 100%;
   aspect-ratio: 1;
-  border-radius: 7px 7px 0 0;
   object-fit: cover;
 }
 
 .review-person-face__unavailable {
   display: grid;
-  align-items: center;
+  place-items: center;
   padding: 4px;
   color: var(--text-muted);
   font-size: 11px;
-  overflow-wrap: anywhere;
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .review-person-face__select {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  min-height: 28px;
-  padding: 2px;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 10px;
-  overflow-wrap: anywhere;
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  min-height: 30px;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .review-person-face__select input {
-  flex: 0 0 auto;
   margin: 0;
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
 }
 
 .review-person-face__open {
   position: relative;
+  z-index: 0;
   display: block;
-  min-width: 0;
   width: 100%;
   padding: 0;
   border: 0;
-  border-radius: 7px 7px 0 0;
   background: transparent;
-  color: var(--text);
+}
+
+.review-person-face__open:focus-visible {
+  outline-offset: -3px;
 }
 
 .review-person-face__expand {
   position: absolute;
-  inset: auto 3px 3px auto;
+  inset: auto 4px 4px auto;
   z-index: 1;
-  padding: 2px 4px;
-  border-radius: 4px;
-  background: rgba(10 12 16 / 85%);
-  color: white;
-  font-size: 12px;
-  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 5px;
+  background: var(--surface-1);
+  color: var(--text);
   pointer-events: none;
 }
 
-.review-person-face__open:hover .review-person-face__expand {
-  background: var(--surface-3);
-  color: var(--text-strong);
+.review-person-detail__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding-block: 8px;
+  border-block-start: 1px solid var(--border);
+  background: var(--bg);
 }
 
-.review-page .review-inbox-card__preview {
-  min-width: 0;
-  padding: 6px;
-}
-
-.review-page .review-inbox-card__preview .review-person-faces {
-  grid-template-columns: repeat(auto-fill, minmax(min(54px, 100%), 1fr));
-}
-
-.review-page .review-inbox-card__actions button,
-.review-page .review-inbox-bulk button {
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.review-page .review-inbox-card__actions {
-  gap: 5px 7px;
-  margin: 0;
-}
-
-.review-page .review-inbox-card__actions > button,
-.review-page .review-inbox-more__actions > button {
-  padding: 5px 9px;
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.review-page .review-inbox-card__actions > .review-inbox-card__primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--on-accent);
-  font-weight: 800;
-}
-
-.review-page .review-inbox-card__actions > .review-inbox-card__primary:disabled {
-  opacity: .55;
-}
-
-.review-page .review-person-card__decision .review-inbox-card__actions > button {
-  width: 100%;
-  overflow-wrap: normal;
-}
-
-.review-inbox-more summary {
-  min-height: 40px;
-  align-content: center;
-  padding: 4px 6px;
+.review-person-detail__actions > p {
   color: var(--text-muted);
-  cursor: pointer;
   font-size: 12px;
 }
 
-.review-inbox-more[open] {
-  flex: 1 1 100%;
-}
-
-.review-inbox-more__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.review-page .review-person-detail-backdrop {
-  padding: 8px;
-}
-
-.review-person-detail {
-  display: grid;
-  gap: 12px;
-  width: min(800px, 100%);
-  min-width: 0;
-  max-height: calc(100vh - 16px);
-  max-height: calc(100dvh - 16px);
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding: clamp(12px, 3vw, 22px);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: var(--surface-1);
-  color: var(--text);
-  box-shadow: var(--shadow-card-hover);
-}
-
-.review-person-detail h2,
-.review-person-detail h3,
-.review-person-detail p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.review-person-detail__header,
-.review-person-detail__actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.review-person-detail__header {
-  justify-content: space-between;
-}
-
-.review-person-detail__header > div {
-  min-width: 0;
-}
-
-.review-person-detail__header .modal-close-button {
-  flex: 0 0 44px;
-  width: 44px;
-  height: 44px;
-}
-
-.review-person-detail__actions {
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.review-person-detail__actions p {
-  flex: 1 0 100%;
-  color: var(--text-muted);
-}
-
-.review-person-detail .review-person-faces {
-  grid-template-columns: repeat(auto-fill, minmax(min(90px, 100%), 1fr));
-}
-
-.review-person-detail button {
+.review-person-detail__actions .primary-button,
+.review-person-detail__actions .secondary-button,
+.review-inbox-more summary {
   min-height: 44px;
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-@media (pointer: coarse) {
-  .review-person-face__select {
-    min-height: 40px;
+.review-inbox-more summary {
+  align-content: center;
+  padding-inline: 5px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.review-inbox-more__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+@media (min-width: 800px) {
+  .review-person-detail__evidence:has(.review-person-reference) {
+    grid-template-columns: minmax(0, 1fr) minmax(150px, 184px);
+  }
+
+  .review-person-detail__evidence:has(.review-person-reference) .review-person-reference {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .review-person-detail__evidence:has(.review-person-reference) > div:not(.review-person-reference) {
+    grid-column: 1;
+    grid-row: 1;
   }
 }
 
-@media (max-width: 480px) {
-  .review-page .review-inbox-card {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .review-page .review-inbox-bulk button,
-  .review-page .review-inbox-card__actions button,
-  .review-page .review-inbox-load-more,
-  .review-inbox-card__mark,
-  .review-inbox-more summary {
+@media (pointer: coarse) {
+  .review-person-face__select {
+    min-width: 44px;
     min-height: 44px;
   }
 }
-
-@media (max-width: 370px) {
-  .review-person-card__previews {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .review-person-card__decision {
-    padding: 6px 0 0;
-    border: 0;
-    border-block-start: 1px solid var(--border);
-  }
-
-  .review-page .review-person-card__decision .review-inbox-card__actions > button {
-    width: auto;
-  }
-}
-.face-action-history { margin-block: .25rem .75rem; }
-.face-action-history__tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
-.face-action-history summary { cursor: pointer; min-height: 36px; padding: .5rem; }
-.face-action-history ol { margin: .25rem .5rem .5rem; padding-inline-start: 1.35rem; }
-.face-action-history li { margin-block: .3rem; }
-.face-action-history li small { display: inline-block; margin-inline-start: .6rem; color: var(--muted); }
