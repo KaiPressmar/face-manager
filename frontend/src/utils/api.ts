@@ -282,6 +282,7 @@ export interface ClusterSummary {
   cluster_label?: string | null;
   person_name: string | null;
   face_count: number;
+  representative_face_id?: number | null;
 }
 
 export interface ClusterFace {
@@ -896,24 +897,11 @@ export async function fetchClusters(): Promise<ClusterSummary[]> {
   if (!Array.isArray(payload)) {
     throw new Error("Die Liste der Gesichtsgruppen ist ungültig.");
   }
-  return payload.map((item) => ({
-    cluster_id: Number(item?.cluster_id ?? item?.id ?? 0),
-    cluster_label:
-      typeof item?.cluster_label === "string" || item?.cluster_label === null
-        ? item.cluster_label
-        : null,
-    person_name:
-      typeof item?.person_name === "string" || item?.person_name === null
-        ? item.person_name
-        : null,
-    face_count: Number(
-      item?.face_count ??
-        (Array.isArray(item?.faces) ? item.faces.length : 0),
-    ),
-  })).filter((item) => item.cluster_id > 0);
+  return payload.map(normalizeClusterSummaryItem).filter((item) => item.cluster_id > 0);
 }
 
 function normalizeClusterSummaryItem(item: any): ClusterSummary {
+  const portraitId = item?.representative_face_id;
   return {
     cluster_id: Number(item?.cluster_id ?? item?.id ?? 0),
     cluster_label:
@@ -927,6 +915,7 @@ function normalizeClusterSummaryItem(item: any): ClusterSummary {
     face_count: Number(
       item?.face_count ?? (Array.isArray(item?.faces) ? item.faces.length : 0),
     ),
+    representative_face_id: Number.isSafeInteger(portraitId) && portraitId > 0 ? portraitId : null,
   };
 }
 
@@ -1256,11 +1245,15 @@ export async function renameCluster(clusterId: number, label: string) {
   }
 }
 
-export async function renamePerson(personId: number, name: string) {
+export async function renamePerson(
+  personId: number, name: string, expectedTargetPersonId?: number | null, expectedLibraryId?: string,
+) {
   const res = await apiFetch(`${API_BASE}/persons/${personId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({
+      name, expected_target_person_id: expectedTargetPersonId, expected_library_id: expectedLibraryId,
+    }),
   });
   if (!res.ok) {
     throw new Error(await readApiError(res, "Die Person konnte nicht umbenannt werden."));
@@ -1272,8 +1265,10 @@ export async function renamePerson(personId: number, name: string) {
 export async function deletePerson(
   personId: number,
   reassignmentGroup: "unassigned" | "unknown_person" | "not_face",
+  expectedLibraryId?: string,
 ) {
   const params = new URLSearchParams({ reassignment_group: reassignmentGroup });
+  if (expectedLibraryId !== undefined) params.set("expected_library_id", expectedLibraryId);
   const res = await apiFetch(`${API_BASE}/persons/${personId}?${params.toString()}`, {
     method: "DELETE",
   });

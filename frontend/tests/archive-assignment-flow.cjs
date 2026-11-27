@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 
 module.exports = async function archiveAssignmentFlow(browser, errors, newPage, webBase) {
-  const page = await newPage(browser, 1100, 800, errors);
+  const page = await newPage(browser, 1280, 800, errors);
   const postBodies = [];
   const makeFace = (id, clusterId) => ({
     id, image_id: 1, cluster_id: clusterId, person_name: null, review_status: 'unknown_person',
@@ -76,7 +76,7 @@ module.exports = async function archiveAssignmentFlow(browser, errors, newPage, 
 };
 
 async function mixedLibraryAssignment(browser, errors, newPage, webBase) {
-  const page = await newPage(browser, 1100, 800, errors);
+  const page = await newPage(browser, 1280, 800, errors);
   const clusters = [4201, 4202].map((id) => ({
     cluster_id: id, cluster_label: `Testgruppe ${id}`, person_name: null, face_count: 1,
   }));

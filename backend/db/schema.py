@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import threading
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,12 @@ def normalize_person_name_key(name: str | None) -> str:
     """Normalize person names consistently in Python and SQLite."""
     """Normalize a person name for case-insensitive deduplication."""
     return (name or "").strip().casefold()
+
+
+def person_name_sort_key(name: str | None) -> str:
+    """Group accented names with their base letters in the person directory."""
+    decomposed = unicodedata.normalize("NFD", normalize_person_name_key(name))
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def _repair_person_name_duplicates(cur):
@@ -195,6 +202,7 @@ def _open_connection():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.create_function("person_name_key", 1, normalize_person_name_key, deterministic=True)
+    conn.create_function("person_name_sort_key", 1, person_name_sort_key, deterministic=True)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -1009,6 +1017,7 @@ def _initialize_schema(conn, *, scan_sources: bool):
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_image_id ON face(image_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_face_cluster_id ON face(cluster_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_cluster_person_id ON cluster(person_id)")
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_cluster_person_suggestion_person "
         "ON cluster_person_suggestion(person_id, status, confidence DESC)"

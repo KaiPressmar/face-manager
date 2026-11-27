@@ -10,6 +10,7 @@ const helpTourFlow = require('./help-tour-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
 const mapFaceliftFlow = require('./map-facelift-flow.cjs');
+const personDirectoryFlow = require('./person-directory-flow.cjs');
 const faceliftWorkspacesFlow = require('./facelift-workspaces-flow.cjs');
 let chromium;
 try {
@@ -151,7 +152,7 @@ async function firstAssignmentFlow(browser, errors) {
     });
     await page.goto(`${webBase}/#/bilder`);
     const assign = page.getByRole('button', { name: 'Personen zuordnen', exact: true });
-    const openTab = page.getByRole('button', { name: /^Ohne Namen/ }).and(page.locator('[aria-current="true"]'));
+    const openTab = page.getByRole('button', { name: /^Ohne Namen/ }).and(page.locator('[aria-current="page"]'));
     await assign.click();
     await page.waitForURL(reviewHash);
     await openTab.waitFor();
@@ -550,8 +551,9 @@ async function existingFlow(browser, errors) {
     await page.getByRole('button', { name: /Benennungsschema ändern/ }).click();
     await page.waitForURL('**/einstellungen/dateinamen');
     await page.getByRole('navigation', { name: 'Hauptnavigation' }).getByRole('button', { name: 'Personen' }).click();
-    await page.getByRole('button', { name: /Ohne Namen.*Benennen/ }).click();
-    await page.getByRole('button', { name: /Personen korrigieren.*Bestätigte/ }).click();
+    await page.getByRole('button', { name: 'Prüfen', exact: true }).click();
+    await page.getByRole('button', { name: /^Ohne Namen / }).click();
+    await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
     const cards = page.locator('.page-pane--active button.cluster-person-browser__cluster-card');
     await cards.first().waitFor();
     const card = (await cards.count()) > 1 ? cards.nth(1) : cards.first();
@@ -578,6 +580,7 @@ async function existingFlow(browser, errors) {
     await page.keyboard.press('Escape');
     await personDialog.waitFor({ state: 'hidden' });
 
+    await page.getByText('Aussortieren oder lösen', { exact: true }).click();
     await page.getByRole('button', { name: 'Gesichtsgruppe umbenennen' }).click();
     const renameDialog = page.getByRole('dialog', { name: 'Gesichtsgruppe umbenennen' });
     await renameDialog.waitFor();
@@ -595,7 +598,7 @@ async function existingFlow(browser, errors) {
     await page.getByText('Neu Beispiel', { exact: true }).first().waitFor();
     await page.unroute('**/api/persons');
 
-    await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
+    await page.getByRole('button', { name: /^Aussortiert / }).click();
     await screenshot(page, 'existing-flows');
     console.log('PASS existing flows: library/folder retry, person filter, import, rename, settings, review tabs');
   } finally {
@@ -1084,7 +1087,7 @@ async function liveWorkflowFlow(browser, errors) {
     await page.getByRole('alert').filter({ hasText: 'Diese Gesichtsgruppe ist nicht mehr verfügbar' }).waitFor();
     await page.waitForURL('**/#/gesichter-pruefen');
     const groupRequest = page.waitForRequest('**/api/face-review-groups/unknown_person/faces');
-    await page.getByRole('button', { name: /Aussortiert.*Unbekannt/ }).click();
+    await page.getByRole('button', { name: /^Aussortiert / }).click();
     await groupRequest;
 
     let total = 27;
@@ -1367,7 +1370,7 @@ async function responsiveFlow(browser, errors) {
       // Simulate moving to the next navigation control before route restoration.
       button.closest('nav').querySelector('.workflow-sidebar__more').focus();
     });
-    await page.getByRole('heading', { name: 'Gesichter prüfen', exact: true }).waitFor();
+    await page.getByRole('heading', { name: 'Personen', exact: true }).waitFor();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     assert.ok(await more.evaluate((button) => document.activeElement === button), 'Navigation restored focus after the user moved it');
     await page.keyboard.press('Enter');
@@ -1483,10 +1486,9 @@ async function reviewInboxFlow(browser, errors) {
     initialListing.release();
 
     const card = inbox.getByRole('article', { name: 'Personenvorschlag für Anna Beispiel' });
-    const open = card.getByRole('button', { name: 'Gruppe prüfen', exact: true });
+    const open = card.getByRole('button', { name: 'Vorschlag für Anna Beispiel prüfen', exact: true });
     await open.waitFor();
-    assert.ok(await card.getByRole('button', { name: 'Auswahl zuordnen', exact: true }).isDisabled(),
-      'Inbox allowed submission while a preview crop was still loading');
+    assert.equal(await card.getByRole('checkbox').count(), 0, 'Ordinary rows must not enter batch mode by default');
     previewCrop.release();
     const viewports = [[320, 568], [390, 844], [768, 1024], [1280, 800]];
     for (const [width, height] of viewports) {
@@ -1495,8 +1497,8 @@ async function reviewInboxFlow(browser, errors) {
     }
 
     await open.press('Enter');
-    const dialog = page.getByRole('dialog', { name: 'Gruppe prüfen', exact: true });
-    const apply = dialog.getByRole('button', { name: 'Auswahl zuordnen', exact: true });
+    const dialog = page.getByRole('region', { name: 'Gruppe prüfen', exact: true });
+    const apply = dialog.getByRole('button', { name: /Gesicht(?:er)? zuordnen$/ });
     const faceBoxes = dialog.getByRole('checkbox', { name: /^Gesicht \d+ auswählen$/ });
     await faceBoxes.nth(4).waitFor();
     assert.equal(await faceBoxes.count(), proposal.face_ids.length, 'Detail omitted faces from the current proposal snapshot');
@@ -1510,13 +1512,6 @@ async function reviewInboxFlow(browser, errors) {
       await page.setViewportSize({ width, height });
       await assertReviewFits(page, [dialog], `Review detail at ${width}×${height}`);
     }
-    // Check the paint order once the responsive layout has settled.
-    await page.waitForFunction(() => {
-      const brand = document.querySelector('.sidebar__brand-mark');
-      if (!brand) return false;
-      const { x, y, width, height } = brand.getBoundingClientRect();
-      return Boolean(document.elementFromPoint(x + width / 2, y + height / 2)?.closest('.review-person-detail-backdrop'));
-    }, undefined, { timeout: 3000 });
     await apply.scrollIntoViewIfNeeded();
     const bounds = await apply.boundingBox();
     assert.ok(bounds && bounds.y >= -1 && bounds.y + bounds.height <= 361,
@@ -1525,8 +1520,7 @@ async function reviewInboxFlow(browser, errors) {
       const { x, y, width, height } = element.getBoundingClientRect();
       return element.contains(document.elementFromPoint(x + width / 2, y + height / 2));
     }), 'Another element covers the detail action at keyboard-height viewport');
-    await assertFocusInDialog(page, dialog);
-    await assertTabTrap(page, dialog);
+    await apply.focus();
     await page.keyboard.press('Escape');
     await dialog.waitFor({ state: 'hidden' });
     await open.and(page.locator(':focus')).waitFor();
@@ -1566,7 +1560,7 @@ async function selectReviewFaces(dialog, proposal, selection) {
     await checkbox.and(dialog.locator('input:enabled')).waitFor();
     await checkbox.setChecked(selection.includes(number));
   }
-  await dialog.getByText(`${selection.length} von ${proposal.face_count} Gesichtern ausgewählt`, { exact: true }).waitFor();
+  await dialog.getByText(`${selection.length} von ${proposal.face_ids.length} ausgewählt`, { exact: true }).waitFor();
 }
 
 async function denseJourneyReview(browser, errors) {
@@ -1803,30 +1797,36 @@ async function suggestionRefreshFlow(browser, errors) {
 
     await page.goto(`${webBase}/#/gesichter-pruefen`);
     const counter = page.getByRole('button', { name: /^Vorschläge / }).locator('b');
-    const action = page.getByRole('article', { name: 'Personenvorschlag für Person 7', exact: true })
-      .getByRole('button', { name: 'Auswahl zuordnen', exact: true });
+    const row = page.getByRole('button', { name: 'Vorschlag für Person 14 prüfen', exact: true });
+    const survivor = page.getByRole('button', { name: 'Vorschlag für Person 15 prüfen', exact: true });
+    const detail = page.getByRole('region', { name: 'Gruppe prüfen' });
+    const action = detail.getByRole('button', { name: /Gesicht(?:er)? zuordnen$/ });
     const scroller = page.locator('[data-workspace-page="review"] .page-content');
-    await action.scrollIntoViewIfNeeded();
-    await action.and(page.locator('button:enabled')).waitFor();
+    await row.scrollIntoViewIfNeeded();
     const startingScroll = await scroller.evaluate((element) => element.scrollTop);
     assert.ok(startingScroll > 100);
+    await row.click();
+    await action.and(detail.locator('button:enabled')).waitFor();
     const pendingResponse = page.waitForResponse((response) => response.url().endsWith('/api/person-suggestions')
       && response.headers()['x-person-suggestions-pending'] === '1');
     await action.click();
     await (await pendingResponse).finished();
     await page.getByText('Vorschläge werden aktualisiert …', { exact: true }).waitFor();
-    const survivor = page.getByRole('article', { name: 'Personenvorschlag für Person 8', exact: true });
-    assert.ok(await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).isDisabled());
+    await survivor.waitFor();
     assert.equal(await counter.textContent(), '14');
     assert.equal(await page.getByRole('heading', { name: 'Keine Vorschläge offen' }).count(), 0);
-    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Pending refresh reset the review scroll');
+    await page.waitForFunction(() => document.querySelector('[data-workspace-page="review"] .page-content').scrollTop > 100);
+    await survivor.click();
+    await action.waitFor();
+    assert.ok(await action.isDisabled(), 'A recalculation did not block the next focused suggestion');
 
     pending = false;
     await page.evaluate(() => window.dispatchEvent(new Event('focus')));
-    await survivor.getByRole('button', { name: 'Auswahl zuordnen' }).and(page.locator('button:enabled')).waitFor();
+    await action.and(detail.locator('button:enabled')).waitFor();
+    await detail.getByRole('button', { name: 'Zu den Vorschlägen' }).click();
     assert.equal(await counter.textContent(), '14');
-    assert.equal(await action.count(), 0);
-    assert.ok(await scroller.evaluate((element) => element.scrollTop) > 100, 'Completed refresh reset the review scroll');
+    assert.equal(await row.count(), 0);
+    await page.waitForFunction(() => document.querySelector('[data-workspace-page="review"] .page-content').scrollTop > 100);
     console.log('PASS suggestion refresh: completed card removed, pending list retained, count and scroll stable');
   } finally {
     await page.close();
@@ -1837,21 +1837,41 @@ async function suggestionRefreshFlow(browser, errors) {
   const browser = await chromium.launch({ headless: true });
   const errors = [];
   try {
-    const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? [denseJourneyReview, backgroundActivitiesFlow] : [
-      (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
+    const flows = process.env.UI_SMOKE_JOURNEY_ONLY === '1' ? {
+      denseJourneyReview,
+      backgroundActivitiesFlow,
+    } : {
+      workspaceNavigation: (browser, errors) => workspaceNavigationFlow(browser, errors, newPage, webBase, true),
       durablePreferencesFlow,
-      mapWithoutStorageFlow, previewFlow, firstAssignmentFlow, collectSourcesFlow, localRecoveryFlow, mapFlow, mapSelectionAndJourneyFlow,
-      (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
-      (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
-      pagedLibraryFacesFlow, liveWorkflowFlow, existingFlow, settingsFlow, previewCacheSettingsFlow, responsiveFlow, reviewInboxFlow, suggestionRefreshFlow,
-      (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
-      (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
-      (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
-      (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
+      mapWithoutStorageFlow,
+      previewFlow,
+      firstAssignmentFlow,
+      collectSourcesFlow,
+      localRecoveryFlow,
+      mapFlow,
+      mapSelectionAndJourneyFlow,
+      archiveAssignment: (browser, errors) => archiveAssignmentFlow(browser, errors, newPage, webBase),
+      compactReview: (browser, errors) => compactReviewFlow(browser, errors, newPage, webBase),
+      pagedLibraryFacesFlow,
+      liveWorkflowFlow,
+      personDirectory: (browser, errors) => personDirectoryFlow(browser, errors, newPage, webBase),
+      existingFlow,
+      settingsFlow,
+      previewCacheSettingsFlow,
+      responsiveFlow,
+      reviewInboxFlow,
+      suggestionRefreshFlow,
+      albumLibrary: (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
+      helpTour: (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
+      mapFacelift: (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+      faceliftWorkspaces: (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),
       freshInstallFlow,
-      (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
-    ];
-    for (const flow of flows) await flow(browser, errors);
+      manualFace: (browser, errors) => manualFaceFlow(browser, errors, newPage, webBase, apiBase, screenshot),
+    };
+    for (const [name, flow] of Object.entries(flows)) {
+      console.log(`START browser smoke: ${name}`);
+      await flow(browser, errors);
+    }
     assert.deepEqual(errors, [], `Browser page errors: ${errors.join('; ')}`);
     console.log('PASS browser smoke: no uncaught page errors');
   } finally {

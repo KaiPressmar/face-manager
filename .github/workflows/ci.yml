@@ -18,6 +18,30 @@ permissions:
   contents: read
 
 jobs:
+  release-proof:
+    name: Check release PR test results
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    continue-on-error: true
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      reuse: ${{ steps.proof.outputs.reuse }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify results for the merged release PR
+        id: proof
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-release-ci.py
+
   metadata:
     name: Metadata and scripts
     runs-on: ubuntu-22.04
@@ -25,7 +49,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Resolve tested tree
+        if: github.event_name == 'pull_request'
+        id: tested-tree
+        run: printf 'oid=%s\n' "$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Tested tree ${{ steps.tested-tree.outputs.oid }}
+        if: github.event_name == 'pull_request'
+        run: 'true'
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -33,7 +66,8 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Validate shell scripts
-        run: bash -n scripts/*.sh
+        run: |
+          for script in scripts/*.sh; do bash -n "$script"; done
 
       - name: Validate release version
         run: ./scripts/check-version.sh
@@ -53,8 +87,13 @@ jobs:
       - name: Validate packaging metadata
         run: python3 scripts/check-packaging.py
 
+      - name: Test release CI verification
+        run: python3 scripts/test-check-release-ci.py
+
   backend:
     name: Backend
+    needs: release-proof
+    if: ${{ !cancelled() && needs.release-proof.outputs.reuse != 'true' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
@@ -99,19 +138,29 @@ jobs:
         run: |
           npm --prefix frontend ci
           npm install --prefix "${RUNNER_TEMP}/face-manager-ui-tools" --no-audit --no-fund playwright@1.65.1
-          "${RUNNER_TEMP}/face-manager-ui-tools/node_modules/.bin/playwright" install --with-deps chromium
+          "${RUNNER_TEMP}/face-manager-ui-tools/node_modules/.bin/playwright" install --with-deps --only-shell chromium
 
       - name: Verify browser workflows
+        timeout-minutes: 5
         env:
           PYTHON_BIN: python
           NODE_PATH: ${{ runner.temp }}/face-manager-ui-tools/node_modules
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/face-manager-browsers
-        run: |
-          ./scripts/check-ui.sh
-          UI_SMOKE_JOURNEY_ONLY=1 ./scripts/check-ui.sh
+        run: ./scripts/check-ui.sh
+
+      - name: Verify browser journey
+        timeout-minutes: 5
+        env:
+          PYTHON_BIN: python
+          NODE_PATH: ${{ runner.temp }}/face-manager-ui-tools/node_modules
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/face-manager-browsers
+          UI_SMOKE_JOURNEY_ONLY: '1'
+        run: ./scripts/check-ui.sh
 
   frontend:
     name: Frontend
+    needs: release-proof
+    if: ${{ !cancelled() && needs.release-proof.outputs.reuse != 'true' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
@@ -135,6 +184,8 @@ jobs:
 
   windows-preview-cache:
     name: Preview cache (Windows)
+    needs: release-proof
+    if: ${{ !cancelled() && needs.release-proof.outputs.reuse != 'true' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7

@@ -2,7 +2,7 @@ import type { FaceReviewGroupKey } from "./api";
 import type { GeoPhotoSelection } from "./geoPhotoSelection";
 
 export type AppPage = "people" | "map" | "renaming" | "review" | "settings";
-export type ReviewView = "suggestions" | "open" | "people" | "archive" | "shared";
+export type ReviewView = "directory" | "suggestions" | "open" | "people" | "archive" | "shared";
 export type SettingsSection =
   | "erkennung"
   | "dateinamen"
@@ -10,12 +10,16 @@ export type SettingsSection =
   | "updates"
   | "daten";
 
+export type ReviewProposal = { kind: "person" | "archive"; clusterId: number };
+
 export interface NavigationEntry {
   page: AppPage;
   clusterId?: number;
   groupKey?: FaceReviewGroupKey;
   archiveClusterId?: number;
   personName?: string | null;
+  personId?: number;
+  proposal?: ReviewProposal;
   reviewView?: ReviewView;
   settingsSection?: SettingsSection;
   geoSelection?: GeoPhotoSelection;
@@ -32,7 +36,7 @@ const PAGE_SEGMENTS: Record<AppPage, string> = {
 };
 
 const REVIEW_SEGMENTS: Record<ReviewView, string> = {
-  suggestions: "vorschlaege", open: "ohne-namen", people: "personen", archive: "archiv", shared: "abgleich",
+  directory: "verzeichnis", suggestions: "vorschlaege", open: "ohne-namen", people: "personen", archive: "archiv", shared: "abgleich",
 };
 
 export interface WorkspaceHistoryMarker {
@@ -96,6 +100,12 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
 /** Build a static-host-safe URL. Hash routes are never sent to the web server. */
 export function navigationHash(entry: NavigationEntry): string {
   const base = `#/${PAGE_SEGMENTS[entry.page]}`;
+  if (entry.page === "review" && entry.proposal) return `${base}/vorschlaege/${entry.proposal.kind === "person" ? "person" : "ablage"}/${entry.proposal.clusterId}`;
+  if (entry.page === "review" && entry.personId !== undefined) {
+    const profile = `${base}/person/${entry.personId}`;
+    if (entry.reviewView !== "people") return profile;
+    return entry.clusterId === undefined ? `${profile}/korrigieren` : `${profile}/korrigieren/gruppe/${entry.clusterId}`;
+  }
   if (entry.page === "review" && entry.groupKey !== undefined) {
     const group = `${base}/kategorie/${entry.groupKey}`;
     return entry.archiveClusterId === undefined ? group : `${group}/gruppe/${entry.archiveClusterId}`;
@@ -130,6 +140,19 @@ export function parseNavigationHash(hash: string, state?: NavigationEntry | null
     return { page, mapAlbumId: segments[2] };
   }
 
+  if (page === "review" && segments[1] === "person") {
+    const personId = positiveId(segments[2]);
+    if (personId !== undefined) {
+      if (segments[3] !== "korrigieren") return { page, reviewView: "directory", personId };
+      const clusterId = segments[4] === "gruppe" ? positiveId(segments[5]) : undefined;
+      return { page, reviewView: "people", personId, ...(clusterId === undefined ? {} : { clusterId }) };
+    }
+  }
+  if (page === "review" && segments[1] === "vorschlaege") {
+    const kind = segments[2] === "person" ? "person" : segments[2] === "ablage" ? "archive" : undefined;
+    const clusterId = positiveId(segments[3]);
+    if (kind && clusterId !== undefined) return { page, reviewView: "suggestions", proposal: { kind, clusterId } };
+  }
   if (page === "review" && segments[1] === "gruppe") {
     const clusterId = positiveId(segments[2]);
     if (clusterId !== undefined) {

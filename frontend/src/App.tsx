@@ -4,6 +4,7 @@ import type { TopbarAction } from "./components/layout/Topbar";
 import type { HelpDestination, HelpTopic } from "./components/shared/HelpTour";
 import PeopleWorkspace from "./components/people/PeoplePage";
 import ReviewWorkspace from "./components/clusters/ClusterPage";
+import PersonDirectory from "./components/clusters/PersonDirectory";
 import RenameWorkspace from "./components/renaming/ImageRenamePage";
 import SettingsWorkspace from "./components/settings/SettingsPage";
 import type { FaceReviewGroupKey } from "./utils/api";
@@ -29,6 +30,7 @@ import {
   type AppPage,
   type NavigationEntry,
   type ReviewView,
+  type ReviewProposal,
   type SettingsSection,
 } from "./utils/navigation";
 
@@ -39,6 +41,8 @@ export interface ClusterNavigationTarget {
   groupKey?: FaceReviewGroupKey;
   archiveClusterId?: number;
   reviewView?: ReviewView;
+  personId?: number;
+  proposal?: ReviewProposal;
   /** Person of the clicked face, if known — lets the review page open the
    *  matching work area without waiting for its cluster list to load. */
   personName?: string | null;
@@ -78,9 +82,9 @@ function readNavigationEntry(): NavigationEntry {
 }
 
 function reviewTarget(entry: NavigationEntry, token: number): ClusterNavigationTarget | null {
-  if (entry.page !== "review" || (!entry.groupKey && entry.clusterId === undefined && !entry.reviewView)) return null;
+  if (entry.page !== "review" || (!entry.groupKey && entry.clusterId === undefined && !entry.reviewView && entry.personId === undefined && !entry.proposal)) return null;
   return { clusterId: entry.clusterId, groupKey: entry.groupKey, archiveClusterId: entry.archiveClusterId,
-    personName: entry.personName, reviewView: entry.reviewView, token };
+    personName: entry.personName, personId: entry.personId, proposal: entry.proposal, reviewView: entry.reviewView, token };
 }
 
 type Changelog =
@@ -148,6 +152,7 @@ const App: React.FC = () => {
   // to a page is instant and preserves its scroll position and state instead
   // of refetching and remounting.
   const visitedRef = useRef<Set<AppPage>>(new Set([page]));
+  const reviewWorkspaceVisited = useRef(false);
   visitedRef.current.add(page);
 
   const reviewToken = useRef(0);
@@ -345,16 +350,34 @@ const App: React.FC = () => {
               onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
           </Suspense>
         );
-      case "review":
+      case "review": {
+        const directory = clusterNavigationTarget?.reviewView === "directory";
+        if (active && !directory) reviewWorkspaceVisited.current = true;
         return (
-          <ClusterPage
-            navigationTarget={clusterNavigationTarget}
-            active={active}
-            sharedLibrary={sharedLibrary}
-            onNavigateReview={handleNavigateReview}
-            onLeaveSharedReview={handleLeaveSharedReview}
-          />
+          <>
+            <div hidden={!directory}>
+              <PersonDirectory
+                active={active && directory}
+                personId={directory ? clusterNavigationTarget?.personId : undefined}
+                onOpenPerson={(personId) => handleNavigateReview({ reviewView: "directory", personId })}
+                onBack={() => handleNavigateReview({ reviewView: "directory" })}
+                onReview={() => handleNavigateReview({ reviewView: "suggestions" })}
+                onCorrect={(person) => handleNavigateReview({ reviewView: "people", personId: person.id, personName: person.name })}
+                onNavigateToCluster={handleNavigateToCluster}
+              />
+            </div>
+            {reviewWorkspaceVisited.current && <div hidden={directory} className="review-workspace-slot">
+              <ClusterPage
+                navigationTarget={clusterNavigationTarget}
+                active={active && !directory}
+                sharedLibrary={sharedLibrary}
+                onNavigateReview={handleNavigateReview}
+                onLeaveSharedReview={handleLeaveSharedReview}
+              />
+            </div>}
+          </>
         );
+      }
       case "renaming":
         return (
           <ImageRenamePage

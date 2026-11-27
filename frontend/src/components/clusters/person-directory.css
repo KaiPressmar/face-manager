@@ -1,0 +1,185 @@
+.person-directory {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.person-directory > p,
+.person-directory :is(.person-directory__heading, .person-directory__profile, .person-directory__photos, .person-directory__paging) > :is(h1, h2, p) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.person-directory__tile strong {
+  overflow-wrap: anywhere;
+}
+
+.person-directory__photos > h2 {
+  font-size: 1rem;
+}
+
+.person-directory :is(.person-directory__heading, .person-directory__profile, .person-directory__actions) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.person-directory__heading {
+  justify-content: space-between;
+}
+
+.person-directory :is(.person-directory__heading, .person-directory__actions, .person-directory__search, .person-directory__paging) .secondary-button {
+  min-height: 44px;
+  max-inline-size: 100%;
+}
+
+.person-directory__review {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-directory__review span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.person-directory__search,
+.person-directory__photos {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.person-directory__photos {
+  gap: 12px;
+}
+
+.person-directory__search label {
+  font-size: .875rem;
+  color: var(--text-muted);
+}
+
+.person-directory__search > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-directory__search input {
+  width: min(100%, 22rem);
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+}
+
+.person-directory__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 7.75rem), 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.person-directory__grid--photos {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 10rem), 1fr));
+}
+
+.person-directory__grid > li {
+  display: grid;
+  min-width: 0;
+}
+
+.person-directory__tile {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  padding: 7px;
+  text-align: start;
+  font: inherit;
+  cursor: pointer;
+}
+
+.person-directory__tile:hover {
+  border-color: var(--border-strong);
+}
+
+.person-directory :is(.person-directory__heading, .person-directory__actions, .person-directory__search, .person-directory__paging) :is(button, input):focus-visible,
+.person-directory__tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.person-directory__tile > span:not(.person-directory__preview) {
+  color: var(--text-muted);
+  font-size: .82rem;
+}
+
+.person-directory__grid--photos .person-directory__tile {
+  padding: 0;
+}
+
+.person-directory__preview {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.person-directory__grid--photos .person-directory__preview {
+  aspect-ratio: 4 / 3;
+  border-radius: inherit;
+}
+
+.person-directory__preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+}
+
+.person-directory__preview-fallback {
+  color: var(--text-muted);
+  font-size: clamp(.85rem, 2.7vw, 1.6rem);
+  font-weight: 650;
+  padding: 6px;
+  text-align: center;
+}
+
+.person-directory__grid--photos .person-directory__preview-fallback {
+  font-size: .85rem;
+}
+
+.person-directory__profile .person-directory__preview {
+  width: 58px;
+}
+
+.person-directory__paging {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-block-start: 8px;
+}
+
+.person-directory__paging:empty {
+  display: none;
+}

@@ -92,7 +92,7 @@ if (-not (Test-Path $iscc)) {
 
 $compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$distDir")
 if ($FastValidationInstaller) {
-    $compileArguments += "/DInstallerCompression=lzma/fast"
+    $compileArguments += "/DInstallerCompression=lzma/fast", "/DInstallerBlockThreads=1"
 }
 & $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
 

@@ -4,7 +4,7 @@ Face Manager ordnet deine Fotos auf deinem Gerät. Du kannst Gesichtern Namen ge
 
 [Download](#download-und-installation) · [Erste Schritte](#erste-schritte) · [Bebilderte Tour](#bebilderte-tour) · [Datenschutz](#daten-und-datenschutz) · [Quellcode](#aus-dem-quellcode-starten)
 
-![Neuer Ansichtsverlauf und Fotokarte mit ausgewähltem Reisezeitraum](docs/screenshots/navigation-0180.webp)
+![Face Manager mit Fotokarte und Fotos aus dem gewählten Ausschnitt](docs/screenshots/photo-map.webp)
 
 <a id="download-and-install"></a>
 
@@ -35,39 +35,131 @@ Für Android 11 oder neuer kannst du die App aus dem Quellcode bauen. Die GitHub
 
 ## Erste Schritte
 
-1. Öffne **Bilder hinzufügen** und wähle einen oder mehrere Bilderordner. Unter **Aktivitäten** siehst du den Fortschritt.
-2. Öffne **Personen → Ohne Namen**, wähle eine Gesichtsgruppe und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
+1. Öffne **Bilder hinzufügen** (in sehr schmalen Fenstern **+ Bilder**) und wähle einen oder mehrere Bilderordner. Unter **Aktivitäten** siehst du den Fortschritt.
+2. Öffne **Personen → Prüfen → Ohne Namen**, wähle eine Gesichtsgruppe und gib den passenden Gesichtern einen Namen. Unter **Vorschläge** kannst du mögliche Zuordnungen prüfen.
 3. In **Bilder** kannst du nach Personen, Ordnern oder Alben filtern. Unter **Karte** findest du Fotos mit gespeicherten Aufnahmeorten.
 
-Oben in der App öffnet **Hilfe** eine Anleitung, in der du ein Thema direkt auswählen kannst. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel über die Seitenleiste bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite.
+Unter **Hilfe** kannst du direkt ein Thema auswählen. Mit **Zurück** und **Vorwärts** kehrst du zu früheren Ansichten zurück. Beim Wechsel zwischen den Bereichen bleiben deine zuletzt verwendeten Ansichten erhalten. **Zur Ausgangsansicht** bringt dich zu den Standardfiltern der aktuellen Seite. In schmalen Fenstern findest du **Dateinamen** und **Einstellungen** unter **Mehr**.
 
 <a id="app-tour"></a>
 
 ## Bebilderte Tour
 
-Screenshots und Video zeigen Beispieldaten aus der App. Die Porträts und Reisefotos der ersten Demo wurden mit OpenAI erzeugt. [Älteres Bedienvideo mit englischen Texteinblendungen (ohne Ton)](docs/screenshots/face-manager-demo.mp4?raw=true)
+Die Screenshots zeigen Face Manager im Modus **Dunkel**. Die Landschaftsaufnahmen stammen vom U.S. National Park Service. [Bildnachweise zu den Nationalparkfotos](docs/screenshots/photo-credits.md)
+
+Die Porträts und Reisefotos im älteren Bedienvideo wurden mit OpenAI erzeugt. [Älteres Bedienvideo mit englischen Texteinblendungen (ohne Ton)](docs/screenshots/face-manager-demo.mp4?raw=true)
 
 <details>
 <summary>Bilder, Galerie und Import</summary>
 
-Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. Öffne in **Bilder** ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
+Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder** kannst du die Auswahl eingrenzen. In kleinen Fenstern öffnest du dazu **Filter und Sortierung**. Öffne ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
+
+![Fotobibliothek mit Nationalparkfotos, Alben und Personenfiltern](docs/screenshots/photo-library.webp)
 
 ![Importdialog mit ausgewählten Bilderordnern](docs/screenshots/import-sources.webp)
 
-![Vollbildgalerie mit Navigation und Speicherort des Originalfotos](docs/screenshots/photo-gallery.webp)
+![Blick durch North Window auf Turret Arch in der Vollbildgalerie mit Navigation und Speicherort](docs/screenshots/photo-gallery.webp)
 
 </details>
 
 <details>
-<summary>Personen und Dateinamen</summary>
+<summary>Personen und Gesichtsgruppen</summary>
 
-Unter **Personen** vergleichst du vorgeschlagene Zuordnungen mit bereits benannten Gesichtern. Nach einer unterstützten lokalen Namenszuordnung oder Archivaktion kannst du die Änderung rückgängig machen und wiederholen. Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person. Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgesehenen Namen.
+Unter **Personen** findest du die bereits benannten Personen. Über **Prüfen** öffnest du die Aufgaben für Gesichter, deren Zuordnung noch offen ist.
 
-![Gesichter prüfen mit einer vorgeschlagenen Zuordnung und Vergleichsfotos](docs/screenshots/people-review.webp)
+<details>
+<summary>Personenverzeichnis, Profil und Verwaltung</summary>
 
-![Ein manuell gesetzter Rahmen um ein Gesicht am Bildrand](docs/screenshots/manual-face-marking.webp)
+Suche eine Person nach Namen und öffne ihr Profil. Dort siehst du ihre Fotos. **Zuordnungen korrigieren** öffnet die Gesichter dieser Person. Unter **Person verwalten** kannst du ihren Namen ändern, sie mit einem anderen Eintrag zusammenführen oder sie aus dem Verzeichnis entfernen. Vor dem Zusammenführen oder Entfernen siehst du, wohin die zugeordneten Gesichter wechseln.
 
-[Bildnachweis für das Porträt der NASA](https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut)
+![Personenverzeichnis mit Suchfeld und Porträts bestätigter Personen](docs/screenshots/people-directory.webp)
+
+![Profil von Eileen Collins mit zugeordneten Fotos und Aktionen](docs/screenshots/people-profile.webp)
+
+![Dialog zur Namensänderung mit Optionen zum Zusammenführen und Entfernen](docs/screenshots/people-management.webp)
+
+</details>
+
+<details>
+<summary>Vorschläge</summary>
+
+Öffne einen Vorschlag, um die Gesichter mit bereits bestätigten Fotos zu vergleichen. Bestätige die markierte Auswahl mit **Gesichter zuordnen**. Unter **Weitere Aktionen** kannst du die Gesichtsgruppe öffnen oder den Vorschlag verwerfen.
+
+Mit **Mehrere auswählen** kannst du passende Empfehlungen gemeinsam bestätigen.
+
+![Übersicht mit zwei Personenvorschlägen und Vorschaubildern](docs/screenshots/people-review.webp)
+
+![Detailansicht eines Personenvorschlags mit Gesichtsauswahl und Vergleichsfotos](docs/screenshots/people-suggestion-detail.webp)
+
+</details>
+
+<details>
+<summary>Ohne Namen</summary>
+
+Wähle eine Gruppe und ordne ihr eine Person zu. Markiere bei gemischten Gruppen zuerst die passenden Gesichter. Über **Aussortieren oder lösen** findest du weitere Gruppenaktionen. In schmalen Fenstern kehrst du mit **Zur Gruppenliste** zur Auswahl zurück.
+
+![Unbenannte Gesichtsgruppen mit geöffneter Gruppe und Namenssuche](docs/screenshots/people-unnamed.webp)
+
+![Gruppenliste mit Gesichtsvorschauen im schmalen Fenster](docs/screenshots/people-unnamed-list-compact.webp)
+
+![Geöffnete Gesichtsgruppe im schmalen Fenster mit Namenssuche und Rückkehr zur Gruppenliste](docs/screenshots/people-review-compact.webp)
+
+</details>
+
+<details>
+<summary>Personen korrigieren</summary>
+
+Öffne im Profil **Zuordnungen korrigieren** oder wähle im Prüfbereich **Personen korrigieren**, um zwischen Personen und Gruppen zu wechseln. Markiere falsch zugeordnete Gesichter und weise sie einer anderen Person zu. Über die weiteren Aktionen kannst du die markierten Gesichter auch wieder zur Prüfung vorlegen.
+
+![Gesichter von Eileen Collins in der Korrekturansicht mit markiertem Gesicht](docs/screenshots/people-corrections.webp)
+
+![Korrekturübersicht mit der Suche nach Personen und Gesichtsgruppen](docs/screenshots/people-correction-overview.webp)
+
+</details>
+
+<details>
+<summary>Aussortiert</summary>
+
+Öffne **Unbekannte Personen** für aussortierte Gesichter oder **Keine Gesichter** für Fehlerkennungen. Mit **Erneut prüfen** legst du ausgewählte Treffer wieder unter **Ohne Namen** vor.
+
+![Übersicht der Kategorien unter Aussortiert](docs/screenshots/people-archive.webp)
+
+![Kategorie Unbekannte Personen mit aussortierten Gesichtern](docs/screenshots/people-archive-unknown.webp)
+
+![Kategorie Keine Gesichter mit aussortierten Fehlerkennungen](docs/screenshots/people-archive-not-face.webp)
+
+</details>
+
+<details>
+<summary>Abgleich prüfen</summary>
+
+Wenn du einen gemeinsamen Ordner eingerichtet hast, kannst du hier abweichende Zuordnungen prüfen. Vergleiche die Bildausschnitte und wähle bei einer beschreibbaren Freigabe **Übernehmen** unter der passenden Entscheidung. Mit **Zur Fallliste** lässt du den Fall offen.
+
+![Fall aus einem gemeinsamen Ordner mit zwei nebeneinander angezeigten Entscheidungen und Bildausschnitten](docs/screenshots/people-shared-review.webp)
+
+</details>
+
+<details>
+<summary>Änderungsverlauf und Gesichter manuell markieren</summary>
+
+Im **Änderungsverlauf** siehst du kürzlich ausgeführte Aktionen. Unterstützte Änderungen an der lokalen Bibliothek kannst du mit **Rückgängig** zurücknehmen und mit **Wiederholen** erneut ausführen.
+
+![Dialog mit den zuletzt ausgeführten Änderungen](docs/screenshots/people-history.webp)
+
+Fehlt ein Gesicht, öffne das Foto und wähle **Gesicht markieren**. Ziehe einen Rahmen auf und wähle die passende Person.
+
+![Ein manuell gesetzter Rahmen um das Gesicht von Eileen Collins](docs/screenshots/manual-face-marking.webp)
+
+</details>
+
+Die Beispielporträts stammen von der NASA und der U.S. Navy. [NASA-Porträt in scikit-image](https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut) · [Grace Hopper in den Matplotlib-Beispieldaten](https://github.com/matplotlib/matplotlib/blob/main/lib/matplotlib/mpl-data/sample_data/grace_hopper.jpg)
+
+</details>
+
+<details>
+<summary>Dateinamen</summary>
+
+Unter **Dateinamen** zeigt **Umbenennung prüfen** den aktuellen und den vorgesehenen Namen.
 
 ![Vorschau der aktuellen und vorgeschlagenen Dateinamen](docs/screenshots/filenames.webp)
 
@@ -82,11 +174,13 @@ In kleinen Fenstern wechselst du zwischen **Karte** und **Fotos** oder **Stopps*
 
 Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswählen und bei Bedarf An- oder Rückreise einblenden. Speichere die ausgewählten Fotos als Reisealbum und öffne es später über **Album** in **Bilder** oder **Karte**. Über **Zum Album hinzufügen** sammelst du weitere Fotos aus der Galerie oder der Karte.
 
-![Offline-Fotokarte mit Standortmarkierungen, Filtern und Fotos aus dem Ausschnitt](docs/screenshots/photo-map.webp)
+![Fotokarte im schmalen Fenster mit Kartenansicht, Fotoansicht und Kartenfilter](docs/screenshots/photo-map-compact.webp)
 
-![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite-017.webp)
+![Fotoansicht der Kompaktkarte mit Aufnahmen aus dem Kartenausschnitt](docs/screenshots/photo-map-compact-photos.webp)
 
-![Reisealbum „Sommer in Frankreich“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
+![Offline-Satellitenansicht mit Ländernamen, Fotostandorten und NASA-Quellenangabe](docs/screenshots/satellite.webp)
+
+![Reisealbum „Nationalparks im Westen“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
 
 </details>
 
@@ -95,9 +189,9 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 
 Öffne in **Karte** die gewünschte Auswahl und wähle unter **Kartendarstellung und Export** die Aktion **Bild exportieren**. Passe Titel, Format, Druckauflösung, Farben und Kartenausschnitt an. Für eigene Bildmaße stehen Pixel und Millimeter zur Wahl. Unter **Route gestalten** kannst du Verkehrsmittel für einzelne Etappen wählen. Speichere eine Seite als PNG oder mehrere Seiten zusammen als ZIP. Mit **Entwurf im Album speichern** sicherst du die Gestaltung. Öffne später das Album und wähle erneut **Bild exportieren**.
 
-![Fotobuchvorschau mit Wiener Reiseverlauf, Format und Druckmaß](docs/screenshots/photobook-0180.webp)
+![Fotobuchvorschau mit Reiseverlauf, Druckauflösung und Abmessungen](docs/screenshots/photobook.webp)
 
-![Mehrseitiges Fotobuch mit Vorschau und gemeinsamem ZIP-Export](docs/screenshots/photobook-zip-0171.webp)
+![Fotobuchvorschau mit Bestätigung für den ZIP-Export aller Seiten](docs/screenshots/photobook-zip.webp)
 
 </details>
 
@@ -106,26 +200,30 @@ Unter **Reisen entdecken** kannst du einen Vorschlag ansehen, Reisetage auswähl
 
 Wähle unter **Hilfe** ein Thema. **Aktivitäten** zeigt laufende und abgeschlossene Aufgaben wie Import, Standortprüfung und Updates. In der Kopfleiste siehst du, ob die Gesichtserkennung den Prozessor (**CPU**) oder die Grafikkarte (**GPU**) nutzt. Einen Wechsel zum Prozessor zeigt die App als **CPU-Ersatzbetrieb** an. Nach der ersten Analyse findest du dort auf dem Computer **Hardware prüfen**.
 
-![Hilfe mit dem Thema „Fotos auf der Karte finden“, Themenauswahl und direktem Einstieg](docs/screenshots/help-017.webp)
+![Hilfe mit Themenauswahl und direktem Einstieg in die Fotokarte](docs/screenshots/help.webp)
 
-![Aktivitäten mit laufendem Import, Standortprüfung und einem abgeschlossenen Import](docs/screenshots/activities-017.webp)
+![Aktivitäten mit Fortschritt und abgeschlossenen Aufgaben](docs/screenshots/activities.webp)
 
-![Hardwarestatus mit CPU-Ersatzbetrieb und Ergebnissen der Hardwareprüfung](docs/screenshots/hardware-017.webp)
+![Hardwarestatus der Gesichtserkennung mit CPU-Ersatzbetrieb und gemessenen Zeiten](docs/screenshots/hardware.webp)
 
 </details>
 
 <details>
 <summary>Einstellungen und gemeinsame Ordner</summary>
 
-In **Einstellungen** findest du Erkennung, Dateinamen, Darstellung sowie **Daten und Wartung**. Dort erstellst du eine Sicherung und stellst die Größe des lokalen Vorschau-Speichers ein.
+Unter **Einstellungen → Darstellung** kannst du **Hell** oder **Dunkel** wählen. **System** übernimmt die Einstellung deines Betriebssystems. Unter **Daten und Wartung** erstellst du eine Sicherung und stellst die Größe des lokalen Vorschau-Speichers ein.
 
 **Gemeinsame Ordner** lassen sich in einer Entwicklervorschau für den Abgleich von Zuordnungen über eine eingerichtete Freigabe nutzen. [Stand und Einrichtung der Vorschau](docs/shared-library-design.md)
 
+![Darstellungseinstellungen mit ausgewähltem Modus Dunkel](docs/screenshots/appearance.webp)
+
 ![Einstellungen für den lokalen Vorschau-Speicher](docs/screenshots/settings.webp)
 
-![Wiederherstellungsvorschau mit Dateidatum, Anzahl der Fotos, Personen und Alben und einer Schaltfläche zum Abbrechen](docs/screenshots/restore-0171.webp)
+![Wiederherstellungsvorschau mit Datum und Anzahl der Fotos, Personen und Alben in der Sicherung](docs/screenshots/restore.webp)
 
-![Gemeinsame Ordner in der Vorschau mit verbundenem Beispielordner und Archiv im Lesemodus](docs/screenshots/shared-library-017.webp)
+![Gemeinsame Ordner mit einer verbundenen und einer schreibgeschützten Freigabe](docs/screenshots/shared-library.webp)
+
+![Benachrichtigung zu einer neuen Version mit Versionshinweisen und Download-Schaltfläche](docs/screenshots/updates.webp)
 
 </details>
 

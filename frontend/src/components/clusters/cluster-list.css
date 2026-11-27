@@ -1,0 +1,19 @@
+.cluster-list-row--with-portrait {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 10px;
+}
+
+.cluster-list-row__portrait {
+  display: block;
+  border-radius: 6px;
+  background: var(--surface-2);
+  object-fit: cover;
+}
+
+.cluster-list-row__text {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

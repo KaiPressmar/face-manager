@@ -3,7 +3,10 @@
 #define MyAppURL "https://github.com/KaiPressmar/face-manager"
 #define MyAppExeName "FaceManager.exe"
 #ifndef InstallerCompression
-  #define InstallerCompression "lzma"
+  #define InstallerCompression "lzma2/max"
+#endif
+#ifndef InstallerBlockThreads
+  #define InstallerBlockThreads 2
 #endif
 
 [Setup]
@@ -22,6 +25,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir={#OutputDir}
 OutputBaseFilename=FaceManager-Setup-{#AppVersion}
 Compression={#InstallerCompression}
+LZMANumBlockThreads={#InstallerBlockThreads}
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible

@@ -1,0 +1,74 @@
+.person-management {
+  display: grid;
+  gap: 1rem;
+  max-block-size: calc(100dvh - 24px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.person-management__modes,
+.person-management__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.person-management__modes button {
+  min-block-size: 44px;
+}
+
+.person-management__modes [aria-pressed="true"] {
+  border-bottom-color: var(--accent);
+  font-weight: 650;
+}
+
+.person-management__form,
+.person-management__field,
+.person-management__confirmation {
+  display: grid;
+  gap: .75rem;
+}
+
+.person-management__field {
+  gap: .4rem;
+}
+
+.person-management__field :is(input, select) {
+  inline-size: 100%;
+  min-inline-size: 0;
+  font: inherit;
+}
+
+.person-management__confirmation p,
+.person-management__form > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.person-management__confirmation strong {
+  color: var(--text);
+}
+
+.person-management__form > .person-management__error {
+  color: var(--danger-soft-text);
+}
+
+.person-management__retry {
+  justify-self: start;
+}
+
+.person-management__actions {
+  justify-content: flex-end;
+}
+
+.person-management__actions button {
+  min-block-size: 44px;
+  max-inline-size: 100%;
+  white-space: normal;
+}
+
+.person-management__actions [data-destructive] {
+  background: var(--surface-2);
+  border-color: var(--danger);
+  color: var(--danger-soft-text);
+}

@@ -18,6 +18,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
   });
   const archiveFaces = [makeFace(6100, 200, 'unknown_person'), makeFace(6101, null, 'unknown_person')];
   const archive = { group_key: 'unknown_person', label: 'Unbekannte Personen', face_count: 2, cluster_count: 2 };
+  const notFace = { group_key: 'not_face', label: 'Keine Gesichter', face_count: 1, cluster_count: 1 };
   const libraryId = 'compact-review-fixture';
   const ensureReflow = async () => {
     const widths = await pane.evaluate((element) => [
@@ -32,7 +33,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
 
   try {
     await page.route('**/api/clusters-overview', (route) => route.fulfill({ json: {
-      clusters, review_groups: [archive], first_cluster: null,
+      clusters, review_groups: [archive, notFace], first_cluster: null,
     } }));
     await page.route('**/api/clusters', (route) => route.fulfill({ json: clusters }));
     await page.route(/\/api\/clusters\/\d+\/faces$/, (route) => {
@@ -43,9 +44,12 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
         faces: Array.from({ length: cluster.face_count }, (_, index) => makeFace(id * 100 + index + 1, id)),
       } });
     });
-    await page.route('**/api/face-review-groups', (route) => route.fulfill({ json: [archive] }));
+    await page.route('**/api/face-review-groups', (route) => route.fulfill({ json: [archive, notFace] }));
     await page.route('**/api/face-review-groups/unknown_person/faces', (route) => route.fulfill({
       json: { ...archive, faces: archiveFaces, assignment_library_id: libraryId },
+    }));
+    await page.route('**/api/face-review-groups/not_face/faces', (route) => route.fulfill({
+      json: { ...notFace, faces: [makeFace(6201, 201, 'not_face')], assignment_library_id: libraryId },
     }));
     await page.route('**/api/persons', (route) => route.fulfill({ json: [{ id: 1, name: 'Andrea Beispiel' }] }));
     await page.route('**/api/faces/batch', (route) => {
@@ -66,7 +70,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
       return button.contains(document.elementFromPoint(x + width / 2, y + height / 2));
     }),
       'First group requires scrolling in the initial 320×568 list');
-    await page.locator('.face-action-history summary').waitFor();
+    await page.getByRole('button', { name: 'Änderungsverlauf', exact: true }).waitFor();
     const enlargedText = await page.addStyleTag({ content: 'html { font-size: 200% }' });
     await ensureReflow();
     await enlargedText.evaluate((element) => element.remove());
@@ -91,7 +95,15 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
     await ensureReflow();
 
     await pane.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await page.getByRole('checkbox', { name: 'Gesicht 3048 auswählen' }).waitFor();
+    const lastFace = page.getByRole('checkbox', { name: 'Gesicht 3048 auswählen' });
+    await lastFace.press('Space');
+    await page.getByRole('button', { name: 'Auswahl bearbeiten (1)', exact: true }).click();
+    const selectedAssignment = page.getByRole('combobox', { name: 'Person suchen oder neuen Namen eingeben' });
+    await selectedAssignment.and(page.locator(':focus')).waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Auswahl aufheben', exact: true }).click();
+    await pane.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await lastFace.waitFor();
     const detailScroll = await pane.evaluate((element) => element.scrollTop);
     assert.ok(detailScroll > 1000);
     await back.click();
@@ -105,7 +117,7 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
     await opener.and(page.locator(':focus')).waitFor();
     await waitForScroll(listScroll);
 
-    for (const viewport of [{ width: 390, height: 740 }, { width: 768, height: 600 }]) {
+    for (const viewport of [{ width: 390, height: 740 }, { width: 768, height: 600 }, { width: 1024, height: 640 }]) {
       await page.setViewportSize(viewport);
       await page.goto(`${webBase}${review}/gruppe/30`);
       const firstFace = page.getByRole('checkbox', { name: 'Gesicht 3001 auswählen' });
@@ -118,7 +130,9 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
 
     await page.setViewportSize({ width: 1250, height: 520 });
     await back.click();
+    await page.getByRole('searchbox', { name: 'Gesichtsgruppe suchen' }).fill('Testgruppe 30');
     await page.getByRole('button', { name: /^Personen korrigieren/ }).click();
+    assert.equal(await page.getByRole('searchbox', { name: 'Person suchen' }).inputValue(), '');
     const person = list.getByRole('button', { name: /^Andrea Beispiel/ });
     await person.waitFor();
     if (await person.getAttribute('aria-expanded') === 'false') await person.press('Enter');
@@ -150,6 +164,9 @@ module.exports = async function compactReviewFlow(browser, errors, newPage, webB
     await list.waitFor();
     await detail.waitFor();
     assert.equal(await back.count(), 0);
+    await page.goto(`${webBase}${review}/kategorie/not_face`);
+    await page.getByRole('checkbox', { name: 'Gesicht 6201 auswählen' }).waitFor();
+    assert.equal(await page.getByRole('checkbox', { name: 'Gesicht 6100 auswählen' }).count(), 0);
     console.log('PASS compact review: 320px, short window, group scope, scroll, focus, history and desktop split');
   } finally {
     await page.close();
