@@ -1,6 +1,7 @@
 """Record and verify the contents of the Ubuntu release package."""
 
 import argparse
+from configparser import ConfigParser
 from importlib import metadata
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ PACKAGE = "face-manager"
 TARGET = "Ubuntu 26.04 amd64"
 PREFIX = "opt/face-manager"
 MANIFEST = f"{PREFIX}/bundle-manifest.json"
+DESKTOP_FILE = f"usr/share/applications/{PACKAGE}.desktop"
 MAX_RELEASE_BYTES = 2 * 1024**3
 EXPECTED_DISTRIBUTIONS = {
     "onnxruntime-gpu": "1.26.0",
@@ -27,8 +29,8 @@ EXPECTED_DISTRIBUTIONS = {
 }
 REQUIRED_FILES = {
     "usr/bin/face-manager",
-    "usr/share/applications/face-manager.desktop",
-    "usr/share/icons/hicolor/scalable/apps/face-manager.svg",
+    DESKTOP_FILE,
+    f"usr/share/icons/hicolor/scalable/apps/{PACKAGE}.svg",
     f"{PREFIX}/BUILD_VARIANT",
     f"{PREFIX}/CHANGELOG.md",
     f"{PREFIX}/VERSION",
@@ -59,6 +61,7 @@ RUNTIME_DEPENDENCIES = (
     "gir1.2-webkit2-4.1",
     "libgl1",
     "libgomp1",
+    "librsvg2-common",
     "libstdc++6",
     "ocl-icd-libopencl1",
     "xdg-utils",
@@ -111,7 +114,7 @@ def check(artifact, version):
                 name = member.name.removeprefix("./")
                 if member.isfile() or member.issym():
                     files.add(name)
-                if name in {MANIFEST, f"{PREFIX}/BUILD_VARIANT", f"{PREFIX}/VERSION"}:
+                if name in {DESKTOP_FILE, MANIFEST, f"{PREFIX}/BUILD_VARIANT", f"{PREFIX}/VERSION"}:
                     values[name] = archive.extractfile(member).read().decode("utf-8").strip()
                 if name == "usr/bin/face-manager" and not member.mode & 0o111:
                     raise SystemExit("The desktop launcher is not executable")
@@ -125,6 +128,11 @@ def check(artifact, version):
     missing = REQUIRED_FILES - files
     if missing:
         raise SystemExit("Missing package files: " + ", ".join(sorted(missing)))
+    desktop = ConfigParser(interpolation=None)
+    desktop.read_string(values[DESKTOP_FILE])
+    for key in ("Icon", "StartupWMClass"):
+        if desktop.get("Desktop Entry", key, fallback=None) != PACKAGE:
+            raise SystemExit(f"Desktop entry {key} must match {PACKAGE}.desktop")
     if not any(
         name.startswith(f"{PREFIX}/vendor/onnxruntime_ep_openvino/") and name.endswith(".so")
         for name in files

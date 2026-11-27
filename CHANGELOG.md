@@ -13,6 +13,8 @@ Requests, nicht in diese Versionshinweise.
 
 ### Behoben
 
+- Face Manager hat ein neues App-Symbol und zeigt es unter Ubuntu auch bei geöffnetem Fenster im Dock an.
+
 ## [0.22.0] - 2026-11-27
 
 ### Verbessert

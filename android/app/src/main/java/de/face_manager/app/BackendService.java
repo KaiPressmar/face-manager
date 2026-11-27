@@ -164,7 +164,7 @@ public final class BackendService extends Service {
         PendingIntent stopPending = PendingIntent.getService(this, 1, stop,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_menu_gallery)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentTitle("Face Manager")
                 .setContentText(message)
                 .setContentIntent(openPending)
