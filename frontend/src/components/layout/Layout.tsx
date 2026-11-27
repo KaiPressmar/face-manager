@@ -38,6 +38,10 @@ const Layout: React.FC<{
   onShowHelp, onImportStateChange, topbarAction, invitation, preferenceNotice, children }) => {
   return (
     <div className="app-shell">
+      <a className="workspace-skip-link" href="#app-workspace" onClick={(event) => {
+        event.preventDefault();
+        document.getElementById("app-workspace")?.focus({ preventScroll: true });
+      }}>Zum Hauptinhalt</a>
       <Sidebar
         page={page}
         onChangePage={onChangePage}
@@ -63,7 +67,7 @@ const Layout: React.FC<{
         {navigation.notice && <p className="workspace-history__notice" role="status">{navigation.notice}</p>}
         {preferenceNotice}
         {invitation}
-        <div className="app-viewport">{children}</div>
+        <main id="app-workspace" className="app-viewport" tabIndex={-1}>{children}</main>
       </div>
     </div>
   );

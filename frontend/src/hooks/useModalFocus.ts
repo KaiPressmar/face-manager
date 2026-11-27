@@ -93,7 +93,8 @@ export function useModalFocus(
       unregister();
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("focusin", onFocusIn, true);
-      if (openerRef.current?.isConnected && canFocus(openerRef.current)) openerRef.current.focus();
+      const opener = openerRef.current;
+      if (opener?.isConnected && canFocus(opener)) opener.focus({ preventScroll: true });
     };
   }, [dialogRef, active]);
 

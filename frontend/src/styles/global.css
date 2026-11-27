@@ -772,8 +772,8 @@ button:disabled {
 .cluster-nav-detail-title span {
   font-size: 10px;
   font-weight: 700;
-  color: var(--on-accent);
-  background: var(--neon-cyan);
+  color: var(--text-strong);
+  background: var(--accent-soft);
   border-radius: 999px;
   padding: 2px 8px;
 }

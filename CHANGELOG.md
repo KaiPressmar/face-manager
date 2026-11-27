@@ -13,7 +13,9 @@ Requests, nicht in diese Versionshinweise.
 
 - Die Kopfleiste ist übersichtlicher. Zwischen den Bereichen wechselst du über die Seitenleiste.
 - Face Manager merkt sich Kartenstil, Ländernamen, Rastergröße und den Status der Einführung über Neustarts hinweg.
-- Ansichten öffnen sich direkt. Beim Wiederöffnen bleiben die Ergebnisse auf der Karte und die Auswahl in der Bilderansicht sichtbar.
+- Ansichten öffnen sich direkt. Kartenfotos, Bildauswahl und der aktuelle Bildausschnitt bleiben bei Hintergrundaktualisierungen und beim Wiederöffnen erhalten.
+- Mit der Tastatur kannst du direkt zum Hauptinhalt springen.
+- Statusangaben unter „Personen“ sind im hellen Design besser lesbar.
 
 ### Behoben
 

@@ -54,6 +54,13 @@ const HelpTour = lazy(() => import("./components/shared/HelpTour"));
 
 const PAGE_ORDER: AppPage[] = ["people", "map", "renaming", "review", "settings"];
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const pageErrorTitles: Record<AppPage, string> = {
+  people: "Die Bilderansicht konnte nicht angezeigt werden",
+  map: "Die Weltkarte konnte nicht angezeigt werden",
+  renaming: "Die Dateinamen konnten nicht angezeigt werden",
+  review: "„Gesichter prüfen“ konnte nicht angezeigt werden",
+  settings: "Die Einstellungen konnten nicht angezeigt werden",
+};
 
 const helpTopicForPage: Record<AppPage, HelpTopic> = {
   people: "photos", map: "map", review: "people", renaming: "files", settings: "settings",
@@ -333,24 +340,20 @@ const App: React.FC = () => {
         );
       case "map":
         return (
-          <ErrorBoundary title="Die Weltkarte konnte nicht angezeigt werden">
-            <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
-              <MapPage active={active} openAlbumId={mapAlbumId} onAlbumChange={handleMapAlbumChange}
-                onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
-            </Suspense>
-          </ErrorBoundary>
+          <Suspense fallback={<p role="status">Weltkarte wird geladen …</p>}>
+            <MapPage active={active} openAlbumId={mapAlbumId} onAlbumChange={handleMapAlbumChange}
+              onNavigateToCluster={handleNavigateToCluster} onOpenImages={handleOpenImages} />
+          </Suspense>
         );
       case "review":
         return (
-          <ErrorBoundary title="„Gesichter prüfen“ konnte nicht angezeigt werden">
-            <ClusterPage
-              navigationTarget={clusterNavigationTarget}
-              active={active}
-              sharedLibrary={sharedLibrary}
-              onNavigateReview={handleNavigateReview}
-              onLeaveSharedReview={handleLeaveSharedReview}
-            />
-          </ErrorBoundary>
+          <ClusterPage
+            navigationTarget={clusterNavigationTarget}
+            active={active}
+            sharedLibrary={sharedLibrary}
+            onNavigateReview={handleNavigateReview}
+            onLeaveSharedReview={handleLeaveSharedReview}
+          />
         );
       case "renaming":
         return (
@@ -410,7 +413,7 @@ const App: React.FC = () => {
             const active = target === page;
             return (
               <PagePane key={target} page={target} active={active}>
-                {renderPage(target, active)}
+                <ErrorBoundary title={pageErrorTitles[target]}>{renderPage(target, active)}</ErrorBoundary>
               </PagePane>
             );
           },

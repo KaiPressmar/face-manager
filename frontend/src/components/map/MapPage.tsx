@@ -26,6 +26,7 @@ import "./cartography.css";
 import "./map-workspace.css";
 
 const PAGE_SIZE = 36;
+const MAX_IMAGE_REQUEST_SIZE = 200;
 const MAP_LIBRARY_EVENTS = new Set([
   "database_import", "delete_image", "image_path_cleanup", "image_rename", "import_completed", "albums_changed",
 ]);
@@ -41,6 +42,7 @@ type ImagePage = {
   nextCursor: MapImageCursor | null;
   extended: boolean;
 };
+type MapImageResult = MapResult<ImagePage> & { revision: number };
 const INITIAL_VIEW: MapView = { longitude: 0, latitude: 0, zoom: 1 };
 const REGIONS: { label: string; view: MapView }[] = [
   { label: "Welt", view: INITIAL_VIEW },
@@ -77,7 +79,7 @@ interface MapWorkspace {
   home?: TravelHome;
   trip?: TripSelection;
   resultScroll: number;
-  loadedResults?: MapResult<ImagePage>;
+  loadedResults?: MapImageResult;
 }
 
 const formatter = new Intl.NumberFormat("de-DE");
@@ -107,7 +109,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const [dateEntryError, setDateEntryError] = useState<DateError>();
   const [datePreset, setDatePreset] = useState("all");
   const [pointsResult, setPointsResult] = useState<MapResult<MapPointsResponse> | null>(null);
-  const [imagesResult, setImagesResult] = useState<MapResult<ImagePage> | null>(null);
+  const [imagesResult, setImagesResult] = useState<MapImageResult | null>(null);
   const [moreLoading, setMoreLoading] = useState(false);
   const [moreError, setMoreError] = useState("");
   const resultsRef = useRef<HTMLElement>(null);
@@ -134,7 +136,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const { checkpoint } = useWorkspaceNavigation<MapWorkspace>("map", {
     capture: () => ({ view, mode, region, regionName, fromDate, toDate, datePreset, dateDraft, dateEntryError,
       albumId, journeyDetail, journeyStopId, includeInferred, home, trip, resultScroll: resultsRef.current?.scrollTop ?? 0,
-      loadedResults: imageResult?.data?.extended ? imageResult : undefined }),
+      loadedResults: imageResult?.data?.extended && imageResult.revision === libraryRevision ? imageResult : undefined }),
     restore: (saved) => {
       setView(saved?.view ?? INITIAL_VIEW);
       setMode(saved?.mode ?? "locations");
@@ -209,15 +211,16 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     grid_rows: pointGrid?.rows,
   };
   const filterKey = JSON.stringify(isJourney ? ["journey", journeyKey, journeyStopId, stopMembership] : selection);
-  const pointKey = JSON.stringify([pointQuery, libraryRevision]);
-  const imageKey = JSON.stringify([filterKey, libraryRevision]);
+  // A library update refreshes the current query without hiding its last results.
+  const pointKey = JSON.stringify(pointQuery);
   const pointResult = showPoints && pointsResult?.key === pointKey ? pointsResult : null;
-  const imageResult = showImages && imagesResult?.key === imageKey ? imagesResult : null;
-  const points = pointResult?.error ? null : pointResult?.data;
+  const imageResult = showImages && imagesResult?.key === filterKey ? imagesResult : null;
+  const points = pointResult?.data;
   const collection = pointsResult?.data;
   const images = imageResult?.data?.items ?? EMPTY_IMAGES;
   const imageTotal = imageResult?.data?.total ?? 0;
   const nextCursor = imageResult?.data?.nextCursor;
+  const canLoadMore = Boolean(nextCursor) && imageResult?.revision === libraryRevision;
   const hasExtendedResults = imageResult?.data?.extended ?? false;
   const pointsLoading = showPoints && !pointResult;
   const imagesLoading = showImages && !imageResult;
@@ -265,10 +268,10 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     void fetchJourney(queryFrom, queryTo, region, journeyDetail, controller.signal, albumId).then((data) => {
       if (!controller.signal.aborted) setJourneyResult({ key: journeyKey, data, error: "" });
     }).catch((error) => {
-      if (!controller.signal.aborted) setJourneyResult({
-        key: journeyKey, data: null,
+      if (!controller.signal.aborted) setJourneyResult((current) => ({
+        key: journeyKey, data: current?.key === journeyKey ? current.data : null,
         error: error instanceof Error ? error.message : "Der Standortverlauf konnte nicht geladen werden.",
-      });
+      }));
     });
     return () => controller.abort();
   }, [canLoad, isJourney, queryFrom, queryTo, region, journeyDetail, journeyKey, journeyRetry, albumId, libraryRevision]);
@@ -286,6 +289,8 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       if (update.reason === "database_import") {
         clearGallery();
         setJourneyResult(null);
+        setPointsResult(null);
+        setImagesResult(null);
         setAlbum(null);
         setSaveSelection(undefined);
         setAlbumId("");
@@ -317,14 +322,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         .then((data) => { if (!controller.signal.aborted) setPointsResult({ key: pointKey, data, error: "" }); })
         .catch((reason) => {
           if (!controller.signal.aborted) setPointsResult((current) => ({
-            key: pointKey, data: current?.data ?? null,
+            key: pointKey, data: current?.key === pointKey ? current.data : null,
             error: reason instanceof Error ? reason.message : "Standorte konnten nicht geladen werden.",
           }));
         });
     }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-    // The key encodes every query value. The debounce only starts for a changed query.
-  }, [canLoadPoints, pointKey, pointRefresh]);
+    // The key encodes every query value.
+  }, [canLoadPoints, pointKey, pointRefresh, libraryRevision]);
 
   useLayoutEffect(() => {
     if (restoreResultScroll.current === undefined) resultsRef.current?.scrollTo({ top: 0 });
@@ -340,34 +345,51 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   useEffect(() => {
     setMoreError("");
     return () => { moreController.current?.abort(); };
-  }, [canLoadImages, imageKey]);
+  }, [canLoadImages, filterKey, libraryRevision]);
 
   useEffect(() => {
     if (!canLoadImages) return;
+    const current = imagesResult?.key === filterKey ? imagesResult : null;
+    if (current?.revision === libraryRevision && current.data?.extended && !current.error) return;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => {
-      void fetchMapSelection(selection, PAGE_SIZE, null, controller.signal)
-        .then((page) => {
-          if (controller.signal.aborted || moreController.current) return;
-          setImagesResult((current) => {
-            // Keep the cursor and already loaded pages together during indexing.
-            if (current?.key === imageKey && current.data?.extended) return current;
-            return {
-              key: imageKey,
-              data: { items: page.items, total: page.total, nextCursor: page.next_cursor, extended: false },
-              error: "",
-            };
-          });
-        })
-        .catch((reason) => {
-          if (!controller.signal.aborted && !moreController.current) setImagesResult((current) => ({
-            key: imageKey, data: current?.key === imageKey ? current.data : null,
-            error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
-          }));
+    const publish = (result: MapImageResult) => {
+      if (controller.signal.aborted || moreController.current?.signal.aborted === false) return;
+      setImagesResult((latest) => {
+        // Pagination may already have delivered a newer, more complete result.
+        if (latest !== current && latest?.key === filterKey && latest.revision === libraryRevision &&
+            latest.data?.extended) return latest;
+        return result;
+      });
+    };
+    const refresh = async () => {
+      try {
+        // Refill the visible extent and publish the items and new cursor together.
+        const target = Math.max(PAGE_SIZE, current?.data?.items.length ?? 0);
+        const items: MapImage[] = [];
+        let cursor: MapImageCursor | null = null;
+        let page;
+        do {
+          page = await fetchMapSelection(selection, Math.min(MAX_IMAGE_REQUEST_SIZE, target - items.length), cursor, controller.signal);
+          if (controller.signal.aborted) return;
+          items.push(...page.items);
+          cursor = page.next_cursor;
+        } while (items.length < target && cursor && page.items.length > 0);
+        publish({
+          key: filterKey, revision: libraryRevision,
+          data: { items, total: page.total, nextCursor: cursor, extended: current?.data?.extended ?? false },
+          error: "",
         });
-    }, 180);
+      } catch (reason) {
+        publish({
+          key: filterKey, revision: current?.revision ?? libraryRevision,
+          data: current?.data ?? null,
+          error: reason instanceof Error ? reason.message : "Fotos konnten nicht geladen werden.",
+        });
+      }
+    };
+    const timer = window.setTimeout(() => { void refresh(); }, 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [canLoadImages, imageKey, imageRefresh]);
+  }, [canLoadImages, filterKey, imageRefresh, libraryRevision]);
 
   useEffect(() => {
     if (!canLoad || !points?.indexing || openedGallery || moreLoading) return;
@@ -542,7 +564,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     });
   };
   const loadMore = async () => {
-    if (moreController.current || !canLoadImages || !nextCursor) return;
+    if (moreController.current || !canLoadImages || !canLoadMore || !nextCursor) return;
     const controller = new AbortController();
     const loadedImages = images;
     moreController.current = controller;
@@ -553,7 +575,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
       if (controller.signal.aborted) return;
       const seen = new Set(loadedImages.map((image) => image.id));
       setImagesResult({
-        key: imageKey,
+        key: filterKey, revision: libraryRevision,
         data: {
           items: loadedImages.concat(page.items.filter((image) => !seen.has(image.id))),
           total: page.total,
@@ -572,7 +594,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     }
   };
 
-  return <main className="gps-page">
+  return <div className="gps-page">
     <header className="gps-page__header">
       <h1>Fotokarte</h1>
       <div className="gps-map-options__modes" role="group" aria-label="Kartenmodus">
@@ -749,7 +771,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           <MapPhotoTile key={image.id} image={image} inferred={inferredIds?.has(image.id)}
             onOpen={(event) => openGallery(event.currentTarget, index)} />)}</div>
         {moreError && <p className="gps-page__error" role="alert">{moreError}</p>}
-        {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
+        {nextCursor && <button type="button" className="gps-page__more" disabled={moreLoading || !canLoadMore} onClick={() => void loadMore()}>{moreLoading ? "Weitere Fotos werden geladen …" : moreError ? "Weitere Fotos erneut laden" : "Weitere Fotos laden"}</button>}
         </>}
       </section>
     </div>
@@ -773,7 +795,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         to_date: tripDays?.[tripDays.length - 1], arrival_included: trip?.includeArrival,
         departure_included: trip?.includeDeparture } : undefined}
       onClose={closeAlbumPicker} />}
-  </main>;
+  </div>;
 };
 
 export default MapPage;
