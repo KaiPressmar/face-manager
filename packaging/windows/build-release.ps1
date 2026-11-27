@@ -100,9 +100,11 @@ $installerPath = Join-Path $distDir "FaceManager-Setup-$version.exe"
 if (-not (Test-Path $installerPath)) {
     throw "Inno Setup did not create $installerPath"
 }
-if ((Get-Item $installerPath).Length -ge 2GB) {
+$installerSize = (Get-Item -LiteralPath $installerPath).Length
+if ($installerSize -ge 2GB) {
     throw "The Windows installer must stay below GitHub's 2 GiB release asset limit."
 }
+Write-Host "Installer size: $installerSize bytes"
 
 $installerVersionInfo = (Get-Item $installerPath).VersionInfo
 $installerProductVersion = $installerVersionInfo.ProductVersion.Trim()
