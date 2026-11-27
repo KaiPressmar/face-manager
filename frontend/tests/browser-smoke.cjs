@@ -946,16 +946,17 @@ async function mapSelectionAndJourneyFlow(browser, errors) {
 
 async function pagedLibraryFacesFlow(browser, errors) {
   const page = await newPage(browser, 1024, 650, errors);
+  const targetIndex = 44;
   const face = {
     id: 1, bbox_x: 60, bbox_y: 20, bbox_w: 10, bbox_h: 10,
     cluster_id: null, person_name: 'Name aus Liste', review_status: 'unknown_person',
   };
   const photos = Array.from({ length: 240 }, (_, index) => ({
     id: index + 1001, filename: `Foto ${index + 1}`, directory: '/fixture', image_path: `/fixture/${index + 1}.jpg`,
-    content_hash: null, created_at: null, image_width: index === 44 ? null : 100, image_height: index === 44 ? null : 100,
-    location_count: 1, locations: [], faces: index === 44 ? [face] : [],
+    content_hash: null, created_at: null, image_width: index === targetIndex ? null : 100, image_height: index === targetIndex ? null : 100,
+    location_count: 1, locations: [], faces: index === targetIndex ? [face] : [],
   }));
-  const target = photos[44];
+  const target = photos[targetIndex];
   const image = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>';
   let detailRequests = 0;
   let refreshing = false;
@@ -999,8 +1000,16 @@ async function pagedLibraryFacesFlow(browser, errors) {
     await page.goto(`${webBase}/#/bilder`);
     const cards = page.locator('[data-image-id]');
     await cards.first().waitFor();
-    const scrollToEnd = () => page.locator('.page-content').evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    await scrollToEnd();
+    // The first card can appear before the masonry layout and scroll listener settle.
+    const scrollUntil = (count) => page.waitForFunction((expected) => {
+      const pane = document.querySelector('[data-workspace-page="people"] > .page-content');
+      if (!pane) return false;
+      if (pane.querySelectorAll('[data-image-id]').length >= expected) return true;
+      pane.scrollTop = pane.scrollHeight;
+      pane.dispatchEvent(new Event('scroll'));
+      return false;
+    }, count, { polling: 150 });
+    await scrollUntil(targetIndex + 1);
     const card = page.locator(`[data-image-id="${target.id}"]`);
     await card.scrollIntoViewIfNeeded();
     const box = card.locator('.hologram-box');
@@ -1016,11 +1025,7 @@ async function pagedLibraryFacesFlow(browser, errors) {
     assert.ok(detailRequests >= 2, 'Geometry was not retried after the transient failure');
     await gallery.getByRole('button', { name: 'Galerie schließen' }).click();
 
-    while (await cards.count() < photos.length) {
-      const before = await cards.count();
-      await scrollToEnd();
-      await page.waitForFunction((count) => document.querySelectorAll('[data-image-id]').length > count, before);
-    }
+    await scrollUntil(photos.length);
     const pendingRefresh = page.waitForRequest((request) => {
       const url = new URL(request.url());
       return url.pathname === '/api/images' && url.searchParams.get('limit') === '200';
