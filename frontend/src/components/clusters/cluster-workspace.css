@@ -65,6 +65,13 @@
   font-size: .85rem;
 }
 
+.review-page[data-compact-review] .face-action-history details {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+
 .review-page[data-compact-list] .cluster-nav-search__topline,
 .review-page[data-compact-list] .cluster-nav-detail-title {
   display: none;
