@@ -267,6 +267,12 @@
 .gps-album-dialog__details input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
 .gps-album-dialog__swatch { width: 14px; height: 14px; flex: none; border: 1px solid var(--border-strong); border-radius: 50%; background: var(--accent); }
 .gps-album-dialog__dimensions { font-variant-numeric: tabular-nums; }
+.gps-album-dialog__scope { font-weight: 650; overflow-wrap: anywhere; }
+.gps-album-dialog__pan { display: flex; gap: 6px; }
+.gps-album-dialog__pan button { min-width: 40px; padding-inline: 8px; }
+.gps-album-dialog .gps-album-dialog__stop-names { display: grid; }
+.gps-album-dialog__stop-names label { display: grid; }
+.gps-album-dialog__stop-names select, .gps-album-dialog__stop-names input { width: 100%; }
 .gps-album-dialog__field-error { grid-column: 1 / -1; width: 100%; margin: 3px 0; color: var(--danger-text, var(--text-strong)); font-size: 13px; }
 .gps-album-dialog__slider { width: 100%; min-height: 32px; }
 .gps-album-dialog__slider input[type="range"] { width: 145px; min-width: 60px; accent-color: var(--accent); }

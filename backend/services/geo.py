@@ -415,9 +415,15 @@ def list_map_years(album_id=None):
 def list_map_points(
     west, east, south, north, from_date=None, to_date=None, zoom=2,
     grid_columns=MAP_GRID_SIZE, grid_rows=MAP_GRID_SIZE, *, album_id=None,
+    selection: GeoPhotoSelection | None = None,
 ):
     """Aggregate a viewport into cells indexed from its southwest corner."""
     where, params = _filter_sql(west, east, south, north, from_date, to_date, album_id)
+    if selection is not None:
+        selection_where, selection_params = photo_selection_sql(selection)
+        where += f" AND ({selection_where})"
+        params.extend(selection_params)
+        album_id = album_id or selection.album_id
     span_lon = east - west if east >= west else (180 - west) + (east + 180)
     span_lat = north - south
     cell_lon = span_lon / grid_columns or 1

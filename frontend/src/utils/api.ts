@@ -1622,12 +1622,19 @@ async function fetchMapData<T>(
   endpoint: string,
   filters: MapPointFilters | MapImageFilters,
   signal?: AbortSignal,
+  selection?: GeoPhotoSelection,
 ): Promise<T> {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
   });
-  const response = await apiFetch(`${API_BASE}/map/${endpoint}?${params}`, { signal });
+  const request: RequestInit = { signal };
+  if (selection) {
+    request.method = "POST";
+    request.headers = { "Content-Type": "application/json" };
+    request.body = JSON.stringify({ selection });
+  }
+  const response = await apiFetch(`${API_BASE}/map/${endpoint}?${params}`, request);
   if (!response.ok) {
     throw new Error(await readApiError(response, "Die Kartendaten konnten nicht geladen werden."));
   }
@@ -1639,6 +1646,15 @@ export function fetchMapPoints(
   signal?: AbortSignal,
 ): Promise<MapPointsResponse> {
   return fetchMapData("points", filters, signal);
+}
+
+export function fetchSelectedMapPoints(
+  { west, east, south, north, grid_columns, grid_rows }: Pick<MapPointFilters,
+    "west" | "east" | "south" | "north" | "grid_columns" | "grid_rows">,
+  selection: GeoPhotoSelection,
+  signal?: AbortSignal,
+): Promise<MapPointsResponse> {
+  return fetchMapData("points/selection", { west, east, south, north, grid_columns, grid_rows }, signal, selection);
 }
 
 export function fetchMapImages(
