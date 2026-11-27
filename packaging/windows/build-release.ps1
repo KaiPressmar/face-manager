@@ -1,6 +1,7 @@
 param(
     [switch]$RequireSigned,
-    [switch]$FastValidationInstaller
+    [switch]$FastValidationInstaller,
+    [switch]$CompareCompression
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,87 +91,125 @@ if (-not (Test-Path $iscc)) {
     throw "Inno Setup 6 is not installed at $iscc"
 }
 
-$compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$distDir")
-if ($FastValidationInstaller) {
-    $compileArguments += "/DInstallerCompression=lzma/fast"
-}
-& $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
-
-$installerPath = Join-Path $distDir "FaceManager-Setup-$version.exe"
-if (-not (Test-Path $installerPath)) {
-    throw "Inno Setup did not create $installerPath"
-}
-$installerSize = (Get-Item -LiteralPath $installerPath).Length
-if ($installerSize -ge 2GB) {
-    throw "The Windows installer must stay below GitHub's 2 GiB release asset limit."
-}
-Write-Host "Installer size: $installerSize bytes"
-
-$installerVersionInfo = (Get-Item $installerPath).VersionInfo
-$installerProductVersion = $installerVersionInfo.ProductVersion.Trim()
-if ($installerProductVersion -ne $version) {
-    throw "Installer product version is '$installerProductVersion', expected '$version'"
+$profile = if ($FastValidationInstaller) { "lzma/fast" } else { "lzma" }
+$profiles = @(
+    @{ Name = $profile; Threads = 1; Output = $distDir; SmokeName = "installed-smoke" }
+)
+if ($CompareCompression) {
+    if ($FastValidationInstaller) {
+        throw "CompareCompression requires the default compression baseline."
+    }
+    $profiles += @{
+        Name = "lzma2/max"
+        Threads = 2
+        Output = Join-Path $buildDir "compression-benchmark/lzma2"
+        SmokeName = "installed-smoke-lzma2"
+    }
 }
 
-if ($env:CI -eq "true") {
-    $smokeDirectory = Join-Path $buildDir "installed-smoke"
-    $savedDataDirectory = $env:FACE_MANAGER_DATA_DIR
-    $env:FACE_MANAGER_DATA_DIR = Join-Path $buildDir "installed-smoke-data"
-    $installed = $false
-    try {
-        $setup = Start-Process -PassThru -Wait -FilePath $installerPath -ArgumentList @(
-            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$smokeDirectory`""
-        )
-        if ($setup.ExitCode -ne 0) {
-            throw "Windows installer smoke test failed with exit code $($setup.ExitCode)."
+foreach ($variant in $profiles) {
+    New-Item -ItemType Directory -Force -Path $variant.Output | Out-Null
+    $compileArguments = @("/DAppVersion=$version", "/DSourceDir=$projectRoot", "/DOutputDir=$($variant.Output)")
+    if ($variant.Name -ne "lzma") {
+        $compileArguments += "/DInstallerCompression=$($variant.Name)"
+    }
+    if ($variant.Threads -ne 1) {
+        $compileArguments += "/DInstallerBlockThreads=$($variant.Threads)"
+    }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    & $iscc @compileArguments (Join-Path $projectRoot "packaging/windows/FaceManager.iss")
+    $timer.Stop()
+
+    $installerPath = Join-Path $variant.Output "FaceManager-Setup-$version.exe"
+    if (-not (Test-Path -LiteralPath $installerPath)) {
+        throw "Inno Setup did not create $installerPath"
+    }
+    $installerSize = (Get-Item -LiteralPath $installerPath).Length
+    Write-Host "Installer size: $installerSize bytes"
+
+    $checksum = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $variant.Checksum = $checksum
+    if ($CompareCompression) {
+        $seconds = $timer.Elapsed.TotalSeconds.ToString("F3", [Globalization.CultureInfo]::InvariantCulture)
+        $result = "| $($variant.Name) | $($variant.Threads) | $seconds | $installerSize | $checksum |"
+        Write-Host $result
+        if ($env:GITHUB_STEP_SUMMARY) {
+            $result | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
         }
-        $installed = $true
-        $reportPath = Join-Path $buildDir "installed-runtime-check.txt"
-        $smoke = Start-Process -PassThru -FilePath (Join-Path $smokeDirectory "FaceManager.exe") `
-            -ArgumentList "--check-runtime `"$reportPath`""
-        if (-not $smoke.WaitForExit(120000)) {
-            $smoke.Kill()
-            throw "Installed Face Manager runtime check timed out."
-        }
-        $report = if (Test-Path $reportPath) { Get-Content -Raw $reportPath } else { "No runtime report" }
-        if ($smoke.ExitCode -ne 0 -or $report -notlike "Face Manager $version,* CPU inference passed.*") {
-            throw "Installed Face Manager runtime check failed with exit code $($smoke.ExitCode): $report"
-        }
-        Write-Host $report
-    } finally {
-        $env:FACE_MANAGER_DATA_DIR = $savedDataDirectory
-        if ($installed) {
-            $uninstall = Start-Process -PassThru -Wait -FilePath (Join-Path $smokeDirectory "unins000.exe") `
-                -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
-            if ($uninstall.ExitCode -ne 0) {
-                throw "Uninstalling the clean smoke-test installation failed with exit code $($uninstall.ExitCode)."
+    }
+}
+
+foreach ($variant in $profiles) {
+    $installerPath = Join-Path $variant.Output "FaceManager-Setup-$version.exe"
+    if ((Get-Item -LiteralPath $installerPath).Length -ge 2GB) {
+        throw "The Windows installer must stay below GitHub's 2 GiB release asset limit: $installerPath"
+    }
+    $installerVersionInfo = (Get-Item $installerPath).VersionInfo
+    $installerProductVersion = $installerVersionInfo.ProductVersion.Trim()
+    if ($installerProductVersion -ne $version) {
+        throw "Installer product version is '$installerProductVersion', expected '$version'"
+    }
+
+    if ($env:CI -eq "true") {
+        $smokeDirectory = Join-Path $buildDir $variant.SmokeName
+        $savedDataDirectory = $env:FACE_MANAGER_DATA_DIR
+        $env:FACE_MANAGER_DATA_DIR = "$smokeDirectory-data"
+        $installed = $false
+        try {
+            $setup = Start-Process -PassThru -Wait -FilePath $installerPath -ArgumentList @(
+                "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=`"$smokeDirectory`""
+            )
+            if ($setup.ExitCode -ne 0) {
+                throw "Windows installer smoke test failed with exit code $($setup.ExitCode)."
+            }
+            $installed = $true
+            $reportPath = Join-Path $buildDir "$($variant.SmokeName)-runtime.txt"
+            $smoke = Start-Process -PassThru -FilePath (Join-Path $smokeDirectory "FaceManager.exe") `
+                -ArgumentList "--check-runtime `"$reportPath`""
+            if (-not $smoke.WaitForExit(120000)) {
+                $smoke.Kill()
+                throw "Installed Face Manager runtime check timed out."
+            }
+            $report = if (Test-Path $reportPath) { Get-Content -Raw $reportPath } else { "No runtime report" }
+            if ($smoke.ExitCode -ne 0 -or $report -notlike "Face Manager $version,* CPU inference passed.*") {
+                throw "Installed Face Manager runtime check failed with exit code $($smoke.ExitCode): $report"
+            }
+            Write-Host $report
+        } finally {
+            $env:FACE_MANAGER_DATA_DIR = $savedDataDirectory
+            if ($installed) {
+                $uninstall = Start-Process -PassThru -Wait -FilePath (Join-Path $smokeDirectory "unins000.exe") `
+                    -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+                if ($uninstall.ExitCode -ne 0) {
+                    throw "Uninstalling the clean smoke-test installation failed with exit code $($uninstall.ExitCode)."
+                }
             }
         }
     }
-}
 
-foreach ($artifact in @($appExe, $installerPath)) {
-    $signature = Get-AuthenticodeSignature $artifact
-    if ($RequireSigned -and $signature.Status -ne "Valid") {
-        throw "$artifact does not have a valid Authenticode signature (status: $($signature.Status))"
+    foreach ($artifact in @($appExe, $installerPath)) {
+        $signature = Get-AuthenticodeSignature $artifact
+        if ($RequireSigned -and $signature.Status -ne "Valid") {
+            throw "$artifact does not have a valid Authenticode signature (status: $($signature.Status))"
+        }
+    }
+
+    $legacyInstallerPath = Join-Path $variant.Output "FaceManager-Setup-GPU-$version.exe"
+    Copy-Item -LiteralPath $installerPath -Destination $legacyInstallerPath
+    $checksum = $variant.Checksum
+    if ((Get-FileHash -Algorithm SHA256 $legacyInstallerPath).Hash.ToLowerInvariant() -ne $checksum) {
+        throw "The Windows compatibility installer is not identical to the built installer."
+    }
+
+    foreach ($artifact in @($installerPath, $legacyInstallerPath)) {
+        $checksumPath = "$artifact.sha256"
+        "$checksum  $(Split-Path -Leaf $artifact)" | Set-Content -Encoding ascii $checksumPath
+        Write-Host "Installer: $artifact"
+        Write-Host "SHA-256 checksum: $checksumPath"
     }
 }
 
-$legacyInstallerPath = Join-Path $distDir "FaceManager-Setup-GPU-$version.exe"
-Copy-Item -LiteralPath $installerPath -Destination $legacyInstallerPath
-$checksum = (Get-FileHash -Algorithm SHA256 $installerPath).Hash.ToLowerInvariant()
-if ((Get-FileHash -Algorithm SHA256 $legacyInstallerPath).Hash.ToLowerInvariant() -ne $checksum) {
-    throw "The Windows compatibility installer is not identical to the built installer."
-}
-
-foreach ($artifact in @($installerPath, $legacyInstallerPath)) {
-    $checksumPath = "$artifact.sha256"
-    "$checksum  $(Split-Path -Leaf $artifact)" | Set-Content -Encoding ascii $checksumPath
-    Write-Host "Installer: $artifact"
-    Write-Host "SHA-256 checksum: $checksumPath"
-}
-
 if ($env:GITHUB_OUTPUT) {
-    "installer_sha256=$checksum" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
+    "installer_sha256=$($profiles[0].Checksum)" | Add-Content -Encoding utf8 $env:GITHUB_OUTPUT
 }
 Write-Host "Dependency inventory: $dependencyInventoryPath"

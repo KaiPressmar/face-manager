@@ -1,11 +1,16 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Version
+    [string]$Version,
+    [string]$InstallerDirectory
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 $root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+if (-not $InstallerDirectory) {
+    $InstallerDirectory = Join-Path $root "dist"
+}
+$InstallerDirectory = (Resolve-Path -LiteralPath $InstallerDirectory).Path
 $testRoot = Join-Path $root "build/upgrade-smoke"
 $legacyRepository = "KaiPressmar/face-manager"
 $registryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}_is1"
@@ -72,7 +77,7 @@ try {
         }
 
         $log = Join-Path $fixtureRoot "setup.log"
-        $candidate = Join-Path $root "dist/FaceManager-Setup${suffix}-${Version}.exe"
+        $candidate = Join-Path $InstallerDirectory "FaceManager-Setup${suffix}-${Version}.exe"
         $liveApp = Join-Path $installDirectory "FaceManager.exe"
         $madeMachineRecord = $false
         $madeDefaultData = $false

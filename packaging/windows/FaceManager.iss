@@ -5,6 +5,9 @@
 #ifndef InstallerCompression
   #define InstallerCompression "lzma"
 #endif
+#ifndef InstallerBlockThreads
+  #define InstallerBlockThreads 1
+#endif
 
 [Setup]
 AppId={{0E1A7413-4FD3-4A24-A59A-3A4B359EA5D0}
@@ -22,6 +25,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 OutputDir={#OutputDir}
 OutputBaseFilename=FaceManager-Setup-{#AppVersion}
 Compression={#InstallerCompression}
+LZMANumBlockThreads={#InstallerBlockThreads}
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
