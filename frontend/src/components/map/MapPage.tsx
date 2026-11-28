@@ -642,11 +642,12 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
     setSaveSelection(undefined);
     requestAnimationFrame(() => albumPickerOpener.current?.focus());
   };
-  const switchCompactPane = (pane: MapPane, fromMapSelection = false) => {
+  const switchCompactPane = (pane: MapPane, fromPaneAction = false) => {
     if (pane === compactPane) return;
     if (pane === "map") {
       savedResultScroll.current = resultsRef.current?.scrollTop ?? 0;
-    } else if (fromMapSelection) {
+      if (fromPaneAction) mapPaneButton.current?.focus({ preventScroll: true });
+    } else if (fromPaneAction) {
       restoreResultScroll.current = 0;
       focusResults.current = true;
     } else {
@@ -967,14 +968,14 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           <button type="button" onClick={() => {
             setView(normalizedView({ latitude: journeyStop.latitude, longitude: journeyStop.longitude,
               zoom: Math.max(view.zoom, journeyDetail === "city" ? 6400 : 3200) }));
-            if (compactLayout) switchCompactPane("map");
+            if (compactLayout) switchCompactPane("map", true);
           }}>Stopp auf Karte zeigen</button>
         </div>}
         {images.length > 0 && <div className="gps-results-actions">
           {!isJourney && region && <button type="button" onClick={() => {
             const frame = viewForBounds(region);
             setView(normalizedView({ ...frame, zoom: Math.min(frame.zoom, 12000) }));
-            if (compactLayout) switchCompactPane("map");
+            if (compactLayout) switchCompactPane("map", true);
           }}>Fotoorte auf Karte zeigen</button>}
           {!isJourney && <button type="button" onClick={() => changeMode("journey", true)}>Verlauf dieser Auswahl</button>}
           {stopDay && (queryFrom !== stopDay || queryTo !== stopDay) &&

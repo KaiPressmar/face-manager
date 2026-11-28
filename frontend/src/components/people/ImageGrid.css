@@ -21,7 +21,25 @@
   .photo-selection-toolbar button { flex: 1 1 auto; }
 }
 
+.image-gallery-card {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .image-gallery-card--animate-ratio { transition: aspect-ratio 0.2s ease; }
+}
+
 .image-gallery-card > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   z-index: 0;
 }
 

@@ -52,6 +52,8 @@ interface PhotoWorkspace {
   selection?: number[];
 }
 
+type PhotoWorkspacePosition = Pick<PhotoWorkspace, "queryKey" | "loadedCount" | "scrollTop" | "selection">;
+
 function applyImageGeometry(image: FaceImage, geometry?: ResolvedImageGeometry): FaceImage {
   if (!geometry || (image.image_width && image.image_height)) return image;
   const { source, detail } = geometry;
@@ -105,7 +107,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [faceStatuses, setFaceStatuses] = useState<string[]>([]);
   const [faceOverlayMode, setFaceOverlayMode] = useState<FaceOverlayMode>("all");
   const { values: { image_grid_size: imageGridSize }, setPreference } = useUiPreferences();
-  const [galleryRevision, setGalleryRevision] = useState(0);
+  const [queryRevision, setQueryRevision] = useState(0);
+  const [libraryGridRevision, setLibraryGridRevision] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState(false);
@@ -144,7 +147,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const queryKeyRef = useRef("");
   const pageHeaderRef = useRef<HTMLElement | null>(null);
   const refreshAnchorRef = useRef<{ scroller: HTMLElement; imageId: string; offset: number; requestId: number }>();
-  const pendingResume = useRef<Pick<PhotoWorkspace, "queryKey" | "loadedCount" | "scrollTop" | "selection">>();
+  const pendingResume = useRef<PhotoWorkspacePosition>();
+  const loadedResume = useRef<{ position: PhotoWorkspacePosition; requestId: number }>();
   const liveRefreshTimerRef = useRef<number | null>(null);
   const hasActivatedLiveRefreshRef = useRef(false);
   const liveRevision = useRef(0);
@@ -167,6 +171,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     },
     restore: (snapshot) => {
       pendingResume.current = snapshot;
+      loadedResume.current = undefined;
       setSelectedFolders(snapshot?.folders ?? []);
       setSelectedPersons(snapshot?.persons ?? []);
       setFaceStatuses(snapshot?.statuses ?? []);
@@ -177,7 +182,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       setShowAlbumLibrary(false);
       setShowFolderFilter(false);
       setShowImport(false);
-      setGalleryRevision((value) => value + 1);
+      setIsLoading(true);
+      setQueryRevision((value) => value + 1);
     },
   });
 
@@ -190,6 +196,17 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     const offset = card.getBoundingClientRect().top - anchor.scroller.getBoundingClientRect().top;
     anchor.scroller.scrollTop += offset - anchor.offset;
   }, [active, images]);
+
+  // Apply history scroll in the same render that makes the refreshed grid
+  // interactive, so it cannot overwrite the next scroll or history entry.
+  useLayoutEffect(() => {
+    if (isLoading) return;
+    const resume = loadedResume.current;
+    loadedResume.current = undefined;
+    if (!resume || resume.position !== pendingResume.current || resume.requestId !== latestQueryRef.current) return;
+    pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: resume.position.scrollTop });
+    pendingResume.current = undefined;
+  }, [images, isLoading]);
 
   const clearGeometryRequests = useCallback(() => {
     geometryRequestsRef.current.forEach((request) => request.abort());
@@ -354,16 +371,11 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         setLoadError(false);
         loadedCountRef.current = Math.max(PAGE_SIZE, items.length);
         if (resume && pendingResume.current === resume) {
+          loadedResume.current = { position: resume, requestId };
           if (resume.selection) {
             const confirmed = new Set(items.map((image) => image.id));
             setSelectedAlbumImages(new Set(resume.selection.filter((id) => confirmed.has(id))));
           }
-          window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-            if (isMounted && latestQueryRef.current === requestId && pendingResume.current === resume) {
-              pendingResume.current = undefined;
-              pageHeaderRef.current?.closest(".page-content")?.scrollTo({ top: resume.scrollTop });
-            }
-          }));
         }
         if (page.has_more) {
           void scheduleNextPagePrefetch(requestId, loadedCountRef.current, queryKey);
@@ -387,7 +399,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       request.abort();
       if (queryRequestRef.current === request) queryRequestRef.current = null;
     };
-  }, [clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, retryLoad, selectedFolders, selectedPersons, sortDirection]);
+  }, [clearGeometryRequests, faceStatuses, geoSelection, groupingMode, queryRevision, retryLoad, selectedFolders, selectedPersons, sortDirection]);
 
   useEffect(() => {
     setSelectedAlbumImages(null);
@@ -407,6 +419,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       prefetchRequestOffset.current = undefined;
       clearGeometryRequests();
       pendingResume.current = undefined;
+      loadedResume.current = undefined;
       queryRequestRef.current?.abort();
       refreshImagesRequestRef.current?.abort();
       setImages([]);
@@ -421,7 +434,8 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       setHasMore(false);
       setIsLoading(true);
       setIsLoadingMore(false);
-      setGalleryRevision((value) => value + 1);
+      setQueryRevision((value) => value + 1);
+      setLibraryGridRevision((value) => value + 1);
     };
     const storeLiveChange = (update: { reason?: string }) => {
       closeGalleryAfterRestore(update);
@@ -648,7 +662,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       document.removeEventListener("pointerdown", noteUserActivity, true);
       window.removeEventListener("focus", refreshIfChanged);
     };
-  }, [active, clearGeometryRequests, faceStatuses, galleryRevision, geoSelection, groupingMode, isLoadingMore, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
+  }, [active, clearGeometryRequests, faceStatuses, geoSelection, groupingMode, isLoadingMore, queryRevision, retryRefresh, selectedFolders, selectedPersons, sortDirection]);
 
   const loadMoreImages = async () => {
     if (!isMountedRef.current || staleResults || isLoading || loadingPageRef.current !== undefined ||
@@ -831,7 +845,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     }
   };
   const albumDialogs = <>
-    {showAlbumLibrary && albumPickerIds === null && <AlbumLibraryDialog
+    {showAlbumLibrary && <AlbumLibraryDialog suspended={albumPickerIds !== null}
       albums={albums} loading={albumsLoading} error={albumsError} reload={reloadAlbums} activeAlbumId={albumId}
       onClose={() => setShowAlbumLibrary(false)} onSelect={(album) => setAlbumFilter(album, true)}
       onCreate={() => setAlbumPickerIds([])}
@@ -1071,7 +1085,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
 
       {(!loadError || images.length > 0) && (
         <ImageGrid
-        key={galleryRevision}
+        key={libraryGridRevision}
         active={active}
         images={images}
         isLoading={(isLoading || staleResults) && images.length === 0}

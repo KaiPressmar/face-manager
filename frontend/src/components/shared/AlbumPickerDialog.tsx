@@ -13,15 +13,22 @@ const numbers = new Intl.NumberFormat("de-DE");
 const photoCountLabel = (count: number) => `${numbers.format(count)} ${count === 1 ? "Foto" : "Fotos"}`;
 
 function AlbumDialog({
-  title, onClose, pending, children,
-}: { title: string; onClose: () => void; pending: boolean; children: ReactNode }) {
+  title, onClose, pending, suspended = false, focusClose = true, children,
+}: {
+  title: string;
+  onClose: () => void;
+  pending: boolean;
+  suspended?: boolean;
+  focusClose?: boolean;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLElement>(null);
   useModalFocus(ref, onClose, !pending);
-  return <div className="photo-album-overlay">
+  return <div className="photo-album-overlay" {...(suspended ? { inert: "" } : {})}>
     <section ref={ref} role="dialog" aria-modal="true" aria-label={title} className="photo-album-dialog">
       <header>
         <h2>{title}</h2>
-        <button type="button" data-initial-focus disabled={pending} onClick={onClose}>Schließen</button>
+        <button type="button" data-initial-focus={focusClose ? true : undefined} disabled={pending} onClick={onClose}>Schließen</button>
       </header>
       {children}
     </section>
@@ -53,7 +60,8 @@ export default function AlbumPickerDialog({
   const request = useRef(false);
   const destination = existingAlbumPicker ? choice ?? (albums.length ? albums[0].id : "") : "";
   const creating = destination === "";
-  const canSave = !pending && (creating ? Boolean(name.trim()) : albums.some((album) => album.id === destination)) && count !== 0;
+  const validDestination = creating ? Boolean(name.trim()) : albums.some((album) => album.id === destination);
+  const canSave = !pending && validDestination && (!photos || count !== 0);
   const title = photos ? "Zum Album hinzufügen" : "Album erstellen";
 
   const save = async (event: FormEvent) => {
@@ -76,7 +84,7 @@ export default function AlbumPickerDialog({
     }
   };
 
-  return <AlbumDialog title={title} onClose={onClose} pending={pending}>
+  return <AlbumDialog title={title} onClose={onClose} pending={pending} focusClose={Boolean(photos)}>
     <form className="photo-album-form" onSubmit={(event) => void save(event)}>
       {photos && <p>{count == null ? "Fotos aus der aktuellen Auswahl" : photoCountLabel(count)}</p>}
       {selection && selection.image_ids === undefined && <p>
@@ -92,7 +100,7 @@ export default function AlbumPickerDialog({
         </select>
       </label>}
       {creating && <label>Albumname
-        <input disabled={pending} required maxLength={albumNameLimit} value={name}
+        <input data-initial-focus={photos ? undefined : true} disabled={pending} required maxLength={albumNameLimit} value={name}
           onChange={(event) => setName(event.target.value)} />
       </label>}
       {saveError && <p role="alert">{saveError}</p>}
@@ -111,6 +119,7 @@ interface AlbumLibraryProps {
   error: string;
   reload: () => void;
   activeAlbumId?: string;
+  suspended?: boolean;
   onClose: () => void;
   onSelect: (album?: PhotoAlbum) => void;
   onCreate: () => void;
@@ -118,7 +127,7 @@ interface AlbumLibraryProps {
 }
 
 export function AlbumLibraryDialog({
-  albums, loading, error, reload, activeAlbumId, onClose, onSelect, onCreate, onDeleted,
+  albums, loading, error, reload, activeAlbumId, suspended, onClose, onSelect, onCreate, onDeleted,
 }: AlbumLibraryProps) {
   const [editing, setEditing] = useState<string>();
   const [name, setName] = useState("");
@@ -145,7 +154,7 @@ export function AlbumLibraryDialog({
     }
   };
 
-  return <AlbumDialog title="Fotoalben" onClose={onClose} pending={pending}>
+  return <AlbumDialog title="Fotoalben" onClose={onClose} pending={pending} suspended={suspended}>
     <div className="photo-album-library">
       <div className="photo-album-library__toolbar">
         {activeAlbumId && <button type="button" disabled={pending} onClick={() => onSelect()}>Alle Fotos anzeigen</button>}

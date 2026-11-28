@@ -90,8 +90,16 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     assert.ok(await provenance(gallery).evaluate(sourceFitsTile), 'Inferred photo provenance is clipped in map gallery');
     await gallery.getByRole('button', { name: 'Galerie schließen', exact: true }).click();
 
+    await page.setViewportSize({ width: 768, height: 680 });
+    const compactPanes = page.getByRole('group', { name: 'Kartenansicht' });
+    const mapPane = compactPanes.getByRole('button', { name: 'Karte', exact: true });
+    const stopsPane = compactPanes.getByRole('button', { name: 'Stopps', exact: true });
+    await stopsPane.click();
+    await results.getByRole('button', { name: 'Stopp auf Karte zeigen', exact: true }).press('Enter');
+    await map.waitFor();
+    await mapPane.and(page.locator(':focus')).waitFor();
     await page.setViewportSize({ width: 320, height: 680 });
-    await page.getByRole('group', { name: 'Kartenansicht' }).getByRole('button', { name: 'Stopps', exact: true }).click();
+    await stopsPane.click();
     await page.getByRole('button', { name: 'Fotobuchbild gestalten', exact: true }).click();
     const book = page.getByRole('dialog', { name: 'Fotobuchbild erstellen' });
     const preview = book.locator('.gps-album-dialog__preview[aria-busy="false"] img');
@@ -249,6 +257,10 @@ async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
     assert.equal(await photoButton.getAttribute('aria-pressed'), 'true');
     assert.ok(await results.evaluate((element) => document.activeElement === element), 'A marker did not transfer focus to its photos');
     assert.equal(await results.evaluate((element) => element.scrollTop), 0);
+    await results.getByRole('button', { name: 'Fotoorte auf Karte zeigen', exact: true }).press('Enter');
+    await map.waitFor();
+    await mapButton.and(page.locator(':focus')).waitFor();
+    await photoButton.click();
     await page.setViewportSize({ width: 768, height: 600 });
     await panes.waitFor();
     assert.equal(await photoButton.getAttribute('aria-pressed'), 'true');
@@ -287,10 +299,28 @@ async function verifyPinch(page, map, touch) {
 }
 
 async function checkMapRefresh(page) {
+  const observedPlaces = (url) => url.pathname === '/api/map/observed-places';
+  const secondPlacePage = (url) => observedPlaces(url) && url.searchParams.get('offset') === '300';
+  let refreshing = false;
+  let releasePlaces;
+  const placesGate = new Promise((resolve) => { releasePlaces = resolve; });
+  const servePlaces = async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.has('from_date')) return route.fulfill({ json: { places: [], next_offset: null } });
+    if (refreshing && secondPlacePage(url)) await placesGate;
+    const count = secondPlacePage(url) ? 2 : refreshing ? 5 : 3;
+    return route.fulfill({ json: {
+      places: [{ latitude: 52.52, longitude: 13.405, photo_count: count, year_counts: { 2025: count } }],
+      next_offset: secondPlacePage(url) ? null : 300,
+    } });
+  };
+  await page.route(observedPlaces, servePlaces);
   const places = page.getByText('Orte aus meinen Fotos', { exact: true });
   await places.click();
   const placeSearch = page.getByRole('searchbox', { name: 'Fotoorte suchen' });
   await placeSearch.fill('Berlin');
+  const berlin = page.getByRole('button', { name: /Berlin .*Fotos/ });
+  await berlin.getByText(/5 Fotos/).waitFor();
   const tiles = page.locator('.gps-page__photo');
   const results = page.locator('#gps-map-results');
   const more = results.getByRole('button', { name: 'Weitere Fotos laden', exact: true });
@@ -311,21 +341,35 @@ async function checkMapRefresh(page) {
   }, { times: 1 });
   try {
     const request = page.waitForRequest((pending) => matches(new URL(pending.url())));
+    const refreshingPlaces = page.waitForRequest((pending) => secondPlacePage(new URL(pending.url())));
+    await berlin.focus();
+    refreshing = true;
     await page.evaluate(() => window.mapTestEvents.dispatchEvent(new MessageEvent('clusters', {
       data: '{"reason":"albums_changed"}',
     })));
-    await request;
+    await Promise.all([request, refreshingPlaces]);
     assert.equal(await tiles.count(), 72, 'A background refresh cleared the previous map photos');
     assert.ok(await page.locator('.gps-map__marker').first().isVisible());
     assert.ok(await placeSearch.isVisible(), 'A background refresh closed the photo place search');
     assert.equal(await placeSearch.inputValue(), 'Berlin');
+    assert.ok(await berlin.getByText(/5 Fotos/).isVisible(), 'A background refresh cleared the completed place search');
+    assert.ok(await berlin.evaluate((element) => document.activeElement === element), 'A place refresh lost keyboard focus');
     assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
+    releasePlaces();
     release();
+    await berlin.getByText(/7 Fotos/).waitFor();
     await more.and(page.locator(':enabled')).waitFor();
     assert.equal(await tiles.count(), 72, 'A background refresh discarded loaded map pages');
     assert.equal(await results.evaluate((element) => element.scrollTop), initialScroll);
+    const period = page.getByLabel('Zeitraum', { exact: true });
+    await period.selectOption('this-year');
+    await berlin.waitFor({ state: 'hidden' });
+    await page.getByText('Für diese Auswahl wurden keine passenden Orte gefunden.').waitFor();
+    await period.selectOption('all');
   } finally {
     release();
+    releasePlaces();
+    await page.unroute(observedPlaces, servePlaces);
     await places.click();
   }
 }

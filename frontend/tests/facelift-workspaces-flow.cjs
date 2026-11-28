@@ -58,6 +58,7 @@ async function checkPhotoFilter(page, webBase) {
   assert.equal(await page.getByText('1 ausgewählt', { exact: true }).count(), 0);
   await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
   await sameCard.and(page.locator('[aria-pressed="true"]')).waitFor();
+  const retainedCard = await page.locator(`[data-image-id="${selectedId}"]`).elementHandle();
 
   for (const holdRetry of [true, false]) {
     const photosPane = page.locator('[data-workspace-page="people"] > .page-content');
@@ -86,6 +87,7 @@ async function checkPhotoFilter(page, webBase) {
       await nav.getByRole('button', { name: 'Zurück', exact: true }).click();
       await pendingResume;
       assert.ok(await sameCard.isDisabled());
+      assert.ok(await retainedCard.evaluate((card) => card.isConnected), 'History remounted the loaded photo');
       await waitForSavedScroll();
       const interruptedScroll = await photosPane.evaluate(async (pane) => {
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -113,6 +115,7 @@ async function checkPhotoFilter(page, webBase) {
     await sameCard.and(page.locator('[aria-pressed="true"]')).waitFor();
     await waitForSavedScroll();
   }
+  await retainedCard.dispose();
 }
 
 async function checkPeopleHistory(page, webBase) {

@@ -17,7 +17,7 @@ type PlaceYear = { count: number; bounds: MapBounds };
 export type ObservedPlace = TravelHome & { count: number; bounds: MapBounds };
 export type ObservedPlacePeriod = { from: string; to: string };
 type PlaceGroup = ObservedPlace & { years: Record<string, PlaceYear> };
-type PlacePage = { scope: string; groups: ReadonlyMap<string, PlaceGroup>; nextOffset: number | null };
+type PlacePage = { scope: string; revision: number; groups: ReadonlyMap<string, PlaceGroup>; nextOffset: number | null };
 
 const PAGE_SIZE = 300;
 const RESULTS_PER_PAGE = 30;
@@ -81,19 +81,23 @@ export default function MapObservedPlaces({ active, revision, from, to, albumId,
   const summary = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [page, setPage] = useState<PlacePage>();
-  const [manualRequest, setManualRequest] = useState<{ scope: string; offset: number }>();
-  const [failure, setFailure] = useState<{ scope: string; offset: number; message: string }>();
+  const [pages, setPages] = useState<{ latest?: PlacePage; complete?: PlacePage }>({});
+  const [manualRequest, setManualRequest] = useState<{ key: string; offset: number }>();
+  const [failure, setFailure] = useState<{ key: string; offset: number; message: string }>();
   const [visibleLimit, setVisibleLimit] = useState(RESULTS_PER_PAGE);
-  const scope = JSON.stringify([from, to, albumId, revision]);
-  const current = page?.scope === scope ? page : undefined;
+  const scope = JSON.stringify([from, to, albumId]);
+  const requestKey = JSON.stringify([scope, revision]);
+  const latest = pages.latest?.scope === scope ? pages.latest : undefined;
+  const current = latest?.revision === revision ? latest : undefined;
   const searchTerm = nameKey(query.trim());
   const searchAll = Boolean(searchTerm);
+  // A search covers every page. Keep the last complete results until the same filters finish refreshing.
+  const displayed = searchAll ? (pages.complete?.scope === scope ? pages.complete : undefined) : latest;
   const nextOffset = current?.nextOffset;
-  const moreRequested = manualRequest?.scope === scope && manualRequest.offset === nextOffset;
+  const moreRequested = manualRequest?.key === requestKey && manualRequest.offset === nextOffset;
   const wantsPage = !current || searchAll || moreRequested;
   const offset = current ? current.nextOffset : 0;
-  const error = wantsPage && failure?.scope === scope && failure.offset === offset ? failure.message : "";
+  const error = wantsPage && failure?.key === requestKey && failure.offset === offset ? failure.message : "";
   const loading = active && open && wantsPage && offset !== null && !error;
 
   useEffect(() => {
@@ -109,23 +113,24 @@ export default function MapObservedPlaces({ active, revision, from, to, albumId,
     });
     void Promise.all([request, loadJourneyPlaces().catch(() => [])]).then(([data, locations]) => {
       if (controller.signal.aborted) return;
-      setPage((previous) => ({
-        scope, groups: groupCells(data.places, locations, offset && previous?.scope === scope ? previous.groups : undefined),
-        nextOffset: data.next_offset,
-      }));
+      setPages(({ latest, complete }) => {
+        const priorGroups = offset > 0 && latest?.scope === scope && latest.revision === revision ? latest.groups : undefined;
+        const page = { scope, revision, groups: groupCells(data.places, locations, priorGroups), nextOffset: data.next_offset };
+        return { latest: page, complete: page.nextOffset === null ? page : complete };
+      });
     }).catch((reason) => {
-      if (!controller.signal.aborted) setFailure({ scope, offset, message: reason instanceof Error ? reason.message : "Fotoorte konnten nicht geladen werden." });
+      if (!controller.signal.aborted) setFailure({ key: requestKey, offset, message: reason instanceof Error ? reason.message : "Fotoorte konnten nicht geladen werden." });
     });
     return () => controller.abort();
-  }, [loading, from, to, albumId, offset, scope]);
+  }, [loading, from, to, albumId, offset, scope, requestKey, revision]);
 
   const visible = useMemo(() => {
-    if (!open || !current || (searchAll && current.nextOffset !== null)) return [];
-    return [...current.groups].filter(([, place]) => {
+    if (!open || !displayed) return [];
+    return [...displayed.groups].filter(([, place]) => {
       const transliterated = place.name.toLocaleLowerCase("de").replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue");
       return nameKey(place.name).includes(searchTerm) || nameKey(transliterated).includes(searchTerm);
     }).sort(([, a], [, b]) => b.count - a.count || a.name.localeCompare(b.name, "de"));
-  }, [current, open, searchAll, searchTerm]);
+  }, [displayed, open, searchTerm]);
 
   const choose = (place: PlaceGroup, year?: string) => {
     const selectedYear = year ? place.years[year] : undefined;
@@ -180,7 +185,7 @@ export default function MapObservedPlaces({ active, revision, from, to, albumId,
       {(visibleMore || moreAvailable) && <button type="button" onClick={() => {
         if (visibleMore) setVisibleLimit((limit) => limit + RESULTS_PER_PAGE);
         else if (nextOffset != null) {
-          setManualRequest({ scope, offset: nextOffset });
+          setManualRequest({ key: requestKey, offset: nextOffset });
           setVisibleLimit((limit) => limit + RESULTS_PER_PAGE);
         }
       }}>Weitere Orte anzeigen</button>}

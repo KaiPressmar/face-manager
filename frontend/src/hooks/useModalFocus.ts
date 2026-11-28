@@ -16,11 +16,11 @@ function tabStops(dialog: HTMLElement) {
     .filter((element) => canFocus(element) && element.tabIndex >= 0);
 }
 
-function focusDialog(dialog: HTMLElement) {
+function focusDialog(dialog: HTMLElement, preventScroll = false) {
   if (!dialog.hasAttribute("tabindex")) dialog.tabIndex = -1;
   const preferred = dialog.querySelector<HTMLElement>("[data-initial-focus], [autofocus]");
   const target = preferred && canFocus(preferred) ? preferred : tabStops(dialog)[0] ?? dialog;
-  target.focus();
+  target.focus({ preventScroll });
 }
 
 /** Keep keyboard focus inside an open dialog and return it to its opener. */
@@ -35,6 +35,7 @@ export function useModalFocus(
   const canCloseRef = useRef(canClose);
   const deferEscapeRef = useRef(deferEscape);
   const openerRef = useRef<HTMLElement | null>(null);
+  const presentedDialogRef = useRef<HTMLElement | null>(null);
   const wasActiveRef = useRef(false);
   if (active && !wasActiveRef.current) {
     openerRef.current = document.activeElement instanceof HTMLElement
@@ -102,9 +103,15 @@ export function useModalFocus(
   // lost when a save temporarily disables the focused input.
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
-    if (!active || !dialog || activeModal() !== dialog) return;
+    if (!active || !dialog) {
+      presentedDialogRef.current = null;
+      return;
+    }
+    if (activeModal() !== dialog) return;
+    const preserveScroll = presentedDialogRef.current === dialog;
+    presentedDialogRef.current = dialog;
     const focused = document.activeElement;
     if (focused && dialog.contains(focused) && !focused.matches(":disabled")) return;
-    focusDialog(dialog);
+    focusDialog(dialog, preserveScroll);
   });
 }
