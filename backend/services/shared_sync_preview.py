@@ -40,7 +40,7 @@ from .shared_sync_outbox import (
 )
 from .shared_sync_reconcile import compare_verified_photo, matching_source_path, photo_event
 from .shared_sync_resolution import record_resolution, shared_library_scope
-from .shared_sync_snapshot import capture_image
+from .shared_sync_snapshot import capture_image, capture_images
 from .shared_sync_transport import MAX_EVENT_BATCH_BYTES
 from .shared_sync_worker import MAX_SOURCE_CHECKS
 from .storage import invalidate_image_query_cache
@@ -783,24 +783,24 @@ class SharedLibraryPreview:
                     register_scope(connection, outbox_scope)
                 more_baseline = enqueue_baseline_page(connection, outbox_scope)
                 candidates = pending_changes(connection, outbox_scope, limit=8, after=state.get("outbox_cursor"))
-                snapshots = [
-                    capture_image(connection, config["source_path"], device_id, change.image_id)
-                    for change in candidates
-                ]
-                snapshots = [
-                    scoped_snapshot(connection, scope=decision_scope, device_id=device_id, local=photo) if photo else None
-                    for photo in snapshots
-                ]
+                captured = capture_images(
+                    connection, config["source_path"], device_id, tuple(change.image_id for change in candidates),
+                )
+                snapshots = {
+                    image_id: scoped_snapshot(connection, scope=decision_scope, device_id=device_id, local=photo)
+                    for image_id, photo in captured.items()
+                }
             state["outbox_ready"] = True
             if not candidates:
                 state.pop("outbox_cursor", None)
                 return more_baseline
 
         events, receipts, skipped = [], [], []
-        for change, photo in zip(candidates, snapshots):
+        for change in candidates:
             if not self._current(revision):
                 return False
             state["outbox_cursor"] = change
+            photo = snapshots.get(change.image_id)
             if photo is None or not self._in_scope(config["source_path"], photo.relative_paths):
                 # No scope-approved current record exists. A new local revision will requeue it.
                 skipped.append(change)

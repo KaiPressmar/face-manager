@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from backend.services.storage import build_person_filename_preview
+from backend.services.filename_format import build_person_filename_preview
 
 
 class FilenameRenamePreviewTest(unittest.TestCase):
@@ -9,7 +9,7 @@ class FilenameRenamePreviewTest(unittest.TestCase):
         stem = "x" * 247
         names = ["A😀", "Regina"]
         options = {"block_separator": "_", "joiner": ", ", "filename_limit": 255}
-        with patch("backend.services.storage.os.name", "nt"):
+        with patch("backend.services.filename_format.os.name", "nt"):
             preview = build_person_filename_preview(f"{stem}.jpg", names, **options)
             self.assertEqual(preview["proposed_filename"], f"{stem}_A😀.jpg")
             self.assertEqual(preview["omitted_person_count"], 1)

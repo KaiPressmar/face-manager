@@ -10,6 +10,7 @@ from unittest.mock import patch
 from fastapi import HTTPException, Response
 
 from backend import app
+from backend.api import library
 from backend.services import preview_cache_budget as budget
 from backend.services.import_queue import ImportJob, ImportJobRepository, ImportQueue
 
@@ -37,14 +38,14 @@ class DatabaseRestoreTest(unittest.TestCase):
     def test_waiting_actions_cannot_change_the_restored_library(self):
         class LibraryChangesBeforeLock:
             def __enter__(self):
-                app._media_library_generation += 1
+                library.generation += 1
 
             def __exit__(self, *_):
                 pass
 
         with (
-            patch.object(app, "_media_library_generation", 0),
-            patch.object(app, "_cluster_operation_lock", LibraryChangesBeforeLock()),
+            patch.object(library, "generation", 0),
+            patch.object(library, "write_lock", LibraryChangesBeforeLock()),
             patch.object(app.auto_cluster_queue, "request_cancel"),
             patch.object(app, "delete_image") as delete_image,
             patch.object(app.import_queue, "clear_history") as clear_history,
@@ -279,7 +280,7 @@ class DatabaseRestoreTest(unittest.TestCase):
             def assert_drained_then_replace(source, destination):
                 worker.stop.assert_called_once()
                 worker.start.assert_not_called()
-                self.assertTrue(app._database_restore_in_progress)
+                self.assertTrue(library.restoring)
                 original_replace(source, destination)
 
             patches.enter_context(patch.object(app.os, "replace", side_effect=assert_drained_then_replace))
@@ -340,4 +341,4 @@ class DatabaseRestoreTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 409)
             self.assertEqual(marker_at(current), "old")
             app.image_path_cleanup.stop.assert_not_called()
-            self.assertFalse(app._database_restore_in_progress)
+            self.assertFalse(library.restoring)

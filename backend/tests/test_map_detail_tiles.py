@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException
 
-from backend.app import get_map_detail_tile
+from backend.api.map import get_map_detail_tile
 from backend.services import map_detail_tiles as tiles
 
 

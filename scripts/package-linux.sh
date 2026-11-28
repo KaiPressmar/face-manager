@@ -55,7 +55,7 @@ find "$vendor" -name '*.onnx' -type f -delete
 (
     cd "$project_root"
     find backend -maxdepth 1 -name '*.py' -type f -exec cp --parents -t "$app_dir" {} +
-    find backend/{db,models,services} -name '*.py' -type f -exec cp --parents -t "$app_dir" {} +
+    find backend/{api,db,models,services} -name '*.py' -type f -exec cp --parents -t "$app_dir" {} +
 )
 install -m 0644 "$project_root/"{VERSION,CHANGELOG.md} "$app_dir/"
 install -m 0644 "$packaging_dir/launch.py" "$app_dir/launch.py"

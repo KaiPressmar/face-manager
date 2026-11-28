@@ -223,15 +223,26 @@ def capture_image(
     conn: sqlite3.Connection, source_path: str | os.PathLike[str], device_id: str, image_id: int,
 ) -> SnapshotPhoto | None:
     """Read a single changed image with the same scope and trust rules."""
+    return capture_images(conn, source_path, device_id, (image_id,)).get(image_id)
+
+
+def capture_images(
+    conn: sqlite3.Connection, source_path: str | os.PathLike[str], device_id: str, image_ids: tuple[int, ...],
+) -> dict[int, SnapshotPhoto]:
+    """Read a bounded batch of changed images, omitting missing or ineligible records."""
     root, namespace = _capture_context(conn, source_path, device_id)
-    if type(image_id) is not int or image_id <= 0:
+    if len(image_ids) > MAX_SNAPSHOT_PAGE:
+        raise ValueError("The snapshot batch limit is invalid")
+    if any(type(image_id) is not int or image_id <= 0 for image_id in image_ids):
         raise ValueError("A positive image ID is required")
+    if not image_ids:
+        return {}
+    placeholders = ",".join("?" for _ in image_ids)
     rows = conn.execute(
-        """
+        f"""
         SELECT id, content_hash, raw_width, raw_height, exif_orientation
-        FROM image WHERE id = ? AND processed_at IS NOT NULL
+        FROM image WHERE id IN ({placeholders}) AND processed_at IS NOT NULL
         """,
-        (image_id,),
+        image_ids,
     ).fetchall()
-    records = _capture_records(conn, root, namespace, rows)
-    return records[0] if records else None
+    return {record.image_id: record for record in _capture_records(conn, root, namespace, rows)}

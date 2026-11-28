@@ -17,6 +17,7 @@ Requests, nicht in diese Versionshinweise.
 - Große Fotolisten bleiben beim Scrollen übersichtlich und behalten deine Auswahl und Position bei Aktualisierungen.
 - Wechsle direkt zwischen Hell, Dunkel und System und öffne Einstellungsbereiche auch in schmalen Fenstern schnell.
 - Prüfe fehlende Originale, bevor du Bibliothekseinträge entfernst. Die Dateinamenansicht zeigt deine Auswahl direkt neben der Vorschau.
+- Große Fotobibliotheken öffnen sich schneller.
 
 ### Behoben
 

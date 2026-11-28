@@ -166,7 +166,8 @@ def stop():
 
 def export_database(previous=False):
     """Return a consistent private temporary SQLite snapshot for SAF export."""
-    from backend.app import _cluster_operation_lock, _latest_restore_backup, snapshot_database_backup
+    from backend.api.library import write_lock
+    from backend.app import _latest_restore_backup, snapshot_database_backup
     from backend.config import get_data_root
 
     folder = get_data_root() / "exports"
@@ -181,7 +182,7 @@ def export_database(previous=False):
     fd, name = tempfile.mkstemp(prefix="face-manager-", suffix=".sqlite", dir=folder)
     os.close(fd)
     try:
-        with _cluster_operation_lock:
+        with write_lock:
             if previous:
                 backup = _latest_restore_backup()
                 if backup is None:

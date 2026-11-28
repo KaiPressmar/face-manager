@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from backend.db import schema
 from backend.services import storage
+from backend.services.filename_format import filename_validation_error
 
 
 RENAME_FILE_INFO = SimpleNamespace(
@@ -532,9 +533,9 @@ class RenameCandidateQueryTest(unittest.TestCase):
 
     def test_windows_paths_use_extended_length_and_utf16_units(self):
         with patch.object(storage.os, "name", "nt"):
-            self.assertIsNone(storage._rename_filename_error("😀" * 125 + ".jpg", 255))
-            self.assertEqual(storage._rename_filename_error("😀" * 126 + ".jpg", 255), "filename_too_long")
-            self.assertEqual(storage._rename_filename_error("COM1.jpg", 255), "invalid_filename")
+            self.assertIsNone(filename_validation_error("😀" * 125 + ".jpg", 255))
+            self.assertEqual(filename_validation_error("😀" * 126 + ".jpg", 255), "filename_too_long")
+            self.assertEqual(filename_validation_error("COM1.jpg", 255), "invalid_filename")
             with (
                 patch.object(storage.os, "lstat", return_value=RENAME_FILE_INFO) as lstat_file,
                 patch.object(storage.os.path, "lexists", return_value=False),

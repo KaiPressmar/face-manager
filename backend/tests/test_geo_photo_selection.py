@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from backend import app
+from backend.api import map as map_api
+from backend.api.photo_selection import _GeoSelectionBody
 from backend.db import schema
 from backend.services.storage import app_cache
 
@@ -73,17 +75,17 @@ class GeoPhotoSelectionTest(unittest.TestCase):
         self.assertEqual({item["id"] for item in page["items"]}, {1, 2, 3, 5, 7})
 
     def test_exact_sets_use_one_id_bind_and_keep_map_cursor(self):
-        selection = app._GeoSelectionBody(image_ids=[*range(10, 2510), 1, 2, 4, 5, 4])
+        selection = _GeoSelectionBody(image_ids=[*range(10, 2510), 1, 2, 4, 5, 4])
         page = app.search_selected_images(self.request, selection, folders=[], persons=[], face_statuses=[], all_photos=True)
         self.assertEqual({item["id"] for item in page["items"]}, {1, 2, 4, 5})
-        first = app.get_selected_map_images(selection, limit=2)
-        second = app.get_selected_map_images(selection, limit=2, **first["next_cursor"])
+        first = map_api.get_selected_map_images(selection, limit=2)
+        second = map_api.get_selected_map_images(selection, limit=2, **first["next_cursor"])
         self.assertEqual([item["id"] for item in first["items"]], [4, 2])
         self.assertEqual([item["id"] for item in second["items"]], [1, 5])
         self.assertEqual(first["total"], 4)
         self.assertEqual(first["total"], second["total"])
 
-        empty = app._GeoSelectionBody(image_ids=[])
+        empty = _GeoSelectionBody(image_ids=[])
         self.assertEqual(app.search_selected_images(
             self.request, empty, folders=[], persons=[], face_statuses=[], all_photos=True,
         )["total"], 0)
@@ -104,17 +106,17 @@ class GeoPhotoSelectionTest(unittest.TestCase):
         )
         viewport = dict(west=160, east=-160, south=0, north=20, grid_columns=4, grid_rows=2)
 
-        scoped = app.get_selected_map_points(app._GeoSelectionBody(**filters), **viewport)
+        scoped = map_api.get_selected_map_points(_GeoSelectionBody(**filters), **viewport)
         self.assertEqual(scoped["total"], 2)
         self.assertEqual(scoped["library_total"], 6)
         self.assertEqual(scoped["located_total"], 5)
         self.assertEqual([(point["x"], point["y"], point["longitude"]) for point in scoped["points"]],
                          [(1, 1, 179.0), (2, 1, -179.0)])
 
-        exact = app.get_selected_map_points(app._GeoSelectionBody(image_ids=[2, 5, 7, 2], **filters), **viewport)
+        exact = map_api.get_selected_map_points(_GeoSelectionBody(image_ids=[2, 5, 7, 2], **filters), **viewport)
         self.assertEqual(exact["total"], 1)
         self.assertEqual(exact["points"], [scoped["points"][1]])
-        self.assertEqual(app.get_selected_map_points(app._GeoSelectionBody(image_ids=[], **filters), **viewport)["total"], 0)
+        self.assertEqual(map_api.get_selected_map_points(_GeoSelectionBody(image_ids=[], **filters), **viewport)["total"], 0)
 
     def test_invalid_bounds_dates_and_exact_ids_fail_closed(self):
         for kwargs in (
@@ -127,4 +129,4 @@ class GeoPhotoSelectionTest(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 422)
         for value in (0, -1, True, "1", 2**63):
             with self.subTest(value=value), self.assertRaises(ValidationError):
-                app._GeoSelectionBody(image_ids=[value])
+                _GeoSelectionBody(image_ids=[value])

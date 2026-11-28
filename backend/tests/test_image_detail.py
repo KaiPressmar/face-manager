@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from backend import app
+from backend.api import library
 from backend.db import schema
 from backend.services import storage
 
@@ -273,7 +274,7 @@ class ImageDetailWithoutFacesTest(unittest.IsolatedAsyncioTestCase):
                 conn.commit()
 
     async def test_late_preview_from_a_replaced_library_does_not_publish(self):
-        generation = app._get_media_library_generation()
+        generation = library.get_generation()
         reading = threading.Event()
         release = threading.Event()
 
@@ -294,8 +295,8 @@ class ImageDetailWithoutFacesTest(unittest.IsolatedAsyncioTestCase):
             preview = asyncio.create_task(app.get_image_thumbnail(5, SimpleNamespace(headers={})))
             try:
                 self.assertTrue(await asyncio.to_thread(reading.wait, 2))
-                with app._media_library_lock:
-                    app._media_library_generation = generation + 1
+                with library.state_lock:
+                    library.generation = generation + 1
             finally:
                 release.set()
             with self.assertRaises(HTTPException) as raised:
