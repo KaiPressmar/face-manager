@@ -207,6 +207,7 @@ const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ onClose }) => {
               <ul>
                 <li>Face Manager sucht in den Ordnern und Unterordnern nach JPG-, JPEG- und PNG-Dateien.</li>
                 <li>Die Dateien bleiben an ihren Speicherorten. Identische Dateien erscheinen als ein Bild mit mehreren Speicherorten.</li>
+                <li>Die Bilderordner bleiben unter Bilder → Ordner verwalten gespeichert. Den automatischen Import neuer Fotos kannst du dort einschalten.</li>
                 <li>Gesichter werden erkannt und ähnliche Gesichter gruppiert. Du kannst die Gruppen prüfen und Personen benennen.</li>
               </ul>
             </section>

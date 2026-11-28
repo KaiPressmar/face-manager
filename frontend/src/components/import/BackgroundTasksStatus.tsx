@@ -40,11 +40,11 @@ import "./activities.css";
 
 type TaskTone = "active" | "waiting" | "completed" | "attention" | "failed" | "cancelled";
 type TaskKind = "import" | "groups" | "previews" | "library";
-type TaskControlState = "queued" | "running" | "paused" | "cancelling" | "terminal";
+type TaskControlState = "queued" | "waiting_for_source" | "running" | "paused" | "cancelling" | "terminal";
 
 interface LibraryActivity {
   id: string;
-  kind: "photo-metadata";
+  kind: "photo-metadata" | "import_source_scan";
   status: "running" | "completed" | "failed" | "cancelled";
   processed: number;
   total: number;
@@ -175,6 +175,7 @@ function importProgress(job: ImportJob): number | null {
 
 function importSummary(job: ImportJob): string {
   if (job.status === "queued") return "Der Ordner wartet auf einen freien Platz.";
+  if (job.status === "waiting_for_source") return "Der Import wird fortgesetzt, sobald der Ordner wieder erreichbar ist.";
   if (job.status === "paused") return "Der gespeicherte Stand bleibt erhalten.";
   if (job.status === "cancelling") return "Wird sicher beendet";
   if (job.status === "completed") {
@@ -207,6 +208,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
   const hasWarnings = Boolean(skipped || job.last_error);
   const status: Record<ImportJob["status"], string> = {
     queued: "Wartet",
+    waiting_for_source: "Ordner nicht erreichbar",
     running: "In Arbeit",
     paused: "Pausiert",
     cancelling: "Wird beendet",
@@ -216,6 +218,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
   };
   const tone: Record<ImportJob["status"], TaskTone> = {
     queued: "waiting",
+    waiting_for_source: "attention",
     running: "active",
     paused: "waiting",
     cancelling: "waiting",
@@ -227,9 +230,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
     id: `import:${job.id}`,
     sourceId: job.id,
     kind: "import",
-    controlState: ["completed", "failed", "cancelled"].includes(job.status)
-      ? "terminal"
-      : job.status as "queued" | "running" | "paused" | "cancelling",
+    controlState: job.status === "completed" || job.status === "failed" || job.status === "cancelled" ? "terminal" : job.status,
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
     summary: skipped ? `${importSummary(job)} · ${skipped}` : importSummary(job),
@@ -385,22 +386,23 @@ function thumbnailTask(task: ThumbnailWarmupTask): BackgroundTaskView {
 
 const activityCount = new Intl.NumberFormat("de-DE");
 
-function photoMetadataTask(activity: LibraryActivity): BackgroundTaskView {
+function libraryActivityTask(activity: LibraryActivity): BackgroundTaskView {
   const running = activity.status === "running";
+  const sourceScan = activity.kind === "import_source_scan";
   const tone: TaskTone = activity.status === "running" ? "active" : activity.status;
   const status = { running: "In Arbeit", completed: "Abgeschlossen", failed: "Nicht abgeschlossen", cancelled: "Unterbrochen" };
   const checked = activityCount.format(activity.processed);
-  const summary = running
-    ? `${checked} von ${activityCount.format(activity.total)} Fotos geprüft`
-    : `${checked} geprüfte Fotos`;
+  const summary = sourceScan ? `${checked} ${activity.processed === 1 ? "Datei geprüft" : "Dateien geprüft"}`
+    : running ? `${checked} von ${activityCount.format(activity.total)} Fotos geprüft` : `${checked} geprüfte Fotos`;
   return {
     id: `library:${activity.id}`, sourceId: activity.id, kind: "library",
     controlState: running ? "running" : "terminal",
-    title: "Fotostandorte und Aufnahmezeiten prüfen", status: status[activity.status], tone,
+    title: sourceScan ? "Bilderordner prüfen" : "Fotostandorte und Aufnahmezeiten prüfen", status: status[activity.status], tone,
     summary: activity.unavailable ? `${summary} · ${activityCount.format(activity.unavailable)} Dateien nicht erreichbar` : summary,
     error: activity.status === "failed" ? "Die Prüfung konnte nicht abgeschlossen werden." : null,
     progress: running ? boundedProgress(activity.processed, activity.total) : null,
     etaSeconds: null, elapsedSeconds: null, finishedAt: activity.finished_at,
+    details: sourceScan ? { href: navigationHash({ page: "people" }), label: "Bilder öffnen" } : undefined,
   };
 }
 
@@ -416,6 +418,7 @@ export function calculateOverallEta(
   clustering: AutoClusterTask | null,
   thumbnails: ThumbnailWarmupTask | null,
 ): number | null {
+  if (queue?.waiting_for_source_count) return null;
   const durations: number[] = [];
   const importsPending = Boolean(
     queue &&
@@ -554,7 +557,8 @@ const BackgroundTasksStatus: React.FC<{
       setConnectionError(status === "closed");
     });
     const unsubscribeLibrary = subscribeToTopic<{ activities: LibraryActivity[] }>("background-activities", ({ activities }) => {
-      const views = activities.filter((activity) => activity.kind === "photo-metadata").map(photoMetadataTask);
+      const views = activities.filter((activity) => activity.kind === "photo-metadata" || activity.kind === "import_source_scan")
+        .map(libraryActivityTask);
       const active = views.filter((task) => task.controlState !== "terminal");
       const finished = views.filter((task) => task.controlState === "terminal" && !dismissedLibraryIds.current.has(task.id));
       const newlyFinished = finished.filter((task) => activeLibraryIds.current.has(task.id)).length;
@@ -1043,18 +1047,18 @@ const TaskRow: React.FC<{
             {task.retryScope === "issues" ? "Ausgelassene Pfade erneut prüfen" : "Ordner erneut prüfen"}
           </button>
         )}
-        {!history && task.controlState === "paused" && onResume && (
+        {!history && (task.controlState === "paused" || task.controlState === "waiting_for_source") && onResume && (
           <button
             type="button"
             className="activity-task__action"
             disabled={busy}
             onClick={onResume}
-            aria-label={`${task.title} fortsetzen`}
+            aria-label={`${task.title} ${task.controlState === "waiting_for_source" ? "jetzt erneut versuchen" : "fortsetzen"}`}
           >
-            Fortsetzen
+            {task.controlState === "waiting_for_source" ? "Jetzt erneut versuchen" : "Fortsetzen"}
           </button>
         )}
-        {!history && ["queued", "running"].includes(task.controlState) && onPause && (
+        {!history && ["queued", "waiting_for_source", "running"].includes(task.controlState) && onPause && (
           <button
             type="button"
             className="activity-task__action"

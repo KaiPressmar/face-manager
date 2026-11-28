@@ -9,28 +9,41 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from dataclasses import asdict, dataclass, field
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
+from pathlib import Path
+from sqlite3 import Connection
 from statistics import median
-from typing import Callable, Optional, Protocol
+from typing import Callable, ContextManager, Optional, Protocol
 
 from ..models.face_model import get_compute_mode
 from ..db.schema import get_conn
 from ..error_logging import configure_error_logging
-from .pipeline import IMPORT_ISSUE_MESSAGES, ImportCancelled, ImportProcessor, configure_processing_slots
+from .pipeline import (
+    IMPORT_ISSUE_MESSAGES,
+    ImportCancelled,
+    ImportProcessor,
+    ImportSourceUnavailable,
+    check_import_source,
+    configure_processing_slots,
+)
 from .task_control import BackgroundTaskControl
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.import_queue")
 MAX_IMPORT_ISSUES = 40
+WAITING_FOR_SOURCE = "waiting_for_source"
 
 
-def _issue_entries(value) -> list[dict[str, str]]:
+def _issue_entries(value, *, limit: int | None = MAX_IMPORT_ISSUES) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
+    if limit is not None:
+        value = value[:limit]
     return [
         {"path": item["path"], "kind": item["kind"]}
-        for item in value[:MAX_IMPORT_ISSUES]
+        for item in value
         if isinstance(item, dict)
         and isinstance(item.get("path"), str)
         and item["path"]
@@ -288,11 +301,14 @@ class ImportJob:
         Returns:
             JSON-compatible job representation.
         """
-        result = asdict(self)
-        result.pop("retry_paths")
+        result = {item.name: getattr(self, item.name) for item in fields(self) if item.name != "retry_paths"}
+        result["issue_counts"] = self.issue_counts.copy()
+        result["issues"] = [issue.copy() for issue in self.issues]
         result["can_retry_issues"] = self.can_retry_issues()
         result["queue_position"] = queue_position
-        result["elapsed_seconds"] = _duration_seconds(self.started_at, self.finished_at)
+        result["elapsed_seconds"] = (
+            None if self.status == WAITING_FOR_SOURCE else _duration_seconds(self.started_at, self.finished_at)
+        )
         result["eta_seconds"] = (
             max(0, round(eta_seconds)) if eta_seconds is not None else None
         )
@@ -373,6 +389,9 @@ class ImportJobRepository:
                 if job.status in {"running", "queued"}:
                     job.status = "paused" if pause_pending else "queued"
                     job.reset_progress()
+                    self._save(connection, job, row["queue_order"])
+                elif pause_pending and job.status == WAITING_FOR_SOURCE:
+                    job.status = "paused"
                     self._save(connection, job, row["queue_order"])
                 elif job.status == "cancelling":
                     job.status = "cancelled"
@@ -468,6 +487,24 @@ class ImportJobRepository:
         try:
             connection.execute("DELETE FROM import_job WHERE id = ?", (job_id,))
             connection.commit()
+        finally:
+            connection.close()
+
+    def update_sources(self, jobs: list[ImportJob], persist: Callable[[Connection], None] | None = None) -> None:
+        """Commit all retargeted jobs together while retaining their queue order."""
+        connection = self._connection_factory()
+        try:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for job in jobs:
+                    row = connection.execute(
+                        "SELECT queue_order FROM import_job WHERE id = ?", (job.id,)
+                    ).fetchone()
+                    if row is None:
+                        raise RuntimeError("Eine Importaufgabe ist nicht mehr vorhanden.")
+                    self._save(connection, job, row["queue_order"])
+                if persist is not None:
+                    persist(connection)
         finally:
             connection.close()
 
@@ -698,7 +735,7 @@ class ImportJobRepository:
                 if kind in IMPORT_ISSUE_MESSAGES and type(value) is int and value > 0
             } if isinstance(counts, dict) else {},
             issues=_issue_entries(report.get("entries")),
-            retry_paths=_issue_entries(_load_json(row["retry_paths"], [])),
+            retry_paths=_issue_entries(_load_json(row["retry_paths"], []), limit=None),
         )
 
 
@@ -712,6 +749,9 @@ class ImportQueue:
     """
 
     TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+    SOURCE_PROBE_INITIAL_DELAY = 5.0
+    SOURCE_PROBE_MAX_DELAY = 120.0
+    SOURCE_PROBE_LIMIT = 2
     STAGE_ORDER = [
         "scanning",
         "hashing",
@@ -750,6 +790,7 @@ class ImportQueue:
         on_change: Optional[Callable[[], None]] = None,
         on_before_terminal: Optional[Callable[[], None]] = None,
         on_after_terminal: Optional[Callable[[], None]] = None,
+        source_resume_lock: ContextManager[object] | None = None,
     ):
         """Initialize queue state and optionally start its worker.
 
@@ -766,10 +807,12 @@ class ImportQueue:
                 stops being visible as active.
             on_after_terminal: Releases that guard after terminal state and
                 notifications have been published.
+            source_resume_lock: Serializes automatic requeues with library replacement.
         """
         self._on_change = on_change
         self._on_before_terminal = on_before_terminal
         self._on_after_terminal = on_after_terminal
+        self._source_resume_lock = source_resume_lock or nullcontext()
         self._processor = processor or ImportProcessor()
         self._repository = repository or ImportJobRepository()
         self._history_limit = history_limit
@@ -789,6 +832,8 @@ class ImportQueue:
         self._pending = deque()
         self._condition = threading.Condition()
         self._active_job_ids: set[str] = set()
+        self._source_retries: dict[str, tuple[float, float]] = {}
+        self._source_probes: set[str] = set()
         self._cancel_events: dict[str, BackgroundTaskControl] = {}
         self._last_progress_persisted: dict[str, float] = {}
         self._worker: Optional[threading.Thread] = None
@@ -828,6 +873,11 @@ class ImportQueue:
         self._pending = deque(pending_ids)
         self._cancel_events = {
             job.id: BackgroundTaskControl() for job in jobs if job.status not in self.TERMINAL_STATUSES
+        }
+        deadline = time.monotonic() + self.SOURCE_PROBE_INITIAL_DELAY
+        self._source_retries = {
+            job.id: (deadline, self.SOURCE_PROBE_INITIAL_DELAY)
+            for job in jobs if job.status == WAITING_FOR_SOURCE
         }
 
     def reload_from_library(self) -> None:
@@ -914,6 +964,47 @@ class ImportQueue:
             retry_paths = list(job.issues)
         return self.enqueue(folder_path, retry_paths=retry_paths)
 
+    def relocate_source(
+        self, old_path: str, new_path: str, *, persist: Callable[[Connection], None] | None = None,
+    ) -> int:
+        """Retarget dormant jobs, including caller updates in the same transaction."""
+        old_root, new_root = Path(old_path), Path(new_path)
+        with self._condition:
+            candidates = [
+                job for job in self._jobs.values()
+                if Path(job.folder_path) == old_root and job.status not in self.TERMINAL_STATUSES
+            ]
+            if any(job.id in self._active_job_ids for job in candidates):
+                raise ValueError("Der Import für diesen Ordner muss erst beendet werden.")
+            moved = []
+            for job in candidates:
+                retry_paths = []
+                for entry in job.retry_paths:
+                    try:
+                        relative = Path(entry["path"]).relative_to(old_root)
+                        if ".." in relative.parts:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise ValueError("Ein Wiederholungspfad liegt außerhalb des bisherigen Bilderordners.") from exc
+                    retry_paths.append({**entry, "path": str(new_root / relative)})
+                relocated = replace(job, folder_path=new_path, retry_paths=retry_paths, issues=[], issue_counts={})
+                relocated.reset_progress()
+                if job.status == WAITING_FOR_SOURCE:
+                    relocated.status = "queued"
+                moved.append(relocated)
+            if moved or persist is not None:
+                self._repository.update_sources(moved, persist)
+            for job in moved:
+                self._jobs[job.id] = job
+                self._source_retries.pop(job.id, None)
+                self._cancel_events[job.id] = BackgroundTaskControl()
+                if job.status == "queued" and job.id not in self._pending:
+                    self._queue_dormant_job(job.id)
+            self._condition.notify_all()
+        if moved:
+            self._notify_change()
+        return len(moved)
+
     def snapshot(self) -> dict:
         """Return current, queued, and retained terminal jobs.
 
@@ -949,6 +1040,7 @@ class ImportQueue:
                 "paused_count": sum(
                     1 for job in self._jobs.values() if job.status == "paused"
                 ),
+                "waiting_for_source_count": len(self._source_retries),
                 "max_concurrent_jobs": self._max_concurrent_jobs,
                 "overall_eta_seconds": (
                     round(overall_eta) if overall_eta is not None else None
@@ -1006,7 +1098,7 @@ class ImportQueue:
             )
             finalizing_state = job.status if stage == "finalizing" else "queued"
         else:
-            if job.status == "queued":
+            if job.status in {"queued", WAITING_FOR_SOURCE}:
                 scanning_state = "queued"
                 hashing_state = "queued"
                 loading_model_state = "queued"
@@ -1206,6 +1298,8 @@ class ImportQueue:
         """Return ETA per stage as seconds from now until stage completion."""
         if job.status in self.TERMINAL_STATUSES:
             return {stage: 0.0 for stage in self.STAGE_ORDER}
+        if job.status == WAITING_FOR_SOURCE:
+            return {stage: None for stage in self.STAGE_ORDER}
 
         image_count = job.total_images if job.total_images > 0 else self._average_images_per_job()
         if job.stage not in self.STAGE_ORDER:
@@ -1396,6 +1490,7 @@ class ImportQueue:
             self._repository.delete(job_id)
             del self._jobs[job_id]
             self._cancel_events.pop(job_id, None)
+            self._source_retries.pop(job_id, None)
             self._drop_stable_etas(job_id)
             self._notify_change()
             return {"id": job_id, "status": "removed"}
@@ -1408,27 +1503,32 @@ class ImportQueue:
                 return None
             if job.status == "paused":
                 return {"id": job_id, "status": "paused"}
+            self._repository.update(replace(job, status="paused"))
             control = self._cancel_events[job_id]
             if job_id in self._active_job_ids:
                 control.pause()
             elif job_id in self._pending:
                 self._pending.remove(job_id)
             job.status = "paused"
-            self._repository.update(job)
+            self._source_retries.pop(job_id, None)
             self._condition.notify_all()
         self._notify_change()
         return {"id": job_id, "status": "paused"}
 
     def resume(self, job_id: str) -> Optional[dict]:
-        """Resume a paused import without discarding committed progress."""
+        """Resume a paused import or immediately retry a parked source."""
         with self._condition:
             job = self._jobs.get(job_id)
-            if job is None or job.status != "paused":
+            if job is None or job.status not in {"paused", WAITING_FOR_SOURCE}:
                 return None
+            next_status = "running" if job_id in self._active_job_ids else "queued"
+            last_error = None if job.status == WAITING_FOR_SOURCE else job.last_error
+            self._repository.update(replace(job, status=next_status, last_error=last_error))
+            job.status, job.last_error = next_status, last_error
+            self._source_retries.pop(job_id, None)
             control = self._cancel_events.setdefault(job_id, BackgroundTaskControl())
-            if job_id in self._active_job_ids:
+            if next_status == "running":
                 control.resume()
-                job.status = "running"
                 resumed_at = time.monotonic()
                 tracker = self._live_stage_timing.get(job_id)
                 if tracker is not None and tracker.stage == job.stage:
@@ -1438,17 +1538,8 @@ class ImportQueue:
                     )
                 self._rebase_stable_etas(job_id, resumed_at)
             else:
-                job.status = "queued"
-                ordered_ids = list(self._jobs)
-                insert_at = len(self._pending)
-                for index, pending_id in enumerate(self._pending):
-                    if ordered_ids.index(job_id) < ordered_ids.index(pending_id):
-                        insert_at = index
-                        break
-                self._pending.insert(insert_at, job_id)
-            self._repository.update(job)
+                self._queue_dormant_job(job_id)
             self._condition.notify_all()
-            next_status = job.status
         self._notify_change()
         return {"id": job_id, "status": next_status}
 
@@ -1464,13 +1555,13 @@ class ImportQueue:
                 self._cancel_events[job_id].set()
                 result = {"id": job_id, "status": "cancelling"}
             else:
+                cancelled = replace(job, status="cancelled", finished_at=_utc_now(), current_file=None)
+                self._repository.update(cancelled)
+                self._jobs[job_id] = cancelled
                 if job_id in self._pending:
                     self._pending.remove(job_id)
-                job.status = "cancelled"
-                job.finished_at = _utc_now()
-                job.current_file = None
-                self._repository.update(job)
                 self._cancel_events.pop(job_id, None)
+                self._source_retries.pop(job_id, None)
                 self._trim_history()
                 result = {"id": job_id, "status": "cancelled"}
             self._condition.notify_all()
@@ -1504,14 +1595,11 @@ class ImportQueue:
         """Dispatch queued jobs while respecting concurrency limits."""
         while True:
             with self._condition:
-                while (
-                    not self._stopping
-                    and (
-                        not self._pending
-                        or len(self._active_job_ids) >= self._max_concurrent_jobs
-                    )
-                ):
-                    self._condition.wait()
+                while not self._stopping:
+                    probe_delay = self._launch_due_source_probes()
+                    if self._pending and len(self._active_job_ids) < self._max_concurrent_jobs:
+                        break
+                    self._condition.wait(probe_delay)
                 if self._stopping:
                     return
 
@@ -1549,8 +1637,69 @@ class ImportQueue:
             )
             self._notify_change()
 
+    def _queue_dormant_job(self, job_id: str) -> None:
+        self._pending.append(job_id)
+        order = {key: index for index, key in enumerate(self._jobs)}
+        self._pending = deque(sorted(self._pending, key=order.__getitem__))
+
+    def _launch_due_source_probes(self) -> float | None:
+        """Start bounded probes without delaying the dispatch of other imports."""
+        now = time.monotonic()
+        retries = sorted(self._source_retries.items(), key=lambda item: item[1][0])
+        for job_id, (deadline, _) in retries:
+            if len(self._source_probes) >= self.SOURCE_PROBE_LIMIT:
+                break
+            if job_id in self._source_probes:
+                continue
+            if deadline > now:
+                return deadline - now
+            self._source_probes.add(job_id)
+            threading.Thread(
+                target=self._probe_source,
+                args=(job_id, self._jobs[job_id].folder_path, self._cancel_events[job_id]),
+                name="face-import-source-probe",
+                daemon=True,
+            ).start()
+        return None
+
+    def _probe_source(self, job_id: str, folder_path: str, control: BackgroundTaskControl) -> None:
+        available = False
+        try:
+            check_import_source(folder_path)
+            available = True
+        except ImportSourceUnavailable:
+            pass
+        except Exception:
+            logger.exception("Could not check import source %s", folder_path)
+
+        with self._source_resume_lock, self._condition:
+            self._source_probes.discard(job_id)
+            self._condition.notify_all()
+            job = self._jobs.get(job_id)
+            if (
+                self._stopping or job is None or job.status != WAITING_FOR_SOURCE
+                or self._cancel_events.get(job_id) is not control
+            ):
+                return
+            if available:
+                resumed = replace(job, status="queued", last_error=None)
+                try:
+                    self._repository.update(resumed)
+                except Exception:
+                    logger.exception("Could not persist automatic resume of import %s", job_id)
+                else:
+                    self._jobs[job_id] = resumed
+                    self._source_retries.pop(job_id, None)
+                    self._queue_dormant_job(job_id)
+            if job_id in self._source_retries:
+                _, delay = self._source_retries[job_id]
+                delay = min(self.SOURCE_PROBE_MAX_DELAY, delay * 2)
+                self._source_retries[job_id] = (time.monotonic() + delay, delay)
+                return
+        self._notify_change()
+
     def _run_job(self, job_id: str, cancel_event: threading.Event) -> tuple[str, Optional[str]]:
-        """Execute one job and return terminal status with optional error."""
+        """Execute one job and return its outcome with an optional error."""
         job = self._jobs[job_id]
         try:
             args = (job.folder_path, self._progress_callback(job_id), cancel_event)
@@ -1560,13 +1709,15 @@ class ImportQueue:
                 self._processor.process(*args)
         except ImportCancelled:
             return "cancelled", None
+        except ImportSourceUnavailable as exc:
+            return WAITING_FOR_SOURCE, str(exc)
         except Exception as exc:  # pragma: no cover - safety net
             logger.exception("Import job %s failed for %s", job_id, job.folder_path)
             return "failed", str(exc)
         return ("cancelled", None) if cancel_event.is_set() else ("completed", None)
 
     def _on_job_done(self, job_id: str, future: Future) -> None:
-        """Persist final job state after worker completion."""
+        """Persist the job state after its worker exits."""
         try:
             final_status, error_message = future.result()
         except Exception as exc:  # pragma: no cover - callback safety
@@ -1580,14 +1731,19 @@ class ImportQueue:
                 if job is None:
                     return
 
+                if job.status == "cancelling":
+                    final_status, error_message = "cancelled", None
+                elif final_status == WAITING_FOR_SOURCE and job.status == "paused":
+                    final_status = "paused"
                 interrupted = final_status == "cancelled" and self._stopping and job.status != "cancelling"
                 if interrupted:
                     final_status = "paused" if job.status == "paused" else "queued"
-                self._record_stage_stats(job)
+                if final_status != WAITING_FOR_SOURCE:
+                    self._record_stage_stats(job)
                 if error_message:
                     job.last_error = error_message
                 job.status = final_status
-                job.finished_at = None if interrupted else _utc_now()
+                job.finished_at = _utc_now() if final_status in self.TERMINAL_STATUSES else None
                 if final_status == "queued":
                     job.reset_progress()
                 if final_status == "completed":
@@ -1614,12 +1770,13 @@ class ImportQueue:
                     self._live_stage_timing.pop(job_id, None)
                     self._drop_stable_etas(job_id)
                     self._futures.pop(job_id, None)
-                    if job.status in {"queued", "paused"}:
+                    if job.status not in self.TERMINAL_STATUSES:
                         self._cancel_events[job_id] = BackgroundTaskControl()
                     if job.status == "queued":
-                        self._pending.append(job_id)
-                        order = {key: index for index, key in enumerate(self._jobs)}
-                        self._pending = deque(sorted(self._pending, key=order.__getitem__))
+                        self._queue_dormant_job(job_id)
+                    if job.status == WAITING_FOR_SOURCE:
+                        delay = self.SOURCE_PROBE_INITIAL_DELAY
+                        self._source_retries[job_id] = (time.monotonic() + delay, delay)
                     self._condition.notify_all()
                 try:
                     self._trim_history()

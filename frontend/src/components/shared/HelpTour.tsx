@@ -23,7 +23,7 @@ const steps: HelpStep[] = [
       <>Wähle <strong>Ordner auswählen</strong> und dann den Ordner mit deinen Fotos. Wenn du <strong>Pfad zum Bilderordner</strong> siehst, gib den Pfad ein und wähle <strong>Zur Liste hinzufügen</strong>.</>,
       <>Prüfe die Ordnerliste. Starte mit <strong>Bilder hinzufügen</strong> oder bei mehreren Ordnern etwa mit <strong>2 Ordner importieren</strong>.</>,
     ],
-    note: <>Unter <strong>Aktivitäten</strong> siehst du den Fortschritt. Mit <strong>Zurück</strong> und <strong>Vorwärts</strong> wechselst du zwischen deinen Ansichten. <strong>Zur Ausgangsansicht</strong> startet die aktuelle Seite mit ihren Standardfiltern.</>,
+    note: <>Unter <strong>Aktivitäten</strong> siehst du den Fortschritt. Beim nächsten Öffnen setzt Face Manager unterbrochene Importe fort. Unter <strong>Bilder → Ordner verwalten</strong> kannst du Ordner erneut prüfen, neue Fotos importieren oder einen verschobenen Ordner verbinden.</>,
     destination: "import",
     actionLabel: "Bilder hinzufügen",
   },

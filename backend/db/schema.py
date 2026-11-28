@@ -12,6 +12,7 @@ from pathlib import Path
 from ..config import DB_PATH
 from ..error_logging import configure_error_logging
 from ..services.face_geometry import face_boxes_overlap
+from .import_sources import create_import_source_tables
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.db")
@@ -1012,6 +1013,7 @@ def _initialize_schema(conn, *, scan_sources: bool):
     if "source_hash" not in {row["name"] for row in cur.execute("PRAGMA table_info(image_rename_intent)")}:
         cur.execute("ALTER TABLE image_rename_intent ADD COLUMN source_hash TEXT")
     _create_import_job_table(cur)
+    create_import_source_tables(cur)
     _create_app_settings_table(cur)
     _create_recluster_dirty_person_table(cur)
     _create_person_suggestion_generation(cur)

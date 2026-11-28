@@ -14,6 +14,7 @@ import { importSkippedImages } from "./importSkippedImages";
 
 const statusLabels: Record<ImportJob["status"], string> = {
   queued: "Wartet",
+  waiting_for_source: "Ordner nicht erreichbar",
   running: "Läuft",
   paused: "Pausiert",
   cancelling: "Wird abgebrochen",
@@ -151,6 +152,7 @@ const ImportJobCard: React.FC<{
   onToggleCollapse: () => void;
 }> = ({ job, onAction, collapsed, onToggleCollapse }) => {
   const isActive = job.status === "running" || job.status === "paused" || job.status === "cancelling";
+  const waitingForSource = job.status === "waiting_for_source";
   const isTerminal = job.status === "completed" || job.status === "failed" || job.status === "cancelled";
   const skipped = importSkippedImages(job);
   const stageLabel = job.stage ? stageLabels[job.stage] : null;
@@ -218,7 +220,8 @@ const ImportJobCard: React.FC<{
             </>
           )}
 
-          {stations.length > 0 && <ImportStationRail stations={stations} />}
+          {waitingForSource && <p className="import-job__meta">Der Import wird fortgesetzt, sobald der Ordner wieder erreichbar ist.</p>}
+          {!waitingForSource && stations.length > 0 && <ImportStationRail stations={stations} />}
 
           {isActive && (
             <>
@@ -288,17 +291,18 @@ const ImportJobCard: React.FC<{
       )}
 
       <div className="import-job__actions">
-        {job.status === "paused" ? (
+        {(job.status === "paused" || waitingForSource) && (
           <button
             type="button"
             className="import-job__action task-icon-button"
             onClick={() => void onAction(job, "resume")}
-            aria-label={`${folderName(job.folder_path)} fortsetzen`}
-            title="Fortsetzen"
+            aria-label={`${folderName(job.folder_path)} ${waitingForSource ? "jetzt erneut versuchen" : "fortsetzen"}`}
+            title={waitingForSource ? "Jetzt erneut versuchen" : "Fortsetzen"}
           >
             <TaskActionIcon name="resume" />
           </button>
-        ) : !isTerminal && job.status !== "cancelling" ? (
+        )}
+        {!isTerminal && job.status !== "paused" && job.status !== "cancelling" && (
           <button
             type="button"
             className="import-job__action task-icon-button"
@@ -308,7 +312,7 @@ const ImportJobCard: React.FC<{
           >
             <TaskActionIcon name="pause" />
           </button>
-        ) : null}
+        )}
         {!isTerminal && (
           <button
             type="button"
@@ -433,6 +437,7 @@ const ImportProgress = () => {
           <span>Aktiv: {runningCount}</span>
           <span>Gleichzeitig möglich: {slotCount}</span>
           <span>Wartend: {queue.queued_count}</span>
+          {!!queue.waiting_for_source_count && <span>Ordner nicht erreichbar: {queue.waiting_for_source_count}</span>}
           <span>Aufgaben insgesamt: {queue.jobs.length}</span>
         </div>
       )}

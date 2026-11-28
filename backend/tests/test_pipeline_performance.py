@@ -22,6 +22,7 @@ from backend.services.pipeline import (
     ImportCancelled,
     ImportFailed,
     ImportProcessor,
+    ImportSourceUnavailable,
     _file_identity,
     _filesystem_path,
     _matches_imported_identity,
@@ -31,6 +32,18 @@ from backend.services.pipeline import (
 
 
 class ImportDiscoveryTest(unittest.TestCase):
+    def test_root_unavailable_before_or_during_scan_is_retryable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with self.assertRaises(ImportSourceUnavailable):
+                ImportProcessor().process(str(root / "missing"), lambda _: None, threading.Event())
+
+            error = PermissionError(13, "Permission denied", str(root))
+            with patch("backend.services.pipeline.os.scandir", side_effect=error):
+                with self.assertRaises(ImportSourceUnavailable) as failure:
+                    ImportProcessor().process(str(root), lambda _: None, threading.Event())
+            self.assertIs(failure.exception.__cause__, error)
+
     def test_discovery_reports_unreadable_directory_and_skips_private_staging(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
