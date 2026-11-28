@@ -47,7 +47,7 @@ const steps: HelpStep[] = [
       <>Wähle unter <strong>Zeitraum</strong> ein Aufnahmejahr oder gib eigene Daten ein. Unter <strong>Orte aus meinen Fotos</strong> kannst du direkt ein Ziel und ein Aufnahmejahr wählen.</>,
       <>Wähle <strong>Bereich wählen</strong> und ziehe ein Rechteck auf der Karte. Mit <strong>Sichtbaren Bereich wählen</strong> übernimmst du stattdessen den gesamten sichtbaren Ausschnitt.</>,
     ],
-    note: <>Zoome auf dem Touchscreen mit zwei Fingern. Unter der Karte lädt <strong>Kartendetails online</strong> Straßen und feinere Kartenbilder für den sichtbaren Bereich. Kartenübersicht und Fotobuch-Export funktionieren offline.</>,
+    note: <>Mit <strong>Fotoorte auf Karte zeigen</strong> wechselst du in kleinen Fenstern direkt zur Karte. Zoome auf dem Touchscreen mit zwei Fingern. <strong>Kartendetails online</strong> zeigt Straßen und feinere Kartenbilder. Kartenübersicht und Fotobuch-Export funktionieren offline.</>,
     destination: "map",
     actionLabel: "Karte öffnen",
   },

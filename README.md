@@ -52,7 +52,7 @@ Die Porträts und Reisefotos im älteren Bedienvideo wurden mit OpenAI erzeugt. 
 <details>
 <summary>Bilder, Galerie und Import</summary>
 
-Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder** kannst du die Auswahl eingrenzen. In kleinen Fenstern öffnest du dazu **Filter und Sortierung**. Öffne ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
+Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder** kannst du die Auswahl eingrenzen. In kleinen Fenstern öffnest du dazu **Filter und Sortierung**. Wenn du aus einem anderen Bereich zurückkehrst, bleiben deine Fotoauswahl und die Scrollposition erhalten. Öffne ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
 
 ![Fotobibliothek mit Nationalparkfotos, Personenfiltern und einem für ein Album ausgewählten Foto](docs/screenshots/photo-library.webp)
 
@@ -175,7 +175,7 @@ Nach einem Abbruch prüft Face Manager offene Umbenennungen. Unter **Unterbroche
 
 ![Fotoort Moab in der Ortssuche mit Aufnahmejahren 2025, 2023 und 2022](docs/screenshots/photo-map-place-years.webp)
 
-Die aktiven Filter stehen oberhalb der Karte. Mit **Fotoorte auf Karte zeigen** zentrierst du die Karte auf die Fotoauswahl. **Verlauf dieser Auswahl** öffnet den Verlauf für denselben Bereich und Zeitraum. Mit **Bereich wählen** kannst du auch einen eigenen Bereich aufziehen.
+Die aktiven Filter stehen oberhalb der Karte. Mit **Fotoorte auf Karte zeigen** zentrierst du die Karte auf die Fotoauswahl. In kleinen Fenstern wechselt die Ansicht dabei zur Karte, wo du mit der Tastatur weiterarbeiten kannst. **Verlauf dieser Auswahl** öffnet den Verlauf für denselben Bereich und Zeitraum. Mit **Bereich wählen** kannst du auch einen eigenen Bereich aufziehen.
 
 ![Drei Fotos aus Moab im Jahr 2025 mit Ortsfilter, Jahresfilter und der Schaltfläche Verlauf dieser Auswahl](docs/screenshots/photo-map-place-selection.webp)
 
@@ -192,6 +192,12 @@ Die aktiven Filter stehen oberhalb der Karte. Mit **Fotoorte auf Karte zeigen** 
 ![Ausgewählte Nationalparkreise mit Reisetagen, Route und Stopps vom September 2025](docs/screenshots/photo-map-selected-journey.webp)
 
 ![Reisealbum „Nationalparks im Westen“ in Bilder mit der Schaltfläche „Auf Karte zeigen“](docs/screenshots/travel-album.webp)
+
+Für ein leeres Album wählst du **Bilder → Alben → Neues Album**. Gib einen Namen ein und bestätige mit **Album erstellen**. Mit **Schließen** oder **Esc** kehrst du zu derselben Stelle in der Albenliste zurück.
+
+![Dialog zum Anlegen des Albums „Meine Favoriten“ mit ausgewähltem Namensfeld](docs/screenshots/album-erstellen.webp)
+
+![Dialog zum Anlegen eines Albums in einem schmalen Fenster](docs/screenshots/album-erstellen-kompakt.webp)
 
 ### Karte in einem kleinen Fenster oder mit mehr Details nutzen
 

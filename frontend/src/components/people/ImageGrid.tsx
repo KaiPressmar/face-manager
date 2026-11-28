@@ -11,14 +11,13 @@ import {
 } from "../../utils/api";
 import { pathBasename } from "../../utils/pathDisplay";
 import { copyTextToClipboard } from "../../utils/clipboard";
-import { imageAspectRatiosMatch } from "../../utils/imageGeometry";
+import { CARD_GAP, galleryDimensions, photosInWindow, positionPhotos, type CachedPreview } from "./photoGridLayout";
 import "./ImageGrid.css";
 
 /** Which face markers to draw on a picture. */
 export type FaceOverlayMode = "all" | "assigned" | "none";
 /** Visual density of the responsive masonry grid. */
 export type ImageGridSize = "xsmall" | "small" | "medium" | "large";
-type PreviewState = { w: number; h: number } | "error";
 
 function needsImageGeometry(image: FaceImage) {
   return image.faces.length > 0 && (!image.image_width || !image.image_height);
@@ -78,60 +77,6 @@ const BREAKPOINT_COLUMNS: Record<ImageGridSize, Record<string, number>> = {
 const COLUMN_PRELOAD_VIEWPORTS = 1.5;
 const GRID_PRELOAD_VIEWPORTS = 2.5;
 const WINDOWED_GRID_THRESHOLD = 240;
-const CARD_GAP = 16;
-
-type CachedPreview = { preview?: PreviewState; retry?: number };
-
-function galleryDimensions(image: FaceImage, preview?: PreviewState) {
-  const previewSize = preview === "error" ? undefined : preview;
-  const imageSize = image.image_width && image.image_height ? { w: image.image_width, h: image.image_height } : undefined;
-  return imageSize && (!previewSize || image.content_hash ||
-    imageAspectRatiosMatch(imageSize.w, imageSize.h, previewSize.w, previewSize.h)) ? imageSize : previewSize;
-}
-
-interface PositionedPhoto {
-  image: FaceImage;
-  index: number;
-  column: number;
-  top: number;
-  bottom: number;
-}
-
-function positionPhotos(images: FaceImage[], width: number, columnCount: number, previews: Map<string, CachedPreview>) {
-  const columnWidth = Math.max(1, (width - CARD_GAP * (columnCount - 1)) / columnCount);
-  const columns: PositionedPhoto[][] = Array.from({ length: columnCount }, () => []);
-  const ends = columns.map(() => 0);
-  const byId = new Map<number, PositionedPhoto>();
-  images.forEach((image, index) => {
-    const column = index % columnCount;
-    const top = ends[column];
-    const size = galleryDimensions(image, previews.get(imageThumbnailUrl(image.id))?.preview);
-    const bottom = top + Math.max(2, size ? columnWidth * size.h / size.w : columnWidth);
-    const photo = { image, index, column, top, bottom };
-    columns[column].push(photo);
-    byId.set(image.id, photo);
-    ends[column] = bottom + CARD_GAP;
-  });
-  return { columns, byId, columnWidth, height: Math.max(...ends), shortestColumn: Math.min(...ends) };
-}
-
-function photosInWindow(columns: PositionedPhoto[][], start: number, end: number) {
-  return columns.flatMap((column) => {
-    let first = 0;
-    let remaining = column.length;
-    while (first < remaining) {
-      const middle = Math.floor((first + remaining) / 2);
-      if (column[middle].bottom < start) first = middle + 1;
-      else remaining = middle;
-    }
-    const visible: PositionedPhoto[] = [];
-    for (let index = first; index < column.length && column[index].top <= end; index += 1) {
-      visible.push(column[index]);
-    }
-    return visible;
-  });
-}
-
 const ImageCard = React.memo(function ImageCard({
   img,
   previewUrl,
@@ -190,18 +135,10 @@ const ImageCard = React.memo(function ImageCard({
   return (
     <div
       data-image-id={img.id}
-      className={selected ? "image-gallery-card image-gallery-card--selected" : "image-gallery-card"}
-      style={{
-        position: "relative",
-        width: "100%",
-        overflow: "hidden",
-        borderRadius: 6,
-        background: "var(--surface-1)",
-        border: "1px solid var(--border)",
-        aspectRatio,
-        marginBottom: "16px",
-        transition: onPreviewRatioChanged ? undefined : "aspect-ratio 0.2s ease",
-      }}
+      className={`image-gallery-card${selected ? " image-gallery-card--selected" : ""}${
+        onPreviewRatioChanged ? "" : " image-gallery-card--animate-ratio"
+      }`}
+      style={{ aspectRatio }}
     >
       {preview === "error" ? (
         <span className="image-gallery-card__error">Vorschau nicht verfügbar</span>
@@ -218,12 +155,6 @@ const ImageCard = React.memo(function ImageCard({
           }}
           onError={() => {
             updatePreview({ retry, preview: "error" });
-          }}
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            display: "block",
           }}
           alt={interactionsDisabled ? img.filename || "Foto" : ""}
         />

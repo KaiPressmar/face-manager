@@ -8,6 +8,10 @@
   background: rgb(7 15 24 / .72);
 }
 
+.photo-album-overlay[inert] {
+  visibility: hidden;
+}
+
 .photo-album-dialog {
   width: min(560px, 100%);
   max-height: min(740px, calc(100dvh - 24px));

@@ -14,7 +14,7 @@ Requests, nicht in diese Versionshinweise.
 ### Verbessert
 
 - In den Aktivitäten siehst du übersprungene Fotos und Ordner mit Grund und kannst betroffene Pfade erneut prüfen.
-- Große Fotolisten bleiben beim Scrollen übersichtlich und behalten deine Auswahl und Position bei Aktualisierungen.
+- Große Fotolisten behalten die Auswahl und Scrollposition bei Aktualisierungen und beim Zurückkehren aus anderen Bereichen.
 - Wechsle direkt zwischen Hell, Dunkel und System und öffne Einstellungsbereiche auch in schmalen Fenstern schnell.
 - Prüfe fehlende Originale, bevor du Bibliothekseinträge entfernst. Die Dateinamenansicht zeigt deine Auswahl direkt neben der Vorschau.
 - Große Fotobibliotheken öffnen sich schneller.
@@ -27,6 +27,9 @@ Requests, nicht in diese Versionshinweise.
 - Unterbrochene Umbenennungen lassen sich beim erneuten Start prüfen und wiederherstellen. Bestätigte Importabbrüche bleiben nach einem Neustart wirksam.
 - Wenn Gesichtsgruppen vorübergehend nicht geladen werden können, zeigt die Prüfung einen Fehler und bietet einen erneuten Versuch.
 - Eine Android-Sicherung zeigt den Speicherfortschritt und bestätigt den Export erst nach erfolgreichem Schreiben.
+- Du kannst leere Alben erstellen. Beim Abbrechen kehrst du in der Albenliste an dieselbe Stelle zurück.
+- Die Ergebnisse der Ortssuche bleiben sichtbar, während neue Fotos eingelesen werden.
+- In schmalen Fenstern bleibt die Karte nach „Fotoorte auf Karte zeigen“ oder „Stopp auf Karte zeigen“ direkt mit der Tastatur bedienbar.
 
 ## [0.22.0] - 2026-11-27
 
