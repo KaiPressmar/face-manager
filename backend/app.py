@@ -35,6 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .api import library
 from .api.albums import router as albums_router
+from .api.import_sources import create_import_sources_router, normalized_source_path
 from .api.map import router as map_router
 from .api.photo_selection import _GeoSelectionBody, optional_map_bounds, validated_photo_selection
 from .changelog import ChangelogError, find_release, load_changelog, released_versions
@@ -116,13 +117,14 @@ from .services.autocluster_queue import (
 )
 from .services.events import TrailingThrottle, event_hub
 from .services.import_queue import ImportQueue
+from .services.import_sources import ImportSources
 from .services.idle_recluster import IdleReclusterScheduler
 from .services.shared_libraries import shared_library_preview
 from .services.shared_sync_import import SharedImportAnalysis
 from .services.pipeline import ImportCancelled, ImportProcessor
 from .services.image_path_cleanup import ImagePathCleanup
 from .services.person_suggestion_worker import PersonSuggestionWorker
-from .services.background_activities import background_activities
+from .services.background_activities import BackgroundActivity, background_activities
 from .services.geo import PHOTO_METADATA_ACTIVITY, geo_backfill
 from .services.geo_query import GeoPhotoSelection
 from .services.ui_preferences import load_ui_preferences, update_ui_preferences, validate_ui_preferences
@@ -428,7 +430,40 @@ import_queue = ImportQueue(
     on_change=_publish_imports_throttled,
     on_before_terminal=_begin_import_finalization,
     on_after_terminal=_end_import_finalization,
+    source_resume_lock=library.write_lock,
 )
+
+
+def _source_scan_idle() -> bool:
+    if library.restoring or _imports_finalizing:
+        return False
+    queue = import_queue.snapshot()
+    return not (queue["running_count"] or queue["queued_count"])
+
+
+def _publish_import_source_scan(source_id, status, processed, unavailable=0) -> None:
+    event_hub.publish("import_sources", {"id": source_id})
+    background_activities.update(BackgroundActivity(
+        id=source_id, kind="import_source_scan", status=status, processed=processed,
+        total=0, unavailable=unavailable,
+        finished_at=datetime.now(timezone.utc).isoformat() if status != "running" else None,
+    ))
+
+
+def _source_locations_changed() -> None:
+    invalidate_image_query_cache()
+    app_cache.clear()
+    notify_clusters_changed("image_path_cleanup")
+
+
+import_sources = ImportSources(
+    library_lock=library.write_lock, generation=library.get_generation, is_idle=_source_scan_idle,
+    enqueue=lambda path, **options: import_queue.enqueue(path, **options),
+    relocate=lambda old, new, **options: import_queue.relocate_source(old, new, **options),
+    suffixes=ImportProcessor.IMAGE_SUFFIXES, publish=_publish_import_source_scan, changed=_source_locations_changed,
+)
+
+
 def _handle_autocluster_success(_repaired_faces: int) -> None:
     """Refresh resources and continue a version migration waiting for idleness."""
     reset_import_resources()
@@ -762,6 +797,7 @@ async def lifespan(_app: FastAPI):
             idle_recluster_scheduler.start()
             _publish_imports(library_replaced=True)
             import_queue.start()
+            import_sources.start()
             if not schedule_version_clustering_upgrade():
                 run_startup_repairs()
             face_thumbnail_warmup_queue.start()
@@ -782,6 +818,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         assist_stop.set()
+        import_sources.stop()
         shared_library_preview.stop()
         if assist_thread is not None:
             assist_thread.join(timeout=1)
@@ -1636,9 +1673,12 @@ def api_undo_archive_repair(selection: _ArchiveRepairUndo):
     return _finish_archive_repair(undo_archive_repair, selection.batch_id)
 
 
-def _initialize_restored_library() -> None:
+def _initialize_restored_library(*, from_backup: bool = True) -> None:
     init_db(recover=False, scan_sources=False)
     import_queue.reload_from_library()
+    if from_backup:
+        import_sources.reset_restored_work()
+    background_activities.discard("import_source_scan")
     reset_import_resources()
     invalidate_image_query_cache()
     app_cache.clear()
@@ -1730,7 +1770,7 @@ def api_import_database(
                 else:
                     current.unlink(missing_ok=True)
                 remove_database_sidecars(current)
-                _initialize_restored_library()
+                _initialize_restored_library(from_backup=False)
                 library_ready = True
             except Exception:
                 logger.exception("Database rollback failed; previous snapshot retained at %s", backup)
@@ -1771,6 +1811,10 @@ def api_import_database(
                 except Exception:
                     logger.exception("Could not restart photo metadata indexing after database import")
             if restore_gate:
+                try:
+                    import_sources.recover_interrupted_scans()
+                except sqlite3.Error:
+                    logger.exception("Could not resume source checks after database import")
                 auto_cluster_queue.notify_ready()
         if library_ready:
             _publish_imports(library_replaced=True)
@@ -1844,7 +1888,9 @@ def api_create_import(request: Request, data: dict = Body(...)):
 
 @safe_cluster_mutation
 def _enqueue_import(folder_path: str):
-    return import_queue.enqueue(folder_path)
+    path = normalized_source_path(folder_path)
+    import_sources.register(path)
+    return import_queue.enqueue(path)
 
 
 @app.get("/api/imports")
@@ -2029,6 +2075,7 @@ def api_cancel_import(job_id: str):
     result = import_queue.cancel(job_id)
     if result is None:
         raise HTTPException(status_code=409, detail="Die Aufgabe kann nicht abgebrochen werden.")
+    import_sources.block_automatic_import(job_id)
     return result
 
 
@@ -2058,6 +2105,8 @@ def api_cancel_or_remove_import(job_id: str):
     result = import_queue.cancel_or_remove(job_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Die Aufgabe wurde nicht gefunden.")
+    if result.get("status") in {"cancelling", "cancelled"}:
+        import_sources.block_automatic_import(job_id)
     return result
 
 
@@ -3359,6 +3408,7 @@ def api_face_image(request: Request, face_id: int, proposal_token: str | None = 
 
 app.include_router(albums_router)
 app.include_router(map_router)
+app.include_router(create_import_sources_router(import_sources, get_display_platform))
 
 
 @app.get("/api/images")

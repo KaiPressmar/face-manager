@@ -10,6 +10,7 @@ Requests, nicht in diese Versionshinweise.
 ### Neu
 
 - Zoome die Fotokarte mit zwei Fingern und speichere Fotobuchbilder und ZIP-Dateien unter Android am gewählten Speicherort.
+- Unter „Bilder → Ordner verwalten“ kannst du gespeicherte Ordner jederzeit prüfen und festlegen, ob neue Fotos automatisch importiert werden.
 
 ### Verbessert
 
@@ -18,6 +19,7 @@ Requests, nicht in diese Versionshinweise.
 - Wechsle direkt zwischen Hell, Dunkel und System und öffne Einstellungsbereiche auch in schmalen Fenstern schnell.
 - Prüfe fehlende Originale, bevor du Bibliothekseinträge entfernst. Die Dateinamenansicht zeigt deine Auswahl direkt neben der Vorschau.
 - Große Fotobibliotheken öffnen sich schneller.
+- Verschobene Fotos lassen sich mit ihren bisherigen Zuordnungen wiederfinden. Beim Wechsel eines ganzen Ordners siehst du vorab, welche Fotos Face Manager sicher zuordnen kann.
 
 ### Behoben
 
@@ -30,6 +32,7 @@ Requests, nicht in diese Versionshinweise.
 - Du kannst leere Alben erstellen. Beim Abbrechen kehrst du in der Albenliste an dieselbe Stelle zurück.
 - Die Ergebnisse der Ortssuche bleiben sichtbar, während neue Fotos eingelesen werden.
 - In schmalen Fenstern bleibt die Karte nach „Fotoorte auf Karte zeigen“ oder „Stopp auf Karte zeigen“ direkt mit der Tastatur bedienbar.
+- Beim Schließen unterbrochene Importe laufen beim nächsten Öffnen weiter. Ist ein Ordner nicht erreichbar, wartet sein Import, bis die Quelle wieder verfügbar ist.
 
 ## [0.22.0] - 2026-11-27
 

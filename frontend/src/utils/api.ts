@@ -375,6 +375,7 @@ export interface FetchImagesParams {
 
 export type ImportJobStatus =
   | "queued"
+  | "waiting_for_source"
   | "running"
   | "paused"
   | "cancelling"
@@ -449,6 +450,7 @@ export interface ImportQueueState {
   active_job_ids?: string[];
   running_count?: number;
   queued_count: number;
+  waiting_for_source_count?: number;
   paused_count?: number;
   max_concurrent_jobs?: number;
   overall_eta_seconds: number | null;

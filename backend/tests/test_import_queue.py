@@ -12,8 +12,9 @@ from backend.services.import_queue import (
     ImportQueue,
     LiveStageTiming,
     StableEta,
+    WAITING_FOR_SOURCE,
 )
-from backend.services.pipeline import ImportCancelled
+from backend.services.pipeline import ImportCancelled, ImportSourceUnavailable
 
 
 class RecordingProcessor:
@@ -124,6 +125,189 @@ class ImportQueueTest(unittest.TestCase):
         self.assertEqual(jobs[first["id"]]["status"], "failed")
         self.assertIn("database or disk is full", jobs[first["id"]]["last_error"])
         self.assertEqual(jobs[second["id"]]["status"], "completed")
+
+    def test_offline_job_reconnects_without_blocking_another_import(self):
+        attempted_probes = []
+        probe_started = threading.Event()
+        reconnect = threading.Event()
+        self.addCleanup(reconnect.set)
+
+        def process(folder, _update, _control):
+            self.processor.started.append(folder)
+            if folder == "/photos/offline" and not reconnect.is_set():
+                raise ImportSourceUnavailable(folder)
+
+        def check(folder):
+            attempted_probes.append(folder)
+            if len(attempted_probes) == 1:
+                raise ImportSourceUnavailable(folder)
+            probe_started.set()
+            reconnect.wait(3)
+
+        with (
+            patch.object(self.queue, "SOURCE_PROBE_INITIAL_DELAY", 0.02),
+            patch.object(self.processor, "process", side_effect=process),
+            patch("backend.services.import_queue.check_import_source", side_effect=check),
+        ):
+            waiting = self.queue.enqueue("/photos/offline")
+            self.assertTrue(probe_started.wait(2))
+            self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 1)
+            self.assertEqual(self.queue.snapshot()["running_count"], 0)
+            online = self.queue.enqueue("/photos/online")
+            self.wait_for(lambda: any(
+                job["id"] == online["id"] and job["status"] == "completed"
+                for job in self.queue.snapshot()["jobs"]
+            ))
+            self.assertEqual(self.processor.started, ["/photos/offline", "/photos/online"])
+            reconnect.set()
+            self.wait_for(lambda: any(
+                job["id"] == waiting["id"] and job["status"] == "completed"
+                for job in self.queue.snapshot()["jobs"]
+            ))
+        self.assertEqual(self.processor.started, ["/photos/offline", "/photos/online", "/photos/offline"])
+        self.assertEqual(attempted_probes, ["/photos/offline", "/photos/offline"])
+
+    def test_parked_job_survives_restart_and_pauses_after_restore(self):
+        self.queue.stop()
+        self.repository.insert(ImportJob("saved", "/photos/offline", status=WAITING_FOR_SOURCE))
+        self.repository.insert(ImportJob("manual", "/photos/manual", status=WAITING_FOR_SOURCE))
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 2)
+        self.assertEqual(self.queue.snapshot()["queued_count"], 0)
+        self.assertEqual(self.queue.resume("manual")["status"], "queued")
+        self.assertEqual(self.queue.cancel("manual")["status"], "cancelled")
+
+        self.queue.reload_from_library()
+        self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 0)
+        self.assertEqual(self.queue.snapshot()["jobs"][0]["status"], "paused")
+        [stored, manual], pending = self.repository.load()
+        self.assertEqual(stored.status, "paused")
+        self.assertEqual(manual.status, "cancelled")
+        self.assertEqual(pending, [])
+        self.assertEqual(self.queue.resume("saved")["status"], "queued")
+
+    def test_stop_and_restore_do_not_wait_for_a_stalled_source_probe(self):
+        self.queue.stop()
+        self.repository.insert(ImportJob("saved", "/photos/offline", status=WAITING_FOR_SOURCE))
+        resume_lock = threading.RLock()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        self.addCleanup(release_probe.set)
+
+        def check(_folder):
+            probe_started.set()
+            release_probe.wait(3)
+
+        with (
+            patch.object(ImportQueue, "SOURCE_PROBE_INITIAL_DELAY", 0.02),
+            patch("backend.services.import_queue.check_import_source", side_effect=check),
+        ):
+            self.queue = ImportQueue(self.processor, repository=self.repository, source_resume_lock=resume_lock)
+            self.assertTrue(probe_started.wait(2))
+            with resume_lock:
+                stopping = time.monotonic()
+                self.queue.stop(timeout=0.1)
+                self.assertLess(time.monotonic() - stopping, 2)
+                self.queue.reload_from_library()
+                self.queue.start()
+                release_probe.set()
+            self.wait_for(lambda: not self.queue._source_probes)
+        self.assertEqual(self.processor.started, [])
+        self.assertEqual(self.queue.snapshot()["jobs"][0]["status"], "paused")
+
+    def test_relocation_retargets_dormant_jobs_atomically(self):
+        self.queue.stop()
+        self.repository.insert(ImportJob("wait", "/old", status=WAITING_FOR_SOURCE))
+        retry_paths = [{"path": "/old/nested/photo.jpg", "kind": "image_unavailable"}]
+        self.repository.insert(ImportJob("paused", "/old", status="paused", retry_paths=retry_paths))
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+
+        def fail(connection):
+            connection.execute("CREATE TABLE registry_change (source_path TEXT)")
+            raise RuntimeError("could not update registry")
+
+        with self.assertRaisesRegex(RuntimeError, "could not update registry"):
+            self.queue.relocate_source("/old", "/new", persist=fail)
+        self.assertEqual([job["folder_path"] for job in self.queue.snapshot()["jobs"]], ["/old", "/old"])
+        self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 1)
+        [waiting, paused], _ = self.repository.load()
+        self.assertEqual((waiting.folder_path, paused.retry_paths), ("/old", retry_paths))
+
+        def save(connection):
+            connection.execute("CREATE TABLE registry_change (source_path TEXT)")
+            connection.execute("INSERT INTO registry_change VALUES ('/new')")
+
+        self.assertEqual(self.queue.relocate_source("/old", "/new", persist=save), 2)
+        [waiting, paused], pending = self.repository.load()
+        self.assertEqual([(job.folder_path, job.status) for job in (waiting, paused)], [
+            ("/new", "queued"), ("/new", "paused"),
+        ])
+        self.assertEqual(paused.retry_paths, [{
+            "path": str(Path("/new") / "nested" / "photo.jpg"), "kind": "image_unavailable",
+        }])
+        self.assertEqual(pending, ["wait"])
+        self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 0)
+        self.assertEqual(self.queue.relocate_source("/unused", "/new", persist=lambda c: c.execute(
+            "INSERT INTO registry_change VALUES ('/second')"
+        )), 0)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT source_path FROM registry_change").fetchall(), [
+                ("/new",), ("/second",),
+            ])
+
+    def test_relocation_rejects_active_source_without_changing_queued_jobs(self):
+        self.queue.enqueue("/old")
+        self.queue.enqueue("/old")
+        self.wait_for(lambda: self.processor.started == ["/old"])
+        with patch.object(self.repository, "update_sources") as relocate:
+            with self.assertRaisesRegex(ValueError, "muss erst beendet werden"):
+                self.queue.relocate_source("/old", "/new")
+        relocate.assert_not_called()
+        self.assertEqual([job["folder_path"] for job in self.queue.snapshot()["jobs"]], ["/old", "/old"])
+
+    def test_all_requested_source_paths_survive_restart_and_relocation(self):
+        self.queue.stop()
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        old_root = Path(self.temp_dir.name) / "old"
+        new_root = old_root.with_name("new")
+        filenames = [f"photo-{index}.jpg" for index in range(64)]
+        job = self.queue.enqueue(str(old_root), retry_paths=[
+            {"path": str(old_root / filename), "kind": "image_unavailable"} for filename in filenames
+        ])
+        self.assertNotIn("retry_paths", job)
+
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        self.assertEqual(self.queue.relocate_source(str(old_root), str(new_root)), 1)
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        with patch.object(self.processor, "process") as process:
+            self.queue.start()
+            self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "completed")
+        self.assertEqual(process.call_count, 1)
+        self.assertEqual(process.call_args.args[0], str(new_root))
+        self.assertEqual(process.call_args.kwargs["retry_paths"], [
+            {"path": str(new_root / filename), "kind": "image_unavailable"} for filename in filenames
+        ])
+
+    def test_user_pause_and_cancel_take_precedence_over_worker_source_failure(self):
+        for action, expected in [(self.queue.pause, "paused"), (self.queue.cancel, "cancelled")]:
+            with self.subTest(expected=expected):
+                started = threading.Event()
+                release = threading.Event()
+                self.addCleanup(release.set)
+
+                def process(folder, _update, _control):
+                    started.set()
+                    release.wait(2)
+                    raise ImportSourceUnavailable(folder)
+
+                with patch.object(self.processor, "process", side_effect=process):
+                    job = self.queue.enqueue(f"/photos/{expected}")
+                    self.assertTrue(started.wait(1))
+                    action(job["id"])
+                    release.set()
+                    self.wait_for(lambda: self.queue.snapshot()["running_count"] == 0)
+                self.assertEqual(self.queue.snapshot()["jobs"][-1]["status"], expected)
+                self.assertEqual(self.queue.snapshot()["waiting_for_source_count"], 0)
 
     def test_old_warning_does_not_disable_progress_throttling(self):
         self.queue.stop()

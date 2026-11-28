@@ -8,6 +8,7 @@ const androidDatabaseExportFlow = require('./android-database-export-flow.cjs');
 const archiveAssignmentFlow = require('./archive-assignment-flow.cjs');
 const compactReviewFlow = require('./compact-review-flow.cjs');
 const helpTourFlow = require('./help-tour-flow.cjs');
+const importSourcesFlow = require('./import-sources-flow.cjs');
 const manualFaceFlow = require('./manual-face-flow.cjs');
 const workspaceNavigationFlow = require('./workspace-navigation-flow.cjs');
 const mapFaceliftFlow = require('./map-facelift-flow.cjs');
@@ -2012,6 +2013,7 @@ async function suggestionRefreshFlow(browser, errors) {
       reviewInboxFlow,
       suggestionRefreshFlow,
       albumLibrary: (browser, errors) => albumLibraryFlow(browser, errors, newPage, webBase),
+      importSources: (browser, errors) => importSourcesFlow(browser, errors, newPage, webBase),
       helpTour: (browser, errors) => helpTourFlow(browser, errors, newPage, webBase),
       mapFacelift: (browser, errors) => mapFaceliftFlow(browser, errors, newPage, webBase, apiBase, screenshot),
       faceliftWorkspaces: (browser, errors) => faceliftWorkspacesFlow(browser, errors, newPage, webBase),

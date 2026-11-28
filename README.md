@@ -54,11 +54,19 @@ Die Porträts und Reisefotos im älteren Bedienvideo wurden mit OpenAI erzeugt. 
 
 Wähle unter **Bilder hinzufügen** mehrere Ordner auf einmal aus. In **Bilder** kannst du die Auswahl eingrenzen. In kleinen Fenstern öffnest du dazu **Filter und Sortierung**. Wenn du aus einem anderen Bereich zurückkehrst, bleiben deine Fotoauswahl und die Scrollposition erhalten. Öffne ein Foto für die Vollbildgalerie. Dort findest du zugehörige Gesichter und die Speicherorte der Datei.
 
-![Fotobibliothek mit Nationalparkfotos, Personenfiltern und einem für ein Album ausgewählten Foto](docs/screenshots/photo-library.webp)
+![Fotobibliothek mit ausgewähltem Foto und der Schaltfläche Ordner verwalten](docs/screenshots/photo-library.webp)
 
 ![Importdialog mit ausgewählten Bilderordnern](docs/screenshots/import-sources.webp)
 
 ![Blick durch North Window auf Turret Arch in der Vollbildgalerie mit Navigation und Speicherort](docs/screenshots/photo-gallery.webp)
+
+Unter **Bilder → Ordner verwalten** findest du deine Bilderordner auch nach dem Löschen der Importhistorie. Mit **Jetzt prüfen** suchst du nach neuen Fotos und Unterordnern. Anschließend kannst du **Neue Fotos importieren** wählen oder den automatischen Import für diesen Ordner aktivieren. Für Ordner, die aus einer älteren Importhistorie übernommen wurden, kannst du **Automatisch prüfen** einschalten.
+
+Mit **Speicherort ändern** prüfst du einen verschobenen Ordner am neuen Pfad. Die Vorschau zeigt verifizierte, unklare und fehlende Fotos. Bestätige den passenden Ordner mit **Neuen Speicherort übernehmen**. Bei mehreren passenden Dateien hilft **Unklare Speicherorte prüfen**.
+
+![Ordnerverwaltung mit einem gefundenen neuen Foto und den Aktionen zur Prüfung und zum Import](docs/screenshots/photo-sources.webp)
+
+![Ordnerverwaltung in einem schmalen Fenster](docs/screenshots/photo-sources-compact.webp)
 
 </details>
 
@@ -284,7 +292,7 @@ Unter **Daten und Wartung** erstellst du eine Sicherung und stellst die Größe 
 
 ## Daten und Datenschutz
 
-Die Fotoanalyse läuft auf deinem Gerät. Namen, Zuordnungen und Merkmale erkannter Gesichter speichert Face Manager in einer lokalen Bibliothek. Die Bibliothek verweist auf deine Fotoordner. Wenn du einen Ordner verschiebst, füge ihn am neuen Speicherort erneut hinzu.
+Die Fotoanalyse läuft auf deinem Gerät. Namen, Zuordnungen und Merkmale erkannter Gesichter speichert Face Manager in einer lokalen Bibliothek. Die Bibliothek verweist auf deine Fotoordner. Wenn du einen Ordner verschiebst, verbinde ihn über **Bilder → Ordner verwalten → Speicherort ändern** mit seinem neuen Pfad.
 
 Unter **Einstellungen → Daten und Wartung** kannst du die Bibliothek sichern oder eine frühere Sicherung wiederherstellen. Die Vorschau zeigt, wie viele Fotos, Personen und Alben in der gewählten Datei stehen. Nach der Bestätigung kannst du den vorherigen Stand speichern. Offene Importe aus der Sicherung lassen sich unter **Aktivitäten** fortsetzen. Sichere deine Originalfotos separat.
 

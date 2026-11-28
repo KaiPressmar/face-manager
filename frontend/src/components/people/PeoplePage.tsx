@@ -9,6 +9,7 @@ import ImageGrid, {
 } from "./ImageGrid";
 import FolderFilterModal from "../shared/FolderFilterModal";
 import FolderPickerModal from "../shared/FolderPickerModal";
+import ImportSourcesDialog from "../import/ImportSourcesDialog";
 import AlbumPickerDialog, { AlbumLibraryDialog } from "../shared/AlbumPickerDialog";
 import { removePhotoAlbumImages, updatePhotoAlbum, usePhotoAlbums, type PhotoAlbum } from "../../utils/photoAlbums";
 import { subscribeToTopic } from "../../utils/events";
@@ -92,6 +93,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   const [selectedPersons, setSelectedPersons] = useState<string[]>([]);
   const [showFolderFilter, setShowFolderFilter] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showImportSources, setShowImportSources] = useState(false);
   const [importPending, setImportPending] = useState(false);
   const [selectedFolders, setSelectedFolders] = useState<string[]>([]);
   const [showAlbumLibrary, setShowAlbumLibrary] = useState(false);
@@ -182,6 +184,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       setShowAlbumLibrary(false);
       setShowFolderFilter(false);
       setShowImport(false);
+      setShowImportSources(false);
       setIsLoading(true);
       setQueryRevision((value) => value + 1);
     },
@@ -756,7 +759,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
     let receivedEvent = false;
     const applyQueue = (queue: ImportQueueState) => {
       setImportPending(queue.jobs.some((job) =>
-        ["queued", "running", "paused", "cancelling"].includes(job.status),
+        ["queued", "waiting_for_source", "running", "paused", "cancelling"].includes(job.status),
       ));
     };
     const unsubscribe = subscribeToTopic<ImportQueueState>("imports", (queue) => {
@@ -780,8 +783,10 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
   );
 
   const pageHeader = (
-    <header ref={pageHeaderRef} className="people-page-heading">
+    <header ref={pageHeaderRef} className="people-page-heading people-page-heading--with-actions">
       <h1>Bilder</h1>
+      <button type="button" className="secondary-button"
+        onClick={() => setShowImportSources(true)}>Ordner verwalten</button>
     </header>
   );
 
@@ -791,6 +796,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
       setShowImport(false);
     }} />
   );
+  const importSourcesDialog = active && showImportSources && <ImportSourcesDialog onClose={() => setShowImportSources(false)} />;
   const resetFilters = () => {
     pendingResume.current = undefined;
     setSelectedPersons([]);
@@ -884,6 +890,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
           </ul>
         </section>
         {importDialog}
+        {importSourcesDialog}
         {albumDialogs}
       </>
     );
@@ -1134,6 +1141,7 @@ const PeoplePage: React.FC<PeoplePageProps> = ({ active, onNavigateToCluster, on
         />
       )}
       {importDialog}
+      {importSourcesDialog}
       {albumDialogs}
     </>
   );

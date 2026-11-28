@@ -94,6 +94,22 @@ class ImportFailed(RuntimeError):
     """Signal that a whole import could not complete."""
 
 
+class ImportSourceUnavailable(FileNotFoundError):
+    """Signal that the job's root folder cannot be accessed."""
+
+    def __init__(self, folder: str | Path):
+        super().__init__(f"Der Bilderordner ist nicht erreichbar: {folder}")
+
+
+def check_import_source(folder: str | Path) -> None:
+    """Check whether the source can be listed without scanning its contents."""
+    try:
+        with os.scandir(_filesystem_path(folder)) as entries:
+            next(entries, None)
+    except OSError as exc:
+        raise ImportSourceUnavailable(folder) from exc
+
+
 class SourceChangedError(OSError):
     """Signal that a file no longer matches the version selected for import."""
 
@@ -451,11 +467,11 @@ class ImportProcessor:
 
         Raises:
             ImportCancelled: If cancellation is requested between images.
-            FileNotFoundError: If the queued folder no longer exists.
+            ImportSourceUnavailable: If the queued folder cannot be accessed.
         """
         folder = Path(folder_path)
         if not os.path.isdir(_filesystem_path(folder)):
-            raise FileNotFoundError(f"Der Bilderordner ist nicht erreichbar: {folder_path}")
+            raise ImportSourceUnavailable(folder_path)
 
         progress_callback(
             {
@@ -473,10 +489,12 @@ class ImportProcessor:
             progress_callback(changes)
 
         if retry_paths:
+            check_import_source(folder)
             image_paths = self._retry_images(folder, retry_paths, scan_progress, cancel_event)
         else:
-            image_paths = self._find_images(folder, scan_progress, cancel_event)
+            image_paths = self._find_images(folder, scan_progress, cancel_event, require_root=True)
         if not image_paths and scan_failed:
+            check_import_source(folder)
             raise ImportFailed("Es konnten keine Bilder aus den nicht erreichbaren Pfaden gelesen werden.")
         progress_callback(
             {
@@ -671,6 +689,8 @@ class ImportProcessor:
                     )
 
             self._raise_if_cancelled(cancel_event)
+            if unavailable_images or scan_failed:
+                check_import_source(folder)
             if image_paths and successful_images == 0:
                 raise ImportFailed(f"Kein Bild konnte hinzugefügt werden. {last_error or ''}".strip())
 
@@ -751,6 +771,8 @@ class ImportProcessor:
         folder: Path,
         progress_callback: Optional[ProgressCallback] = None,
         cancel_event: Optional[threading.Event] = None,
+        *,
+        require_root: bool = False,
     ) -> list[Path]:
         """Find supported images below a folder.
 
@@ -760,7 +782,11 @@ class ImportProcessor:
         Returns:
             Sorted image paths for deterministic queue processing.
         """
+        root_scanned = False
+
         def on_error(error: OSError) -> None:
+            if require_root and not root_scanned:
+                raise ImportSourceUnavailable(folder) from error
             path = error.filename or folder
             logger.warning("Skipping inaccessible import directory %s: %s", path, error)
             if progress_callback is not None:
@@ -768,6 +794,7 @@ class ImportProcessor:
 
         image_paths = []
         for root, directories, filenames in os.walk(_filesystem_path(folder), onerror=on_error):
+            root_scanned = True
             directories[:] = [name for name in directories if not _is_private_import_directory(name)]
             directories.sort()
             filenames.sort()
