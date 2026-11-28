@@ -33,6 +33,11 @@ interface ClusterListProps {
   searchTerm: string;
   onSearch: (value: string) => void;
   isLoading: boolean;
+  ready: boolean;
+  archiveLoading: boolean;
+  archiveReady: boolean;
+  archiveError: string;
+  onRetryArchive?: () => void;
 }
 
 const ClusterList: React.FC<ClusterListProps> = ({
@@ -50,6 +55,11 @@ const ClusterList: React.FC<ClusterListProps> = ({
   searchTerm,
   onSearch,
   isLoading,
+  ready,
+  archiveLoading,
+  archiveReady,
+  archiveError,
+  onRetryArchive,
 }) => {
   const safeClusters = Array.isArray(clusters) ? clusters : [];
   const clusterRefs = useRef<Record<number, HTMLButtonElement | null>>({});
@@ -293,6 +303,10 @@ const ClusterList: React.FC<ClusterListProps> = ({
     </div>
   );
 
+  if (!ready) return isLoading
+    ? <p className="review-load-status" role="status">Gesichtsgruppen werden geladen …</p>
+    : null;
+
   return (
     <div className="cluster-nav-shell">
       <section className="cluster-nav-search">
@@ -425,6 +439,11 @@ const ClusterList: React.FC<ClusterListProps> = ({
                 <strong>{group.sectionLabel}</strong>
                 {renderCountSummary(group.cluster_count, group.face_count)}
               </div>
+              {archiveError && onRetryArchive && <div className="review-load-error" role="alert">
+                <p>{archiveError}</p>
+                <button type="button" className="secondary-button" disabled={archiveLoading}
+                  onClick={onRetryArchive}>Archivgesichter erneut laden</button>
+              </div>}
               {matchingArchiveSections.length > 0 ? (
                 matchingArchiveSections
                   .map((section) => {
@@ -467,10 +486,10 @@ const ClusterList: React.FC<ClusterListProps> = ({
                       </button>
                     );
                   })
-              ) : (
+              ) : !archiveError && (
                 <div className="cluster-nav-empty-state">
-                  {isLoading
-                    ? "Gesichtsgruppen werden geladen…"
+                  {(isLoading || archiveLoading) && !archiveReady
+                    ? "Gesichtsgruppen werden geladen …"
                     : normalizedSearch
                       ? "Keine passende Gesichtsgruppe gefunden."
                       : "Keine Gesichtsgruppen in diesem Bereich."}
@@ -480,7 +499,7 @@ const ClusterList: React.FC<ClusterListProps> = ({
           </section>
         ))}
 
-      {normalizedSearch && visibleModeItemCount === 0 && (
+      {normalizedSearch && visibleModeItemCount === 0 && !archiveError && !archiveLoading && (
         <div className="cluster-nav-empty-state">
           Keine Treffer für <strong>{searchTerm}</strong>.
         </div>

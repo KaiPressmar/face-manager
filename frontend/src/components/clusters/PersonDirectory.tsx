@@ -152,6 +152,7 @@ export default function PersonDirectory({
   const searchField = useRef<HTMLInputElement>(null);
   const lastPerson = useRef<{ id: number; top: number; query: string }>();
   const previousPerson = useRef(personId);
+  const [libraryRevision, setLibraryRevision] = useState(0);
   const [localRevision, setLocalRevision] = useState(0);
   const [manualRevision, setManualRevision] = useState(0);
   const [managing, setManaging] = useState(false);
@@ -170,14 +171,22 @@ export default function PersonDirectory({
     fetchPersonDirectory({ search: query, offset, limit: PAGE_SIZE, signal }), [query]);
   const loadPhotos = useCallback((offset: number, signal: AbortSignal) =>
     fetchPersonPhotos(personId!, { offset, limit: PAGE_SIZE, signal }), [personId]);
-  const people = usePagedResults(query, version + manualRevision, active && !profileOpen, loadPeople);
-  const photos = usePagedResults(String(personId), version, active && profileOpen, loadPhotos);
+  const people = usePagedResults(`${libraryRevision}:${query}`, version + manualRevision, active && !profileOpen, loadPeople);
+  const photos = usePagedResults(`${libraryRevision}:${personId}`, version, active && profileOpen, loadPhotos);
 
   useEffect(() => {
     let refreshTimer: number | undefined;
     const unsubscribe = subscribeToTopic<{ reason?: string }>("clusters", (event) => {
       if (event?.reason === "library_identity") return;
       window.clearTimeout(refreshTimer);
+      if (event?.reason === "database_import") {
+        lastPerson.current = undefined;
+        setLibraryRevision((value) => value + 1);
+        setProfile(undefined);
+        setManaging(false);
+        setGallery(undefined);
+        return;
+      }
       refreshTimer = window.setTimeout(() => setLocalRevision((value) => value + 1),
         event?.reason === "background_progress" ? 1800 : 300);
     });
@@ -197,7 +206,7 @@ export default function PersonDirectory({
         ? error.message : "Das Personenprofil konnte nicht geladen werden." });
     });
     return () => controller.abort();
-  }, [active, personId, profileRetry, version]);
+  }, [active, libraryRevision, personId, profileRetry, version]);
 
   useLayoutEffect(() => {
     if (!active || previousPerson.current === personId) return;

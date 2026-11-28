@@ -11,6 +11,7 @@ from fastapi import HTTPException, Response
 
 from backend import app
 from backend.services import preview_cache_budget as budget
+from backend.services.import_queue import ImportJob, ImportJobRepository, ImportQueue
 
 
 def make_database(path: Path, marker: str) -> None:
@@ -33,6 +34,30 @@ def marker_at(path: Path) -> str:
 
 
 class DatabaseRestoreTest(unittest.TestCase):
+    def test_waiting_actions_cannot_change_the_restored_library(self):
+        class LibraryChangesBeforeLock:
+            def __enter__(self):
+                app._media_library_generation += 1
+
+            def __exit__(self, *_):
+                pass
+
+        with (
+            patch.object(app, "_media_library_generation", 0),
+            patch.object(app, "_cluster_operation_lock", LibraryChangesBeforeLock()),
+            patch.object(app.auto_cluster_queue, "request_cancel"),
+            patch.object(app, "delete_image") as delete_image,
+            patch.object(app.import_queue, "clear_history") as clear_history,
+        ):
+            with self.assertRaises(HTTPException) as deletion:
+                app.remove_image(1)
+            self.assertEqual(deletion.exception.status_code, 409)
+            with self.assertRaises(HTTPException) as history:
+                app.api_delete_import_history()
+            self.assertEqual(history.exception.status_code, 409)
+            delete_image.assert_not_called()
+            clear_history.assert_not_called()
+
     def test_database_restore_keeps_device_preview_policy(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
             root = Path(folder)
@@ -119,6 +144,38 @@ class DatabaseRestoreTest(unittest.TestCase):
         patches.enter_context(patch.object(app, "schedule_version_clustering_upgrade", return_value=True))
         patches.enter_context(patch.object(app, "reset_import_resources"))
         patches.enter_context(patch.object(app.app_cache, "clear"))
+        patches.enter_context(patch.object(app.import_queue, "reload_from_library"))
+        patches.enter_context(patch.object(app, "_import_was_busy", False))
+        patches.enter_context(patch.object(app, "_last_import_progress", {}))
+
+    def test_database_restore_replaces_import_history_and_pauses_restored_work(self):
+        def connect(path):
+            connection = sqlite3.connect(path)
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:
+            current = Path(folder) / "database.sqlite"
+            incoming = Path(folder) / "incoming.sqlite"
+            make_database(current, "old")
+            make_database(incoming, "new")
+            old_repository = ImportJobRepository(lambda: connect(current))
+            old_repository.insert(ImportJob(id="old", folder_path="/previous/photos", status="completed"))
+            new_repository = ImportJobRepository(lambda: connect(incoming))
+            new_repository.insert(ImportJob(id="new", folder_path="/restored/photos", status="running"))
+            queue = ImportQueue(repository=old_repository, auto_start=False)
+            self._isolate_restore(patches, current)
+            patches.enter_context(patch.object(app, "import_queue", queue))
+            patches.enter_context(patch.object(app, "init_db"))
+            latest = {}
+            patches.enter_context(patch.object(app.event_hub, "_latest", latest))
+
+            self.assertEqual([job["id"] for job in queue.snapshot()["jobs"]], ["old"])
+            app.api_import_database(incoming.read_bytes())
+            snapshot = queue.snapshot()
+            self.assertEqual([(job["id"], job["status"]) for job in snapshot["jobs"]], [("new", "paused")])
+            self.assertEqual(snapshot["queued_count"], 0)
+            self.assertEqual(latest["imports"]["jobs"][0]["id"], "new")
 
     def test_failed_install_restores_old_database_without_copying_file_metadata(self):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as patches:

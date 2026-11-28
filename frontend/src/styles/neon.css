@@ -419,12 +419,6 @@
   color: var(--accent);
 }
 
-.theme-toggle__label {
-  color: inherit;
-  font-size: 11px;
-  line-height: 1;
-}
-
 .theme-toggle:hover {
   border-color: var(--accent-border);
   color: var(--text);
@@ -1091,9 +1085,6 @@ button.sidebar__version:hover {
     padding: 0;
   }
 
-  .theme-toggle__label {
-    display: none;
-  }
 }
 
 @media (max-width: 650px) {

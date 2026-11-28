@@ -1,6 +1,7 @@
 import ctypes
 import errno
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -10,10 +11,9 @@ import sqlite3
 import stat
 import struct
 import sys
-import tempfile
 import unicodedata
 from collections import defaultdict
-from contextlib import closing
+from contextlib import closing, contextmanager
 from functools import lru_cache
 from itertools import groupby
 from threading import Lock
@@ -28,6 +28,7 @@ from ..db.schema import (
     FACE_REVIEW_STATUS_NOT_FACE,
     FACE_REVIEW_STATUS_UNKNOWN_PERSON,
     VALID_FACE_REVIEW_STATUSES,
+    calculate_file_hash,
     get_conn,
     normalize_person_name_key,
     person_name_sort_key,
@@ -45,10 +46,11 @@ from ..models.clustering import (
     tune_distance_threshold,
 )
 from .cache import app_cache
-from .filesystem_paths import filesystem_path
+from .filesystem_paths import filesystem_path, stored_path
 from .face_action_history import face_action_watch_available, pause_face_action_watch, record_face_action
 from .face_geometry import face_boxes_overlap
 from .geo_query import GeoPhotoSelection, photo_selection_sql
+from .photo_identity import RegisteredPhotoChanged, open_registered_photo
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.storage")
@@ -2083,7 +2085,7 @@ def list_images(folders=None):
     return rows
 
 
-def list_image_locations(image_ids):
+def list_image_locations(image_ids, *, include_source_hash=False):
     """List every assigned location for canonical images.
 
     Args:
@@ -2100,7 +2102,7 @@ def list_image_locations(image_ids):
     conn = get_conn()
     rows = conn.execute(
         f"""
-        SELECT image_id, path, directory, filename
+        SELECT image_id, path, directory, filename, content_hash
         FROM image_location
         WHERE image_id IN ({placeholders})
         ORDER BY image_id, path
@@ -2118,6 +2120,8 @@ def list_image_locations(image_ids):
                 "filename": row["filename"],
             }
         )
+        if include_source_hash and row["content_hash"]:
+            locations[row["image_id"]][-1]["source_hash"] = row["content_hash"]
     return dict(locations)
 
 
@@ -2340,13 +2344,13 @@ def save_missing_image_geometry(image_id: int, content_hash: str, geometry: tupl
         conn.close()
 
 
-def get_available_image_path(
+def open_available_image_file(
     image_id: int,
     preferred_path=None,
     *,
     require_preferred: bool = False,
 ):
-    """Find an existing filesystem location for an image.
+    """Open a verified source, preserving a selected location when required.
 
     Args:
         image_id: Canonical image identifier.
@@ -2355,29 +2359,49 @@ def get_available_image_path(
             was selected by the user.
 
     Returns:
-        Existing path, or ``None`` when all locations are unavailable.
+        Path, open source, and stat, or ``None`` if all locations are missing.
     """
-    conn = get_conn()
-    if require_preferred and preferred_path:
+    preferred_only = bool(require_preferred and preferred_path)
+    with closing(get_conn()) as conn:
         rows = conn.execute(
-            "SELECT path FROM image_location WHERE image_id = ? AND path = ?",
-            (image_id, preferred_path),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT path
-            FROM image_location
-            WHERE image_id = ?
-            ORDER BY CASE WHEN path = ? THEN 0 ELSE 1 END, path
+            f"""
+            SELECT location.path, COALESCE(location.content_hash, image.content_hash),
+                   location.file_device, location.file_inode, location.file_size,
+                   location.modified_at_ns, location.file_changed_at_ns
+            FROM image_location location JOIN image ON image.id = location.image_id
+            WHERE location.image_id = ?
+            {"AND location.path = ?" if preferred_only else ""}
+            ORDER BY CASE WHEN location.path = ? THEN 0 ELSE 1 END, location.path
             """,
-            (image_id, preferred_path),
+            (image_id, preferred_path, preferred_path) if preferred_only else (image_id, preferred_path),
         ).fetchall()
-    conn.close()
-    return next(
-        (row["path"] for row in rows if os.path.isfile(filesystem_path(row["path"]))),
-        None,
-    )
+    changed = None
+    for path, content_hash, *identity in rows:
+        try:
+            source, info = open_registered_photo(path, content_hash, tuple(identity))
+        except RegisteredPhotoChanged as error:
+            changed = error
+        except OSError:
+            continue
+        else:
+            return path, source, info
+    if changed is not None:
+        raise changed
+    return None
+
+
+def get_available_image_path(image_id: int, preferred_path=None, *, require_preferred: bool = False):
+    """Resolve a verified location without handing its open file to the caller."""
+    available = open_available_image_file(image_id, preferred_path, require_preferred=require_preferred)
+    if available is None:
+        return None
+    path, source, _ = available
+    source.close()
+    return path
+
+
+class PendingImageRenameError(ValueError):
+    """Deleting the image would detach an unfinished filesystem operation."""
 
 
 def delete_image(image_id: int):
@@ -2389,21 +2413,22 @@ def delete_image(image_id: int):
     Returns:
         Whether an image row was deleted.
     """
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
-    deleted = cur.rowcount > 0
-    if deleted:
-        cur.execute(
-            """
-            DELETE FROM cluster
-            WHERE NOT EXISTS (
-                SELECT 1 FROM face WHERE face.cluster_id = cluster.id
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if cur.execute("SELECT 1 FROM image_rename_intent WHERE image_id = ? LIMIT 1", (image_id,)).fetchone():
+            raise PendingImageRenameError("Für dieses Foto ist eine Umbenennung offen. Prüfe zuerst die Speicherorte unter „Dateinamen“.")
+        cur.execute("DELETE FROM image WHERE id = ?", (image_id,))
+        deleted = cur.rowcount > 0
+        if deleted:
+            cur.execute(
+                """
+                DELETE FROM cluster
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM face WHERE face.cluster_id = cluster.id
+                )
+                """
             )
-            """
-        )
-        conn.commit()
-    conn.close()
     if deleted:
         invalidate_image_query_cache()
     return deleted
@@ -3735,54 +3760,51 @@ def get_faces_for_review_group(group_key: str):
     }
 
 
-def remove_faces_from_cluster(cluster_id: int, face_ids):
+def remove_faces_from_cluster(cluster_id: int, face_ids, *, expected_faces=None):
     """Detach selected faces from one cluster while keeping them reviewable."""
     normalized_face_ids = _normalize_face_ids(face_ids)
     placeholders = ",".join("?" for _ in normalized_face_ids)
-    conn = get_conn()
-    cur = conn.cursor()
-    affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
-    cur.execute(
-        f"""
-        UPDATE face
-        SET cluster_id = NULL, review_status = ?
-        WHERE cluster_id = ?
-          AND id IN ({placeholders})
-        """,
-        (FACE_REVIEW_STATUS_ACTIVE, cluster_id, *normalized_face_ids),
-    )
-    detached_count = int(cur.rowcount)
-    if detached_count == 0:
-        conn.close()
-        raise LookupError("No selected faces belong to this cluster")
-    _recluster_active_faces_into_inbox(cur, normalized_face_ids, excluded_cluster_ids={cluster_id})
-    _delete_empty_clusters(cur)
-    mark_persons_dirty_for_recluster(cur, affected_person_ids)
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if expected_faces is not None:
+            _face_assignment_rows(cur, normalized_face_ids, expected_faces)
+        matching_ids = [
+            row["id"] for row in cur.execute(
+                f"SELECT id FROM face WHERE cluster_id = ? AND id IN ({placeholders})",
+                (cluster_id, *normalized_face_ids),
+            )
+        ]
+        if expected_faces is not None and len(matching_ids) != len(normalized_face_ids):
+            raise StaleFaceAssignmentError("Die ausgewählten Gesichter gehören nicht mehr zu dieser Gruppe.")
+        if not matching_ids:
+            raise LookupError("No selected faces belong to this cluster")
+        affected_person_ids = _persons_of_faces(cur, matching_ids)
+        cur.execute(
+            f"""
+            UPDATE face
+            SET cluster_id = NULL, review_status = ?
+            WHERE cluster_id = ? AND id IN ({placeholders})
+            """,
+            (FACE_REVIEW_STATUS_ACTIVE, cluster_id, *normalized_face_ids),
+        )
+        _recluster_active_faces_into_inbox(cur, matching_ids, excluded_cluster_ids={cluster_id})
+        _delete_empty_clusters(cur)
+        mark_persons_dirty_for_recluster(cur, affected_person_ids)
     invalidate_image_query_cache()
-    return detached_count
+    return len(matching_ids)
 
 
-def create_cluster_from_faces(face_ids):
+def create_cluster_from_faces(face_ids, *, expected_faces=None):
     """Create a fresh dedicated cluster from selected faces."""
     normalized_face_ids = _normalize_face_ids(face_ids)
-    conn = get_conn()
-    cur = conn.cursor()
-    placeholders = ",".join("?" for _ in normalized_face_ids)
-    existing = cur.execute(
-        f"SELECT COUNT(*) AS count FROM face WHERE id IN ({placeholders})",
-        normalized_face_ids,
-    ).fetchone()["count"]
-    if int(existing) != len(normalized_face_ids):
-        conn.close()
-        raise LookupError("One or more faces were not found")
-    affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
-    cluster_id = _create_cluster_for_faces(cur, normalized_face_ids)
-    _delete_empty_clusters(cur)
-    mark_persons_dirty_for_recluster(cur, affected_person_ids)
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        face_rows = _face_assignment_rows(cur, normalized_face_ids, expected_faces)
+        cluster_id = _create_cluster_for_faces(cur, normalized_face_ids)
+        _delete_empty_clusters(cur)
+        mark_persons_dirty_for_recluster(cur, {row["person_id"] for row in face_rows})
     invalidate_image_query_cache()
     return cluster_id
 
@@ -3891,30 +3913,30 @@ def mark_faces_with_review_status(
     return result
 
 
-def restore_faces_to_manual_review(face_ids):
+def restore_faces_to_manual_review(face_ids, *, expected_faces=None):
     """Restore selected faces to the visible manual review queue."""
     normalized_face_ids = _normalize_face_ids(face_ids)
     placeholders = ",".join("?" for _ in normalized_face_ids)
-    conn = get_conn()
-    cur = conn.cursor()
-    affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
-    cur.execute(
-        f"""
-        UPDATE face
-        SET cluster_id = NULL, review_status = ?
-        WHERE id IN ({placeholders})
-        """,
-        (FACE_REVIEW_STATUS_ACTIVE, *normalized_face_ids),
-    )
-    restored_count = int(cur.rowcount)
-    if restored_count == 0:
-        conn.close()
-        raise LookupError("No faces were updated")
-    _recluster_active_faces_into_inbox(cur, normalized_face_ids)
-    _delete_empty_clusters(cur)
-    mark_persons_dirty_for_recluster(cur, affected_person_ids)
-    conn.commit()
-    conn.close()
+    with closing(get_conn()) as conn, conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        if expected_faces is not None:
+            _face_assignment_rows(cur, normalized_face_ids, expected_faces)
+        affected_person_ids = _persons_of_faces(cur, normalized_face_ids)
+        cur.execute(
+            f"""
+            UPDATE face
+            SET cluster_id = NULL, review_status = ?
+            WHERE id IN ({placeholders})
+            """,
+            (FACE_REVIEW_STATUS_ACTIVE, *normalized_face_ids),
+        )
+        restored_count = int(cur.rowcount)
+        if restored_count == 0:
+            raise LookupError("No faces were updated")
+        _recluster_active_faces_into_inbox(cur, normalized_face_ids)
+        _delete_empty_clusters(cur)
+        mark_persons_dirty_for_recluster(cur, affected_person_ids)
     invalidate_image_query_cache()
     return restored_count
 
@@ -4927,15 +4949,59 @@ class _RenameRecoveryRequired(OSError):
 
     def __init__(self, path: str):
         self.recovery_path = path
-        super().__init__(f"Die Datei liegt zur Wiederherstellung hier: {path}")
+        super().__init__(f"Die Umbenennung ist noch offen. Prüfe den Wiederherstellungspfad {path}.")
 
 
-def _move_rename_location(source: str, target: str, source_stat):
+@contextmanager
+def _rename_operation_lock():
+    """Serialize file moves and recovery across processes sharing a library."""
+    from ..db.schema import DB_PATH
+
+    fd = os.open(filesystem_path(os.fspath(DB_PATH) + ".rename.lock"),
+                 os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("Die Umbenennungssperre ist nicht verfügbar.")
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        # Backups may carry the journal, but only the originating installation
+        # can authorize recovery writes to the original files.
+        os.lseek(fd, 1, os.SEEK_SET)
+        key = os.read(fd, 32)
+        if len(key) != 32:
+            key = os.urandom(32)
+            os.lseek(fd, 1, os.SEEK_SET)
+            if os.write(fd, key) != len(key):
+                raise OSError("Der Wiederherstellungsschlüssel konnte nicht gespeichert werden.")
+            os.fsync(fd)
+        yield key
+    finally:
+        os.close(fd)
+
+
+_RENAME_INTENT_FIELDS = ("location_id", "image_id", "source_path", "target_path", "staging_path", "file_identity")
+
+
+def _rename_intent_proof(intent, key: bytes) -> bytes:
+    fields = [intent[name] for name in _RENAME_INTENT_FIELDS]
+    if intent["source_hash"]:
+        fields.append(intent["source_hash"])
+    return hmac.digest(key, json.dumps(fields).encode(), "sha256")
+
+
+def _move_rename_location(source: str, target: str, source_stat, staging: str):
     # Verify the actual moved file in a private directory before occupying the
     # public target. The two moves also handle case changes on insensitive filesystems.
-    parent = os.path.realpath(os.path.dirname(source))
-    staging_dir = tempfile.mkdtemp(prefix=".face-manager-rename-", dir=parent)
-    staging = os.path.join(staging_dir, os.path.basename(source))
+    staging_dir = os.path.dirname(staging)
+    os.mkdir(staging_dir, mode=0o700)
     try:
         _rename_noreplace(source, staging)
         try:
@@ -4954,6 +5020,181 @@ def _move_rename_location(source: str, target: str, source_stat):
             os.rmdir(staging_dir)
         except OSError:
             logger.debug("Rename staging directory retained at %s", staging_dir)
+
+
+def _publish_registered_rename(intent, destination: str, file_info) -> None:
+    with closing(get_conn()) as conn, conn:
+        cur = conn.execute(
+            """UPDATE image_location
+               SET path = ?, filename = ?, file_size = ?, modified_at_ns = ?,
+                   file_device = ?, file_inode = ?, file_changed_at_ns = ?
+               WHERE id = ? AND image_id = ? AND path = ?""",
+            (destination, os.path.basename(destination), file_info.st_size, file_info.st_mtime_ns,
+             file_info.st_dev, file_info.st_ino, file_info.st_ctime_ns,
+             intent["location_id"], intent["image_id"], intent["source_path"]),
+        )
+        if cur.rowcount == 0:
+            raise sqlite3.IntegrityError("Der registrierte Dateipfad wurde geändert.")
+        _refresh_canonical_image_location(cur, intent["image_id"])
+        cur.execute("DELETE FROM image_rename_intent WHERE location_id = ?", (intent["location_id"],))
+
+
+def _verified_rename_info(path, identity, source_hash):
+    """Verify candidate bytes before blessing a new filesystem identity."""
+    try:
+        info = os.lstat(filesystem_path(path))
+        if _rename_file_identity(info) != identity:
+            return None
+        source, verified = open_registered_photo(path, source_hash, None)
+        with source:
+            return verified if _rename_file_identity(verified) == identity else None
+    except (FileNotFoundError, RegisteredPhotoChanged):
+        return None
+
+
+def _rename_registered_file(candidate, source: str, target: str, source_stat) -> None:
+    source_fs, target_fs = filesystem_path(source), filesystem_path(target)
+    stage_directory = os.path.join(os.path.realpath(os.path.dirname(source_fs)), f".face-manager-rename-{uuid4().hex}")
+    stage_fs = os.path.join(stage_directory, os.path.basename(source_fs))
+    source_identity = _rename_file_identity(source_stat)
+    intent = {
+        "location_id": candidate["location_id"], "image_id": candidate["image_id"],
+        "source_path": source, "target_path": target, "staging_path": stored_path(stage_fs),
+        "file_identity": json.dumps(source_identity),
+    }
+    with _rename_operation_lock() as key:
+        with closing(get_conn()) as conn, conn:
+            pending = conn.execute(
+                """SELECT staging_path FROM image_rename_intent
+                   WHERE location_id = ? OR source_path = ? OR target_path = ?""",
+                (intent["location_id"], target, target),
+            ).fetchone()
+            if pending is not None:
+                raise _RenameRecoveryRequired(pending["staging_path"])
+            registered = conn.execute(
+                """SELECT COALESCE(location.content_hash, image.content_hash),
+                          location.file_device, location.file_inode, location.file_size,
+                          location.modified_at_ns, location.file_changed_at_ns
+                   FROM image_location AS location JOIN image ON image.id = location.image_id
+                   WHERE location.id = ? AND location.image_id = ? AND location.path = ?""",
+                (intent["location_id"], intent["image_id"], source),
+            ).fetchone()
+            if registered is None:
+                raise _RenameSourceChanged()
+            content_hash, *expected_identity = registered
+            if content_hash or all(value is not None for value in expected_identity):
+                try:
+                    verified, verified_info = open_registered_photo(source, content_hash, tuple(expected_identity))
+                except RegisteredPhotoChanged as exc:
+                    raise _RenameSourceChanged() from exc
+                with verified:
+                    if _rename_file_identity(verified_info) != source_identity:
+                        raise _RenameSourceChanged()
+            if not content_hash:
+                content_hash = calculate_file_hash(source_fs)
+                if _rename_source_token(os.lstat(source_fs)) != _rename_source_token(source_stat):
+                    raise _RenameSourceChanged()
+            intent["source_hash"] = content_hash
+            cursor = conn.execute(
+                """INSERT INTO image_rename_intent
+                   (location_id, image_id, source_path, target_path, staging_path, file_identity, source_hash, proof)
+                   SELECT id, image_id, ?, ?, ?, ?, ?, ? FROM image_location
+                   WHERE id = ? AND image_id = ? AND path = ?""",
+                (source, target, intent["staging_path"], intent["file_identity"],
+                 content_hash, _rename_intent_proof(intent, key), intent["location_id"], intent["image_id"], source),
+            )
+            if cursor.rowcount == 0:
+                raise _RenameSourceChanged()
+
+        try:
+            _move_rename_location(source_fs, target_fs, source_stat, stage_fs)
+        except _RenameRecoveryRequired:
+            raise
+        except OSError:
+            with closing(get_conn()) as conn, conn:
+                conn.execute("DELETE FROM image_rename_intent WHERE location_id = ?", (intent["location_id"],))
+            raise
+        try:
+            file_info = _verified_rename_info(target, source_identity, content_hash)
+            if file_info is None:
+                raise OSError("Die Datei wurde beim Umbenennen ausgetauscht.")
+            _publish_registered_rename(intent, target, file_info)
+        except (sqlite3.DatabaseError, OSError) as exc:
+            raise _RenameRecoveryRequired(target) from exc
+
+
+def list_interrupted_image_renames() -> dict:
+    with closing(get_conn()) as conn:
+        pending_count = conn.execute("SELECT COUNT(*) FROM image_rename_intent").fetchone()[0]
+        pending = conn.execute(
+            """SELECT source_path, target_path, staging_path FROM image_rename_intent
+               ORDER BY location_id LIMIT 20""",
+        )
+        return {"pending_count": pending_count, "pending": [dict(row) for row in pending]}
+
+
+def _recover_registered_rename(intent, key: bytes) -> bool:
+    proof = intent["proof"]
+    if not isinstance(proof, bytes) or not hmac.compare_digest(proof, _rename_intent_proof(intent, key)):
+        return False
+    identity = tuple(json.loads(intent["file_identity"]))
+    if not identity[1]:
+        return False
+    source, target, staging = (filesystem_path(intent[name]) for name in ("source_path", "target_path", "staging_path"))
+    stage_directory = os.path.dirname(staging)
+    if (os.path.islink(stage_directory)
+            or os.path.normcase(os.path.realpath(os.path.dirname(source))) != os.path.normcase(os.path.dirname(stage_directory))):
+        return False
+
+    with closing(get_conn()) as conn:
+        source_row = conn.execute(
+            """SELECT COALESCE(location.content_hash, image.content_hash)
+               FROM image_location AS location JOIN image ON image.id = location.image_id
+               WHERE location.id = ? AND location.image_id = ? AND location.path = ?""",
+            (intent["location_id"], intent["image_id"], intent["source_path"]),
+        ).fetchone()
+    if source_row is None:
+        return False
+    source_hash = intent["source_hash"] or source_row[0]
+    if not source_hash:
+        return False
+
+    original_info = _verified_rename_info(intent["source_path"], identity, source_hash)
+    new_info = _verified_rename_info(intent["target_path"], identity, source_hash)
+    if os.path.lexists(staging):
+        with_stage = _verified_rename_info(intent["staging_path"], identity, source_hash)
+        if with_stage is None or os.path.lexists(source) or new_info is not None:
+            return False
+        _rename_noreplace(staging, source)
+        original_info = _verified_rename_info(intent["source_path"], identity, source_hash)
+    if original_info is not None and not (new_info is not None and _case_only_existing_target(target, source)):
+        _publish_registered_rename(intent, intent["source_path"], original_info)
+    elif new_info is not None:
+        _publish_registered_rename(intent, intent["target_path"], new_info)
+    else:
+        return False
+    try:
+        os.rmdir(stage_directory)
+    except OSError:
+        pass
+    return True
+
+
+def recover_interrupted_image_renames() -> dict:
+    """Resolve intact interrupted moves without touching ambiguous files."""
+    resolved_count = 0
+    if list_interrupted_image_renames()["pending_count"]:
+        with _rename_operation_lock() as key:
+            with closing(get_conn()) as conn:
+                intents = conn.execute("SELECT * FROM image_rename_intent ORDER BY location_id").fetchall()
+            for intent in intents:
+                try:
+                    resolved_count += int(_recover_registered_rename(intent, key))
+                except (OSError, sqlite3.DatabaseError, ValueError):
+                    logger.warning("Could not reconcile file rename for location %s", intent["location_id"], exc_info=True)
+    if resolved_count:
+        invalidate_image_query_cache()
+    return {**list_interrupted_image_renames(), "resolved_count": resolved_count}
 
 
 def rename_image_locations_to_match_people(
@@ -5000,12 +5241,9 @@ def rename_image_locations_to_match_people(
         if reason:
             skipped.append({"path": source_path, "reason": reason})
             continue
-        source_filesystem_path = filesystem_path(source_path)
-        target_filesystem_path = filesystem_path(target_path)
-
         try:
-            _move_rename_location(source_filesystem_path, target_filesystem_path, source_stat)
-        except OSError as exc:
+            _rename_registered_file(candidate, source_path, target_path, source_stat)
+        except (OSError, sqlite3.DatabaseError) as exc:
             if isinstance(exc, _RenameSourceChanged):
                 skipped.append({"path": source_path, "reason": "source_changed"})
                 continue
@@ -5015,10 +5253,11 @@ def rename_image_locations_to_match_people(
             if isinstance(exc, FileNotFoundError):
                 skipped.append({"path": source_path, "reason": "missing_source"})
                 continue
-            if exc.errno == errno.EOPNOTSUPP:
+            error_number = getattr(exc, "errno", None)
+            if error_number == errno.EOPNOTSUPP:
                 skipped.append({"path": source_path, "reason": "exclusive_rename_unavailable"})
                 continue
-            if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+            if error_number == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
                 skipped.append({"path": source_path, "reason": "filename_too_long"})
                 continue
             logger.exception(
@@ -5031,52 +5270,6 @@ def rename_image_locations_to_match_people(
                 failure["recovery_path"] = exc.recovery_path
             errors.append(failure)
             continue
-
-        conn = None
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute(
-                """
-                UPDATE image_location
-                SET path = ?, filename = ?
-                WHERE id = ? AND path = ?
-                """,
-                (target_path, candidate["proposed_filename"], candidate["location_id"], source_path),
-            )
-            if cur.rowcount == 0:
-                raise sqlite3.IntegrityError("Der registrierte Dateipfad wurde geändert.")
-            _refresh_canonical_image_location(cur, candidate["image_id"])
-            if _rename_file_identity(os.lstat(target_filesystem_path)) != _rename_file_identity(source_stat):
-                raise OSError("Die Datei wurde beim Umbenennen ausgetauscht.")
-            conn.commit()
-        except (sqlite3.DatabaseError, OSError) as exc:
-            if conn is not None:
-                conn.rollback()
-            failure = {"path": source_path, "reason": str(exc)}
-            logger.exception(
-                "Database update failed after renaming %s to %s",
-                source_path,
-                target_path,
-            )
-            try:
-                if _rename_file_identity(os.lstat(target_filesystem_path)) == _rename_file_identity(source_stat):
-                    _move_rename_location(target_filesystem_path, source_filesystem_path, source_stat)
-            except _RenameRecoveryRequired as recovery:
-                failure["reason"] = f"{exc} {recovery}"
-                failure["recovery_path"] = recovery.recovery_path
-            except OSError:
-                logger.exception(
-                    "Could not roll back file rename from %s to %s",
-                    target_path,
-                    source_path,
-                )
-                pass
-            errors.append(failure)
-            continue
-        finally:
-            if conn is not None:
-                conn.close()
         renamed.append(
             {
                 "from_path": source_path,

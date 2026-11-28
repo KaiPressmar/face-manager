@@ -78,6 +78,25 @@ class ClusterApiTest(unittest.TestCase):
         self.assertEqual(rejected.exception.status_code, 409)
         assign.assert_not_called()
 
+    def test_other_batch_actions_reject_ids_from_prior_library(self):
+        for action, writer in (
+            ("remove_from_cluster", "remove_faces_from_cluster"),
+            ("create_cluster", "create_cluster_from_faces"),
+            ("restore_to_manual_review", "restore_faces_to_manual_review"),
+        ):
+            with (
+                self.subTest(action=action),
+                patch.object(app, writer) as mutate,
+                patch.object(app, "get_person_suggestion_epoch", return_value="restored-library"),
+            ):
+                with self.assertRaises(HTTPException) as rejected:
+                    app.api_batch_update_faces({
+                        "action": action, "face_ids": [22], "cluster_id": 3,
+                        "expected_library_id": "old-library",
+                    })
+                self.assertEqual(rejected.exception.status_code, 409)
+                mutate.assert_not_called()
+
     @patch("backend.app.idle_recluster_scheduler")
     @patch("backend.app.auto_cluster_queue")
     @patch("backend.app.schedule_full_recluster")

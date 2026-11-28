@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import secrets
-import sqlite3
+import shutil
 import tempfile
 import threading
 import time
@@ -164,17 +164,31 @@ def stop():
         os.environ.pop("FACE_MANAGER_ANDROID_SESSION_TOKEN", None)
 
 
-def export_database():
+def export_database(previous=False):
     """Return a consistent private temporary SQLite snapshot for SAF export."""
-    from backend.config import DB_PATH, get_data_root
+    from backend.app import _cluster_operation_lock, _latest_restore_backup, snapshot_database_backup
+    from backend.config import get_data_root
 
     folder = get_data_root() / "exports"
     folder.mkdir(parents=True, exist_ok=True)
+    expired = time.time() - 24 * 60 * 60
+    for leftover in folder.glob("face-manager-*.*"):
+        try:
+            if leftover.stat().st_mtime < expired:
+                leftover.unlink(missing_ok=True)
+        except OSError:
+            pass
     fd, name = tempfile.mkstemp(prefix="face-manager-", suffix=".sqlite", dir=folder)
     os.close(fd)
     try:
-        with sqlite3.connect(DB_PATH) as source, sqlite3.connect(name) as target:
-            source.backup(target)
+        with _cluster_operation_lock:
+            if previous:
+                backup = _latest_restore_backup()
+                if backup is None:
+                    raise FileNotFoundError("Die vorherige Bibliothek ist nicht verfügbar.")
+                shutil.copyfile(backup, name)
+            else:
+                snapshot_database_backup(Path(name))
         return name
     except Exception:
         Path(name).unlink(missing_ok=True)

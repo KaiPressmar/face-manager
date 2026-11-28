@@ -109,12 +109,24 @@ def _build_error_page(message: str) -> str:
     escaped_message = html.escape(message)
     escaped_log_path = html.escape(str(get_error_log_path()))
     return f"""
-    <html>
-      <body style="font-family: Segoe UI, sans-serif; background: #111827; color: #f3f4f6; padding: 32px;">
-        <h1 style="margin-top: 0;">Face Manager could not recover automatically</h1>
-        <p>Application log location:</p>
-        <pre style="padding: 12px; background: #1f2937; border-radius: 8px;">{escaped_log_path}</pre>
-        <p style="white-space: pre-wrap;">{escaped_message}</p>
+    <!doctype html>
+    <html lang="de">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Face Manager konnte nicht starten</title>
+      </head>
+      <body style="font: 1rem/1.5 system-ui, sans-serif; background: #111827; color: #f3f4f6; padding: clamp(12px, 4vw, 32px);">
+        <main>
+          <h1 style="margin-top: 0; font-size: 1.5rem;">Face Manager konnte nicht starten</h1>
+          <p>Schließe dieses Fenster und öffne Face Manager erneut. Falls der Fehler wieder auftritt, findest du die Ursache im Fehlerprotokoll.</p>
+          <p><strong>Fehlerprotokoll</strong></p>
+          <pre style="padding: 12px; background: #1f2937; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere;">{escaped_log_path}</pre>
+          <details>
+            <summary>Technische Meldung anzeigen</summary>
+            <p style="white-space: pre-wrap; overflow-wrap: anywhere;">{escaped_message}</p>
+          </details>
+        </main>
       </body>
     </html>
     """

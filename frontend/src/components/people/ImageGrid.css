@@ -1,3 +1,26 @@
+.image-window { position: relative; }
+.image-window__card { position: absolute; }
+
+.photo-selection-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-block: 8px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+}
+
+.photo-selection-toolbar span { font-weight: 700; padding-inline-end: 6px; }
+.photo-selection-toolbar button { min-height: 40px; }
+
+@media (max-width: 420px) {
+  .photo-selection-toolbar span { flex-basis: 100%; }
+  .photo-selection-toolbar button { flex: 1 1 auto; }
+}
+
 .image-gallery-card > img {
   z-index: 0;
 }

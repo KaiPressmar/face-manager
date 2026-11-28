@@ -24,6 +24,7 @@ import {
   fetchFaceImage,
   fetchPersonSuggestions,
   fetchReviewSuggestions,
+  invalidatePersonsCache,
   listPersons,
   PersonSuggestion,
   PersonSuggestionDecision,
@@ -183,7 +184,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const [reviewGroups, setReviewGroups] =
     useState<FaceReviewGroupSummary[]>(DEFAULT_REVIEW_GROUPS);
   const [selectedTarget, setSelectedTarget] = useState<SelectionTarget | null>(null);
-  const [clusterDetails, setClusterDetails] = useState<ClusterDetails | null>(null);
   const [reviewGroupDetails, setReviewGroupDetails] =
     useState<FaceReviewGroupDetails | null>(null);
   const [persons, setPersons] = useState<PersonOption[]>([]);
@@ -227,13 +227,18 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const [detailModal, setDetailModal] = useState<DetailModalState>(null);
   const [modalError, setModalError] = useState<string | null>(null);
   const [isListLoading, setIsListLoading] = useState(true);
-  const [isDetailsLoading, setIsDetailsLoading] = useState(false);
+  const [listReady, setListReady] = useState(false);
+  const [listError, setListError] = useState("");
+  const [loadingArchive, setLoadingArchive] = useState<FaceReviewGroupKey | null>(null);
+  const [archiveError, setArchiveError] = useState<{ group: FaceReviewGroupKey; text: string }>();
   const [isMutating, setIsMutating] = useState(false);
   const detailModalRef = useRef<HTMLElement>(null);
   useModalFocus(detailModalRef, () => setDetailModal(null), !isMutating, detailModal !== null && !sharedReviewActive);
   const [highlightedClusterId, setHighlightedClusterId] = useState<number | null>(null);
   const [clusterDetailsMap, setClusterDetailsMap] = useState<Record<number, ClusterDetails>>({});
   const [loadingClusterIds, setLoadingClusterIds] = useState<Set<number>>(new Set());
+  const [clusterErrors, setClusterErrors] = useState<Record<number, string>>({});
+  const libraryRequests = useRef(new AbortController());
   const listRequestIdRef = useRef(0);
   const suggestionRequest = useRef<AbortController | null>(null);
   const suggestionLibrary = useRef<string | null>(null);
@@ -315,6 +320,10 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     selectedTarget?.type === "cluster" ? selectedTarget.clusterId : null;
   const selectedReviewGroupKey =
     selectedTarget?.type === "group" ? selectedTarget.groupKey : null;
+  const isDetailsLoading = selectedClusterId !== null
+    ? loadingClusterIds.has(selectedClusterId)
+    : selectedReviewGroupKey !== null && loadingArchive === selectedReviewGroupKey;
+  const selectedArchiveError = archiveError?.group === selectedReviewGroupKey ? archiveError.text : "";
 
   const selectedSummary = useMemo(
     () =>
@@ -604,10 +613,6 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     .filter((group) => group.group_key !== "unassigned")
     .reduce((sum, group) => sum + group.face_count, 0);
 
-  useEffect(() => {
-    clusterDetailsMapRef.current = clusterDetailsMap;
-  }, [clusterDetailsMap]);
-
   const updateLoadingClusterIds = React.useCallback((clusterIds: number[], isLoading: boolean) => {
     if (clusterIds.length === 0) {
       return;
@@ -644,28 +649,28 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   // skipped so repeated triggers (scroll, neighbour preload, re-observe) never
   // hit the backend twice for the same cluster.
   const loadClusterFaces = React.useCallback(
-    (clusterId: number) => {
+    async (clusterId: number, refresh = false) => {
       if (
-        clusterDetailsMapRef.current[clusterId] ||
+        (!refresh && clusterDetailsMapRef.current[clusterId]) ||
         loadingClusterIdsRef.current.has(clusterId)
       ) {
         return;
       }
+      const { signal } = libraryRequests.current;
       updateLoadingClusterIds([clusterId], true);
-      void fetchClusterFaces(clusterId)
-        .then((details) => {
-          if (details) {
-            mergeClusterDetails({
-              [details.cluster_id]: normalizeClusterDetails(details),
-            });
-          }
-        })
-        .catch((error) => {
-          console.error("Fehler beim Laden des Clusters:", error);
-        })
-        .finally(() => {
-          updateLoadingClusterIds([clusterId], false);
-        });
+      try {
+        const details = await fetchClusterFaces(clusterId, signal);
+        if (signal.aborted) return;
+        if (!details) throw new Error("Diese Gesichtsgruppe ist nicht mehr verfügbar.");
+        mergeClusterDetails({ [clusterId]: normalizeClusterDetails(details) });
+        setClusterErrors((current) => current[clusterId] ? { ...current, [clusterId]: "" } : current);
+      } catch (error) {
+        if (!signal.aborted) setClusterErrors((current) => ({ ...current,
+          [clusterId]: error instanceof Error ? error.message : "Die Gesichtsgruppe konnte nicht geladen werden.",
+        }));
+      } finally {
+        if (!signal.aborted) updateLoadingClusterIds([clusterId], false);
+      }
     },
     [mergeClusterDetails, normalizeClusterDetails, updateLoadingClusterIds],
   );
@@ -675,24 +680,27 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   const ensurePersonsLoaded = React.useCallback((refresh = false) => {
     if (personsLoadingRef.current || (personsLoadedRef.current && !refresh)) return;
     personsLoadingRef.current = true;
+    const { signal } = libraryRequests.current;
     setPeopleStatus("loading");
     void listPersons()
       .then((data) => {
+        if (signal.aborted) return;
         personsLoadedRef.current = true;
         setPersons(data);
         setPeopleStatus("ready");
       })
       .catch((error) => {
+        if (signal.aborted) return;
         personsLoadedRef.current = false;
         setPeopleStatus("error");
         console.error("Fehler beim Laden der Personenliste:", error);
       })
-      .finally(() => { personsLoadingRef.current = false; });
+      .finally(() => { if (!signal.aborted) personsLoadingRef.current = false; });
   }, []);
 
   useEffect(() => {
-    if (active && (workspaceView !== "suggestions" || detailModal)) ensurePersonsLoaded();
-  }, [active, workspaceView, detailModal, ensurePersonsLoaded]);
+    if (active && peopleStatus === "idle" && (workspaceView !== "suggestions" || detailModal)) ensurePersonsLoaded();
+  }, [active, workspaceView, detailModal, ensurePersonsLoaded, peopleStatus]);
 
   const captureSuggestionAnchor = React.useCallback(() => {
     const pane = suggestionPane.current;
@@ -769,217 +777,125 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     }
   }, [cancelPendingNavigation, replaceWithOverview]);
 
-  const loadSidebarData = React.useCallback(async (background = false) => {
-    const requestId = listRequestIdRef.current + 1;
-    listRequestIdRef.current = requestId;
-    if (!background) {
-      setIsListLoading(true);
-    }
+  const loadSidebarData = React.useCallback(async (background = false, bootstrap = false) => {
+    const requestId = ++listRequestIdRef.current;
+    const { signal } = libraryRequests.current;
+    if (!background) setIsListLoading(true);
 
     try {
-      const [clusterData, reviewGroupData] = await Promise.all([
-        fetchClusters(),
-        fetchFaceReviewGroups(),
-      ]);
-      if (listRequestIdRef.current !== requestId) {
-        return;
+      const overview = bootstrap ? await fetchClusterOverview(signal).catch(() => null) : null;
+      if (signal.aborted || listRequestIdRef.current !== requestId) return;
+      const [nextClusters, nextReviewGroups] = overview
+        ? [overview.clusters, overview.review_groups]
+        : await Promise.all([fetchClusters(signal), fetchFaceReviewGroups(signal)]);
+      if (signal.aborted || listRequestIdRef.current !== requestId) return;
+
+      const mergedGroups = mergeReviewGroups(nextReviewGroups);
+      if (overview?.first_cluster) {
+        const first = normalizeClusterDetails(overview.first_cluster);
+        mergeClusterDetails({ [first.cluster_id]: first });
       }
-
-      const safeClusters = Array.isArray(clusterData) ? clusterData : [];
-      const mergedGroups = mergeReviewGroups(
-        Array.isArray(reviewGroupData) ? reviewGroupData : [],
-      );
-
-      resolvePendingNavigation(safeClusters);
-      setClusters(safeClusters);
+      resolvePendingNavigation(nextClusters);
+      setClusters(nextClusters);
       setReviewGroups(mergedGroups);
-      setSelectedTarget((current) =>
-        resolveSelectedTarget(
-          current,
-          safeClusters,
-          mergedGroups,
-          pendingNavigationClusterIdRef.current,
-        ),
-      );
+      setListReady(true);
+      setListError("");
+      setSelectedTarget((current) => resolveSelectedTarget(
+        current, nextClusters, mergedGroups, pendingNavigationClusterIdRef.current,
+      ));
     } catch (error) {
-      console.error("Fehler beim Laden der Cluster-Ansicht:", error);
+      if (!signal.aborted && listRequestIdRef.current === requestId) {
+        setListError(error instanceof Error ? error.message : "Die Gesichtsgruppen konnten nicht geladen werden.");
+      }
     } finally {
-      if (listRequestIdRef.current === requestId) {
-        setIsListLoading(false);
-      }
+      if (!signal.aborted && listRequestIdRef.current === requestId) setIsListLoading(false);
     }
-  }, [resolvePendingNavigation]);
+  }, [mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
 
-  const loadTargetDetails = React.useCallback((target: SelectionTarget | null) => {
-    if (!target) {
-      setClusterDetails(null);
-      setReviewGroupDetails(null);
-      setIsDetailsLoading(false);
+  const loadTargetDetails = React.useCallback(async (target: SelectionTarget | null, refresh = false) => {
+    const requestId = ++detailsRequestIdRef.current;
+    if (target?.type !== "group") {
+      setLoadingArchive(null);
+      if (target) await loadClusterFaces(target.clusterId, refresh);
       return;
     }
 
-    const requestId = detailsRequestIdRef.current + 1;
-    detailsRequestIdRef.current = requestId;
-    setIsDetailsLoading(true);
-
-    if (target.type === "cluster") {
-      setReviewGroupDetails(null);
-      const cachedDetails = clusterDetailsMapRef.current[target.clusterId];
-      if (cachedDetails) {
-        setClusterDetails(cachedDetails);
-        setIsDetailsLoading(false);
-        return;
-      }
-      if (loadingClusterIdsRef.current.has(target.clusterId)) {
-        setIsDetailsLoading(false);
-        return;
-      }
-
-      updateLoadingClusterIds([target.clusterId], true);
-      void fetchClusterFaces(target.clusterId)
-        .then((data) => {
-          if (detailsRequestIdRef.current !== requestId) {
-            return;
-          }
-          if (data) {
-            const normalizedData = normalizeClusterDetails(data);
-            setClusterDetails(normalizedData);
-            mergeClusterDetails({ [target.clusterId]: normalizedData });
-          } else {
-            setClusterDetails(null);
-          }
-        })
-        .catch((error) => {
-          if (detailsRequestIdRef.current === requestId) {
-            setClusterDetails(null);
-          }
-          console.error("Fehler beim Laden der Clusterdetails:", error);
-        })
-        .finally(() => {
-          updateLoadingClusterIds([target.clusterId], false);
-          if (detailsRequestIdRef.current === requestId) {
-            setIsDetailsLoading(false);
-          }
+    const { groupKey } = target;
+    const { signal } = libraryRequests.current;
+    setLoadingArchive(groupKey);
+    try {
+      const details = await fetchFaceReviewGroupFaces(groupKey, signal);
+      if (signal.aborted || detailsRequestIdRef.current !== requestId) return;
+      if (!details) throw new Error("Diese Archivkategorie ist nicht mehr verfügbar.");
+      setReviewGroupDetails(details);
+      setArchiveError(undefined);
+    } catch (error) {
+      if (!signal.aborted && detailsRequestIdRef.current === requestId) {
+        setArchiveError({ group: groupKey,
+          text: error instanceof Error ? error.message : "Die Gesichter im Archiv konnten nicht geladen werden.",
         });
-      return;
+      }
+    } finally {
+      if (!signal.aborted && detailsRequestIdRef.current === requestId) setLoadingArchive(null);
     }
+  }, [loadClusterFaces]);
 
-    setClusterDetails(null);
-    setReviewGroupDetails((current) =>
-      current?.group_key === target.groupKey ? current : null,
-    );
-    void fetchFaceReviewGroupFaces(target.groupKey)
-      .then((data) => {
-        if (detailsRequestIdRef.current !== requestId) {
-          return;
-        }
-        setReviewGroupDetails(
-          data
-            ? {
-                ...data,
-                faces: Array.isArray(data.faces) ? data.faces : [],
-              }
-            : null,
-        );
-      })
-      .catch((error) => {
-        if (detailsRequestIdRef.current === requestId) {
-          setReviewGroupDetails(null);
-        }
-        console.error("Fehler beim Laden der Prüfliste:", error);
-      })
-      .finally(() => {
-        if (detailsRequestIdRef.current === requestId) {
-          setIsDetailsLoading(false);
-        }
-      });
-  }, [mergeClusterDetails, normalizeClusterDetails, updateLoadingClusterIds]);
+  useEffect(() => {
+    void loadSidebarData(false, true);
+    return () => {
+      libraryRequests.current.abort();
+      libraryRequests.current = new AbortController();
+      loadingClusterIdsRef.current = new Set();
+      personsLoadingRef.current = false;
+    };
+  }, [loadSidebarData]);
 
-  const refreshTargetDetails = React.useCallback(
-    async (target: SelectionTarget | null) => {
-      if (!target) return;
-      const requestId = detailsRequestIdRef.current + 1;
-      detailsRequestIdRef.current = requestId;
-      try {
-        if (target.type === "cluster") {
-          const data = await fetchClusterFaces(target.clusterId);
-          if (detailsRequestIdRef.current !== requestId || !data) return;
-          const normalized = normalizeClusterDetails(data);
-          setClusterDetails(normalized);
-          mergeClusterDetails({ [target.clusterId]: normalized });
-          return;
-        }
-        const data = await fetchFaceReviewGroupFaces(target.groupKey);
-        if (detailsRequestIdRef.current !== requestId || !data) return;
-        setReviewGroupDetails({
-          ...data,
-          faces: Array.isArray(data.faces) ? data.faces : [],
-        });
-      } catch (error) {
-        console.error("Live-Aktualisierung der Gesichter fehlgeschlagen:", error);
-      }
-    },
-    [mergeClusterDetails, normalizeClusterDetails],
-  );
-
+  // Kept-alive workspaces must invalidate their data even when hidden during a
+  // restore. IDs and counts can coincide in two different libraries.
   useEffect(() => subscribeToTopic<{ reason?: string }>("clusters", (event) => {
     if (event?.reason !== "database_import") return;
+    libraryRequests.current.abort();
+    libraryRequests.current = new AbortController();
+    listRequestIdRef.current += 1;
+    detailsRequestIdRef.current += 1;
+    groupPhotoRequest.current?.abort();
+    suggestionPhotoRequest.current?.abort();
     suggestionRequest.current?.abort();
+    invalidatePersonsCache();
+    personsLoadedRef.current = false;
+    personsLoadingRef.current = false;
+    workflowFallbackRef.current = [];
+    loadingClusterIdsRef.current = new Set();
+    clusterDetailsMapRef.current = {};
     suggestionLibrary.current = null;
+
+    setClusters([]);
+    setReviewGroups(DEFAULT_REVIEW_GROUPS);
+    setListReady(false);
+    setListError("");
+    setIsListLoading(true);
+    setSelectedTarget(null);
+    setClusterDetailsMap({});
+    setLoadingClusterIds(new Set());
+    setClusterErrors({});
+    setReviewGroupDetails(null);
+    setLoadingArchive(null);
+    setArchiveError(undefined);
+    setFaceGallery(null);
+    setDetailModal(null);
+    setSelectedFaceIds([]);
+    setArchiveSelection(null);
+    setPersons([]);
+    setPeopleStatus("idle");
+    setWorkflowFeedback(null);
+    setAssignmentRevision((value) => value + 1);
     setPersonSuggestions([]);
     setReviewSuggestions([]);
     setSuggestionsPending(false);
     setSuggestionsError(null);
     setSuggestionsLoading(true);
-  }), []);
-
-  // One-time bootstrap: fetch summaries, counts and the first cluster's faces
-  // together. Fall back to the split loaders if the overview fails.
-  useEffect(() => {
-    let cancelled = false;
-    const requestId = listRequestIdRef.current + 1;
-    listRequestIdRef.current = requestId;
-    setIsListLoading(true);
-    fetchClusterOverview()
-      .then((overview) => {
-        if (cancelled || listRequestIdRef.current !== requestId) {
-          return;
-        }
-        const mergedGroups = mergeReviewGroups(overview.review_groups);
-        resolvePendingNavigation(overview.clusters);
-        setClusters(overview.clusters);
-        setReviewGroups(mergedGroups);
-        if (overview.first_cluster) {
-          mergeClusterDetails({
-            [overview.first_cluster.cluster_id]: normalizeClusterDetails(
-              overview.first_cluster,
-            ),
-          });
-        }
-        setSelectedTarget((current) =>
-          resolveSelectedTarget(
-            current,
-            overview.clusters,
-            mergedGroups,
-            pendingNavigationClusterIdRef.current,
-          ),
-        );
-      })
-      .catch((error) => {
-        console.error("Fehler beim Laden der Cluster-Übersicht:", error);
-        if (!cancelled) {
-          void loadSidebarData();
-        }
-      })
-      .finally(() => {
-        if (!cancelled && listRequestIdRef.current === requestId) {
-          setIsListLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [loadSidebarData, mergeClusterDetails, normalizeClusterDetails, resolvePendingNavigation]);
+    if (active) void loadSidebarData(false, true);
+  }), [active, loadSidebarData]);
 
   useEffect(() => {
     // Pause background polling while the cluster page is not the visible one so
@@ -1012,6 +928,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         return;
       }
       refreshInFlight = true;
+      const { signal } = libraryRequests.current;
       // Reclustering is scoped now, so a change usually touches only some
       // groups. Dropping every cached group here would collapse all sections to
       // their reserved height and throw the user's scroll position and marking
@@ -1020,7 +937,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       try {
         const anchor = captureDetailAnchor();
         await loadSidebarData(true);
-        await refreshTargetDetails(selectedTarget);
+        if (!isMounted || signal.aborted) return;
+        await loadTargetDetails(selectedTarget, true);
+        if (!isMounted || signal.aborted) return;
         restoreDetailAnchor(anchor);
         needsCatchUpRefreshRef.current = false;
       } finally {
@@ -1068,13 +987,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     const unsubscribeClusters = subscribeToTopic<{ reason?: string }>(
       "clusters",
       (update) => {
-        if (update?.reason === "database_import") {
-          suggestionPhotoRequest.current?.abort();
-          setFaceGallery(null);
-          setSelectedFaceIds([]);
-          setArchiveSelection(null);
-          setAssignmentRevision((value) => value + 1);
-        }
+        if (update?.reason === "database_import") return;
         needsCatchUpRefreshRef.current = true;
         const isBackgroundCheckpoint = update?.reason === "background_progress";
         maybeRefreshVisibleData(
@@ -1109,7 +1022,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     captureDetailAnchor,
     isMutating,
     loadSidebarData,
-    refreshTargetDetails,
+    loadTargetDetails,
     restoreDetailAnchor,
     selectedTarget,
   ]);
@@ -1205,19 +1118,19 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
 
   useEffect(() => {
     const selectionSource = selectionSourceRef.current;
-    if (showDetail || workspaceView === "archive") loadTargetDetails(selectedTarget);
+    if (active && (showDetail || workspaceView === "archive")) void loadTargetDetails(selectedTarget);
     if (selectionSource !== "scroll") {
       setSelectedFaceIds([]);
       setDetailModal(null);
     }
     selectionSourceRef.current = "system";
-  }, [loadTargetDetails, selectedTarget, showDetail, workspaceView]);
+  }, [active, loadTargetDetails, selectedTarget, showDetail, workspaceView]);
 
   // Eagerly load only the selected cluster and its immediate neighbours so the
   // initial view and nearby scrolling feel instant. Everything else is loaded
   // lazily by the viewport observer below instead of fetching the whole scope.
   useEffect(() => {
-    if (!showDetail || compact || scopedClusterIds.length === 0) {
+    if (!active || !showDetail || compact || scopedClusterIds.length === 0) {
       return;
     }
     const anchorIndex =
@@ -1226,8 +1139,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         : 0;
     const startIndex = Math.max(0, anchorIndex - 1);
     const endIndex = Math.min(scopedClusterIds.length, anchorIndex + 2);
-    scopedClusterIds.slice(startIndex, endIndex).forEach(loadClusterFaces);
-  }, [scopedClusterIds, selectedClusterId, loadClusterFaces, compact, showDetail]);
+    scopedClusterIds.slice(startIndex, endIndex).forEach((id) => { void loadClusterFaces(id); });
+  }, [active, scopedClusterIds, selectedClusterId, loadClusterFaces, compact, showDetail]);
 
   // Load the remaining groups as their section approaches the viewport, so a
   // long scope (every group of a person, every new group) never fetches all
@@ -1236,7 +1149,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   useEffect(() => {
     if (!active || !showDetail) return;
     const pending = visibleSections.filter(
-      (section) => section.clusterId != null && !section.loaded,
+      (section) => section.clusterId != null && !section.loaded && !clusterErrors[section.clusterId],
     );
     if (pending.length === 0) {
       return;
@@ -1268,7 +1181,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
     );
     nodeToClusterId.forEach((_, node) => observer.observe(node));
     return () => observer.disconnect();
-  }, [active, getDetailScroller, loadClusterFaces, showDetail, visibleSections]);
+  }, [active, clusterErrors, getDetailScroller, loadClusterFaces, showDetail, visibleSections]);
 
   useEffect(() => {
     if (selectedTarget?.type !== "cluster") {
@@ -1494,8 +1407,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
   }, [selectedSummary, selectedTarget]);
 
   const refreshAllData = React.useCallback(async () => {
+    const { signal } = libraryRequests.current;
     await loadSidebarData(true);
-    loadTargetDetails(selectedTarget);
+    if (!signal.aborted) await loadTargetDetails(selectedTarget, true);
   }, [loadSidebarData, loadTargetDetails, selectedTarget]);
 
   const runSuggestionAction = async (save: () => Promise<string>) => {
@@ -1688,27 +1602,29 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       }
       payload.person_name = name;
     }
-    if (action === "assign_person" || action === "mark_unknown_person" || action === "mark_not_face") {
-      payload.expected_faces = [];
-      const libraryIds = new Set<string | undefined>();
-      for (const id of faceIds) {
-        const face = scopeFacesById.get(id);
-        if (!face) return;
-        libraryIds.add(face.assignment_library_id);
-        payload.expected_faces.push({
-          id, cluster_id: face.cluster_id, review_status: face.review_status, person_name: face.person_name,
-        });
-      }
-      if (libraryIds.size > 1) {
-        setWorkflowFeedback({
-          kind: "error",
-          message: "Die Auswahl enthält Gesichter aus unterschiedlichen Bibliotheksständen. Lade die Ansicht neu.",
-        });
-        return;
-      }
-      [payload.expected_library_id] = libraryIds;
+    payload.expected_faces = [];
+    const libraryIds = new Set<string | undefined>();
+    for (const id of faceIds) {
+      const face = scopeFacesById.get(id);
+      if (!face) return;
+      libraryIds.add(face.assignment_library_id);
+      payload.expected_faces.push({
+        id, cluster_id: face.cluster_id, review_status: face.review_status, person_name: face.person_name,
+      });
     }
+    if (libraryIds.size !== 1 || libraryIds.has(undefined)) {
+      setWorkflowFeedback({
+        kind: "error",
+        message: libraryIds.size > 1
+          ? "Die Auswahl enthält Gesichter aus unterschiedlichen Bibliotheksständen. Lade die Ansicht neu."
+          : "Der Bibliotheksstand dieser Auswahl konnte nicht geprüft werden. Lade die Gesichter erneut.",
+      });
+      void loadTargetDetails(selectedTarget, true);
+      return;
+    }
+    [payload.expected_library_id] = libraryIds;
 
+    const { signal } = libraryRequests.current;
     setIsMutating(true);
     setWorkflowFeedback(null);
     try {
@@ -1718,6 +1634,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       // and only move on if the current group is gone — then to the *next* one.
       workflowFallbackRef.current = remainingScopeAfterSelection();
       const result = await batchUpdateFaces(payload);
+      if (signal.aborted) return;
       setAssignmentRevision((value) => value + 1);
       setSelectedFaceIds([]);
       setDetailModal(null);
@@ -1732,8 +1649,9 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
       }
       if (action === "assign_person") ensurePersonsLoaded(true);
       await loadSidebarData(true);
-      loadTargetDetails(selectedTarget);
+      if (!signal.aborted) await loadTargetDetails(selectedTarget, true);
     } catch (error) {
+      if (signal.aborted) return;
       workflowFallbackRef.current = [];
       setWorkflowFeedback({
         kind: "error",
@@ -2019,7 +1937,8 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           {([["suggestions", "Vorschläge", suggestionCount], ["open", "Ohne Namen", openClusters.length]] as const).map(([view, label, count]) => (
             <button type="button" key={view} aria-current={!sharedReviewActive && workspaceView === view ? "page" : undefined}
               onClick={() => selectWorkspaceView(view)}>
-              {label} <b>{view === "suggestions" && count === 0 && (suggestionsLoading || suggestionsPending || suggestionsError) ? "…" : count.toLocaleString()}</b>
+              {label} <b>{view === "open" && !listReady ? "–" : view === "suggestions" && count === 0 &&
+                (suggestionsLoading || suggestionsPending || suggestionsError) ? "…" : count.toLocaleString()}</b>
             </button>
           ))}
         </div>
@@ -2027,7 +1946,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           <button type="button" aria-current={!sharedReviewActive && workspaceView === "people" ? "page" : undefined}
             onClick={() => selectWorkspaceView("people")}>Personen korrigieren</button>
           <button type="button" aria-current={!sharedReviewActive && workspaceView === "archive" ? "page" : undefined}
-            onClick={() => selectWorkspaceView("archive")}>Aussortiert <b>{archivedFaceCount.toLocaleString()}</b></button>
+            onClick={() => selectWorkspaceView("archive")}>Aussortiert <b>{listReady ? archivedFaceCount.toLocaleString() : "–"}</b></button>
           {sharedLibrary.configured && <a aria-current={sharedReviewActive ? "page" : undefined}
             href={navigationHash({ page: "review", reviewView: "shared" })}>Abgleich prüfen</a>}
         </div>
@@ -2041,6 +1960,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
         >
           {workflowFeedback.message}
         </p>
+      )}
+      {!sharedReviewActive && workspaceView !== "suggestions" && listError && (
+        <div className="review-load-error" role="alert">
+          <p>{listError}{listReady && " Die zuletzt geladenen Gruppen bleiben sichtbar."}</p>
+          <button type="button" className="secondary-button" disabled={isListLoading}
+            onClick={() => void loadSidebarData(false, true)}>Gesichtsgruppen erneut laden</button>
+        </div>
       )}
       {!sharedReviewActive && !proposalDetail && <div className={hasCompactDetail ? "cluster-compact-navigation" : "cluster-workspace-navigation"}>
         {hasCompactDetail && <button type="button" className="secondary-button cluster-compact-back" ref={compactBackRef} onClick={() => {
@@ -2114,11 +2040,16 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
           searchTerm={clusterSearch}
           onSearch={setClusterSearch}
           isLoading={isListLoading}
+          ready={listReady}
+          archiveLoading={loadingArchive !== null}
+          archiveReady={reviewGroupDetails?.group_key === selectedReviewGroupKey}
+          archiveError={selectedArchiveError}
+          onRetryArchive={showDetail ? undefined : () => void loadTargetDetails(selectedTarget, true)}
         />
       </aside>
 
       {showDetail && <div className="cluster-workspace__main">
-        {compactRoutePending || (isListLoading && !selectedTarget) ? (
+        {compactRoutePending || (isListLoading && !listReady) ? (
           <div role="status" style={{ opacity: 0.7, paddingTop: 24, textAlign: "center" }}>Ansicht wird geladen…</div>
         ) : selectedTarget ? (
           <div className="cluster-detail-layout">
@@ -2214,8 +2145,13 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
               className="cluster-detail-layout__content"
               data-cluster-scroll-container="true"
             >
-              {isDetailsLoading && detailSections.length === 0 ? (
-                <div style={{ opacity: 0.5, paddingTop: 20, textAlign: "center" }}>
+              {selectedArchiveError && <div className="review-load-error" role="alert">
+                <p>{selectedArchiveError}{detailSections.length > 0 && " Die zuletzt geladenen Gesichter bleiben sichtbar."}</p>
+                <button type="button" className="secondary-button" disabled={isDetailsLoading}
+                  onClick={() => void loadTargetDetails(selectedTarget, true)}>Archivgesichter erneut laden</button>
+              </div>}
+              {isDetailsLoading && detailSections.length === 0 && !selectedArchiveError ? (
+                <div role="status" className="review-load-status">
                   Gesichter werden geladen…
                 </div>
               ) : (
@@ -2227,6 +2163,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                       sectionFaceIds.length > 0 &&
                       sectionFaceIds.every((id) => selectedFaceIdSet.has(id));
                     const isActiveSection = activeSectionKey === section.key;
+                    const loadError = section.clusterId === null ? "" : clusterErrors[section.clusterId];
                     return (
                       <section
                         className={
@@ -2262,7 +2199,12 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                             {allMarked ? "Markierung entfernen" : "Alle auswählen"}
                           </button>
                         </header>
-                        <ClusterFacesGrid
+                        {section.clusterId !== null && loadError && <div className="review-load-error" role="alert">
+                          <p>{loadError}{section.loaded && " Die zuletzt geladenen Gesichter bleiben sichtbar."}</p>
+                          <button type="button" className="secondary-button" disabled={loadingClusterIds.has(section.clusterId)}
+                            onClick={() => void loadClusterFaces(section.clusterId!, true)}>Gesichter erneut laden</button>
+                        </div>}
+                        {(!loadError || section.loaded) && <ClusterFacesGrid
                           faces={section.faces}
                           getScrollContainer={getDetailScroller}
                           reservedCount={section.faceCount}
@@ -2278,7 +2220,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
                               opener,
                             )
                           }
-                        />
+                        />}
                       </section>
                     );
                   })}
@@ -2297,7 +2239,7 @@ const ClusterPage: React.FC<ClusterPageProps> = ({ navigationTarget, sharedLibra
               )}
             </div>
           </div>
-        ) : (
+        ) : !listError && (
           <div style={{ opacity: 0.5, paddingTop: 40, textAlign: "center" }}>
             {profileCorrection ? (isListLoading || peopleStatus === "loading" || peopleStatus === "idle"
               ? "Zuordnungen werden geladen …"

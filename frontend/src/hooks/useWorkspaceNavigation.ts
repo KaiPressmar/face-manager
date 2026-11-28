@@ -3,6 +3,8 @@ import type { AppPage } from "../utils/navigation";
 
 export interface WorkspaceBinding<T = unknown> {
   capture: () => T;
+  /** Intended position while a restored page is still rebuilding. */
+  captureScrollTop?: () => number | undefined;
   restore: (snapshot: T | undefined) => void;
 }
 
@@ -21,6 +23,7 @@ export function useWorkspaceNavigation<T>(page: AppPage, binding: WorkspaceBindi
   useLayoutEffect(() => { current.current = binding; });
   useLayoutEffect(() => context?.register(page, {
     capture: () => current.current.capture(),
+    captureScrollTop: () => current.current.captureScrollTop?.(),
     restore: (value) => current.current.restore(value as T | undefined),
   }), [context, page]);
   return {

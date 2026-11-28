@@ -1,17 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { fetchRuntimeInfo, type ImportQueueState, type SharedLibraryState } from "../../utils/api";
 import { useTheme } from "../../theme/ThemeContext";
-import { ThemeMode } from "../../utils/theme";
+import { THEME_MODES, type ThemeMode } from "../../utils/theme";
 import { subscribeToTopic } from "../../utils/events";
 import BackgroundTasksStatus from "../import/BackgroundTasksStatus";
 import FolderPickerModal from "../shared/FolderPickerModal";
 import RuntimeStatus, { type RuntimeStatusInfo } from "./RuntimeStatus";
-
-const THEME_CYCLE: Record<ThemeMode, ThemeMode> = {
-  system: "light",
-  light: "dark",
-  dark: "system",
-};
 
 const THEME_META: Record<ThemeMode, { icon: string; label: string }> = {
   system: { icon: "◐", label: "System" },
@@ -110,7 +104,7 @@ const Topbar: React.FC<{
   return (
     <header className="topbar">
       <div className="topbar__actions">
-        <div className="topbar__workflow">
+        <div className="topbar__workflow" role="group" aria-label="Fotos und Aktivitäten">
           <button
             ref={importButton}
             type="button"
@@ -134,19 +128,19 @@ const Topbar: React.FC<{
           )}
         </div>
 
-        <div className="topbar__utilities">
+        <div className="topbar__utilities" role="group" aria-label="Anwendung">
           <RuntimeStatus runtime={runtime} unavailable={runtimeUnavailable} route={route} />
           <button id="app-help-trigger" className="theme-toggle" type="button" onClick={onShowHelp}>Hilfe</button>
-          <button
-            type="button"
-            className="theme-toggle"
-            onClick={() => setThemeMode(THEME_CYCLE[themeMode])}
-            title={`Darstellung: ${themeMeta.label} — zum Wechseln klicken`}
-            aria-label={`Darstellung wechseln (aktuell: ${themeMeta.label})`}
-          >
-            <span aria-hidden="true">{themeMeta.icon}</span>
-            <span className="theme-toggle__label">{themeMeta.label}</span>
-          </button>
+          <label className="topbar-theme" title={`Darstellung: ${themeMeta.label}`}>
+            <span className="topbar-theme__icon" aria-hidden="true">{themeMeta.icon}</span>
+            <select className="topbar-theme__select" aria-label="Farbschema der Anwendung"
+              value={themeMode} onChange={(event) => {
+                const mode = THEME_MODES.find((value) => value === event.target.value);
+                if (mode) setThemeMode(mode);
+              }}>
+              {THEME_MODES.map((mode) => <option key={mode} value={mode}>{THEME_META[mode].label}</option>)}
+            </select>
+          </label>
         </div>
       </div>
 

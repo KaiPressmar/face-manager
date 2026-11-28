@@ -29,12 +29,14 @@ class ImagePathCleanup:
         is_idle: Callable[[], bool],
         on_change: Callable[[dict], None] | None = None,
         *,
+        before_scan: Callable[[], None] | None = None,
         batch_size: int = 50,
         check_delay_seconds: float = 0.01,
         retry_seconds: float = 15.0,
     ) -> None:
         self._is_idle = is_idle
         self._on_change = on_change
+        self._before_scan = before_scan
         self._batch_size = max(1, int(batch_size))
         self._check_delay_seconds = max(0.0, check_delay_seconds)
         self._retry_seconds = max(0.1, retry_seconds)
@@ -167,6 +169,8 @@ class ImagePathCleanup:
             prune = self.snapshot()["reason"] == "manual"
             if not self._wait_until_idle():
                 return
+            if self._before_scan is not None:
+                self._before_scan()
             last_id = 0
             while not self._stop_event.is_set():
                 if not self._wait_until_idle():
@@ -259,7 +263,8 @@ class ImagePathCleanup:
                 row = conn.execute(
                     """SELECT id, image_id, path, file_size, modified_at_ns,
                               file_device, file_inode, file_changed_at_ns
-                       FROM image_location WHERE path = ?""",
+                       FROM image_location WHERE path = ?
+                         AND id NOT IN (SELECT location_id FROM image_rename_intent)""",
                     (path,),
                 ).fetchone()
                 if row is not None and is_confirmed_missing(path, row["file_device"]):
@@ -279,7 +284,8 @@ class ImagePathCleanup:
                        WHERE id = :id AND image_id = :image_id AND path = :path
                          AND file_size IS :file_size AND modified_at_ns IS :modified_at_ns
                          AND file_device IS :file_device AND file_inode IS :file_inode
-                         AND file_changed_at_ns IS :file_changed_at_ns""",
+                         AND file_changed_at_ns IS :file_changed_at_ns
+                         AND id NOT IN (SELECT location_id FROM image_rename_intent)""",
                     dict(row),
                 )
                 if cur.rowcount:

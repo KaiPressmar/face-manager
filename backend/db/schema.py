@@ -323,6 +323,7 @@ def _create_image_table(cur):
             directory TEXT NOT NULL,
             filename TEXT NOT NULL,
             content_hash TEXT,
+            visual_hash TEXT,
             processed_at TEXT,
             raw_width INTEGER,
             raw_height INTEGER,
@@ -352,6 +353,7 @@ def _create_image_location_table(cur):
             file_device INTEGER,
             file_inode INTEGER,
             file_changed_at_ns INTEGER,
+            content_hash TEXT,
             FOREIGN KEY(image_id) REFERENCES image(id) ON DELETE CASCADE
         )
         """
@@ -578,6 +580,8 @@ def _migrate_image_locations(conn, *, scan_sources: bool):
     for name in ("file_device", "file_inode", "file_changed_at_ns"):
         if name not in location_columns:
             cur.execute(f"ALTER TABLE image_location ADD COLUMN {name} INTEGER")
+    if "content_hash" not in location_columns:
+        cur.execute("ALTER TABLE image_location ADD COLUMN content_hash TEXT")
     cur.execute("DROP INDEX IF EXISTS idx_image_content_hash")
     cur.execute(
         """
@@ -730,6 +734,8 @@ def _create_import_job_table(cur):
             stage_total INTEGER NOT NULL DEFAULT 0,
             current_file TEXT,
             last_error TEXT,
+            issue_report TEXT NOT NULL DEFAULT '{}',
+            retry_paths TEXT NOT NULL DEFAULT '[]',
             queue_order INTEGER NOT NULL
         )
         """
@@ -746,6 +752,8 @@ def _create_import_job_table(cur):
         "current_file": "TEXT",
         "unavailable_images": "INTEGER NOT NULL DEFAULT 0",
         "unreadable_images": "INTEGER NOT NULL DEFAULT 0",
+        "issue_report": "TEXT NOT NULL DEFAULT '{}'",
+        "retry_paths": "TEXT NOT NULL DEFAULT '[]'",
     }
     for column, definition in additions.items():
         if column not in columns:
@@ -954,6 +962,7 @@ def _initialize_schema(conn, *, scan_sources: bool):
         ("raw_width", "INTEGER"),
         ("raw_height", "INTEGER"),
         ("exif_orientation", "INTEGER"),
+        ("visual_hash", "TEXT"),
     ):
         if name not in image_columns:
             cur.execute(f"ALTER TABLE image ADD COLUMN {name} {column_type}")
@@ -969,6 +978,22 @@ def _initialize_schema(conn, *, scan_sources: bool):
 
     _create_album_tables(cur)
     _migrate_image_locations(conn, scan_sources=scan_sources)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS image_rename_intent (
+            location_id INTEGER PRIMARY KEY,
+            image_id INTEGER NOT NULL,
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            staging_path TEXT NOT NULL,
+            file_identity TEXT NOT NULL,
+            source_hash TEXT,
+            proof BLOB NOT NULL
+        )
+        """
+    )
+    if "source_hash" not in {row["name"] for row in cur.execute("PRAGMA table_info(image_rename_intent)")}:
+        cur.execute("ALTER TABLE image_rename_intent ADD COLUMN source_hash TEXT")
     _create_import_job_table(cur)
     _create_app_settings_table(cur)
     _create_recluster_dirty_person_table(cur)
@@ -1010,6 +1035,10 @@ def _initialize_schema(conn, *, scan_sources: bool):
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_location_image_path "
         "ON image_location(image_id, path)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_location_content_hash "
+        "ON image_location(content_hash) WHERE content_hash IS NOT NULL"
     )
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_image_location_created_at "

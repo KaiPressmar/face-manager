@@ -107,6 +107,7 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
     await book.getByRole('button', { name: 'Nächste Seite', exact: true }).click();
     const pages = book.getByRole('group', { name: 'Fotobuchseiten' });
     await pages.getByText(/Seite 2 von /).waitFor();
+    await verifyAndroidExports(page, book);
     const title = book.getByLabel('Titel', { exact: true });
     await title.fill('Geändertes Fotobuch');
     await book.getByText('Vorschau wird aktualisiert …', { exact: true }).waitFor();
@@ -130,6 +131,41 @@ module.exports = async function mapFaceliftFlow(browser, errors, newPage, webBas
   }
 };
 
+async function verifyAndroidExports(page, book) {
+  const staged = [];
+  await page.route('**/api/android/exports', async (route) => {
+    const data = route.request().postDataBuffer();
+    staged.push(data.readUInt32BE(0));
+    return route.fulfill({ json: { token: `mock-token-${staged.length}` } });
+  });
+  await page.route('**/api/android/exports/**', (route) => route.fulfill({ status: 204 }));
+  await page.evaluate(() => {
+    const files = [];
+    const statuses = new Map();
+    window.mapAndroidFiles = files;
+    window.AndroidExport = {
+      requestDatabaseExport() {},
+      requestStagedFileExport(token, filename) {
+        files.push(filename);
+        statuses.set(token, 'PENDING');
+        setTimeout(() => {
+          statuses.set(token, 'SAVED');
+          window.dispatchEvent(new Event('face-manager:android-export'));
+        }, 30);
+      },
+      getStagedFileExportStatus: (token) => statuses.get(token) ?? 'IDLE',
+    };
+  });
+  await book.getByRole('button', { name: 'Diese Seite als PNG speichern', exact: true }).click();
+  await book.getByText('PNG gespeichert.', { exact: true }).waitFor();
+  await book.getByRole('button', { name: 'Alle Seiten als ZIP speichern', exact: true }).click();
+  await book.getByText('ZIP gespeichert.', { exact: true }).waitFor();
+  assert.deepEqual(staged, [0x89504e47, 0x504b0304]);
+  const files = await page.evaluate(() => window.mapAndroidFiles);
+  assert.match(files[0], /-02\.png$/);
+  assert.match(files[1], /\.zip$/);
+}
+
 async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
   const page = await newPage(browser, 320, 760, errors, { isMobile: true, hasTouch: true });
   try {
@@ -151,6 +187,25 @@ async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
     await screenshot(page, 'fotokarte-schmal');
 
     const mapControls = page.getByRole('group', { name: 'Kartensteuerung' });
+    const resetMap = mapControls.getByRole('button', { name: 'Weltkarte anzeigen' });
+    const touch = await page.context().newCDPSession(page);
+    await verifyPinch(page, map, touch);
+    assert.equal(await mapButton.getAttribute('aria-pressed'), 'true', 'Pinching activated a map marker');
+    await resetMap.click();
+
+    await page.getByRole('button', { name: 'Bereich wählen', exact: true }).click();
+    await verifyPinch(page, map, touch);
+    assert.equal(await map.locator('.gps-map__selection').count(), 0, 'Pinching selected a photo area');
+    const zoomedFrame = await map.boundingBox();
+    const contact = (x, y) => [{ id: 3, x: zoomedFrame.x + x * zoomedFrame.width, y: zoomedFrame.y + y * zoomedFrame.height }];
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: contact(.2, .25) });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: contact(.8, .75) });
+    await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await map.locator('.gps-map__selection').waitFor();
+    await page.getByRole('button', { name: 'Auswahl löschen', exact: true }).click();
+    await resetMap.click();
+    await touch.detach();
+
     const pan = mapControls.getByText('Verschieben', { exact: true });
     const east = mapControls.getByRole('button', { name: 'Nach Osten verschieben' });
     assert.equal(await east.count(), 0);
@@ -160,7 +215,7 @@ async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
     await east.press('Enter');
     assert.notEqual(await map.getAttribute('viewBox'), zoomed);
     await pan.click();
-    await mapControls.getByRole('button', { name: 'Weltkarte anzeigen' }).click();
+    await resetMap.click();
 
     await filters.click();
     const period = page.getByLabel('Zeitraum', { exact: true });
@@ -198,10 +253,37 @@ async function checkCompactMap(browser, errors, newPage, webBase, screenshot) {
     await panes.waitFor();
     assert.equal(await photoButton.getAttribute('aria-pressed'), 'true');
     assert.ok(await results.isVisible());
-    console.log('PASS compact map: secondary navigation, custom dates, Escape focus, photo scroll and marker shortcut');
+    await mapButton.click();
+    await page.locator('.gps-map__marker').first().tap();
+    await results.waitFor();
+    await page.route((url) => /^\/api\/images\/\d+\/thumbnail$/.test(url.pathname), (route) =>
+      route.fulfill({ status: 503 }));
+    await page.reload();
+    await photoButton.click();
+    const unavailablePreview = results.locator('.gps-page__photo').filter({ hasText: 'Vorschau nicht verfügbar' }).first();
+    await unavailablePreview.waitFor();
+    assert.ok(await unavailablePreview.isEnabled(), 'An unavailable preview blocked the photo action');
+    console.log('PASS compact map: two-finger zoom, date filters, unavailable previews, photo scroll and marker shortcut');
   } finally {
     await page.close();
   }
+}
+
+async function verifyPinch(page, map, touch) {
+  await map.scrollIntoViewIfNeeded();
+  const frame = await map.boundingBox();
+  const width = Number((await map.getAttribute('viewBox')).split(' ')[2]);
+  const contacts = (halfWidth) => [1, 2].map((id) => ({
+    id, x: frame.x + frame.width * .58 + (id === 1 ? -halfWidth : halfWidth),
+    y: frame.y + frame.height / 2,
+  }));
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: contacts(28) });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: contacts(59) });
+  await page.waitForFunction((originalWidth) => Number(document.querySelector('.gps-map__svg')
+    .getAttribute('viewBox').split(' ')[2]) < originalWidth * .6, width);
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await page.waitForFunction((originalWidth) => Number(document.querySelector('.gps-map__svg')
+    .getAttribute('viewBox').split(' ')[2]) < originalWidth * .6, width);
 }
 
 async function checkMapRefresh(page) {

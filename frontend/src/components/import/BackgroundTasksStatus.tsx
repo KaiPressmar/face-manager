@@ -13,12 +13,15 @@ import {
   fetchImagePathCleanup,
   fetchUpdateDownloadState,
   ImagePathCleanupStatus,
+  ImportIssue,
+  ImportIssueKind,
   ImportJob,
   ImportQueueState,
   pauseAutoClusterTask,
   pauseImportJob,
   pauseThumbnailWarmup,
   processFolder,
+  retryImportIssues,
   resumeAutoClusterTask,
   resumeImportJob,
   resumeThumbnailWarmup,
@@ -30,10 +33,12 @@ import {
 } from "../../utils/api";
 import { subscribeToConnectionStatus, subscribeToTopic } from "../../utils/events";
 import { navigationHash } from "../../utils/navigation";
+import { pathBasename } from "../../utils/pathDisplay";
 import TaskActionIcon from "./TaskActionIcon";
 import { importSkippedImages } from "./importSkippedImages";
+import "./activities.css";
 
-type TaskTone = "active" | "waiting" | "completed" | "failed" | "cancelled";
+type TaskTone = "active" | "waiting" | "completed" | "attention" | "failed" | "cancelled";
 type TaskKind = "import" | "groups" | "previews" | "library";
 type TaskControlState = "queued" | "running" | "paused" | "cancelling" | "terminal";
 
@@ -57,6 +62,9 @@ export type BackgroundTaskView = {
   summary: string;
   error?: string | null;
   retryFolder?: string;
+  retryScope?: "issues" | "folder";
+  issues?: ImportIssue[];
+  issueCount?: number;
   tone: TaskTone;
   progress: number | null;
   etaSeconds: number | null;
@@ -70,6 +78,14 @@ const TERMINAL_IMPORT_STATUSES = new Set<ImportJob["status"]>([
   "failed",
   "cancelled",
 ]);
+
+const issueLabels: Record<ImportIssueKind, string> = {
+  directory_unavailable: "Ordner nicht erreichbar",
+  image_unavailable: "Datei nicht erreichbar",
+  image_unreadable: "Datei kann nicht als Bild gelesen werden",
+  image_changed: "Datei wurde geändert",
+  image_failed: "Datei konnte nicht verarbeitet werden",
+};
 
 function finiteDuration(value: number | null | undefined): number | null {
   return value != null && Number.isFinite(value) ? Math.max(0, value) : null;
@@ -159,7 +175,7 @@ function importProgress(job: ImportJob): number | null {
 
 function importSummary(job: ImportJob): string {
   if (job.status === "queued") return "Der Ordner wartet auf einen freien Platz.";
-  if (job.status === "paused") return "Pausiert und kann jederzeit fortgesetzt werden";
+  if (job.status === "paused") return "Der gespeicherte Stand bleibt erhalten.";
   if (job.status === "cancelling") return "Wird sicher beendet";
   if (job.status === "completed") {
     if (job.total_images === 0) return "Keine JPG-, JPEG- oder PNG-Dateien gefunden.";
@@ -187,12 +203,14 @@ function importSummary(job: ImportJob): string {
 
 function importTask(job: ImportJob): BackgroundTaskView {
   const skipped = importSkippedImages(job);
+  const issueCount = Object.values(job.issue_counts ?? {}).reduce((sum, count) => sum + count, 0);
+  const hasWarnings = Boolean(skipped || job.last_error);
   const status: Record<ImportJob["status"], string> = {
     queued: "Wartet",
     running: "In Arbeit",
     paused: "Pausiert",
     cancelling: "Wird beendet",
-    completed: job.last_error ? "Abgeschlossen mit Hinweisen" : "Abgeschlossen",
+    completed: hasWarnings ? "Abgeschlossen mit Hinweisen" : "Abgeschlossen",
     failed: "Nicht abgeschlossen",
     cancelled: "Abgebrochen",
   };
@@ -201,7 +219,7 @@ function importTask(job: ImportJob): BackgroundTaskView {
     running: "active",
     paused: "waiting",
     cancelling: "waiting",
-    completed: "completed",
+    completed: hasWarnings ? "attention" : "completed",
     failed: "failed",
     cancelled: "cancelled",
   };
@@ -215,10 +233,13 @@ function importTask(job: ImportJob): BackgroundTaskView {
     title: `Bilder aus „${folderName(job.folder_path)}“ hinzufügen`,
     status: status[job.status],
     summary: skipped ? `${importSummary(job)} · ${skipped}` : importSummary(job),
-    error: readableImportError(job.last_error),
-    retryFolder: job.status === "failed" || job.status === "cancelled" || (job.status === "completed" && job.last_error)
+    error: issueCount && job.status !== "failed" ? null : readableImportError(job.last_error),
+    retryFolder: job.status === "failed" || job.status === "cancelled" || (job.status === "completed" && hasWarnings)
       ? job.folder_path
       : undefined,
+    retryScope: job.can_retry_issues ? "issues" : "folder",
+    issues: job.issues,
+    issueCount,
     tone: tone[job.status],
     progress: importProgress(job),
     etaSeconds: finiteDuration(job.eta_seconds),
@@ -649,9 +670,15 @@ const BackgroundTasksStatus: React.FC<{
     setActionError(null);
     setActionNotice(null);
     try {
-      await processFolder(task.retryFolder);
+      if (task.retryScope === "issues") {
+        await retryImportIssues(task.sourceId);
+      } else {
+        await processFolder(task.retryFolder);
+      }
       setRetriedImports((current) => new Set(current).add(task.id));
-      setActionNotice("Ordner erneut zur Prüfung eingereiht.");
+      setActionNotice(task.retryScope === "issues"
+        ? "Ausgelassene Pfade erneut zur Prüfung eingereiht."
+        : "Ordner erneut zur Prüfung eingereiht.");
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Der Ordner konnte nicht erneut eingereiht werden.");
     } finally {
@@ -818,17 +845,28 @@ const BackgroundTasksStatus: React.FC<{
         <section id="activity-center-popover" className="activity-center__popover" aria-label="Aktivitäten">
           <header className="activity-center__header">
             <div>
-              <strong>Aktivitäten</strong>
-              <p>
-                {activeTasks.length > 0
-                  ? "Während dieser Arbeiten kann Face Manager vorübergehend langsamer reagieren."
-                  : sharedCount ? "Hier findest du den Stand der gemeinsamen Ordner." : "Aktuell ist keine Aufgabe offen."}
-              </p>
+              <h2>Aktivitäten</h2>
+              {activeTasks.length > 0 && totalEta !== null && <p>Noch ca. {formatFriendlyDuration(totalEta)}</p>}
+              {!activeTasks.length && !connectionError && (
+                <p>{queue ? "Aktuell ist keine Aufgabe offen." : "Aufgaben werden geladen …"}</p>
+              )}
             </div>
-            {totalEta !== null && activeTasks.length > 0 && (
-              <span>Noch ca. {formatFriendlyDuration(totalEta)}</span>
-            )}
+            <button
+              type="button"
+              className="activity-center__close"
+              aria-label="Aktivitäten schließen"
+              onClick={() => {
+                setIsPinned(false);
+                triggerRef.current?.focus();
+              }}
+            >Schließen</button>
           </header>
+
+          {connectionError && (
+            <p className="activity-center__connection" role="status">Der Aufgabenstatus wird gerade neu verbunden.</p>
+          )}
+          {actionError && <p className="activity-center__connection" role="alert">{actionError}</p>}
+          {actionNotice && <p className="activity-center__connection" role="status">{actionNotice}</p>}
 
           {activeTasks.length > 0 && (
             <div className="activity-center__section">
@@ -924,16 +962,9 @@ const BackgroundTasksStatus: React.FC<{
                   />
                 ))}
               </div>
-            ) : (
-              <p className="activity-center__empty">In dieser Sitzung wurde noch nichts abgeschlossen.</p>
-            )}
+            ) : queue ? <p className="activity-center__empty">Keine abgeschlossenen Aufgaben.</p> : null}
           </div>
 
-          {connectionError && (
-            <p className="activity-center__connection">Der Aufgabenstatus wird gerade neu verbunden.</p>
-          )}
-          {actionError && <p className="activity-center__connection" role="alert">{actionError}</p>}
-          {actionNotice && <p className="activity-center__connection" role="status">{actionNotice}</p>}
         </section>
       )}
     </div>
@@ -970,6 +1001,23 @@ const TaskRow: React.FC<{
       </div>
       <p>{task.summary}</p>
       {task.error && <p className="import-job__error">{task.error}</p>}
+      {!!task.issues?.length && (
+        <details className="activity-task__issues">
+          <summary>Betroffene Pfade ansehen</summary>
+          <ul>
+            {task.issues.map((issue, index) => (
+              <li key={`${issue.kind}:${issue.path}:${index}`}>
+                <strong>{pathBasename(issue.path)}</strong>
+                <span>{issueLabels[issue.kind]}</span>
+                <small>{issue.path}</small>
+              </li>
+            ))}
+          </ul>
+          {(task.issueCount ?? 0) > task.issues.length && (
+            <p>{task.issues.length} von {task.issueCount} betroffenen Pfaden werden angezeigt.</p>
+          )}
+        </details>
+      )}
       {!history && task.progress != null && (
         <div
           className="activity-task__progress"
@@ -982,15 +1030,17 @@ const TaskRow: React.FC<{
           <div style={{ width: `${task.progress}%` }} />
         </div>
       )}
-      <div className="activity-task__meta">
-        <span>{history ? finishedLabel(task.finishedAt) : duration ? `Fertig in ca. ${duration}` : task.kind === "library" ? "" : "Zeit wird berechnet"}</span>
-        {history && duration && <span>Dauer: {duration}</span>}
-      </div>
+      {(history || (duration && task.controlState === "running")) && (
+        <div className="activity-task__meta">
+          <span>{history ? finishedLabel(task.finishedAt) : `Fertig in ca. ${duration}`}</span>
+          {history && duration && <span>Dauer: {duration}</span>}
+        </div>
+      )}
       <div className="activity-task__actions">
         {task.details && <a href={task.details.href} onClick={onOpenDetails}>{task.details.label}</a>}
         {history && onRetry && (
           <button type="button" disabled={busy} onClick={onRetry}>
-            Ordner erneut prüfen
+            {task.retryScope === "issues" ? "Ausgelassene Pfade erneut prüfen" : "Ordner erneut prüfen"}
           </button>
         )}
         {!history && task.controlState === "paused" && onResume && (

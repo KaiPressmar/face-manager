@@ -451,7 +451,12 @@ function albumPageSvg(size: AlbumDimensions, layout: Layout, title: string, cont
     <title>${xml(title.trim() || "Meine Fotokarte")}</title>${content}</svg>`;
 }
 
-type Detail = typeof import("./world-detail.json");
+interface Detail {
+  land: typeof import("./world-detail-land.json");
+  borders: typeof import("./world-detail-borders.json");
+  lakes: typeof import("./world-detail-lakes.json");
+  rivers: typeof import("./world-detail-rivers.json");
+}
 
 function baseMap(detail: Detail, frame: Frame, bounds: MapBounds, style: MapStyle, raster: string, palette: Palette) {
   const scale = 360 / (bounds.east - bounds.west);
@@ -740,11 +745,15 @@ export async function buildMapAlbumArtwork(input: MapAlbumArtworkInput): Promise
   };
   const stops = cropJourney ? allStops.filter(withinSubject) : allStops;
   const points = adjusted ? input.points?.filter(withinSubject) : input.points;
-  const [{ default: detail }, raster] = await Promise.all([
-    import("./world-detail.json"),
+  const [{ default: land }, { default: borders }, { default: lakes }, { default: rivers }, raster] = await Promise.all([
+    import("./world-detail-land.json"),
+    import("./world-detail-borders.json"),
+    import("./world-detail-lakes.json"),
+    import("./world-detail-rivers.json"),
     input.style === "satellite" ? readMapRaster("satellite").catch(() => "")
       : input.style === "landscape" ? readMapRaster("landscape") : Promise.resolve(""),
   ]);
+  const detail: Detail = { land, borders, lakes, rivers };
   const satelliteFallback = input.style === "satellite" && !raster;
   const style = satelliteFallback ? "standard" : input.style;
   const mapPalette = style === "satellite" ? { ...palette, labelInk: "#f4f0de", labelHalo: "#17211b" } : palette;
@@ -868,13 +877,13 @@ function densityChunk(dpi: AlbumDpi) {
 export async function setMapAlbumPngDensity(png: Blob, dpi: AlbumDpi = 300): Promise<Blob> {
   const data = await png.arrayBuffer();
   const view = new DataView(data);
-  const chunks: BlobPart[] = [data.slice(0, 8)];
+  const chunks: BlobPart[] = [png.slice(0, 8)];
   for (let offset = 8; offset + 12 <= data.byteLength;) {
     const length = view.getUint32(offset);
     const type = view.getUint32(offset + 4);
     const end = offset + 12 + length;
     if (end > data.byteLength) throw new Error("Die PNG-Datei ist unvollständig.");
-    if (type !== 0x70485973) chunks.push(data.slice(offset, end)); // pHYs
+    if (type !== 0x70485973) chunks.push(png.slice(offset, end)); // pHYs
     if (type === 0x49484452) chunks.push(densityChunk(dpi)); // IHDR
     offset = end;
   }
@@ -886,6 +895,7 @@ export async function mapAlbumPageToPng(page: MapAlbumPage): Promise<Blob> {
   const canvas = document.createElement("canvas");
   canvas.width = page.width;
   canvas.height = page.height;
+  let png: Blob;
   try {
     const image = new Image();
     image.src = url;
@@ -893,14 +903,14 @@ export async function mapAlbumPageToPng(page: MapAlbumPage): Promise<Blob> {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Das Bild konnte nicht gerendert werden.");
     context.drawImage(image, 0, 0);
-    const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
+    png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => {
       if (blob) resolve(blob);
       else reject(new Error("Die PNG-Datei konnte nicht erstellt werden."));
     }, "image/png"));
-    return await setMapAlbumPngDensity(png, page.dpi);
   } finally {
     URL.revokeObjectURL(url);
     canvas.width = 0;
     canvas.height = 0;
   }
+  return setMapAlbumPngDensity(png, page.dpi);
 }

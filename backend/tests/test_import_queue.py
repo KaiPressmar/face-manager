@@ -554,6 +554,93 @@ class ImportQueueTest(unittest.TestCase):
             ["/photos/interrupted", "/photos/queued"],
         )
 
+    def test_shutdown_preserves_running_and_paused_jobs(self):
+        running = self.queue.enqueue("/photos/running")
+        self.wait_for(lambda: self.processor.started == ["/photos/running"])
+        paused = self.queue.enqueue("/photos/paused")
+        self.queue.pause(paused["id"])
+
+        self.queue.stop()
+
+        jobs, pending = self.repository.load()
+        self.assertEqual([(job.id, job.status) for job in jobs], [
+            (running["id"], "queued"), (paused["id"], "paused"),
+        ])
+        self.assertEqual(pending, [running["id"]])
+        self.assertIsNone(jobs[0].finished_at)
+
+    def test_shutdown_preserves_an_actively_paused_job(self):
+        job = self.queue.enqueue("/photos/paused")
+        self.wait_for(lambda: self.processor.started == ["/photos/paused"])
+        self.assertEqual(self.queue.pause(job["id"])["status"], "paused")
+
+        self.queue.stop()
+
+        jobs, pending = self.repository.load()
+        self.assertEqual([(job.id, job.status) for job in jobs], [(job["id"], "paused")])
+        self.assertEqual(pending, [])
+
+    def test_interrupted_explicit_cancellation_remains_cancelled(self):
+        self.repository.insert(ImportJob(id="cancelled", folder_path="/photos/cancelled", status="cancelling"))
+
+        jobs, pending = self.repository.load()
+
+        self.assertEqual(jobs[0].status, "cancelled")
+        self.assertIsNotNone(jobs[0].finished_at)
+        self.assertEqual(pending, [])
+
+    def test_restored_history_replaces_memory_and_pauses_work(self):
+        self.processor.release.set()
+        old = self.queue.enqueue("/photos/old")
+        self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "completed")
+        self.repository.delete(old["id"])
+        self.repository.insert(ImportJob(id="saved", folder_path="/photos/saved", status="completed"))
+        self.repository.insert(ImportJob(id="restored", folder_path="/photos/restored", status="running"))
+
+        self.queue.reload_from_library()
+
+        snapshot = self.queue.snapshot()
+        self.assertEqual([(job["id"], job["status"]) for job in snapshot["jobs"]], [
+            ("saved", "completed"), ("restored", "paused"),
+        ])
+        self.assertEqual(snapshot["queued_count"], 0)
+        self.assertEqual(self.processor.started, ["/photos/old"])
+        self.assertEqual(self.queue.resume("restored")["status"], "queued")
+        self.wait_for(lambda: self.processor.started == ["/photos/old", "/photos/restored"])
+
+    def test_completed_skips_survive_restart_and_can_be_retried_selectively(self):
+        self.queue.stop()
+        self.queue = ImportQueue(self.processor, repository=self.repository, auto_start=False)
+        issue = {"path": "/photos/partial/damaged.jpg", "kind": "image_unreadable"}
+        self.repository.insert(ImportJob(
+            id="partial", folder_path="/photos/partial", status="completed",
+            issues=[issue], issue_counts={"image_unreadable": 1},
+        ))
+        self.queue.reload_from_library()
+
+        self.assertTrue(self.queue.snapshot()["jobs"][0]["can_retry_issues"])
+        retry = self.queue.retry_issues("partial")
+
+        jobs, pending = self.repository.load()
+        self.assertEqual(jobs[0].issues, [issue])
+        self.assertEqual(jobs[1].retry_paths, [issue])
+        self.assertNotIn("retry_paths", retry)
+        self.assertEqual(pending, [retry["id"]])
+
+    def test_issue_count_is_durable_when_visible_paths_are_bounded(self):
+        def report_skips(_folder, update, _cancel):
+            for index in range(46):
+                update({"issue": {"path": f"/photos/partial/{index}", "kind": "directory_unavailable"}})
+        with patch.object(self.processor, "process", side_effect=report_skips):
+            job = self.queue.enqueue("/photos/partial")
+            self.wait_for(lambda: self.queue.snapshot()["jobs"][0]["status"] == "completed")
+
+        stored, _ = self.repository.load()
+        self.assertEqual(stored[0].issue_counts, {"directory_unavailable": 46})
+        self.assertEqual(len(stored[0].issues), 40)
+        with self.assertRaises(ValueError):
+            self.queue.retry_issues(job["id"])
+
     def test_repository_migrates_existing_import_job_table(self):
         self.queue.stop()
         legacy_path = Path(self.temp_dir.name) / "legacy.sqlite"
@@ -598,5 +685,7 @@ class ImportQueueTest(unittest.TestCase):
                 "stage_current",
                 "stage_total",
                 "current_file",
+                "issue_report",
+                "retry_paths",
             }.issubset(columns)
         )

@@ -129,6 +129,26 @@ class ImportApiTest(unittest.TestCase):
         self.assertEqual(app.api_delete_import_history_entry("job-1")["status"], "removed")
         self.assertEqual(app.api_delete_import_history(), {"removed_count": 3})
 
+    @patch.object(app, "import_queue")
+    def test_retry_only_uses_recorded_job_id(self, import_queue):
+        import_queue.retry_issues.return_value = {
+            "id": "new-job", "status": "queued", "folder_path": "/photos",
+        }
+
+        result = app.api_retry_import_issues(self.make_request(), "old-job")
+
+        import_queue.retry_issues.assert_called_once_with("old-job")
+        self.assertEqual(result["id"], "new-job")
+
+    @patch.object(app, "import_queue")
+    def test_retry_rejects_ineligible_job(self, import_queue):
+        import_queue.retry_issues.side_effect = ValueError("Vollständiger Ordnerimport nötig")
+
+        with self.assertRaises(HTTPException) as raised:
+            app.api_retry_import_issues(self.make_request(), "old-job")
+
+        self.assertEqual(raised.exception.status_code, 409)
+
     @patch.object(app, "event_hub")
     @patch.object(app, "_publish_background_cluster_progress_throttled")
     @patch.object(app, "import_queue")

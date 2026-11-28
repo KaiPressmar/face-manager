@@ -7,6 +7,10 @@ on:
     paths:
       - '.github/workflows/windows-ubuntu-smb-proof.yml'
       - 'scripts/test-wsl-smb.ps1'
+      - 'backend/db/schema.py'
+      - 'backend/services/photo_identity.py'
+      - 'backend/services/pipeline.py'
+      - 'backend/services/storage.py'
       - 'backend/services/shared_sync_job_announcements.py'
       - 'backend/services/shared_sync_jobs.py'
       - 'backend/services/shared_sync_transport.py'

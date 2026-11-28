@@ -17,7 +17,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    host: true,
+    host: process.env.FACE_MANAGER_DEV_HOST || "127.0.0.1",
     proxy: {
       "/api": {
         target: process.env.FACE_MANAGER_VITE_API_TARGET || "http://127.0.0.1:8000",

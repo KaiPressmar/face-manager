@@ -202,9 +202,9 @@ def _source_identity(stat):
 
 def _legacy_capture(row, candidates, stop_event: threading.Event) -> CaptureMetadata:
     """Read a new clock only from verified bytes or a registered file identity."""
-    content_hash = row["content_hash"]
     unavailable = False
-    for path, recorded_identity in candidates:
+    for path, recorded_identity, source_hash in candidates:
+        content_hash = source_hash or row["content_hash"]
         if stop_event.is_set():
             break
         if not content_hash and (recorded_identity is None or None in recorded_identity):
@@ -343,20 +343,22 @@ class GeoBackfill:
                 break
             # Resolve locations and read EXIF before taking the write lock.
             locations = conn.execute(
-                """SELECT path, file_device, file_inode, file_size, modified_at_ns, file_changed_at_ns
+                """SELECT path, file_device, file_inode, file_size, modified_at_ns, file_changed_at_ns, content_hash
                    FROM image_location WHERE image_id = ? ORDER BY id""",
                 (row["id"],),
             ).fetchall()
             candidates = [
-                (location["path"], tuple(location[column] for column in _LOCATION_IDENTITY_COLUMNS))
+                (location["path"], tuple(location[column] for column in _LOCATION_IDENTITY_COLUMNS),
+                 location["content_hash"])
                 for location in locations
             ]
-            if all(path != row["path"] for path, _ in candidates):
-                candidates.append((row["path"], None))
-            if row["metadata_scanned_at"] is not None or (row["latitude"] is not None and row["longitude"] is not None):
+            if all(path != row["path"] for path, _, _ in candidates):
+                candidates.append((row["path"], None, None))
+            if (row["content_hash"] or row["metadata_scanned_at"] is not None
+                    or (row["latitude"] is not None and row["longitude"] is not None)):
                 metadata = _legacy_capture(row, candidates, self._stop)
             else:
-                available = next((path for path, _ in candidates if os.path.isfile(filesystem_path(path))), None)
+                available = next((path for path, _, _ in candidates if os.path.isfile(filesystem_path(path))), None)
                 metadata = (
                     _with_timing(extract_image_metadata(available, include_timing=True))
                     if available else CaptureMetadata(None, None, None, None, "unavailable")

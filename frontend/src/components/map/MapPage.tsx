@@ -7,7 +7,7 @@ import WorldMap, { boundsForView, countryLabels, normalizedView, type MapBounds,
 import MapGallery, { type MapGalleryOpening } from "./MapGallery";
 import MapPhotoTile from "./MapPhotoTile";
 import MapAlbumDialog, { type MapAlbumOpening } from "./MapAlbumDialog";
-import MapJourney from "./MapJourney";
+import MapJourney, { journeyStopLabel } from "./MapJourney";
 import MapTrips from "./MapTrips";
 import MapObservedPlaces from "./MapObservedPlaces";
 import AlbumPickerDialog from "../shared/AlbumPickerDialog";
@@ -570,6 +570,9 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
   const dateLabel = describeMapDates(queryFrom, queryTo);
   const photoScope = journeyStop ? `Stopp ${journeyStop.number}` : regionName || (region ? "Gewählter Bereich" : "Sichtbarer Kartenausschnitt");
   const scopeLabels = [photoScope, dateLabel, selectedAlbum?.name, !isJourney && trip?.title].filter(Boolean);
+  const resultsContext = journeyStop
+    ? [journeyStopLabel(journeyStop), regionName, selectedAlbum?.name].filter(Boolean).join(" · ")
+    : regionName || dateLabel || selectedAlbum ? scopeLabels.join(" · ") : "";
   const hasFilters = !!(region || queryFrom || queryTo || dateDraft || albumId || trip);
   const onlyDates = Boolean(dateLabel && !region && view.zoom === INITIAL_VIEW.zoom && !albumId);
   const selectRegion = (bounds: MapBounds | null, name = "") => {
@@ -873,11 +876,6 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           </div>
         </div>
         {pointResult?.error && <div className="gps-page__error" role="alert">{pointResult.error} <button type="button" onClick={() => { setPointRefresh((value) => value + 1); }}>Erneut versuchen</button></div>}
-        <div className="gps-page__online-details">
-          <label><input type="checkbox" checked={onlineDetails} aria-describedby="gps-online-details-note"
-            onChange={(event) => setOnlineDetails(event.target.checked)} />Kartendetails online</label>
-          <span id="gps-online-details-note">Fragt beim Zoomen den sichtbaren Bereich bei Kartenanbietern ab.</span>
-        </div>
         <WorldMap
           view={view}
           onViewChange={setView}
@@ -900,10 +898,16 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
           selectionMode={selectMode}
         />
         <div className="gps-page__map-foot">
-          <span>{selectMode ? "Einen Bereich mit Maus oder Finger aufziehen" : isJourney ? "Stopp oder Gruppe auf der Karte wählen" : "Karte ziehen · +/− zum Zoomen · Ort anklicken für Fotos"}</span>
+          <span>{selectMode ? "Bereich mit Maus oder einem Finger aufziehen" : isJourney ? "Stopp oder Gruppe auf der Karte wählen" : "Ort auf der Karte wählen, um Fotos zu sehen"}</span>
+          <span className="gps-page__touch-hint">Mit zwei Fingern zoomen</span>
           {mapStyle === "satellite" ? <a className="gps-map__credit" href="https://science.nasa.gov/earth/earth-observatory/blue-marble-next-generation/" target="_blank" rel="noreferrer">NASA Earth Observatory · Natural Earth</a>
             : <a className="gps-map__credit" href="https://www.naturalearthdata.com/" target="_blank" rel="noreferrer">Kartendaten: Natural Earth</a>}
           {region && <span>Fester Bereichsfilter</span>}
+        </div>
+        <div className="gps-page__online-details">
+          <label><input type="checkbox" checked={onlineDetails} aria-describedby="gps-online-details-note"
+            onChange={(event) => setOnlineDetails(event.target.checked)} />Kartendetails online</label>
+          <span id="gps-online-details-note">Fragt beim Zoomen den sichtbaren Bereich bei Kartenanbietern ab.</span>
         </div>
         <div className="gps-page__map-settings">
           <details className="gps-map-discovery">
@@ -950,7 +954,7 @@ const MapPage: React.FC<Props> = ({ active, openAlbumId, onAlbumChange, onNaviga
         </>}
         {(!isJourney || journeyStop) && <>
         <div className="gps-page__results-head"><div><h2 ref={journeyStop ? stopPhotosRef : undefined} tabIndex={journeyStop ? -1 : undefined}>{journeyStop ? `Fotos von Stopp ${journeyStop.number}` : region ? "Fotos im gewählten Bereich" : "Fotos im Kartenausschnitt"}</h2></div><span role="status">{imagesLoading ? "Fotos werden geladen …" : imageResult?.data ? countWithLabel(imageTotal, "Foto", "Fotos") : "–"}</span></div>
-        {(regionName || dateLabel || selectedAlbum) && <p className="gps-page__results-hint">{scopeLabels.join(" · ")}</p>}
+        {resultsContext && <p className="gps-page__results-hint">{resultsContext}</p>}
         {journeyStop && <div className="gps-results-actions">
           <button type="button" onClick={() => {
             setJourneyStopId(undefined);

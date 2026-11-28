@@ -164,7 +164,8 @@ class FaceThumbnailTest(unittest.TestCase):
                 CREATE TABLE image_location (
                     id INTEGER PRIMARY KEY,
                     image_id INTEGER NOT NULL,
-                    path TEXT NOT NULL
+                    path TEXT NOT NULL,
+                    content_hash TEXT
                 )
                 """
             )
@@ -214,7 +215,7 @@ class FaceThumbnailTest(unittest.TestCase):
                 conn.executescript(
                     """
                     CREATE TABLE image (id INTEGER PRIMARY KEY, content_hash TEXT);
-                    CREATE TABLE image_location (image_id INTEGER, path TEXT);
+                    CREATE TABLE image_location (image_id INTEGER, path TEXT, content_hash TEXT);
                     CREATE TABLE face (id INTEGER PRIMARY KEY, image_id INTEGER,
                         bbox_x REAL, bbox_y REAL, bbox_w REAL, bbox_h REAL);
                     INSERT INTO face VALUES (1, 10, 1, 2, 30, 40), (2, 10, 5, 6, 30, 40);
@@ -222,7 +223,7 @@ class FaceThumbnailTest(unittest.TestCase):
                 )
                 conn.execute("INSERT INTO image VALUES (10, ?)", (content_hash,))
                 conn.executemany(
-                    "INSERT INTO image_location VALUES (10, ?)",
+                    "INSERT INTO image_location(image_id, path) VALUES (10, ?)",
                     [(str(root / "a-missing.png"),), (str(stale),), (str(source),)],
                 )
 

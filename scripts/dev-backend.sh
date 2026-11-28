@@ -22,5 +22,5 @@ exec "${PYTHON}" -m uvicorn backend.app:app \
   --reload-exclude "${PROJECT_ROOT}/backend/.venv" \
   --reload-exclude "${PROJECT_ROOT}/backend/tests" \
   --reload-exclude "${PROJECT_ROOT}/backend/.pytest_cache" \
-  --host 0.0.0.0 \
+  --host "${FACE_MANAGER_DEV_HOST:-127.0.0.1}" \
   --port 8000

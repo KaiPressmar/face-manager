@@ -118,7 +118,8 @@ def _choose_boxes(detections, image_size, exclusions):
 
 
 def suggest_face_boxes(
-    paths: Iterable[str], content_hash: str | None, existing_raw_boxes: Iterable[FaceBox], get_model: Callable,
+    paths: Iterable[str | tuple[str, str]], content_hash: str | None,
+    existing_raw_boxes: Iterable[FaceBox], get_model: Callable,
 ) -> list[dict[str, float]]:
     """Return normalized upright rectangles. Sources and model state stay read-only."""
     if os.environ.get("FACE_MANAGER_PLATFORM") == "android":
@@ -127,11 +128,12 @@ def suggest_face_boxes(
         raise FaceBoxSuggestionBusy("Die Gesichtssuche ist gerade ausgelastet. Bitte versuche es erneut.")
     deadline = monotonic() + _SOURCE_DEADLINE
     try:
-        for path in paths:
+        for candidate in paths:
+            path, expected_hash = candidate if isinstance(candidate, tuple) else (candidate, content_hash)
             if monotonic() >= deadline:
                 raise FaceBoxSuggestionBusy("Die Fotoquelle antwortet zu langsam. Bitte versuche es erneut.")
             try:
-                pixels, geometry = _read_photo(path, content_hash)
+                pixels, geometry = _read_photo(path, expected_hash)
                 break
             except (OSError, ValueError, Image.DecompressionBombError):
                 continue

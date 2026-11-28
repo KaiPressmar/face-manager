@@ -20,7 +20,7 @@
         "--reload-exclude",
         "${workspaceFolder}/backend/.pytest_cache",
         "--host",
-        "0.0.0.0",
+        "127.0.0.1",
         "--port",
         "8000"
       ],
@@ -38,7 +38,7 @@
       "name": "Frontend: Chrome",
       "type": "chrome",
       "request": "launch",
-      "url": "http://localhost:5173",
+      "url": "http://127.0.0.1:5173",
       "webRoot": "${workspaceFolder}/frontend/src",
       "preLaunchTask": "Frontend: Dev server"
     }

@@ -4,6 +4,7 @@
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -50,9 +51,10 @@ def seed_journeys(conn, root: Path, now: str) -> int:
                     image.save(path, "JPEG")
                 cursor = conn.execute(
                     """INSERT INTO image(path, directory, filename, latitude, longitude, captured_at, captured_at_utc,
-                       capture_time_source, metadata_scanned_at, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       capture_time_source, metadata_scanned_at, processed_at, content_hash)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (str(path), str(root), path.name, *coordinates, captured.replace(tzinfo=None).isoformat(),
-                     captured.isoformat(), time_source, now, now),
+                     captured.isoformat(), time_source, now, now, sha256(path.read_bytes()).hexdigest()),
                 )
                 info = path.stat()
                 conn.execute(
@@ -103,8 +105,9 @@ def main() -> None:
         captured_at = f"{year}-{(index % 12) + 1:02d}-{((index // 6) % 27) + 1:02d}T12:00:00"
         cursor = conn.execute(
             """INSERT INTO image(path, directory, filename, latitude, longitude,
-               captured_at, metadata_scanned_at, processed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (str(path), str(root), filename, latitude, longitude, captured_at, now, now),
+               captured_at, metadata_scanned_at, processed_at, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (str(path), str(root), filename, latitude, longitude, captured_at, now, now,
+             sha256(path.read_bytes()).hexdigest()),
         )
         image_id = cursor.lastrowid
         conn.execute(

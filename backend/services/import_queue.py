@@ -1,5 +1,6 @@
 """Adaptive import queue with request-level cancellation and staged ETA."""
 
+import json
 import logging
 import math
 import os
@@ -16,11 +17,35 @@ from typing import Callable, Optional, Protocol
 from ..models.face_model import get_compute_mode
 from ..db.schema import get_conn
 from ..error_logging import configure_error_logging
-from .pipeline import ImportCancelled, ImportProcessor, configure_processing_slots
+from .pipeline import IMPORT_ISSUE_MESSAGES, ImportCancelled, ImportProcessor, configure_processing_slots
 from .task_control import BackgroundTaskControl
 
 configure_error_logging()
 logger = logging.getLogger("face_manager.import_queue")
+MAX_IMPORT_ISSUES = 40
+
+
+def _issue_entries(value) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {"path": item["path"], "kind": item["kind"]}
+        for item in value[:MAX_IMPORT_ISSUES]
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and item["path"]
+        and "\0" not in item["path"]
+        and isinstance(item.get("kind"), str)
+        and item["kind"] in IMPORT_ISSUE_MESSAGES
+    ]
+
+
+def _load_json(value, default):
+    try:
+        result = json.loads(value)
+    except (TypeError, ValueError):
+        return default
+    return result if isinstance(result, type(default)) else default
 
 
 def _utc_now() -> str:
@@ -229,6 +254,26 @@ class ImportJob:
     stage_total: int = 0
     current_file: Optional[str] = None
     last_error: Optional[str] = None
+    issue_counts: dict[str, int] = field(default_factory=dict)
+    issues: list[dict[str, str]] = field(default_factory=list)
+    retry_paths: list[dict[str, str]] = field(default_factory=list, repr=False)
+
+    def can_retry_issues(self) -> bool:
+        return (
+            self.status == "completed"
+            and bool(self.issues)
+            and len(self.issues) == sum(self.issue_counts.values())
+        )
+
+    def reset_progress(self) -> None:
+        self.started_at = self.finished_at = self.stage_started_at = None
+        self.stage = self.current_file = self.last_error = None
+        self.total_images = self.hashed_images = self.processed_images = 0
+        self.unavailable_images = self.unreadable_images = 0
+        self.total_faces = self.processed_faces = 0
+        self.stage_current = self.stage_total = 0
+        self.issue_counts.clear()
+        self.issues.clear()
 
     def to_dict(
         self,
@@ -244,6 +289,8 @@ class ImportJob:
             JSON-compatible job representation.
         """
         result = asdict(self)
+        result.pop("retry_paths")
+        result["can_retry_issues"] = self.can_retry_issues()
         result["queue_position"] = queue_position
         result["elapsed_seconds"] = _duration_seconds(self.started_at, self.finished_at)
         result["eta_seconds"] = (
@@ -292,8 +339,6 @@ class ImportJobRepository:
         connection_factory: Callable returning a configured SQLite connection.
     """
 
-    RECOVERABLE_STATUSES = {"queued", "running", "cancelling"}
-
     def __init__(self, connection_factory: Callable = get_conn):
         """Initialize the repository and ensure its table exists.
 
@@ -303,12 +348,11 @@ class ImportJobRepository:
         self._connection_factory = connection_factory
         self._ensure_schema()
 
-    def load(self) -> tuple[list[ImportJob], list[str]]:
+    def load(self, *, pause_pending: bool = False) -> tuple[list[ImportJob], list[str]]:
         """Load visible jobs and recover interrupted work.
 
-        Jobs left in ``running`` or ``cancelling`` state by a process exit are
-        changed back to ``queued``. Their progress counters are reset because
-        the processor reconstructs progress by rescanning committed images.
+        Interrupted work resumes by rescanning committed images. An explicit
+        cancellation survives a restart. Restored work requires a local resume.
 
         Returns:
             Ordered jobs and the ordered IDs that should resume processing.
@@ -326,24 +370,16 @@ class ImportJobRepository:
             pending_ids = []
             for row in rows:
                 job = self._row_to_job(row)
-                if job.status in self.RECOVERABLE_STATUSES:
-                    job.status = "queued"
-                    job.started_at = None
-                    job.finished_at = None
-                    job.total_images = 0
-                    job.hashed_images = 0
-                    job.processed_images = 0
-                    job.unavailable_images = 0
-                    job.unreadable_images = 0
-                    job.total_faces = 0
-                    job.processed_faces = 0
-                    job.stage = None
-                    job.stage_started_at = None
-                    job.stage_current = 0
-                    job.stage_total = 0
-                    job.current_file = None
-                    job.last_error = None
+                if job.status in {"running", "queued"}:
+                    job.status = "paused" if pause_pending else "queued"
+                    job.reset_progress()
                     self._save(connection, job, row["queue_order"])
+                elif job.status == "cancelling":
+                    job.status = "cancelled"
+                    job.current_file = None
+                    job.finished_at = job.finished_at or _utc_now()
+                    self._save(connection, job, row["queue_order"])
+                if job.status == "queued":
                     pending_ids.append(job.id)
                 jobs.append(job)
             connection.commit()
@@ -393,7 +429,8 @@ class ImportJobRepository:
                     stage_current = ?,
                     stage_total = ?,
                     current_file = ?,
-                    last_error = ?
+                    last_error = ?,
+                    issue_report = ?
                 WHERE id = ?
                 """,
                 (
@@ -413,6 +450,7 @@ class ImportJobRepository:
                     job.stage_total,
                     job.current_file,
                     job.last_error,
+                    self._serialize_issues(job),
                     job.id,
                 ),
             )
@@ -515,6 +553,8 @@ class ImportJobRepository:
                     stage_total INTEGER NOT NULL DEFAULT 0,
                     current_file TEXT,
                     last_error TEXT,
+                    issue_report TEXT NOT NULL DEFAULT '{}',
+                    retry_paths TEXT NOT NULL DEFAULT '[]',
                     queue_order INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_import_job_queue_order
@@ -536,6 +576,8 @@ class ImportJobRepository:
                 "hashed_images": "INTEGER NOT NULL DEFAULT 0",
                 "unavailable_images": "INTEGER NOT NULL DEFAULT 0",
                 "unreadable_images": "INTEGER NOT NULL DEFAULT 0",
+                "issue_report": "TEXT NOT NULL DEFAULT '{}'",
+                "retry_paths": "TEXT NOT NULL DEFAULT '[]'",
             }
             for column, definition in additions.items():
                 if column not in columns:
@@ -562,9 +604,9 @@ class ImportJobRepository:
                 total_images, processed_images, total_faces, processed_faces,
                 hashed_images, unavailable_images, unreadable_images,
                 stage, stage_started_at, stage_current, stage_total,
-                current_file, last_error, queue_order
+                current_file, last_error, issue_report, retry_paths, queue_order
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 folder_path = excluded.folder_path,
                 status = excluded.status,
@@ -584,6 +626,8 @@ class ImportJobRepository:
                 stage_total = excluded.stage_total,
                 current_file = excluded.current_file,
                 last_error = excluded.last_error,
+                issue_report = excluded.issue_report,
+                retry_paths = excluded.retry_paths,
                 queue_order = excluded.queue_order
             """,
             (
@@ -606,9 +650,15 @@ class ImportJobRepository:
                 job.stage_total,
                 job.current_file,
                 job.last_error,
+                ImportJobRepository._serialize_issues(job),
+                json.dumps(job.retry_paths, ensure_ascii=True),
                 queue_order,
             ),
         )
+
+    @staticmethod
+    def _serialize_issues(job: ImportJob) -> str:
+        return json.dumps({"counts": job.issue_counts, "entries": job.issues}, ensure_ascii=True)
 
     @staticmethod
     def _row_to_job(row) -> ImportJob:
@@ -620,6 +670,8 @@ class ImportJobRepository:
         Returns:
             Hydrated import job.
         """
+        report = _load_json(row["issue_report"], {})
+        counts = report.get("counts")
         return ImportJob(
             id=row["id"],
             folder_path=row["folder_path"],
@@ -640,6 +692,13 @@ class ImportJobRepository:
             stage_total=row["stage_total"],
             current_file=row["current_file"],
             last_error=row["last_error"],
+            issue_counts={
+                kind: value
+                for kind, value in counts.items()
+                if kind in IMPORT_ISSUE_MESSAGES and type(value) is int and value > 0
+            } if isinstance(counts, dict) else {},
+            issues=_issue_entries(report.get("entries")),
+            retry_paths=_issue_entries(_load_json(row["retry_paths"], [])),
         )
 
 
@@ -742,12 +801,7 @@ class ImportQueue:
         self._stable_etas: dict[tuple[str, str], StableEta] = {}
         self._avg_images_per_completed_job: Optional[float] = None
         self._stopping = False
-        jobs, pending_ids = self._repository.load()
-        self._jobs.update((job.id, job) for job in jobs)
-        self._pending.extend(pending_ids)
-        for job in jobs:
-            if job.status not in self.TERMINAL_STATUSES:
-                self._cancel_events[job.id] = BackgroundTaskControl()
+        self._load_jobs()
         if auto_start:
             self.start()
 
@@ -767,6 +821,26 @@ class ImportQueue:
                 daemon=True,
             )
             self._worker.start()
+
+    def _load_jobs(self, *, pause_pending: bool = False) -> None:
+        jobs, pending_ids = self._repository.load(pause_pending=pause_pending)
+        self._jobs = OrderedDict((job.id, job) for job in jobs)
+        self._pending = deque(pending_ids)
+        self._cancel_events = {
+            job.id: BackgroundTaskControl() for job in jobs if job.status not in self.TERMINAL_STATUSES
+        }
+
+    def reload_from_library(self) -> None:
+        """Reload restored history while leaving pending imports paused."""
+        with self._condition:
+            if self._active_job_ids or self._pending:
+                raise RuntimeError("Aktive Importe müssen vor der Wiederherstellung beendet sein.")
+            self._load_jobs(pause_pending=True)
+            self._last_progress_persisted.clear()
+            self._live_stage_timing.clear()
+            self._stable_etas.clear()
+            self._stage_stats = {stage: StageTimingStats() for stage in self.STAGE_ORDER}
+            self._avg_images_per_completed_job = None
 
     def stop(self, timeout: float = 2.0) -> None:
         """Request dispatcher shutdown without cancelling active jobs.
@@ -800,7 +874,7 @@ class ImportQueue:
         except Exception:  # pragma: no cover - subscriber must never break work
             logger.exception("Import queue change notification failed")
 
-    def enqueue(self, folder_path: str) -> dict:
+    def enqueue(self, folder_path: str, *, retry_paths: list[dict[str, str]] | None = None) -> dict:
         """Append a folder import request.
 
         Args:
@@ -813,6 +887,7 @@ class ImportQueue:
             id=uuid.uuid4().hex,
             folder_path=folder_path,
             created_at=_utc_now(),
+            retry_paths=retry_paths or [],
         )
         with self._condition:
             self._repository.insert(job)
@@ -823,6 +898,21 @@ class ImportQueue:
             self._condition.notify()
         self._notify_change()
         return job.to_dict(position)
+
+    def retry_issues(self, job_id: str) -> dict:
+        """Requeue only the known skipped files and subfolders of a finished import."""
+        with self._condition:
+            job = self._jobs.get(job_id)
+            if job is None or not job.can_retry_issues():
+                raise ValueError("Starte den Bilderordner erneut, um alle ausgelassenen Pfade zu prüfen.")
+            folder_path = job.folder_path
+            if any(
+                other.folder_path == folder_path and other.status not in self.TERMINAL_STATUSES
+                for other in self._jobs.values()
+            ):
+                raise ValueError("Für diesen Bilderordner ist bereits eine Aufgabe offen.")
+            retry_paths = list(job.issues)
+        return self.enqueue(folder_path, retry_paths=retry_paths)
 
     def snapshot(self) -> dict:
         """Return current, queued, and retained terminal jobs.
@@ -1358,8 +1448,9 @@ class ImportQueue:
                 self._pending.insert(insert_at, job_id)
             self._repository.update(job)
             self._condition.notify_all()
+            next_status = job.status
         self._notify_change()
-        return {"id": job_id, "status": job.status}
+        return {"id": job_id, "status": next_status}
 
     def cancel(self, job_id: str) -> Optional[dict]:
         """Cancel an import while retaining a terminal history entry."""
@@ -1426,6 +1517,7 @@ class ImportQueue:
 
                 job_id = self._pending.popleft()
                 job = self._jobs[job_id]
+                job.reset_progress()
                 job.status = "running"
                 job.started_at = _utc_now()
                 job.stage = "scanning"
@@ -1461,11 +1553,11 @@ class ImportQueue:
         """Execute one job and return terminal status with optional error."""
         job = self._jobs[job_id]
         try:
-            self._processor.process(
-                job.folder_path,
-                self._progress_callback(job_id),
-                cancel_event,
-            )
+            args = (job.folder_path, self._progress_callback(job_id), cancel_event)
+            if job.retry_paths:
+                self._processor.process(*args, retry_paths=job.retry_paths)
+            else:
+                self._processor.process(*args)
         except ImportCancelled:
             return "cancelled", None
         except Exception as exc:  # pragma: no cover - safety net
@@ -1488,11 +1580,16 @@ class ImportQueue:
                 if job is None:
                     return
 
+                interrupted = final_status == "cancelled" and self._stopping and job.status != "cancelling"
+                if interrupted:
+                    final_status = "paused" if job.status == "paused" else "queued"
                 self._record_stage_stats(job)
                 if error_message:
                     job.last_error = error_message
                 job.status = final_status
-                job.finished_at = _utc_now()
+                job.finished_at = None if interrupted else _utc_now()
+                if final_status == "queued":
+                    job.reset_progress()
                 if final_status == "completed":
                     job.stage = "completed"
                     if job.total_images > 0:
@@ -1517,6 +1614,12 @@ class ImportQueue:
                     self._live_stage_timing.pop(job_id, None)
                     self._drop_stable_etas(job_id)
                     self._futures.pop(job_id, None)
+                    if job.status in {"queued", "paused"}:
+                        self._cancel_events[job_id] = BackgroundTaskControl()
+                    if job.status == "queued":
+                        self._pending.append(job_id)
+                        order = {key: index for index, key in enumerate(self._jobs)}
+                        self._pending = deque(sorted(self._pending, key=order.__getitem__))
                     self._condition.notify_all()
                 try:
                     self._trim_history()
@@ -1604,6 +1707,12 @@ class ImportQueue:
                 if job is None:
                     return
                 update_values = dict(changes)
+                issue = update_values.pop("issue", None)
+                if issue:
+                    kind = issue["kind"]
+                    job.issue_counts[kind] = job.issue_counts.get(kind, 0) + 1
+                    if len(job.issues) < MAX_IMPORT_ISSUES:
+                        job.issues.append(issue)
                 next_stage = update_values.get("stage")
                 if next_stage and next_stage != job.stage:
                     self._record_stage_stats(job)
